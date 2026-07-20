@@ -7,7 +7,7 @@
     "interop": "node interop.mjs ../../build/mcpdemo && node legacy-interop.mjs ../../build/mcpdemo"
   },
   "dependencies": {
-    "@modelcontextprotocol/client": "^2.0.0-beta.4",
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/client": "2.0.0-beta.4",
+    "@modelcontextprotocol/sdk": "1.29.0"
   }
 }

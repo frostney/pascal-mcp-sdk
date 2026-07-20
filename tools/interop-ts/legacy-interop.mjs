@@ -7,8 +7,23 @@
 //
 // Usage: node legacy-interop.mjs /abs/path/to/mcpdemo
 
+import { readFileSync } from 'node:fs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+
+function installedVersion(packageName) {
+  const packageUrl = new URL(
+    `./node_modules/${packageName}/package.json`,
+    import.meta.url,
+  );
+  return JSON.parse(readFileSync(packageUrl, 'utf8')).version;
+}
+
+console.log(
+  'interop packages: ' +
+    `@modelcontextprotocol/client ${installedVersion('@modelcontextprotocol/client')}, ` +
+    `@modelcontextprotocol/sdk ${installedVersion('@modelcontextprotocol/sdk')}`,
+);
 
 const DEMO = process.argv[2];
 if (!DEMO) {

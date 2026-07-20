@@ -22,9 +22,14 @@ Python `websockets` reference). Two batteries:
 ```sh
 lwpt build                # produces build/mcpdemo
 cd tools/interop-ts
-npm install
+npm ci
 npm run interop           # v2-beta battery (pinned + auto) then v1 battery
 ```
+
+The two SDK packages are exact-version pinned in `package.json`, and the
+committed `package-lock.json` makes `npm ci` reproduce those resolutions. Each
+battery prints both resolved package versions at startup so its output records
+the implementation versions under test.
 
 Requires Node ≥ 20. Not wired into CI while the SDK is in beta (its
 API may still shift); run it manually when touching the protocol

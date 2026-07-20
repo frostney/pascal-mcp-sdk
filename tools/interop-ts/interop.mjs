@@ -9,8 +9,23 @@
 //
 // Usage: node interop.mjs /abs/path/to/mcpdemo
 
+import { readFileSync } from 'node:fs';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+
+function installedVersion(packageName) {
+  const packageUrl = new URL(
+    `./node_modules/${packageName}/package.json`,
+    import.meta.url,
+  );
+  return JSON.parse(readFileSync(packageUrl, 'utf8')).version;
+}
+
+console.log(
+  'interop packages: ' +
+    `@modelcontextprotocol/client ${installedVersion('@modelcontextprotocol/client')}, ` +
+    `@modelcontextprotocol/sdk ${installedVersion('@modelcontextprotocol/sdk')}`,
+);
 
 const DEMO = process.argv[2];
 if (!DEMO) {
