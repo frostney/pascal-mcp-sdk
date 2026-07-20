@@ -14,7 +14,7 @@ cleanly rather than port it.
 ## Product direction
 
 One transport-agnostic core (`MCP.Server` over `MCP.Protocol` and
-`MCP.JsonRpc`) owns every protocol rule and performs no I/O. Transports
+`MCP.JSONRPC`) owns every protocol rule and performs no I/O. Transports
 are thin bindings around it: **stdio** (newline-delimited JSON-RPC, pure
 RTL — v1, complete) and, as an explicit follow-up, **Streamable HTTP**
 (`MCP.Transport.Http`). The same tested core sits behind every binding

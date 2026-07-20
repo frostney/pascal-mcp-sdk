@@ -23,13 +23,13 @@ uses
   MCP.Transport.Stdio;
 
 function EchoHandler(AArguments: TJSONObject;
-  const ACtx: TMcpRequestContext): TMcpToolResult;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
-  Result := McpTextResult(AArguments.Get('message', ''));
+  Result := MCPTextResult(AArguments.Get('message', ''));
 end;
 
 function AddHandler(AArguments: TJSONObject;
-  const ACtx: TMcpRequestContext): TMcpToolResult;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
 var
   Sum: Double;
   Structured: TJSONObject;
@@ -37,11 +37,11 @@ begin
   if (AArguments.Find('a') = nil) or (AArguments.Find('b') = nil) then
     // Input problems are execution errors (isError: true): in-band
     // text a model can read and act on, not a protocol error.
-    Exit(McpErrorResult('Both "a" and "b" are required numbers'));
+    Exit(MCPErrorResult('Both "a" and "b" are required numbers'));
   Sum := AArguments.Get('a', 0.0) + AArguments.Get('b', 0.0);
   Structured := TJSONObject.Create;
   Structured.Add('sum', Sum);
-  Result := McpStructuredResult('The sum is ' + FloatToStr(Sum), Structured);
+  Result := MCPStructuredResult('The sum is ' + FloatToStr(Sum), Structured);
 end;
 
 function AddToolDefinition: TJSONObject;
@@ -60,10 +60,10 @@ begin
 end;
 
 var
-  Server: TMcpServer;
+  Server: TMCPServer;
 
 begin
-  Server := TMcpServer.Create('pascal-mcp-sdk-demo', '0.1.0');
+  Server := TMCPServer.Create('pascal-mcp-sdk-demo', '0.1.0');
   try
     Server.Instructions :=
       'Demo server for the pascal-mcp-sdk library. Use "echo" to mirror a ' +
@@ -81,9 +81,9 @@ begin
       'text/plain', 'Hello from pascal-mcp-sdk, a FreePascal MCP server.',
       'A static greeting resource');
 
-    McpLogToStderr('mcpdemo: serving MCP ' + MCP_PROTOCOL_VERSION +
+    MCPLogToStderr('mcpdemo: serving MCP ' + MCP_PROTOCOL_VERSION +
       ' on stdio (2 tools, 1 resource)');
-    RunMcpStdioServer(Server);
+    RunMCPStdioServer(Server);
   finally
     Server.Free;
   end;

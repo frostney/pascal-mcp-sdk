@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-pascal-mcp-sdk is four units layered strictly bottom-up: `MCP.JsonRpc`
+pascal-mcp-sdk is four units layered strictly bottom-up: `MCP.JSONRPC`
 (the JSON-RPC 2.0 profile MCP mandates), `MCP.Protocol` (the stateless
 per-request `_meta` model of spec revision 2026-07-28), `MCP.Server`
 (the sans-I/O dispatch core holding the tool/resource registries), and
@@ -21,14 +21,14 @@ MCP.Server               dispatch + registries; HandleMessage(line) → line
         │
 MCP.Protocol             _meta validation, version negotiation, result stamping
         │
-MCP.JsonRpc              JSON-RPC 2.0 parse/build, MCP profile + error codes
+MCP.JSONRPC              JSON-RPC 2.0 parse/build, MCP profile + error codes
         │
 RTL + fpjson             the only runtime dependencies
 ```
 
 Rules live in the layer that owns them and nowhere else:
 
-- **`MCP.JsonRpc`** — message classification (request / notification /
+- **`MCP.JSONRPC`** — message classification (request / notification /
   invalid), MCP's tightened id rules (string or number, never null),
   batch rejection, params-must-be-object, id preservation into error
   replies, compact single-line serialization. Knows nothing about MCP
@@ -50,9 +50,9 @@ Rules live in the layer that owns them and nowhere else:
 
 ## The sans-I/O core
 
-`TMcpServer.HandleMessage(const ALine; out AResponse): Boolean` is the
+`TMCPServer.HandleMessage(const ALine; out AResponse): Boolean` is the
 entire protocol surface. It is what the unit tests drive (no pipes, no
-processes), what `RunMcpStdioLoop` calls in a loop, and what
+processes), what `RunMCPStdioLoop` calls in a loop, and what
 `MCP.Transport.Http` will call per POST body when it lands. This
 mirrors duetto's `WS.Protocol` discipline: one tested core, transports
 as delivery.
@@ -73,7 +73,7 @@ no `listChanged`/`subscribe` capability is advertised and
 in two shapes per registry — plain function pointers and `of object`
 method pointers — so both programs and class-based hosts (lantaarn)
 register naturally. Tool input schemas are JSON Schema as strings,
-parsed for well-formedness at registration (`EMcpServer` on error);
+parsed for well-formedness at registration (`EMCPServer` on error);
 argument validation beyond that is the handler's job, reported as
 in-band `isError` results that a model can read and correct against.
 
@@ -120,7 +120,7 @@ statelessly per 2026-07-28; an `initialize` request selects legacy
 semantics (2024-11-05…2025-11-25), scoped to the server instance (=
 the stdio process) — the one deliberate piece of cross-request state
 the compatibility model prescribes. Both eras run concurrently on the
-same instance; handlers are era-blind (`TMcpRequestContext` is filled
+same instance; handlers are era-blind (`TMCPRequestContext` is filled
 from `_meta` or from the stored handshake). The legacy dialect is
 era-faithful at the edges: no `resultType`/`serverInfo` stamps, no
 SEP-2549 cache fields, resource-not-found `-32002`, and `ping`

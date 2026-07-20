@@ -6,7 +6,7 @@
   the initialize rejection naming supported versions, method-not-found,
   notifications producing no response, malformed lines answered with
   the right JSON-RPC error, and registration guards (duplicate names,
-  bad schema JSON → EMcpServer). }
+  bad schema JSON → EMCPServer). }
 
 program MCP.Server.Test;
 
@@ -17,7 +17,7 @@ uses
 
   fpjson,
   jsonparser,
-  MCP.JsonRpc,
+  MCP.JSONRPC,
   MCP.Protocol,
   MCP.Server,
   TestingPascalLibrary;
@@ -30,7 +30,7 @@ const
 type
   TDispatchSuite = class(TTestSuite)
   protected
-    FServer: TMcpServer;
+    FServer: TMCPServer;
     procedure BeforeEach; override;
     procedure AfterEach; override;
     // One request through the server; parsed response (caller frees).
@@ -97,45 +97,45 @@ type
 { ───────── handlers under test ───────── }
 
 function EchoHandler(AArguments: TJSONObject;
-  const ACtx: TMcpRequestContext): TMcpToolResult;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
-  Result := McpTextResult(AArguments.Get('message', '(no message)'));
+  Result := MCPTextResult(AArguments.Get('message', '(no message)'));
 end;
 
 function SumHandler(AArguments: TJSONObject;
-  const ACtx: TMcpRequestContext): TMcpToolResult;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
 var
   Structured: TJSONObject;
 begin
   Structured := TJSONObject.Create;
   Structured.Add('sum', AArguments.Get('a', 0.0) + AArguments.Get('b', 0.0));
-  Result := McpStructuredResult('sum computed', Structured);
+  Result := MCPStructuredResult('sum computed', Structured);
 end;
 
 function BoomHandler(AArguments: TJSONObject;
-  const ACtx: TMcpRequestContext): TMcpToolResult;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
   raise Exception.Create('boom');
 end;
 
 // Mirrors the request context so era plumbing is handler-observable.
 function WhoAmIHandler(AArguments: TJSONObject;
-  const ACtx: TMcpRequestContext): TMcpToolResult;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
-  Result := McpTextResult(ACtx.ProtocolVersion + '|' + ACtx.ClientName);
+  Result := MCPTextResult(ACtx.ProtocolVersion + '|' + ACtx.ClientName);
 end;
 
 function ClockReader(const AUri: string;
-  const ACtx: TMcpRequestContext): TJSONArray;
+  const ACtx: TMCPRequestContext): TJSONArray;
 begin
-  Result := McpTextContents(AUri, 'text/plain', 'tick');
+  Result := MCPTextContents(AUri, 'text/plain', 'tick');
 end;
 
 { ───────── shared fixture ───────── }
 
 procedure TDispatchSuite.BeforeEach;
 begin
-  FServer := TMcpServer.Create('test-server', '9.9.9');
+  FServer := TMCPServer.Create('test-server', '9.9.9');
   FServer.Instructions := 'test instructions';
   FServer.RegisterTool('echo', 'Echo a message',
     '{"type":"object","properties":{"message":{"type":"string"}}}',
@@ -466,17 +466,17 @@ end;
 
 procedure TRegistrationGuards.TestDuplicateTool;
 var
-  Server: TMcpServer;
+  Server: TMCPServer;
   Raised: Boolean;
 begin
-  Server := TMcpServer.Create('t', '1');
+  Server := TMCPServer.Create('t', '1');
   try
     Server.RegisterTool('a', 'first', '{"type":"object"}', EchoHandler);
     Raised := False;
     try
       Server.RegisterTool('a', 'second', '{"type":"object"}', EchoHandler);
     except
-      on EMcpServer do
+      on EMCPServer do
         Raised := True;
     end;
     Expect<Boolean>(Raised).ToBe(True);
@@ -488,16 +488,16 @@ end;
 
 procedure TRegistrationGuards.TestBadSchema;
 var
-  Server: TMcpServer;
+  Server: TMCPServer;
   Raised: Boolean;
 begin
-  Server := TMcpServer.Create('t', '1');
+  Server := TMCPServer.Create('t', '1');
   try
     Raised := False;
     try
       Server.RegisterTool('a', 'desc', '{not json', EchoHandler);
     except
-      on EMcpServer do
+      on EMCPServer do
         Raised := True;
     end;
     Expect<Boolean>(Raised).ToBe(True);
@@ -509,17 +509,17 @@ end;
 
 procedure TRegistrationGuards.TestDuplicateResource;
 var
-  Server: TMcpServer;
+  Server: TMCPServer;
   Raised: Boolean;
 begin
-  Server := TMcpServer.Create('t', '1');
+  Server := TMCPServer.Create('t', '1');
   try
     Server.RegisterTextResource('mem://x', 'x', 'text/plain', 'one');
     Raised := False;
     try
       Server.RegisterTextResource('mem://x', 'x', 'text/plain', 'two');
     except
-      on EMcpServer do
+      on EMCPServer do
         Raised := True;
     end;
     Expect<Boolean>(Raised).ToBe(True);
@@ -653,7 +653,7 @@ var
   Response: TJSONObject;
 begin
   // Handlers see the negotiated legacy version + clientInfo from the
-  // handshake — the same TMcpRequestContext API as the modern era.
+  // handshake — the same TMCPRequestContext API as the modern era.
   DoInitialize('2025-06-18');
   Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
     '"params":{"name":"whoami"}}');

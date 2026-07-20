@@ -16,7 +16,7 @@ uses
 
   fpjson,
   jsonparser,
-  MCP.JsonRpc,
+  MCP.JSONRPC,
   MCP.Protocol,
   TestingPascalLibrary;
 
@@ -58,7 +58,7 @@ begin
   Result := TJSONObject(GetJSON(AJson));
 end;
 
-procedure FreeMetaError(var AError: TMcpMetaError);
+procedure FreeMetaError(var AError: TMCPMetaError);
 begin
   FreeAndNil(AError.Data);
 end;
@@ -67,8 +67,8 @@ end;
 
 procedure TMetaValidation.TestNilParams;
 var
-  Ctx: TMcpRequestContext;
-  MetaErr: TMcpMetaError;
+  Ctx: TMCPRequestContext;
+  MetaErr: TMCPMetaError;
 begin
   Expect<Boolean>(
     ExtractRequestContext(nil, Supported, Ctx, MetaErr)).ToBe(False);
@@ -79,8 +79,8 @@ end;
 procedure TMetaValidation.TestMissingMeta;
 var
   Params: TJSONObject;
-  Ctx: TMcpRequestContext;
-  MetaErr: TMcpMetaError;
+  Ctx: TMCPRequestContext;
+  MetaErr: TMCPMetaError;
 begin
   Params := ParseObj('{"name":"echo"}');
   Expect<Boolean>(
@@ -93,8 +93,8 @@ end;
 procedure TMetaValidation.TestMissingVersion;
 var
   Params: TJSONObject;
-  Ctx: TMcpRequestContext;
-  MetaErr: TMcpMetaError;
+  Ctx: TMCPRequestContext;
+  MetaErr: TMCPMetaError;
 begin
   Params := ParseObj(
     '{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}');
@@ -110,8 +110,8 @@ end;
 procedure TMetaValidation.TestMissingCapabilities;
 var
   Params: TJSONObject;
-  Ctx: TMcpRequestContext;
-  MetaErr: TMcpMetaError;
+  Ctx: TMCPRequestContext;
+  MetaErr: TMCPMetaError;
 begin
   Params := ParseObj(
     '{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}');
@@ -127,8 +127,8 @@ end;
 procedure TMetaValidation.TestNonObjectCapabilities;
 var
   Params: TJSONObject;
-  Ctx: TMcpRequestContext;
-  MetaErr: TMcpMetaError;
+  Ctx: TMCPRequestContext;
+  MetaErr: TMCPMetaError;
 begin
   Params := ParseObj(
     '{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
@@ -143,8 +143,8 @@ end;
 procedure TMetaValidation.TestUnsupportedVersion;
 var
   Params: TJSONObject;
-  Ctx: TMcpRequestContext;
-  MetaErr: TMcpMetaError;
+  Ctx: TMCPRequestContext;
+  MetaErr: TMCPMetaError;
   Data: TJSONObject;
 begin
   Params := ParseObj(
@@ -165,8 +165,8 @@ end;
 procedure TMetaValidation.TestValidMinimal;
 var
   Params: TJSONObject;
-  Ctx: TMcpRequestContext;
-  MetaErr: TMcpMetaError;
+  Ctx: TMCPRequestContext;
+  MetaErr: TMCPMetaError;
 begin
   Params := ParseObj(VALID_META);
   Expect<Boolean>(
@@ -180,8 +180,8 @@ end;
 procedure TMetaValidation.TestClientInfoExtracted;
 var
   Params: TJSONObject;
-  Ctx: TMcpRequestContext;
-  MetaErr: TMcpMetaError;
+  Ctx: TMCPRequestContext;
+  MetaErr: TMCPMetaError;
 begin
   Params := ParseObj(
     '{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
@@ -198,8 +198,8 @@ end;
 procedure TMetaValidation.TestLogLevelExtracted;
 var
   Params: TJSONObject;
-  Ctx: TMcpRequestContext;
-  MetaErr: TMcpMetaError;
+  Ctx: TMCPRequestContext;
+  MetaErr: TMCPMetaError;
 begin
   Params := ParseObj(
     '{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
@@ -214,8 +214,8 @@ end;
 procedure TMetaValidation.TestHasCapability;
 var
   Params: TJSONObject;
-  Ctx: TMcpRequestContext;
-  MetaErr: TMcpMetaError;
+  Ctx: TMCPRequestContext;
+  MetaErr: TMCPMetaError;
 begin
   Params := ParseObj(
     '{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +

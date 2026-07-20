@@ -33,21 +33,21 @@ uses
   MCP.Protocol, MCP.Server, MCP.Transport.Stdio;
 
 function Greet(AArguments: TJSONObject;
-  const ACtx: TMcpRequestContext): TMcpToolResult;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
-  Result := McpTextResult('Hello, ' + AArguments.Get('name', 'world') + '!');
+  Result := MCPTextResult('Hello, ' + AArguments.Get('name', 'world') + '!');
 end;
 
 var
-  Server: TMcpServer;
+  Server: TMCPServer;
 begin
-  Server := TMcpServer.Create('my-server', '1.0.0');
+  Server := TMCPServer.Create('my-server', '1.0.0');
   try
     Server.RegisterTool('greet', 'Greet someone by name',
       '{"type":"object","properties":{"name":{"type":"string"}},' +
       '"required":["name"]}',
       Greet);
-    RunMcpStdioServer(Server);  // serves until the client closes stdin
+    RunMCPStdioServer(Server);  // serves until the client closes stdin
   finally
     Server.Free;
   end;
@@ -57,8 +57,8 @@ end.
 Handlers are synchronous plain functions or methods (`of object` —
 both registration overloads exist). Tool input schemas are JSON Schema
 passed as strings and validated for well-formedness at registration.
-Results are built with `McpTextResult` / `McpErrorResult` /
-`McpStructuredResult`; handler exceptions become in-band
+Results are built with `MCPTextResult` / `MCPErrorResult` /
+`MCPStructuredResult`; handler exceptions become in-band
 `isError: true` tool results automatically. Resources register either
 as static text (`RegisterTextResource`) or with a reader callback
 (`RegisterResource`).

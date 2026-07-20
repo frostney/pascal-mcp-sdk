@@ -5,7 +5,7 @@
 Install FPC 3.2.2 (and optionally the lwpt release binary), clone,
 `lwpt build` — or `fpc @lwpt.cfg -FEbuild source/apps/mcpdemo.pas` with
 no lwpt at all. Register tools with a name, description, JSON-Schema
-string, and a handler function; call `RunMcpStdioServer`. Wire the
+string, and a handler function; call `RunMCPStdioServer`. Wire the
 binary into any MCP client as a stdio server.
 
 ## Prerequisites
@@ -66,15 +66,15 @@ uses
   MCP.Protocol, MCP.Server, MCP.Transport.Stdio;
 
 function Greet(AArguments: TJSONObject;
-  const ACtx: TMcpRequestContext): TMcpToolResult;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
-  Result := McpTextResult('Hello, ' + AArguments.Get('name', 'world') + '!');
+  Result := MCPTextResult('Hello, ' + AArguments.Get('name', 'world') + '!');
 end;
 
 var
-  Server: TMcpServer;
+  Server: TMCPServer;
 begin
-  Server := TMcpServer.Create('my-server', '1.0.0');
+  Server := TMCPServer.Create('my-server', '1.0.0');
   try
     Server.Instructions := 'Greets people.';   // surfaced via server/discover
     Server.RegisterTool('greet', 'Greet someone by name',
@@ -83,7 +83,7 @@ begin
       Greet);
     Server.RegisterTextResource('mcp://my-server/motd', 'motd',
       'text/plain', 'Be excellent to each other.');
-    RunMcpStdioServer(Server);
+    RunMCPStdioServer(Server);
   finally
     Server.Free;
   end;
@@ -131,5 +131,5 @@ The generic configuration shape:
 }
 ```
 
-Logging goes to **stderr only** (`McpLogToStderr`) — stdout belongs to
+Logging goes to **stderr only** (`MCPLogToStderr`) — stdout belongs to
 the protocol.

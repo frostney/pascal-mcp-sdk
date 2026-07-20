@@ -23,7 +23,7 @@
 - **`build/` is generated** — never commit it.
 - **`MCP.Server` owns the protocol surface.** Dispatch rules, error codes,
   and result shapes must not leak into transports; transports move lines
-  only. `MCP.Protocol` owns the per-request `_meta` model; `MCP.JsonRpc`
+  only. `MCP.Protocol` owns the per-request `_meta` model; `MCP.JSONRPC`
   owns the JSON-RPC 2.0 profile.
 - **Spec facts are verified, never recalled.** Any change to protocol
   behaviour cites the official spec page (modelcontextprotocol.io) it
@@ -49,12 +49,12 @@ lwpt test              # four co-located unit suites
 
 | Path | Role |
 | --- | --- |
-| `source/units/` | Library: `MCP.JsonRpc` (JSON-RPC 2.0 profile), `MCP.Protocol` (per-request `_meta` model), `MCP.Server` (sans-I/O dispatch core, tool/resource registries), `MCP.Transport.Stdio` (newline-delimited stdio binding) |
+| `source/units/` | Library: `MCP.JSONRPC` (JSON-RPC 2.0 profile), `MCP.Protocol` (per-request `_meta` model), `MCP.Server` (sans-I/O dispatch core, tool/resource registries), `MCP.Transport.Stdio` (newline-delimited stdio binding) |
 | `source/apps/` | Programs: `mcpdemo` (example stdio server), `mcpsmoke` (subprocess E2E battery) |
 | `tools/` | Cross-implementation checks: `interop-ts/` (official MCP TypeScript client beta vs `mcpdemo`) |
 | `docs/` | Architecture, quick-start, tooling, code style, deployment |
 
-Layering is strictly bottom-up: `MCP.JsonRpc` → `MCP.Protocol` →
+Layering is strictly bottom-up: `MCP.JSONRPC` → `MCP.Protocol` →
 `MCP.Server` → `MCP.Transport.Stdio`. The server core performs no I/O
 (`HandleMessage`: line in, line out) — the planned `MCP.Transport.Http`
 (Streamable HTTP) wraps the same core without changes, mirroring

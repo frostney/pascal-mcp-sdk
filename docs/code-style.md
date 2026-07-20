@@ -19,11 +19,11 @@ directives; if a flag is worth setting, it is worth centralising.
 
 - Units are namespaced `MCP.<Area>.pas`; tests co-located as
   `MCP.<Area>.Test.pas` (programs, discovered by `lwpt test`).
-- Types `T`-prefixed (`TMcpServer`, `TMcpToolResult`), fields
+- Types `T`-prefixed (`TMCPServer`, `TMCPToolResult`), fields
   `F`-prefixed, parameters `A`-prefixed, exceptions `E`-prefixed
-  (`EMcpServer`).
-- Public API helpers are plain unit-level functions with an `Mcp`
-  prefix (`McpTextResult`, `McpTextContents`) so call sites read
+  (`EMCPServer`).
+- Public API helpers are plain unit-level functions with an `MCP`
+  prefix (`MCPTextResult`, `MCPTextContents`) so call sites read
   without qualification.
 - `lwpt format` owns whitespace, uses-clause ordering, and casing —
   run it rather than arguing with it (pre-commit does).
@@ -33,8 +33,8 @@ directives; if a flag is worth setting, it is worth centralising.
 fpjson is manual-memory: `TJSONObject.Add(name, data)` **takes
 ownership**, `Find` returns a **borrowed** reference, `Clone` allocates.
 Every API boundary that passes `TJSONData` states its ownership rule in
-a comment at the declaration (see `TJsonRpcMessage`,
-`TMcpToolResult`, the `Register*` overloads). New code follows suit:
+a comment at the declaration (see `TJSONRPCMessage`,
+`TMCPToolResult`, the `Register*` overloads). New code follows suit:
 a reader should never have to guess who frees.
 
 House rules distilled:

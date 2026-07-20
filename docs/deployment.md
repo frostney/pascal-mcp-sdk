@@ -29,7 +29,7 @@ natively on Linux, macOS, and Windows instead.
   it in a restart loop that fights the client's lifecycle (clients
   restart stateless servers themselves).
 - **stdout is sacred.** Only MCP messages. Anything a server wants to
-  say goes to stderr (`McpLogToStderr`); clients may capture, forward,
+  say goes to stderr (`MCPLogToStderr`); clients may capture, forward,
   or ignore it.
 - **State is explicit.** The protocol is stateless: the process may be
   killed and relaunched between any two requests. State that must

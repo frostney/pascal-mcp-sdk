@@ -63,47 +63,47 @@ uses
   fpjson,
   jsonparser,
   jsonscanner,
-  MCP.JsonRpc,
+  MCP.JSONRPC,
   MCP.Protocol;
 
 type
   // Result of one tool invocation. Content is a JSON array of content
-  // blocks (owned; use the Mcp*Result builders), StructuredContent is
+  // blocks (owned; use the MCP*Result builders), StructuredContent is
   // the optional machine-readable payload (owned; nil when absent).
-  TMcpToolResult = record
+  TMCPToolResult = record
     Content: TJSONArray;
     StructuredContent: TJSONData;
     IsError: Boolean;
   end;
 
-  TMcpToolHandler = function(AArguments: TJSONObject;
-    const ACtx: TMcpRequestContext): TMcpToolResult;
-  TMcpToolMethod = function(AArguments: TJSONObject;
-    const ACtx: TMcpRequestContext): TMcpToolResult of object;
+  TMCPToolHandler = function(AArguments: TJSONObject;
+    const ACtx: TMCPRequestContext): TMCPToolResult;
+  TMCPToolMethod = function(AArguments: TJSONObject;
+    const ACtx: TMCPRequestContext): TMCPToolResult of object;
 
   // Resource readers return the "contents" array of a resources/read
-  // result (owned; use McpTextContents / McpBlobContents).
-  TMcpResourceReader = function(const AUri: string;
-    const ACtx: TMcpRequestContext): TJSONArray;
-  TMcpResourceMethod = function(const AUri: string;
-    const ACtx: TMcpRequestContext): TJSONArray of object;
+  // result (owned; use MCPTextContents / MCPBlobContents).
+  TMCPResourceReader = function(const AUri: string;
+    const ACtx: TMCPRequestContext): TJSONArray;
+  TMCPResourceMethod = function(const AUri: string;
+    const ACtx: TMCPRequestContext): TJSONArray of object;
 
-  TMcpToolRegistration = record
+  TMCPToolRegistration = record
     Definition: TJSONObject; // owned: name/description/inputSchema/...
-    Handler: TMcpToolHandler;
-    Method: TMcpToolMethod;
+    Handler: TMCPToolHandler;
+    Method: TMCPToolMethod;
   end;
 
-  TMcpResourceRegistration = record
+  TMCPResourceRegistration = record
     Definition: TJSONObject; // owned: uri/name/mimeType/...
     Uri: string;
     StaticText: string;      // used when no reader is registered
     HasStaticText: Boolean;
-    Reader: TMcpResourceReader;
-    Method: TMcpResourceMethod;
+    Reader: TMCPResourceReader;
+    Method: TMCPResourceMethod;
   end;
 
-  TMcpServer = class
+  TMCPServer = class
   private
     FName: string;
     FVersion: string;
@@ -119,35 +119,35 @@ type
     FLegacyClientName: string;
     FLegacyClientVersion: string;
     FLegacyClientCapabilities: TJSONObject; // owned clone from initialize
-    FTools: array of TMcpToolRegistration;
-    FResources: array of TMcpResourceRegistration;
+    FTools: array of TMCPToolRegistration;
+    FResources: array of TMCPResourceRegistration;
 
     function ParseSchema(const ASchemaJson, AToolName: string): TJSONObject;
     function BuildToolDefinition(const AName, ADescription,
       AInputSchemaJson: string): TJSONObject;
-    procedure AddTool(ADefinition: TJSONObject; AHandler: TMcpToolHandler;
-      AMethod: TMcpToolMethod);
+    procedure AddTool(ADefinition: TJSONObject; AHandler: TMCPToolHandler;
+      AMethod: TMCPToolMethod);
     procedure AddResource(const AUri, AName, AMimeType, ADescription: string;
-      AReader: TMcpResourceReader; AMethod: TMcpResourceMethod;
+      AReader: TMCPResourceReader; AMethod: TMCPResourceMethod;
       const AStaticText: string; AHasStaticText: Boolean);
     function FindTool(const AName: string): Integer;
     function FindResource(const AUri: string): Integer;
 
-    function DispatchRequest(const AMessage: TJsonRpcMessage): string;
-    function DispatchLegacyRequest(const AMessage: TJsonRpcMessage): string;
-    function HandleInitialize(const AMessage: TJsonRpcMessage): string;
-    function HandleDiscover(const AMessage: TJsonRpcMessage): string;
-    function HandleToolsList(const AMessage: TJsonRpcMessage;
+    function DispatchRequest(const AMessage: TJSONRPCMessage): string;
+    function DispatchLegacyRequest(const AMessage: TJSONRPCMessage): string;
+    function HandleInitialize(const AMessage: TJSONRPCMessage): string;
+    function HandleDiscover(const AMessage: TJSONRPCMessage): string;
+    function HandleToolsList(const AMessage: TJSONRPCMessage;
       ALegacy: Boolean): string;
-    function HandleToolsCall(const AMessage: TJsonRpcMessage;
-      const ACtx: TMcpRequestContext; ALegacy: Boolean): string;
-    function HandleResourcesList(const AMessage: TJsonRpcMessage;
+    function HandleToolsCall(const AMessage: TJSONRPCMessage;
+      const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
+    function HandleResourcesList(const AMessage: TJSONRPCMessage;
       ALegacy: Boolean): string;
-    function HandleResourcesRead(const AMessage: TJsonRpcMessage;
-      const ACtx: TMcpRequestContext; ALegacy: Boolean): string;
-    function ResultResponse(const AMessage: TJsonRpcMessage;
+    function HandleResourcesRead(const AMessage: TJSONRPCMessage;
+      const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
+    function ResultResponse(const AMessage: TJSONRPCMessage;
       AResult: TJSONObject; ALegacy: Boolean): string;
-    function LegacyContext: TMcpRequestContext;
+    function LegacyContext: TMCPRequestContext;
     procedure AddCacheFields(AResult: TJSONObject; ATtlMs: Integer);
   public
     constructor Create(const AName, AVersion: string);
@@ -175,26 +175,26 @@ type
     // versions.
     property DualEra: Boolean read FDualEra write FDualEra;
 
-    // AInputSchemaJson is parsed at registration and raises EMcpServer
+    // AInputSchemaJson is parsed at registration and raises EMCPServer
     // on invalid JSON — a bad schema is a programming error, not a
     // runtime condition. The definition-object overloads take
     // ownership of ADefinition for tools that need title/outputSchema/
     // annotations.
     procedure RegisterTool(const AName, ADescription, AInputSchemaJson: string;
-      AHandler: TMcpToolHandler); overload;
+      AHandler: TMCPToolHandler); overload;
     procedure RegisterTool(const AName, ADescription, AInputSchemaJson: string;
-      AMethod: TMcpToolMethod); overload;
+      AMethod: TMCPToolMethod); overload;
     procedure RegisterTool(ADefinition: TJSONObject;
-      AHandler: TMcpToolHandler); overload;
+      AHandler: TMCPToolHandler); overload;
     procedure RegisterTool(ADefinition: TJSONObject;
-      AMethod: TMcpToolMethod); overload;
+      AMethod: TMCPToolMethod); overload;
 
     procedure RegisterTextResource(const AUri, AName, AMimeType, AText: string;
       const ADescription: string = '');
     procedure RegisterResource(const AUri, AName, AMimeType: string;
-      AReader: TMcpResourceReader; const ADescription: string = ''); overload;
+      AReader: TMCPResourceReader; const ADescription: string = ''); overload;
     procedure RegisterResource(const AUri, AName, AMimeType: string;
-      AMethod: TMcpResourceMethod; const ADescription: string = ''); overload;
+      AMethod: TMCPResourceMethod; const ADescription: string = ''); overload;
 
     // The core entry point: one inbound line in, at most one response
     // line out. Returns True when AResponse must be written (requests
@@ -206,15 +206,15 @@ type
     function ResourceCount: Integer;
   end;
 
-  EMcpServer = class(Exception);
+  EMCPServer = class(Exception);
 
 // Content builders for handler implementations.
-function McpTextResult(const AText: string): TMcpToolResult;
-function McpErrorResult(const AText: string): TMcpToolResult;
-function McpStructuredResult(const AText: string;
-  AStructured: TJSONData): TMcpToolResult;
-function McpTextContents(const AUri, AMimeType, AText: string): TJSONArray;
-function McpBlobContents(const AUri, AMimeType, ABase64: string): TJSONArray;
+function MCPTextResult(const AText: string): TMCPToolResult;
+function MCPErrorResult(const AText: string): TMCPToolResult;
+function MCPStructuredResult(const AText: string;
+  AStructured: TJSONData): TMCPToolResult;
+function MCPTextContents(const AUri, AMimeType, AText: string): TJSONArray;
+function MCPBlobContents(const AUri, AMimeType, ABase64: string): TJSONArray;
 
 implementation
 
@@ -227,27 +227,27 @@ begin
   Result.Add('text', AText);
 end;
 
-function McpTextResult(const AText: string): TMcpToolResult;
+function MCPTextResult(const AText: string): TMCPToolResult;
 begin
-  Result := Default(TMcpToolResult);
+  Result := Default(TMCPToolResult);
   Result.Content := TJSONArray.Create;
   Result.Content.Add(TextContentBlock(AText));
 end;
 
-function McpErrorResult(const AText: string): TMcpToolResult;
+function MCPErrorResult(const AText: string): TMCPToolResult;
 begin
-  Result := McpTextResult(AText);
+  Result := MCPTextResult(AText);
   Result.IsError := True;
 end;
 
-function McpStructuredResult(const AText: string;
-  AStructured: TJSONData): TMcpToolResult;
+function MCPStructuredResult(const AText: string;
+  AStructured: TJSONData): TMCPToolResult;
 begin
-  Result := McpTextResult(AText);
+  Result := MCPTextResult(AText);
   Result.StructuredContent := AStructured;
 end;
 
-function McpTextContents(const AUri, AMimeType, AText: string): TJSONArray;
+function MCPTextContents(const AUri, AMimeType, AText: string): TJSONArray;
 var
   Item: TJSONObject;
 begin
@@ -259,7 +259,7 @@ begin
   Result.Add(Item);
 end;
 
-function McpBlobContents(const AUri, AMimeType, ABase64: string): TJSONArray;
+function MCPBlobContents(const AUri, AMimeType, ABase64: string): TJSONArray;
 var
   Item: TJSONObject;
 begin
@@ -271,9 +271,9 @@ begin
   Result.Add(Item);
 end;
 
-{ ───────── TMcpServer: lifecycle ───────── }
+{ ───────── TMCPServer: lifecycle ───────── }
 
-constructor TMcpServer.Create(const AName, AVersion: string);
+constructor TMCPServer.Create(const AName, AVersion: string);
 begin
   inherited Create;
   FName := AName;
@@ -283,7 +283,7 @@ begin
   FDualEra := True;
 end;
 
-destructor TMcpServer.Destroy;
+destructor TMCPServer.Destroy;
 var
   I: Integer;
 begin
@@ -295,9 +295,9 @@ begin
   inherited Destroy;
 end;
 
-{ ───────── TMcpServer: registration ───────── }
+{ ───────── TMCPServer: registration ───────── }
 
-function TMcpServer.ParseSchema(const ASchemaJson, AToolName: string): TJSONObject;
+function TMCPServer.ParseSchema(const ASchemaJson, AToolName: string): TJSONObject;
 var
   Parser: TJSONParser;
   Data: TJSONData;
@@ -308,7 +308,7 @@ begin
       Data := Parser.Parse;
     except
       on E: Exception do
-        raise EMcpServer.CreateFmt(
+        raise EMCPServer.CreateFmt(
           'Invalid input schema for tool "%s": %s', [AToolName, E.Message]);
     end;
   finally
@@ -317,13 +317,13 @@ begin
   if (Data = nil) or (Data.JSONType <> jtObject) then
   begin
     Data.Free;
-    raise EMcpServer.CreateFmt(
+    raise EMCPServer.CreateFmt(
       'Invalid input schema for tool "%s": must be a JSON object', [AToolName]);
   end;
   Result := TJSONObject(Data);
 end;
 
-function TMcpServer.BuildToolDefinition(const AName, ADescription,
+function TMCPServer.BuildToolDefinition(const AName, ADescription,
   AInputSchemaJson: string): TJSONObject;
 begin
   Result := TJSONObject.Create;
@@ -332,8 +332,8 @@ begin
   Result.Add('inputSchema', ParseSchema(AInputSchemaJson, AName));
 end;
 
-procedure TMcpServer.AddTool(ADefinition: TJSONObject;
-  AHandler: TMcpToolHandler; AMethod: TMcpToolMethod);
+procedure TMCPServer.AddTool(ADefinition: TJSONObject;
+  AHandler: TMCPToolHandler; AMethod: TMCPToolMethod);
 var
   ToolName: string;
 begin
@@ -341,12 +341,12 @@ begin
   if ToolName = '' then
   begin
     ADefinition.Free;
-    raise EMcpServer.Create('Tool definition must carry a non-empty name');
+    raise EMCPServer.Create('Tool definition must carry a non-empty name');
   end;
   if FindTool(ToolName) >= 0 then
   begin
     ADefinition.Free;
-    raise EMcpServer.CreateFmt('Tool "%s" is already registered', [ToolName]);
+    raise EMCPServer.CreateFmt('Tool "%s" is already registered', [ToolName]);
   end;
   SetLength(FTools, Length(FTools) + 1);
   FTools[High(FTools)].Definition := ADefinition;
@@ -354,43 +354,43 @@ begin
   FTools[High(FTools)].Method := AMethod;
 end;
 
-procedure TMcpServer.RegisterTool(const AName, ADescription,
-  AInputSchemaJson: string; AHandler: TMcpToolHandler);
+procedure TMCPServer.RegisterTool(const AName, ADescription,
+  AInputSchemaJson: string; AHandler: TMCPToolHandler);
 begin
   AddTool(BuildToolDefinition(AName, ADescription, AInputSchemaJson),
     AHandler, nil);
 end;
 
-procedure TMcpServer.RegisterTool(const AName, ADescription,
-  AInputSchemaJson: string; AMethod: TMcpToolMethod);
+procedure TMCPServer.RegisterTool(const AName, ADescription,
+  AInputSchemaJson: string; AMethod: TMCPToolMethod);
 begin
   AddTool(BuildToolDefinition(AName, ADescription, AInputSchemaJson),
     nil, AMethod);
 end;
 
-procedure TMcpServer.RegisterTool(ADefinition: TJSONObject;
-  AHandler: TMcpToolHandler);
+procedure TMCPServer.RegisterTool(ADefinition: TJSONObject;
+  AHandler: TMCPToolHandler);
 begin
   AddTool(ADefinition, AHandler, nil);
 end;
 
-procedure TMcpServer.RegisterTool(ADefinition: TJSONObject;
-  AMethod: TMcpToolMethod);
+procedure TMCPServer.RegisterTool(ADefinition: TJSONObject;
+  AMethod: TMCPToolMethod);
 begin
   AddTool(ADefinition, nil, AMethod);
 end;
 
-procedure TMcpServer.AddResource(const AUri, AName, AMimeType,
-  ADescription: string; AReader: TMcpResourceReader;
-  AMethod: TMcpResourceMethod; const AStaticText: string;
+procedure TMCPServer.AddResource(const AUri, AName, AMimeType,
+  ADescription: string; AReader: TMCPResourceReader;
+  AMethod: TMCPResourceMethod; const AStaticText: string;
   AHasStaticText: Boolean);
 var
   Definition: TJSONObject;
 begin
   if AUri = '' then
-    raise EMcpServer.Create('Resource registration requires a non-empty uri');
+    raise EMCPServer.Create('Resource registration requires a non-empty uri');
   if FindResource(AUri) >= 0 then
-    raise EMcpServer.CreateFmt('Resource "%s" is already registered', [AUri]);
+    raise EMCPServer.CreateFmt('Resource "%s" is already registered', [AUri]);
   Definition := TJSONObject.Create;
   Definition.Add('uri', AUri);
   Definition.Add('name', AName);
@@ -407,25 +407,25 @@ begin
   FResources[High(FResources)].Method := AMethod;
 end;
 
-procedure TMcpServer.RegisterTextResource(const AUri, AName, AMimeType,
+procedure TMCPServer.RegisterTextResource(const AUri, AName, AMimeType,
   AText: string; const ADescription: string);
 begin
   AddResource(AUri, AName, AMimeType, ADescription, nil, nil, AText, True);
 end;
 
-procedure TMcpServer.RegisterResource(const AUri, AName, AMimeType: string;
-  AReader: TMcpResourceReader; const ADescription: string);
+procedure TMCPServer.RegisterResource(const AUri, AName, AMimeType: string;
+  AReader: TMCPResourceReader; const ADescription: string);
 begin
   AddResource(AUri, AName, AMimeType, ADescription, AReader, nil, '', False);
 end;
 
-procedure TMcpServer.RegisterResource(const AUri, AName, AMimeType: string;
-  AMethod: TMcpResourceMethod; const ADescription: string);
+procedure TMCPServer.RegisterResource(const AUri, AName, AMimeType: string;
+  AMethod: TMCPResourceMethod; const ADescription: string);
 begin
   AddResource(AUri, AName, AMimeType, ADescription, nil, AMethod, '', False);
 end;
 
-function TMcpServer.FindTool(const AName: string): Integer;
+function TMCPServer.FindTool(const AName: string): Integer;
 var
   I: Integer;
 begin
@@ -435,7 +435,7 @@ begin
   Result := -1;
 end;
 
-function TMcpServer.FindResource(const AUri: string): Integer;
+function TMCPServer.FindResource(const AUri: string): Integer;
 var
   I: Integer;
 begin
@@ -445,19 +445,19 @@ begin
   Result := -1;
 end;
 
-function TMcpServer.ToolCount: Integer;
+function TMCPServer.ToolCount: Integer;
 begin
   Result := Length(FTools);
 end;
 
-function TMcpServer.ResourceCount: Integer;
+function TMCPServer.ResourceCount: Integer;
 begin
   Result := Length(FResources);
 end;
 
-{ ───────── TMcpServer: dispatch ───────── }
+{ ───────── TMCPServer: dispatch ───────── }
 
-function TMcpServer.ResultResponse(const AMessage: TJsonRpcMessage;
+function TMCPServer.ResultResponse(const AMessage: TJSONRPCMessage;
   AResult: TJSONObject; ALegacy: Boolean): string;
 begin
   // The modern stamps (resultType, serverInfo _meta) belong to the
@@ -468,14 +468,14 @@ begin
   Result := BuildResultResponse(AMessage.Id, AResult);
 end;
 
-function TMcpServer.HandleMessage(const ALine: string;
+function TMCPServer.HandleMessage(const ALine: string;
   out AResponse: string): Boolean;
 var
-  Msg: TJsonRpcMessage;
+  Msg: TJSONRPCMessage;
 begin
   AResponse := '';
   Result := False;
-  Msg := ParseJsonRpcMessage(ALine);
+  Msg := ParseJSONRPCMessage(ALine);
   try
     case Msg.Kind of
       jrkInvalid:
@@ -502,7 +502,7 @@ begin
         end;
     end;
   finally
-    FreeJsonRpcMessage(Msg);
+    FreeJSONRPCMessage(Msg);
   end;
 end;
 
@@ -522,10 +522,10 @@ begin
     (TJSONObject(MetaData).Find(META_KEY_PROTOCOL_VERSION) <> nil);
 end;
 
-function TMcpServer.DispatchRequest(const AMessage: TJsonRpcMessage): string;
+function TMCPServer.DispatchRequest(const AMessage: TJSONRPCMessage): string;
 var
-  Ctx: TMcpRequestContext;
-  MetaErr: TMcpMetaError;
+  Ctx: TMCPRequestContext;
+  MetaErr: TMCPMetaError;
 begin
   if AMessage.Method = 'initialize' then
   begin
@@ -562,8 +562,8 @@ begin
     'Method not found: ' + AMessage.Method);
 end;
 
-function TMcpServer.DispatchLegacyRequest(
-  const AMessage: TJsonRpcMessage): string;
+function TMCPServer.DispatchLegacyRequest(
+  const AMessage: TJSONRPCMessage): string;
 begin
   // ping is a legacy utility a client may send at any time, including
   // before initialize (the modern revision removed it — a modern
@@ -593,7 +593,7 @@ begin
     'Method not found: ' + AMessage.Method);
 end;
 
-function TMcpServer.HandleInitialize(const AMessage: TJsonRpcMessage): string;
+function TMCPServer.HandleInitialize(const AMessage: TJSONRPCMessage): string;
 var
   VersionData, InfoData, CapsData: TJSONData;
   Requested: string;
@@ -649,16 +649,16 @@ begin
   Result := BuildResultResponse(AMessage.Id, InitResult);
 end;
 
-function TMcpServer.LegacyContext: TMcpRequestContext;
+function TMCPServer.LegacyContext: TMCPRequestContext;
 begin
-  Result := Default(TMcpRequestContext);
+  Result := Default(TMCPRequestContext);
   Result.ProtocolVersion := FLegacyProtocolVersion;
   Result.ClientName := FLegacyClientName;
   Result.ClientVersion := FLegacyClientVersion;
   Result.ClientCapabilities := FLegacyClientCapabilities;
 end;
 
-procedure TMcpServer.AddCacheFields(AResult: TJSONObject; ATtlMs: Integer);
+procedure TMCPServer.AddCacheFields(AResult: TJSONObject; ATtlMs: Integer);
 begin
   // CacheableResult (SEP-2549): ttlMs + cacheScope are REQUIRED on
   // discover/list/read results — the official RC SDKs reject results
@@ -668,7 +668,7 @@ begin
   AResult.Add('cacheScope', FCacheScope);
 end;
 
-function TMcpServer.HandleDiscover(const AMessage: TJsonRpcMessage): string;
+function TMCPServer.HandleDiscover(const AMessage: TJSONRPCMessage): string;
 var
   DiscoverResult, Capabilities, ServerInfo: TJSONObject;
   Versions: TJSONArray;
@@ -701,7 +701,7 @@ begin
   Result := ResultResponse(AMessage, DiscoverResult, False);
 end;
 
-function TMcpServer.HandleToolsList(const AMessage: TJsonRpcMessage;
+function TMCPServer.HandleToolsList(const AMessage: TJSONRPCMessage;
   ALegacy: Boolean): string;
 var
   ListResult: TJSONObject;
@@ -720,14 +720,14 @@ begin
   Result := ResultResponse(AMessage, ListResult, ALegacy);
 end;
 
-function TMcpServer.HandleToolsCall(const AMessage: TJsonRpcMessage;
-  const ACtx: TMcpRequestContext; ALegacy: Boolean): string;
+function TMCPServer.HandleToolsCall(const AMessage: TJSONRPCMessage;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
 var
   NameData, ArgsData: TJSONData;
   ToolName: string;
   Index: Integer;
   Arguments, OwnedEmpty, CallResult: TJSONObject;
-  ToolResult: TMcpToolResult;
+  ToolResult: TMCPToolResult;
 begin
   NameData := AMessage.Params.Find('name');
   if (NameData = nil) or (NameData.JSONType <> jtString) then
@@ -766,7 +766,7 @@ begin
       // can read them and self-correct; only dispatch-level faults are
       // JSON-RPC errors.
       on E: Exception do
-        ToolResult := McpErrorResult('Tool execution failed: ' + E.Message);
+        ToolResult := MCPErrorResult('Tool execution failed: ' + E.Message);
     end;
   finally
     OwnedEmpty.Free;
@@ -784,7 +784,7 @@ begin
   Result := ResultResponse(AMessage, CallResult, ALegacy);
 end;
 
-function TMcpServer.HandleResourcesList(const AMessage: TJsonRpcMessage;
+function TMCPServer.HandleResourcesList(const AMessage: TJSONRPCMessage;
   ALegacy: Boolean): string;
 var
   ListResult: TJSONObject;
@@ -801,8 +801,8 @@ begin
   Result := ResultResponse(AMessage, ListResult, ALegacy);
 end;
 
-function TMcpServer.HandleResourcesRead(const AMessage: TJsonRpcMessage;
-  const ACtx: TMcpRequestContext; ALegacy: Boolean): string;
+function TMCPServer.HandleResourcesRead(const AMessage: TJSONRPCMessage;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
 var
   UriData: TJSONData;
   Uri, MimeType: string;
@@ -842,11 +842,11 @@ begin
   else
   begin
     MimeType := FResources[Index].Definition.Get('mimeType', 'text/plain');
-    Contents := McpTextContents(Uri, MimeType, FResources[Index].StaticText);
+    Contents := MCPTextContents(Uri, MimeType, FResources[Index].StaticText);
     ReadTtlMs := FCacheTtlMs;
   end;
   if Contents = nil then
-    raise EMcpServer.CreateFmt(
+    raise EMCPServer.CreateFmt(
       'Resource reader for "%s" returned no contents', [Uri]);
 
   ReadResult := TJSONObject.Create;

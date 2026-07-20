@@ -10,7 +10,7 @@ unit MCP.Transport.Stdio;
 //     (fpjson escapes newlines inside strings, so serialized responses
 //     are single-line by construction);
 //   - stdout carries nothing but MCP messages — diagnostics belong on
-//     stderr (McpLogToStderr);
+//     stderr (MCPLogToStderr);
 //   - responses are terminated with a bare LF on every platform (a
 //     platform WriteLn would emit CRLF on Windows); inbound lines get
 //     a stray trailing CR stripped for the mirror-image reason;
@@ -22,7 +22,7 @@ unit MCP.Transport.Stdio;
 // notifications/cancelled correct (see MCP.Server).
 //
 // MCP.Transport.Http is the planned second binding (Streamable HTTP);
-// it will wrap the same TMcpServer without changes here.
+// it will wrap the same TMCPServer without changes here.
 
 {$I Shared.inc}
 
@@ -34,20 +34,20 @@ uses
   MCP.Server;
 
 // Serve AServer over the program's standard input/output until EOF.
-procedure RunMcpStdioServer(AServer: TMcpServer);
+procedure RunMCPStdioServer(AServer: TMCPServer);
 
 // The same loop over arbitrary Text files — the seam tests drive with
 // temp files, and custom stream transports (sockets reusing the stdio
 // framing, as the spec suggests) can reuse.
-procedure RunMcpStdioLoop(var AInput, AOutput: Text; AServer: TMcpServer);
+procedure RunMCPStdioLoop(var AInput, AOutput: Text; AServer: TMCPServer);
 
 // Diagnostics channel: stderr is the only stream a stdio MCP server may
 // log to. Writes one line and flushes.
-procedure McpLogToStderr(const AMessage: string);
+procedure MCPLogToStderr(const AMessage: string);
 
 implementation
 
-procedure RunMcpStdioLoop(var AInput, AOutput: Text; AServer: TMcpServer);
+procedure RunMCPStdioLoop(var AInput, AOutput: Text; AServer: TMCPServer);
 var
   Line, Response: string;
 begin
@@ -68,12 +68,12 @@ begin
   end;
 end;
 
-procedure RunMcpStdioServer(AServer: TMcpServer);
+procedure RunMCPStdioServer(AServer: TMCPServer);
 begin
-  RunMcpStdioLoop(Input, Output, AServer);
+  RunMCPStdioLoop(Input, Output, AServer);
 end;
 
-procedure McpLogToStderr(const AMessage: string);
+procedure MCPLogToStderr(const AMessage: string);
 begin
   Write(ErrOutput, AMessage, #10);
   Flush(ErrOutput);

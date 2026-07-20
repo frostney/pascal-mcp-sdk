@@ -1,5 +1,5 @@
 { MCP.Transport.Stdio.Test — the framing shell, driven through temp
-  Text files (the seam RunMcpStdioLoop exposes): one response line per
+  Text files (the seam RunMCPStdioLoop exposes): one response line per
   request line, LF-only terminators even for multi-line-ish payloads,
   CRLF input tolerated, blank lines skipped, notifications producing no
   output line, and the loop returning cleanly at EOF. }
@@ -27,7 +27,7 @@ const
 type
   TStdioLoop = class(TTestSuite)
   private
-    FServer: TMcpServer;
+    FServer: TMCPServer;
     FDir: string;
     // Feed AInput through the loop; returns the raw bytes written out.
     function RunLoop(const AInput: string): string;
@@ -45,14 +45,14 @@ type
   end;
 
 function PingHandler(AArguments: TJSONObject;
-  const ACtx: TMcpRequestContext): TMcpToolResult;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
-  Result := McpTextResult('pong');
+  Result := MCPTextResult('pong');
 end;
 
 procedure TStdioLoop.BeforeEach;
 begin
-  FServer := TMcpServer.Create('stdio-test', '1.0');
+  FServer := TMCPServer.Create('stdio-test', '1.0');
   FServer.RegisterTool('ping', 'Ping', '{"type":"object"}', PingHandler);
   FDir := GetTempDir + 'pascal-mcp-sdk-stdio-test' + PathDelim;
   ForceDirectories(FDir);
@@ -73,7 +73,7 @@ var
   FileStream: TFileStream;
 begin
   // Write the scripted input, then drive the loop with real Text
-  // files — the same code path RunMcpStdioServer wires to Input/Output.
+  // files — the same code path RunMCPStdioServer wires to Input/Output.
   Bytes := TStringStream.Create(AInput);
   try
     Bytes.SaveToFile(FDir + 'in.txt');
@@ -86,7 +86,7 @@ begin
   Assign(OutFile, FDir + 'out.txt');
   Rewrite(OutFile);
   try
-    RunMcpStdioLoop(InFile, OutFile, FServer);
+    RunMCPStdioLoop(InFile, OutFile, FServer);
   finally
     Close(InFile);
     Close(OutFile);

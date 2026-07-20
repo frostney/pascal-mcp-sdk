@@ -1,4 +1,4 @@
-unit MCP.JsonRpc;
+unit MCP.JSONRPC;
 
 // JSON-RPC 2.0 message layer, restricted to the profile MCP mandates
 // (spec revision 2026-07-28, "Base Protocol"): every message is a
@@ -9,8 +9,8 @@ unit MCP.JsonRpc;
 // a decoded message and result/error payloads back into compact
 // single-line JSON.
 //
-// Ownership: TJsonRpcMessage.Raw owns the whole parse tree; Id and
-// Params are borrowed views into it. Free with FreeJsonRpcMessage.
+// Ownership: TJSONRPCMessage.Raw owns the whole parse tree; Id and
+// Params are borrowed views into it. Free with FreeJSONRPCMessage.
 // The Build* functions clone the id (so the message can be freed
 // independently) and take ownership of the payload they are given.
 
@@ -41,10 +41,10 @@ const
   MCP_ERROR_UNSUPPORTED_PROTOCOL_VERSION = -32022;
 
 type
-  TJsonRpcKind = (jrkInvalid, jrkRequest, jrkNotification);
+  TJSONRPCKind = (jrkInvalid, jrkRequest, jrkNotification);
 
-  TJsonRpcMessage = record
-    Kind: TJsonRpcKind;
+  TJSONRPCMessage = record
+    Kind: TJSONRPCKind;
     Method: string;
     Id: TJSONData;       // borrowed from Raw; nil for notifications and
                          // for invalid messages whose id was unreadable
@@ -57,9 +57,9 @@ type
 // Decode one line into a message. Never raises: malformed input comes
 // back as Kind = jrkInvalid with the JSON-RPC error to reply with (a
 // readable id is preserved so the reply can carry it).
-function ParseJsonRpcMessage(const ALine: string): TJsonRpcMessage;
+function ParseJSONRPCMessage(const ALine: string): TJSONRPCMessage;
 
-procedure FreeJsonRpcMessage(var AMessage: TJsonRpcMessage);
+procedure FreeJSONRPCMessage(var AMessage: TJSONRPCMessage);
 
 // Build a response line. AId is cloned (nil becomes JSON null, which
 // JSON-RPC prescribes when the request id was unreadable); AResult /
@@ -86,8 +86,8 @@ begin
   end;
 end;
 
-function Invalid(var AMessage: TJsonRpcMessage; ACode: Integer;
-  const AText: string): TJsonRpcMessage;
+function Invalid(var AMessage: TJSONRPCMessage; ACode: Integer;
+  const AText: string): TJSONRPCMessage;
 begin
   AMessage.Kind := jrkInvalid;
   AMessage.ErrorCode := ACode;
@@ -95,12 +95,12 @@ begin
   Result := AMessage;
 end;
 
-function ParseJsonRpcMessage(const ALine: string): TJsonRpcMessage;
+function ParseJSONRPCMessage(const ALine: string): TJSONRPCMessage;
 var
   Obj: TJSONObject;
   Version, IdData, MethodData, ParamsData: TJSONData;
 begin
-  Result := Default(TJsonRpcMessage);
+  Result := Default(TJSONRPCMessage);
 
   try
     Result.Raw := ParseJson(ALine);
@@ -151,7 +151,7 @@ begin
     Result.Kind := jrkRequest;
 end;
 
-procedure FreeJsonRpcMessage(var AMessage: TJsonRpcMessage);
+procedure FreeJSONRPCMessage(var AMessage: TJSONRPCMessage);
 begin
   FreeAndNil(AMessage.Raw);
   AMessage.Id := nil;

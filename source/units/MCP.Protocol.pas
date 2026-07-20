@@ -24,7 +24,7 @@ uses
   SysUtils,
 
   fpjson,
-  MCP.JsonRpc;
+  MCP.JSONRPC;
 
 const
   // The modern (stateless, per-request-metadata) revision this library
@@ -63,7 +63,7 @@ type
   // extracted from the request's _meta. ClientCapabilities is a
   // borrowed reference into the request tree — valid for the duration
   // of the handler call, never to be freed or retained.
-  TMcpRequestContext = record
+  TMCPRequestContext = record
     ProtocolVersion: string;
     ClientName: string;          // '' when clientInfo absent
     ClientVersion: string;
@@ -72,7 +72,7 @@ type
     function HasCapability(const AName: string): Boolean;
   end;
 
-  TMcpMetaError = record
+  TMCPMetaError = record
     Code: Integer;
     Message: string;
     Data: TJSONData; // ownership transfers to the caller (nil if none)
@@ -84,7 +84,7 @@ type
 // data.supported list) for a version outside ASupportedVersions.
 function ExtractRequestContext(AParams: TJSONObject;
   const ASupportedVersions: array of string;
-  out ACtx: TMcpRequestContext; out AError: TMcpMetaError): Boolean;
+  out ACtx: TMCPRequestContext; out AError: TMCPMetaError): Boolean;
 
 // Stamp the fields the spec expects on every result: resultType
 // ("complete" unless the builder already set one) and the serverInfo
@@ -113,13 +113,13 @@ begin
   Result := False;
 end;
 
-function TMcpRequestContext.HasCapability(const AName: string): Boolean;
+function TMCPRequestContext.HasCapability(const AName: string): Boolean;
 begin
   Result := (ClientCapabilities <> nil) and
     (ClientCapabilities.Find(AName) <> nil);
 end;
 
-function MetaError(out AError: TMcpMetaError; ACode: Integer;
+function MetaError(out AError: TMCPMetaError; ACode: Integer;
   const AText: string; AData: TJSONData = nil): Boolean;
 begin
   AError.Code := ACode;
@@ -145,15 +145,15 @@ end;
 
 function ExtractRequestContext(AParams: TJSONObject;
   const ASupportedVersions: array of string;
-  out ACtx: TMcpRequestContext; out AError: TMcpMetaError): Boolean;
+  out ACtx: TMCPRequestContext; out AError: TMCPMetaError): Boolean;
 var
   MetaData, VersionData, CapsData, InfoData, LevelData: TJSONData;
   Meta, Info: TJSONObject;
   Version: string;
   Known: Boolean;
 begin
-  ACtx := Default(TMcpRequestContext);
-  AError := Default(TMcpMetaError);
+  ACtx := Default(TMCPRequestContext);
+  AError := Default(TMCPMetaError);
 
   if AParams = nil then
     Exit(MetaError(AError, JSONRPC_INVALID_PARAMS,

@@ -1,11 +1,11 @@
-{ MCP.JsonRpc.Test — the JSON-RPC 2.0 profile MCP mandates: request /
+{ MCP.JSONRPC.Test — the JSON-RPC 2.0 profile MCP mandates: request /
   notification classification, the id rules (string or number, never
   null), rejection of batches and non-object params, id preservation
   into error replies for malformed-but-parseable input, and the
   response builders (result / error shape, id cloning, null id for
   unreadable requests, single-line output with escaped newlines). }
 
-program MCP.JsonRpc.Test;
+program MCP.JSONRPC.Test;
 
 {$I Shared.inc}
 
@@ -13,7 +13,7 @@ uses
   SysUtils,
 
   fpjson,
-  MCP.JsonRpc,
+  MCP.JSONRPC,
   TestingPascalLibrary;
 
 type
@@ -61,58 +61,58 @@ end;
 
 procedure TParseValid.TestRequestWithNumberId;
 var
-  Msg: TJsonRpcMessage;
+  Msg: TJSONRPCMessage;
 begin
-  Msg := ParseJsonRpcMessage(
+  Msg := ParseJSONRPCMessage(
     '{"jsonrpc":"2.0","id":7,"method":"tools/list"}');
   Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkRequest));
   Expect<string>(Msg.Method).ToBe('tools/list');
   Expect<Integer>(Msg.Id.AsInteger).ToBe(7);
-  FreeJsonRpcMessage(Msg);
+  FreeJSONRPCMessage(Msg);
 end;
 
 procedure TParseValid.TestRequestWithStringId;
 var
-  Msg: TJsonRpcMessage;
+  Msg: TJSONRPCMessage;
 begin
-  Msg := ParseJsonRpcMessage(
+  Msg := ParseJSONRPCMessage(
     '{"jsonrpc":"2.0","id":"discover-1","method":"server/discover"}');
   Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkRequest));
   Expect<string>(Msg.Id.AsString).ToBe('discover-1');
-  FreeJsonRpcMessage(Msg);
+  FreeJSONRPCMessage(Msg);
 end;
 
 procedure TParseValid.TestNotification;
 var
-  Msg: TJsonRpcMessage;
+  Msg: TJSONRPCMessage;
 begin
-  Msg := ParseJsonRpcMessage(
+  Msg := ParseJSONRPCMessage(
     '{"jsonrpc":"2.0","method":"notifications/cancelled"}');
   Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkNotification));
   Expect<Boolean>(Msg.Id = nil).ToBe(True);
-  FreeJsonRpcMessage(Msg);
+  FreeJSONRPCMessage(Msg);
 end;
 
 procedure TParseValid.TestParamsCaptured;
 var
-  Msg: TJsonRpcMessage;
+  Msg: TJSONRPCMessage;
 begin
-  Msg := ParseJsonRpcMessage(
+  Msg := ParseJSONRPCMessage(
     '{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
     '"params":{"name":"echo"}}');
   Expect<Boolean>(Msg.Params <> nil).ToBe(True);
   Expect<string>(Msg.Params.Get('name', '')).ToBe('echo');
-  FreeJsonRpcMessage(Msg);
+  FreeJSONRPCMessage(Msg);
 end;
 
 procedure TParseValid.TestParamsAbsent;
 var
-  Msg: TJsonRpcMessage;
+  Msg: TJSONRPCMessage;
 begin
-  Msg := ParseJsonRpcMessage('{"jsonrpc":"2.0","id":1,"method":"x"}');
+  Msg := ParseJSONRPCMessage('{"jsonrpc":"2.0","id":1,"method":"x"}');
   Expect<Boolean>(Msg.Params = nil).ToBe(True);
   Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkRequest));
-  FreeJsonRpcMessage(Msg);
+  FreeJSONRPCMessage(Msg);
 end;
 
 procedure TParseValid.SetupTests;
@@ -128,88 +128,88 @@ end;
 
 procedure TParseInvalid.TestGarbage;
 var
-  Msg: TJsonRpcMessage;
+  Msg: TJSONRPCMessage;
 begin
-  Msg := ParseJsonRpcMessage('this is not json');
+  Msg := ParseJSONRPCMessage('this is not json');
   Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkInvalid));
   Expect<Integer>(Msg.ErrorCode).ToBe(JSONRPC_PARSE_ERROR);
-  FreeJsonRpcMessage(Msg);
+  FreeJSONRPCMessage(Msg);
 end;
 
 procedure TParseInvalid.TestNonObject;
 var
-  Msg: TJsonRpcMessage;
+  Msg: TJSONRPCMessage;
 begin
-  Msg := ParseJsonRpcMessage('"just a string"');
+  Msg := ParseJSONRPCMessage('"just a string"');
   Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkInvalid));
   Expect<Integer>(Msg.ErrorCode).ToBe(JSONRPC_INVALID_REQUEST);
-  FreeJsonRpcMessage(Msg);
+  FreeJSONRPCMessage(Msg);
 end;
 
 procedure TParseInvalid.TestBatchRejected;
 var
-  Msg: TJsonRpcMessage;
+  Msg: TJSONRPCMessage;
 begin
   // MCP removed JSON-RPC batching; arrays are invalid requests.
-  Msg := ParseJsonRpcMessage(
+  Msg := ParseJSONRPCMessage(
     '[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]');
   Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkInvalid));
   Expect<Integer>(Msg.ErrorCode).ToBe(JSONRPC_INVALID_REQUEST);
-  FreeJsonRpcMessage(Msg);
+  FreeJSONRPCMessage(Msg);
 end;
 
 procedure TParseInvalid.TestWrongVersion;
 var
-  Msg: TJsonRpcMessage;
+  Msg: TJSONRPCMessage;
 begin
-  Msg := ParseJsonRpcMessage('{"jsonrpc":"1.0","id":1,"method":"x"}');
+  Msg := ParseJSONRPCMessage('{"jsonrpc":"1.0","id":1,"method":"x"}');
   Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkInvalid));
   Expect<Integer>(Msg.ErrorCode).ToBe(JSONRPC_INVALID_REQUEST);
-  FreeJsonRpcMessage(Msg);
+  FreeJSONRPCMessage(Msg);
 end;
 
 procedure TParseInvalid.TestMissingMethod;
 var
-  Msg: TJsonRpcMessage;
+  Msg: TJSONRPCMessage;
 begin
-  Msg := ParseJsonRpcMessage('{"jsonrpc":"2.0","id":1}');
+  Msg := ParseJSONRPCMessage('{"jsonrpc":"2.0","id":1}');
   Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkInvalid));
-  FreeJsonRpcMessage(Msg);
+  FreeJSONRPCMessage(Msg);
 end;
 
 procedure TParseInvalid.TestNullId;
 var
-  Msg: TJsonRpcMessage;
+  Msg: TJSONRPCMessage;
 begin
   // MCP tightens JSON-RPC: the id MUST NOT be null.
-  Msg := ParseJsonRpcMessage(
+  Msg := ParseJSONRPCMessage(
     '{"jsonrpc":"2.0","id":null,"method":"tools/list"}');
   Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkInvalid));
   Expect<Integer>(Msg.ErrorCode).ToBe(JSONRPC_INVALID_REQUEST);
-  FreeJsonRpcMessage(Msg);
+  FreeJSONRPCMessage(Msg);
 end;
 
 procedure TParseInvalid.TestArrayParams;
 var
-  Msg: TJsonRpcMessage;
+  Msg: TJSONRPCMessage;
 begin
-  Msg := ParseJsonRpcMessage(
+  Msg := ParseJSONRPCMessage(
     '{"jsonrpc":"2.0","id":1,"method":"x","params":[1,2]}');
   Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkInvalid));
-  FreeJsonRpcMessage(Msg);
+  FreeJSONRPCMessage(Msg);
 end;
 
 procedure TParseInvalid.TestIdPreservedOnInvalid;
 var
-  Msg: TJsonRpcMessage;
+  Msg: TJSONRPCMessage;
 begin
   // A readable id survives validation failure so the error reply can
   // carry it (JSON-RPC 2.0 §5).
-  Msg := ParseJsonRpcMessage('{"jsonrpc":"1.0","id":42,"method":"x"}');
+  Msg := ParseJSONRPCMessage('{"jsonrpc":"1.0","id":42,"method":"x"}');
   Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkInvalid));
   Expect<Boolean>(Msg.Id <> nil).ToBe(True);
   Expect<Integer>(Msg.Id.AsInteger).ToBe(42);
-  FreeJsonRpcMessage(Msg);
+  FreeJSONRPCMessage(Msg);
 end;
 
 procedure TParseInvalid.SetupTests;
@@ -306,9 +306,9 @@ begin
 end;
 
 begin
-  TestRunnerProgram.AddSuite(TParseValid.Create('JsonRpc: valid input'));
-  TestRunnerProgram.AddSuite(TParseInvalid.Create('JsonRpc: invalid input'));
+  TestRunnerProgram.AddSuite(TParseValid.Create('JSONRPC: valid input'));
+  TestRunnerProgram.AddSuite(TParseInvalid.Create('JSONRPC: invalid input'));
   TestRunnerProgram.AddSuite(
-    TResponseBuilders.Create('JsonRpc: response builders'));
+    TResponseBuilders.Create('JSONRPC: response builders'));
   TestRunnerProgram.Run;
 end.
