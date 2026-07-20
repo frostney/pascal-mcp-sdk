@@ -33,11 +33,16 @@ unit MCP.Schema;
 //    "integer", Boolean → "boolean", enums → "string" with the enum
 //    names as allowed values. All published properties are required.
 //
-//    Classes, not records: FPC 3.2.2 RTTI does not expose field names
-//    for plain records (only managed-field layout), and Delphi-style
-//    extended RTTI/attributes are not available — published class
-//    properties are the one reflection surface the compiler
-//    guarantees, the same one fpjsonrtti streaming builds on. For
+//    Classes, not records: FPC 3.2.2 record RTTI enumerates every
+//    field's offset and type (verified empirically) but carries NO
+//    field names — and the rtti unit has no TRttiField at all, with
+//    {$RTTI EXPLICIT} accepted only as a Delphi-compatibility no-op.
+//    A names-supplied-by-caller record API would be positional and
+//    corrupt memory on silent field reorders, so published class
+//    properties — the one name-carrying reflection surface 3.2.2
+//    guarantees, the same one fpjsonrtti builds on — are the
+//    deliberate choice. Revisit for plain records when the toolchain
+//    adopts FPC's extended RTTI (trunk: TRttiField for records). For
 //    per-property descriptions use the fluent builder; RTTI carries
 //    no place to put them.
 //
