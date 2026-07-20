@@ -138,15 +138,23 @@ type
   TLegacyEra = class(TDispatchSuite)
   private
     procedure DoInitialize(const AVersion: string);
+    procedure ExpectInvalidParams(const ALine: string);
   public
     procedure SetupTests; override;
     procedure TestKnownVersionEchoed;
     procedure TestBatchRevisionAnswersLatestLegacy;
     procedure TestUnknownVersionAnswersLatestLegacy;
     procedure TestInitializeResultShape;
+    procedure TestInitializeMissingCapabilities;
+    procedure TestInitializeNonObjectCapabilities;
+    procedure TestInitializeMissingClientInfo;
+    procedure TestInitializeIncompleteClientInfo;
     procedure TestRequestBeforeInitialize;
     procedure TestPingBeforeInitialize;
     procedure TestLegacyToolCall;
+    procedure TestParamslessToolCall;
+    procedure TestParamslessResourceRead;
+    procedure TestParamslessPromptGet;
     procedure TestLegacyResponsesUnstamped;
     procedure TestLegacyContextVisibleToHandlers;
     procedure TestLegacyResourceNotFound;
@@ -387,7 +395,8 @@ begin
   // Modern-only posture: DualEra off restores the strict rejection.
   FServer.DualEra := False;
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
-    '"params":{"protocolVersion":"2025-11-25","capabilities":{}}}');
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
     .ToBe(JSONRPC_METHOD_NOT_FOUND);
   // The reply MUST name the supported versions — the only diagnostic a
@@ -990,7 +999,8 @@ var
   ResultObj: TJSONObject;
 begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
-    '"params":{"protocolVersion":"2025-11-25","capabilities":{}}}');
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   Response.Free;
   Response := Call(
     '{"jsonrpc":"2.0","id":2,"method":"resources/templates/list",' +
@@ -1178,7 +1188,8 @@ var
   Response, Note: TJSONObject;
 begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
-    '"params":{"protocolVersion":"2025-11-25","capabilities":{}}}');
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   Response.Free;
   // progressToken is per-request in every era; no logLevel opt-in
   // exists in the legacy path, so only progress is emitted.
@@ -1332,7 +1343,8 @@ var
   ResultObj: TJSONObject;
 begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
-    '"params":{"protocolVersion":"2025-11-25","capabilities":{}}}');
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   Expect<Boolean>(
     Response.FindPath('result.capabilities.prompts') <> nil).ToBe(True);
   Response.Free;
@@ -1370,12 +1382,23 @@ begin
   Response.Free;
 end;
 
+procedure TLegacyEra.ExpectInvalidParams(const ALine: string);
+var
+  Response: TJSONObject;
+begin
+  Response := Call(ALine);
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INVALID_PARAMS);
+  Response.Free;
+end;
+
 procedure TLegacyEra.TestKnownVersionEchoed;
 var
   Response: TJSONObject;
 begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
-    '"params":{"protocolVersion":"2025-06-18","capabilities":{}}}');
+    '"params":{"protocolVersion":"2025-06-18","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   Expect<string>(
     TJSONObject(Response.Find('result')).Get('protocolVersion', ''))
     .ToBe('2025-06-18');
@@ -1387,7 +1410,8 @@ var
   Response: TJSONObject;
 begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
-    '"params":{"protocolVersion":"2025-03-26","capabilities":{}}}');
+    '"params":{"protocolVersion":"2025-03-26","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   Expect<string>(
     TJSONObject(Response.Find('result')).Get('protocolVersion', ''))
     .ToBe('2025-11-25');
@@ -1401,7 +1425,8 @@ begin
   // Legacy negotiation: an unknown request gets the server's latest
   // legacy revision; the client decides whether to proceed.
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
-    '"params":{"protocolVersion":"1999-01-01","capabilities":{}}}');
+    '"params":{"protocolVersion":"1999-01-01","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   Expect<string>(
     TJSONObject(Response.Find('result')).Get('protocolVersion', ''))
     .ToBe(LATEST_LEGACY_PROTOCOL_VERSION);
@@ -1414,7 +1439,8 @@ var
   ResultObj: TJSONObject;
 begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
-    '"params":{"protocolVersion":"2025-11-25","capabilities":{}}}');
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   ResultObj := TJSONObject(Response.Find('result'));
   Expect<string>(
     TJSONObject(ResultObj.Find('serverInfo')).Get('name', ''))
@@ -1426,6 +1452,37 @@ begin
   Expect<Boolean>(ResultObj.Find('resultType') = nil).ToBe(True);
   Expect<Boolean>(ResultObj.Find('_meta') = nil).ToBe(True);
   Response.Free;
+end;
+
+procedure TLegacyEra.TestInitializeMissingCapabilities;
+begin
+  ExpectInvalidParams(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25",' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+end;
+
+procedure TLegacyEra.TestInitializeNonObjectCapabilities;
+begin
+  ExpectInvalidParams(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":"all",' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+end;
+
+procedure TLegacyEra.TestInitializeMissingClientInfo;
+begin
+  ExpectInvalidParams(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{}}}');
+end;
+
+procedure TLegacyEra.TestInitializeIncompleteClientInfo;
+begin
+  ExpectInvalidParams(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client"}}}');
 end;
 
 procedure TLegacyEra.TestRequestBeforeInitialize;
@@ -1461,6 +1518,27 @@ begin
     TJSONData(Response.FindPath('result.content[0].text')).AsString)
     .ToBe('legacy hi');
   Response.Free;
+end;
+
+procedure TLegacyEra.TestParamslessToolCall;
+begin
+  DoInitialize('2025-11-25');
+  ExpectInvalidParams(
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call"}');
+end;
+
+procedure TLegacyEra.TestParamslessResourceRead;
+begin
+  DoInitialize('2025-11-25');
+  ExpectInvalidParams(
+    '{"jsonrpc":"2.0","id":2,"method":"resources/read"}');
+end;
+
+procedure TLegacyEra.TestParamslessPromptGet;
+begin
+  DoInitialize('2025-11-25');
+  ExpectInvalidParams(
+    '{"jsonrpc":"2.0","id":2,"method":"prompts/get"}');
 end;
 
 procedure TLegacyEra.TestLegacyResponsesUnstamped;
@@ -1541,9 +1619,21 @@ begin
   Test('unknown version → latest legacy answered',
     TestUnknownVersionAnswersLatestLegacy);
   Test('initialize result shape, unstamped', TestInitializeResultShape);
+  Test('initialize without capabilities → -32602',
+    TestInitializeMissingCapabilities);
+  Test('initialize with non-object capabilities → -32602',
+    TestInitializeNonObjectCapabilities);
+  Test('initialize without clientInfo → -32602',
+    TestInitializeMissingClientInfo);
+  Test('initialize with incomplete clientInfo → -32602',
+    TestInitializeIncompleteClientInfo);
   Test('request before initialize → -32600', TestRequestBeforeInitialize);
   Test('ping answered before initialize', TestPingBeforeInitialize);
   Test('legacy tools/call after handshake', TestLegacyToolCall);
+  Test('legacy tools/call without params → -32602', TestParamslessToolCall);
+  Test('legacy resources/read without params → -32602',
+    TestParamslessResourceRead);
+  Test('legacy prompts/get without params → -32602', TestParamslessPromptGet);
   Test('legacy responses carry no modern stamps',
     TestLegacyResponsesUnstamped);
   Test('legacy context reaches handlers', TestLegacyContextVisibleToHandlers);

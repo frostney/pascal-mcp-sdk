@@ -1383,7 +1383,7 @@ end;
 
 function TMCPServer.HandleInitialize(const AMessage: TJSONRPCMessage): string;
 var
-  VersionData, InfoData, CapsData: TJSONData;
+  VersionData, InfoData, CapsData, NameData, ClientVersionData: TJSONData;
   Requested: string;
   InitResult, Capabilities, ServerInfo: TJSONObject;
 begin
@@ -1396,6 +1396,35 @@ begin
       'Invalid params: protocolVersion must be a string'));
   Requested := VersionData.AsString;
 
+  // InitializeRequest params require object-valued capabilities and
+  // clientInfo with string name and version members:
+  // https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle
+  // (verified 2026-07-20).
+  CapsData := AMessage.Params.Find('capabilities');
+  if CapsData = nil then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: initialize requires capabilities'));
+  if CapsData.JSONType <> jtObject then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: capabilities must be an object'));
+
+  InfoData := AMessage.Params.Find('clientInfo');
+  if InfoData = nil then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: initialize requires clientInfo'));
+  if InfoData.JSONType <> jtObject then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: clientInfo must be an object'));
+  NameData := TJSONObject(InfoData).Find('name');
+  if (NameData = nil) or (NameData.JSONType <> jtString) then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: clientInfo.name must be a string'));
+  ClientVersionData := TJSONObject(InfoData).Find('version');
+  if (ClientVersionData = nil) or
+    (ClientVersionData.JSONType <> jtString) then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: clientInfo.version must be a string'));
+
   // Legacy negotiation: echo a supported revision, otherwise answer
   // with the latest legacy revision we speak (the client decides
   // whether to proceed or disconnect).
@@ -1405,18 +1434,10 @@ begin
     FLegacyProtocolVersion := LATEST_LEGACY_PROTOCOL_VERSION;
 
   // A re-initialize renegotiates: replace any earlier session state.
-  FLegacyClientName := '';
-  FLegacyClientVersion := '';
+  FLegacyClientName := NameData.AsString;
+  FLegacyClientVersion := ClientVersionData.AsString;
   FreeAndNil(FLegacyClientCapabilities);
-  InfoData := AMessage.Params.Find('clientInfo');
-  if (InfoData <> nil) and (InfoData.JSONType = jtObject) then
-  begin
-    FLegacyClientName := TJSONObject(InfoData).Get('name', '');
-    FLegacyClientVersion := TJSONObject(InfoData).Get('version', '');
-  end;
-  CapsData := AMessage.Params.Find('capabilities');
-  if (CapsData <> nil) and (CapsData.JSONType = jtObject) then
-    FLegacyClientCapabilities := TJSONObject(CapsData.Clone);
+  FLegacyClientCapabilities := TJSONObject(CapsData.Clone);
   FLegacyInitialized := True;
 
   Capabilities := ServerCapabilities;
@@ -1547,6 +1568,9 @@ var
   ToolResult: TMCPToolResult;
   ArgsInstance: TMCPArgs;
 begin
+  if AMessage.Params = nil then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: params are required'));
   NameData := AMessage.Params.Find('name');
   if (NameData = nil) or (NameData.JSONType <> jtString) then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
@@ -1646,6 +1670,9 @@ var
   Contents: TJSONArray;
   ReadResult, NotFoundData, Vars: TJSONObject;
 begin
+  if AMessage.Params = nil then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: params are required'));
   UriData := AMessage.Params.Find('uri');
   if (UriData = nil) or (UriData.JSONType <> jtString) then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
@@ -1759,6 +1786,9 @@ var
   DeclaredArgs: TJSONArray;
   Messages: TJSONArray;
 begin
+  if AMessage.Params = nil then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: params are required'));
   NameData := AMessage.Params.Find('name');
   if (NameData = nil) or (NameData.JSONType <> jtString) then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
