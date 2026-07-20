@@ -116,7 +116,7 @@ type
   TMCPResourceRegistration = record
     Definition: TJSONObject; // owned: uri/name/mimeType/...
     Uri: string;
-    StaticText: string;      // used when no reader is registered
+    StaticText: string;      // used only when HasStaticText is true
     HasStaticText: Boolean;
     Reader: TMCPResourceReader;
     Method: TMCPResourceMethod;
@@ -159,7 +159,8 @@ type
 
   // Fluent declaration of a prompt's flat argument list (name /
   // description / required — prompts do not use JSON Schema). Same
-  // value semantics as TMCPSchema: registration calls Build.
+  // value semantics as TMCPSchema: registration calls Build through
+  // constref so invalidation reaches the caller's record.
   TMCPPromptArguments = record
   private
     FList: TJSONArray;
@@ -220,9 +221,13 @@ type
     FTemplates: array of TMCPTemplateRegistration;
     FPrompts: array of TMCPPromptRegistration;
 
+    procedure SetCacheTtlMs(AValue: Integer);
+    procedure SetCacheScope(const AValue: string);
     function ParseSchema(const ASchemaJson, AToolName: string): TJSONObject;
     function BuildToolDefinition(const AName, ADescription,
       AInputSchemaJson: string): TJSONObject;
+    procedure ValidateToolDefinition(ADefinition: TJSONObject;
+      out AToolName: string);
     function AddTool(ADefinition: TJSONObject; AHandler: TMCPToolHandler;
       AMethod: TMCPToolMethod): TMCPToolOptions;
     function AddTypedTool(ADefinition: TJSONObject;
@@ -280,8 +285,8 @@ type
     // tools/list example) with "private" scope. Reads served by a
     // dynamic reader always advertise ttl 0 (revalidate) — the library
     // cannot know how fresh a callback's data stays.
-    property CacheTtlMs: Integer read FCacheTtlMs write FCacheTtlMs;
-    property CacheScope: string read FCacheScope write FCacheScope;
+    property CacheTtlMs: Integer read FCacheTtlMs write SetCacheTtlMs;
+    property CacheScope: string read FCacheScope write SetCacheScope;
 
     // Dual-era mode (default True): answer the legacy initialize
     // handshake (2025-11-25 and earlier) alongside stateless
@@ -319,14 +324,14 @@ type
     // path for flat object schemas — no JSON strings. The overloads
     // call Build and take ownership of the finished schemas.
     function RegisterTool(const AName, ADescription: string;
-      const AInputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions; overload;
+      constref AInputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions; overload;
     function RegisterTool(const AName, ADescription: string;
-      const AInputSchema: TMCPSchema; AMethod: TMCPToolMethod): TMCPToolOptions; overload;
+      constref AInputSchema: TMCPSchema; AMethod: TMCPToolMethod): TMCPToolOptions; overload;
     function RegisterTool(const AName, ADescription: string;
-      const AInputSchema, AOutputSchema: TMCPSchema;
+      constref AInputSchema, AOutputSchema: TMCPSchema;
       AHandler: TMCPToolHandler): TMCPToolOptions; overload;
     function RegisterTool(const AName, ADescription: string;
-      const AInputSchema, AOutputSchema: TMCPSchema;
+      constref AInputSchema, AOutputSchema: TMCPSchema;
       AMethod: TMCPToolMethod): TMCPToolOptions; overload;
 
     // Typed-argument overloads: the argument class IS the schema
@@ -339,10 +344,10 @@ type
     function RegisterTool(const AName, ADescription: string;
       AArgsClass: TMCPArgsClass; AMethod: TMCPArgsMethod): TMCPToolOptions; overload;
     function RegisterTool(const AName, ADescription: string;
-      AArgsClass: TMCPArgsClass; const AOutputSchema: TMCPSchema;
+      AArgsClass: TMCPArgsClass; constref AOutputSchema: TMCPSchema;
       AHandler: TMCPArgsHandler): TMCPToolOptions; overload;
     function RegisterTool(const AName, ADescription: string;
-      AArgsClass: TMCPArgsClass; const AOutputSchema: TMCPSchema;
+      AArgsClass: TMCPArgsClass; constref AOutputSchema: TMCPSchema;
       AMethod: TMCPArgsMethod): TMCPToolOptions; overload;
     function RegisterTool(const AName, ADescription: string;
       AArgsClass, AOutputClass: TMCPArgsClass;
@@ -375,10 +380,10 @@ type
     procedure RegisterPrompt(const AName, ADescription: string;
       AMethod: TMCPPromptMethod); overload;
     procedure RegisterPrompt(const AName, ADescription: string;
-      const AArguments: TMCPPromptArguments;
+      constref AArguments: TMCPPromptArguments;
       AHandler: TMCPPromptHandler); overload;
     procedure RegisterPrompt(const AName, ADescription: string;
-      const AArguments: TMCPPromptArguments;
+      constref AArguments: TMCPPromptArguments;
       AMethod: TMCPPromptMethod); overload;
 
     // The core entry point: one inbound line in, at most one response
@@ -451,6 +456,8 @@ function TMCPPromptArguments.Add(const AName: string;
 var
   Arg: TJSONObject;
 begin
+  if FList = nil then
+    raise EMCPServer.Create('Prompt arguments were already built');
   Arg := TJSONObject.Create;
   Arg.Add('name', AName);
   if ADescription <> '' then
@@ -463,7 +470,10 @@ end;
 
 function TMCPPromptArguments.Build: TJSONArray;
 begin
+  if FList = nil then
+    raise EMCPServer.Create('Prompt arguments were already built');
   Result := FList;
+  FList := nil;
 end;
 
 function MCPPromptMessage(const ARole, AText: string): TJSONObject;
@@ -798,11 +808,32 @@ end;
 constructor TMCPServer.Create(const AName, AVersion: string);
 begin
   inherited Create;
+  if AName = '' then
+    raise EMCPServer.Create('Server name must not be empty');
+  if AVersion = '' then
+    raise EMCPServer.Create('Server version must not be empty');
   FName := AName;
   FVersion := AVersion;
   FCacheTtlMs := 300000;
   FCacheScope := CACHE_SCOPE_PRIVATE;
   FDualEra := True;
+end;
+
+procedure TMCPServer.SetCacheTtlMs(AValue: Integer);
+begin
+  if AValue < 0 then
+    raise EMCPServer.Create('CacheTtlMs must not be negative');
+  FCacheTtlMs := AValue;
+end;
+
+procedure TMCPServer.SetCacheScope(const AValue: string);
+begin
+  if (AValue <> CACHE_SCOPE_PRIVATE) and
+     (AValue <> CACHE_SCOPE_PUBLIC) then
+    raise EMCPServer.CreateFmt(
+      'CacheScope must be "%s" or "%s"',
+      [CACHE_SCOPE_PRIVATE, CACHE_SCOPE_PUBLIC]);
+  FCacheScope := AValue;
 end;
 
 destructor TMCPServer.Destroy;
@@ -869,26 +900,47 @@ begin
   Result.Add('inputSchema', ParseSchema(AInputSchemaJson, AName));
 end;
 
+procedure TMCPServer.ValidateToolDefinition(ADefinition: TJSONObject;
+  out AToolName: string);
+var
+  InputSchema: TJSONData;
+begin
+  if ADefinition = nil then
+    raise EMCPServer.Create('Tool definition must not be nil');
+  AToolName := ADefinition.Get('name', '');
+  if AToolName = '' then
+    raise EMCPServer.Create('Tool definition must carry a non-empty name');
+  // Tool.inputSchema is a required JSON Schema object:
+  // https://modelcontextprotocol.io/specification/draft/server/tools
+  // (verified 2026-07-21).
+  InputSchema := ADefinition.Find('inputSchema');
+  if (InputSchema = nil) or (InputSchema.JSONType <> jtObject) then
+    raise EMCPServer.CreateFmt(
+      'Tool "%s" definition must carry an object-valued inputSchema',
+      [AToolName]);
+  if FindTool(AToolName) >= 0 then
+    raise EMCPServer.CreateFmt(
+      'Tool "%s" is already registered', [AToolName]);
+end;
+
 function TMCPServer.AddTool(ADefinition: TJSONObject;
   AHandler: TMCPToolHandler; AMethod: TMCPToolMethod): TMCPToolOptions;
 var
   ToolName: string;
 begin
-  ToolName := ADefinition.Get('name', '');
-  if ToolName = '' then
-  begin
+  try
+    ValidateToolDefinition(ADefinition, ToolName);
+    if Assigned(AHandler) = Assigned(AMethod) then
+      raise EMCPServer.CreateFmt(
+        'Tool "%s" must have exactly one callable', [ToolName]);
+    SetLength(FTools, Length(FTools) + 1);
+    FTools[High(FTools)].Definition := ADefinition;
+    FTools[High(FTools)].Handler := AHandler;
+    FTools[High(FTools)].Method := AMethod;
+  except
     ADefinition.Free;
-    raise EMCPServer.Create('Tool definition must carry a non-empty name');
+    raise;
   end;
-  if FindTool(ToolName) >= 0 then
-  begin
-    ADefinition.Free;
-    raise EMCPServer.CreateFmt('Tool "%s" is already registered', [ToolName]);
-  end;
-  SetLength(FTools, Length(FTools) + 1);
-  FTools[High(FTools)].Definition := ADefinition;
-  FTools[High(FTools)].Handler := AHandler;
-  FTools[High(FTools)].Method := AMethod;
   Result.FDefinition := ADefinition;
 end;
 
@@ -953,11 +1005,27 @@ end;
 function TMCPServer.AddTypedTool(ADefinition: TJSONObject;
   AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler;
   AMethod: TMCPArgsMethod): TMCPToolOptions;
+var
+  ToolName: string;
 begin
-  Result := AddTool(ADefinition, nil, nil);
-  FTools[High(FTools)].ArgsClass := AArgsClass;
-  FTools[High(FTools)].ArgsHandler := AHandler;
-  FTools[High(FTools)].ArgsMethod := AMethod;
+  try
+    ValidateToolDefinition(ADefinition, ToolName);
+    if AArgsClass = nil then
+      raise EMCPServer.CreateFmt(
+        'Typed tool "%s" requires a non-nil argument class', [ToolName]);
+    if Assigned(AHandler) = Assigned(AMethod) then
+      raise EMCPServer.CreateFmt(
+        'Typed tool "%s" must have exactly one callable', [ToolName]);
+    SetLength(FTools, Length(FTools) + 1);
+    FTools[High(FTools)].Definition := ADefinition;
+    FTools[High(FTools)].ArgsClass := AArgsClass;
+    FTools[High(FTools)].ArgsHandler := AHandler;
+    FTools[High(FTools)].ArgsMethod := AMethod;
+  except
+    ADefinition.Free;
+    raise;
+  end;
+  Result.FDefinition := ADefinition;
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription,
@@ -999,29 +1067,38 @@ begin
     Result.Add('outputSchema', AOutputSchema);
 end;
 
+function InputSchemaFromClass(const AToolName: string;
+  AArgsClass: TMCPArgsClass): TJSONObject;
+begin
+  if AArgsClass = nil then
+    raise EMCPServer.CreateFmt(
+      'Typed tool "%s" requires a non-nil argument class', [AToolName]);
+  Result := SchemaFrom(AArgsClass).Build;
+end;
+
 function TMCPServer.RegisterTool(const AName, ADescription: string;
-  const AInputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions;
+  constref AInputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions;
 begin
   Result := AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build, nil),
     AHandler, nil);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
-  const AInputSchema: TMCPSchema; AMethod: TMCPToolMethod): TMCPToolOptions;
+  constref AInputSchema: TMCPSchema; AMethod: TMCPToolMethod): TMCPToolOptions;
 begin
   Result := AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build, nil),
     nil, AMethod);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
-  const AInputSchema, AOutputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions;
+  constref AInputSchema, AOutputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions;
 begin
   Result := AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build,
     AOutputSchema.Build), AHandler, nil);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
-  const AInputSchema, AOutputSchema: TMCPSchema; AMethod: TMCPToolMethod): TMCPToolOptions;
+  constref AInputSchema, AOutputSchema: TMCPSchema; AMethod: TMCPToolMethod): TMCPToolOptions;
 begin
   Result := AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build,
     AOutputSchema.Build), nil, AMethod);
@@ -1031,31 +1108,31 @@ function TMCPServer.RegisterTool(const AName, ADescription: string;
   AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler): TMCPToolOptions;
 begin
   Result := AddTypedTool(SchemaDefinition(AName, ADescription,
-    SchemaFrom(AArgsClass).Build, nil), AArgsClass, AHandler, nil);
+    InputSchemaFromClass(AName, AArgsClass), nil), AArgsClass, AHandler, nil);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
   AArgsClass: TMCPArgsClass; AMethod: TMCPArgsMethod): TMCPToolOptions;
 begin
   Result := AddTypedTool(SchemaDefinition(AName, ADescription,
-    SchemaFrom(AArgsClass).Build, nil), AArgsClass, nil, AMethod);
+    InputSchemaFromClass(AName, AArgsClass), nil), AArgsClass, nil, AMethod);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
-  AArgsClass: TMCPArgsClass; const AOutputSchema: TMCPSchema;
+  AArgsClass: TMCPArgsClass; constref AOutputSchema: TMCPSchema;
   AHandler: TMCPArgsHandler): TMCPToolOptions;
 begin
   Result := AddTypedTool(SchemaDefinition(AName, ADescription,
-    SchemaFrom(AArgsClass).Build, AOutputSchema.Build),
+    InputSchemaFromClass(AName, AArgsClass), AOutputSchema.Build),
     AArgsClass, AHandler, nil);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
-  AArgsClass: TMCPArgsClass; const AOutputSchema: TMCPSchema;
+  AArgsClass: TMCPArgsClass; constref AOutputSchema: TMCPSchema;
   AMethod: TMCPArgsMethod): TMCPToolOptions;
 begin
   Result := AddTypedTool(SchemaDefinition(AName, ADescription,
-    SchemaFrom(AArgsClass).Build, AOutputSchema.Build),
+    InputSchemaFromClass(AName, AArgsClass), AOutputSchema.Build),
     AArgsClass, nil, AMethod);
 end;
 
@@ -1063,7 +1140,7 @@ function TMCPServer.RegisterTool(const AName, ADescription: string;
   AArgsClass, AOutputClass: TMCPArgsClass; AHandler: TMCPArgsHandler): TMCPToolOptions;
 begin
   Result := AddTypedTool(SchemaDefinition(AName, ADescription,
-    SchemaFrom(AArgsClass).Build, SchemaFrom(AOutputClass).Build),
+    InputSchemaFromClass(AName, AArgsClass), SchemaFrom(AOutputClass).Build),
     AArgsClass, AHandler, nil);
 end;
 
@@ -1071,7 +1148,7 @@ function TMCPServer.RegisterTool(const AName, ADescription: string;
   AArgsClass, AOutputClass: TMCPArgsClass; AMethod: TMCPArgsMethod): TMCPToolOptions;
 begin
   Result := AddTypedTool(SchemaDefinition(AName, ADescription,
-    SchemaFrom(AArgsClass).Build, SchemaFrom(AOutputClass).Build),
+    InputSchemaFromClass(AName, AArgsClass), SchemaFrom(AOutputClass).Build),
     AArgsClass, nil, AMethod);
 end;
 
@@ -1262,6 +1339,18 @@ var
 begin
   if AUri = '' then
     raise EMCPServer.Create('Resource registration requires a non-empty uri');
+  if AName = '' then
+    raise EMCPServer.CreateFmt(
+      'Resource "%s" requires a non-empty display name', [AUri]);
+  if AHasStaticText then
+  begin
+    if Assigned(AReader) or Assigned(AMethod) then
+      raise EMCPServer.CreateFmt(
+        'Static resource "%s" must not have a callable', [AUri]);
+  end
+  else if Assigned(AReader) = Assigned(AMethod) then
+    raise EMCPServer.CreateFmt(
+      'Dynamic resource "%s" must have exactly one callable', [AUri]);
   if FindResource(AUri) >= 0 then
     raise EMCPServer.CreateFmt('Resource "%s" is already registered', [AUri]);
   Definition := TJSONObject.Create;
@@ -1326,6 +1415,14 @@ var
   Definition: TJSONObject;
   ValidationError: string;
 begin
+  if AName = '' then
+    raise EMCPServer.CreateFmt(
+      'Resource template "%s" requires a non-empty display name',
+      [AUriTemplate]);
+  if Assigned(AReader) = Assigned(AMethod) then
+    raise EMCPServer.CreateFmt(
+      'Resource template "%s" must have exactly one callable',
+      [AUriTemplate]);
   if not TryValidateUriTemplate(AUriTemplate, ValidationError) then
     raise EMCPServer.Create(ValidationError);
   for I := 0 to High(FTemplates) do
@@ -1335,7 +1432,8 @@ begin
   Definition := TJSONObject.Create;
   Definition.Add('uriTemplate', AUriTemplate);
   Definition.Add('name', AName);
-  Definition.Add('mimeType', AMimeType);
+  if AMimeType <> '' then
+    Definition.Add('mimeType', AMimeType);
   if ADescription <> '' then
     Definition.Add('description', ADescription);
   SetLength(FTemplates, Length(FTemplates) + 1);
@@ -1375,6 +1473,17 @@ procedure TMCPServer.AddPrompt(const AName, ADescription: string;
 var
   Definition: TJSONObject;
 begin
+  if AName = '' then
+  begin
+    AArguments.Free;
+    raise EMCPServer.Create('Prompt registration requires a non-empty name');
+  end;
+  if Assigned(AHandler) = Assigned(AMethod) then
+  begin
+    AArguments.Free;
+    raise EMCPServer.CreateFmt(
+      'Prompt "%s" must have exactly one callable', [AName]);
+  end;
   if FindPrompt(AName) >= 0 then
   begin
     AArguments.Free;
@@ -1406,13 +1515,13 @@ begin
 end;
 
 procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
-  const AArguments: TMCPPromptArguments; AHandler: TMCPPromptHandler);
+  constref AArguments: TMCPPromptArguments; AHandler: TMCPPromptHandler);
 begin
   AddPrompt(AName, ADescription, AArguments.Build, AHandler, nil);
 end;
 
 procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
-  const AArguments: TMCPPromptArguments; AMethod: TMCPPromptMethod);
+  constref AArguments: TMCPPromptArguments; AMethod: TMCPPromptMethod);
 begin
   AddPrompt(AName, ADescription, AArguments.Build, nil, AMethod);
 end;
@@ -1896,7 +2005,7 @@ begin
       Contents := FResources[Index].Method(Uri, ACtx)
     else if Assigned(FResources[Index].Reader) then
       Contents := FResources[Index].Reader(Uri, ACtx)
-    else
+    else if FResources[Index].HasStaticText then
     begin
       MimeType := FResources[Index].Definition.Get('mimeType', 'text/plain');
       Contents := MCPTextContents(Uri, MimeType,

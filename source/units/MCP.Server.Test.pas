@@ -86,7 +86,32 @@ type
     procedure SetupTests; override;
     procedure TestDuplicateTool;
     procedure TestBadSchema;
+    procedure TestNilToolHandler;
+    procedure TestNilToolMethod;
+    procedure TestNilTypedToolHandler;
+    procedure TestNilTypedToolMethod;
+    procedure TestNilTypedToolClass;
+    procedure TestNilToolDefinition;
+    procedure TestMissingDefinitionInputSchema;
+    procedure TestNonObjectDefinitionInputSchema;
     procedure TestDuplicateResource;
+    procedure TestNilResourceReader;
+    procedure TestNilResourceMethod;
+    procedure TestEmptyResourceName;
+    procedure TestNilTemplateReader;
+    procedure TestNilTemplateMethod;
+    procedure TestEmptyTemplateName;
+    procedure TestNilPromptHandler;
+    procedure TestNilPromptMethod;
+    procedure TestEmptyPromptName;
+    procedure TestEmptyServerName;
+    procedure TestEmptyServerVersion;
+    procedure TestNegativeCacheTtl;
+    procedure TestInvalidCacheScope;
+    procedure TestSchemaConsumedByRegistration;
+    procedure TestPromptArgumentsBuildReuse;
+    procedure TestPromptArgumentsAddReuse;
+    procedure TestPromptArgumentsConsumedByRegistration;
     procedure TestEmptyResourceTemplate;
     procedure TestEmptyTemplateVariable;
     procedure TestUnclosedTemplateVariable;
@@ -108,6 +133,7 @@ type
     procedure TestMatcherPathologicalNoMatch;
     procedure TestMatcherPreservesPercentEncoding;
     procedure TestTemplatesList;
+    procedure TestEmptyMimeTypeOmitted;
     procedure TestReadViaTemplate;
     procedure TestExactResourceWins;
     procedure TestStillNotFound;
@@ -362,6 +388,25 @@ begin
     AVars.Get('a', '') + '|' + AVars.Get('b', ''));
 end;
 
+function ResourceTemplateCount(AServer: TMCPServer): Integer;
+var
+  ResponseLine: string;
+  Response: TJSONObject;
+begin
+  if not AServer.HandleMessage(
+    '{"jsonrpc":"2.0","id":1,"method":"resources/templates/list",' +
+    '"params":{' + META_MODERN + '}}', ResponseLine) then
+    raise Exception.Create(
+      'Expected a resource template list response, got none');
+  Response := TJSONObject(GetJSON(ResponseLine));
+  try
+    Result := TJSONArray(
+      TJSONObject(Response.Find('result')).Find('resourceTemplates')).Count;
+  finally
+    Response.Free;
+  end;
+end;
+
 procedure ExpectTemplateRegistrationError(const ATemplate,
   AExpectedMessage: string);
 var
@@ -379,6 +424,7 @@ begin
         ErrorMessage := E.Message;
     end;
     Expect<string>(ErrorMessage).ToBe(AExpectedMessage);
+    Expect<Integer>(ResourceTemplateCount(Server)).ToBe(0);
   finally
     Server.Free;
   end;
@@ -1049,6 +1095,188 @@ begin
   end;
 end;
 
+procedure TRegistrationGuards.TestNilToolHandler;
+var
+  ErrorMessage: string;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    ErrorMessage := '';
+    try
+      Server.RegisterTool('wärkzeug', 'desc', '{"type":"object"}',
+        TMCPToolHandler(nil));
+    except
+      on E: EMCPServer do
+        ErrorMessage := E.Message;
+    end;
+    Expect<string>(ErrorMessage)
+      .ToBe('Tool "wärkzeug" must have exactly one callable');
+    Expect<Integer>(Server.ToolCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestNilToolMethod;
+var
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := False;
+    try
+      Server.RegisterTool('method-tool', 'desc', '{"type":"object"}',
+        TMCPToolMethod(nil));
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(Server.ToolCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestNilTypedToolHandler;
+var
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := False;
+    try
+      Server.RegisterTool('typed', 'desc', TScaleArgs,
+        TMCPArgsHandler(nil));
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(Server.ToolCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestNilTypedToolMethod;
+var
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := False;
+    try
+      Server.RegisterTool('typed-method', 'desc', TScaleArgs,
+        TMCPArgsMethod(nil));
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(Server.ToolCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestNilTypedToolClass;
+var
+  ErrorMessage: string;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    ErrorMessage := '';
+    try
+      Server.RegisterTool('typed', 'desc', TMCPArgsClass(nil), ScaleHandler);
+    except
+      on E: EMCPServer do
+        ErrorMessage := E.Message;
+    end;
+    Expect<string>(ErrorMessage)
+      .ToBe('Typed tool "typed" requires a non-nil argument class');
+    Expect<Integer>(Server.ToolCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestNilToolDefinition;
+var
+  ErrorMessage: string;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    ErrorMessage := '';
+    try
+      Server.RegisterTool(TJSONObject(nil), EchoHandler);
+    except
+      on E: EMCPServer do
+        ErrorMessage := E.Message;
+    end;
+    Expect<string>(ErrorMessage).ToBe('Tool definition must not be nil');
+    Expect<Integer>(Server.ToolCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestMissingDefinitionInputSchema;
+var
+  Definition: TJSONObject;
+  ErrorMessage: string;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Definition := TJSONObject.Create;
+    Definition.Add('name', 'raw');
+    ErrorMessage := '';
+    try
+      Server.RegisterTool(Definition, EchoHandler);
+    except
+      on E: EMCPServer do
+        ErrorMessage := E.Message;
+    end;
+    Expect<string>(ErrorMessage)
+      .ToBe('Tool "raw" definition must carry an object-valued inputSchema');
+    Expect<Integer>(Server.ToolCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestNonObjectDefinitionInputSchema;
+var
+  Definition: TJSONObject;
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Definition := TJSONObject.Create;
+    Definition.Add('name', 'raw');
+    Definition.Add('inputSchema', 'not-an-object');
+    Raised := False;
+    try
+      Server.RegisterTool(Definition, EchoHandler);
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(Server.ToolCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
 procedure TRegistrationGuards.TestDuplicateResource;
 var
   Server: TMCPServer;
@@ -1066,6 +1294,362 @@ begin
     end;
     Expect<Boolean>(Raised).ToBe(True);
     Expect<Integer>(Server.ResourceCount).ToBe(1);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestNilResourceReader;
+var
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := False;
+    try
+      Server.RegisterResource('mem://nil-reader', 'nil reader', 'text/plain',
+        TMCPResourceReader(nil));
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(Server.ResourceCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestNilResourceMethod;
+var
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := False;
+    try
+      Server.RegisterResource('mem://nil-method', 'nil method', 'text/plain',
+        TMCPResourceMethod(nil));
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(Server.ResourceCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestEmptyResourceName;
+var
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := False;
+    try
+      Server.RegisterTextResource('mem://unnamed', '', 'text/plain', 'text');
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(Server.ResourceCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestNilTemplateReader;
+var
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := False;
+    try
+      Server.RegisterResourceTemplate('mem://nil/{id}', 'nil reader',
+        'text/plain', TMCPTemplateReader(nil));
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(ResourceTemplateCount(Server)).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestNilTemplateMethod;
+var
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := False;
+    try
+      Server.RegisterResourceTemplate('mem://nil-method/{id}', 'nil method',
+        'text/plain', TMCPTemplateMethod(nil));
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(ResourceTemplateCount(Server)).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestEmptyTemplateName;
+var
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := False;
+    try
+      Server.RegisterResourceTemplate('mem://unnamed/{id}', '', 'text/plain',
+        PairReader);
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(ResourceTemplateCount(Server)).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestNilPromptHandler;
+var
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := False;
+    try
+      Server.RegisterPrompt('nil-handler', 'desc', TMCPPromptHandler(nil));
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(Server.PromptCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestNilPromptMethod;
+var
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := False;
+    try
+      Server.RegisterPrompt('nil-method', 'desc', TMCPPromptMethod(nil));
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(Server.PromptCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestEmptyPromptName;
+var
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := False;
+    try
+      Server.RegisterPrompt('', 'desc', HelloPromptHandler);
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(Server.PromptCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestEmptyServerName;
+var
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := nil;
+  Raised := False;
+  try
+    Server := TMCPServer.Create('', '1');
+  except
+    on EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  Server.Free;
+end;
+
+procedure TRegistrationGuards.TestEmptyServerVersion;
+var
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := nil;
+  Raised := False;
+  try
+    Server := TMCPServer.Create('t', '');
+  except
+    on EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  Server.Free;
+end;
+
+procedure TRegistrationGuards.TestNegativeCacheTtl;
+var
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := False;
+    try
+      Server.CacheTtlMs := -1;
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(Server.CacheTtlMs).ToBe(300000);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestInvalidCacheScope;
+var
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := False;
+    try
+      Server.CacheScope := 'Private';
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<string>(Server.CacheScope).ToBe(CACHE_SCOPE_PRIVATE);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestSchemaConsumedByRegistration;
+var
+  Builder: TMCPSchema;
+  ErrorMessage: string;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Builder := ObjectSchema.AddString('value');
+    Server.RegisterTool('first', 'desc', Builder, EchoHandler);
+    ErrorMessage := '';
+    try
+      Server.RegisterTool('second', 'desc', Builder, EchoHandler);
+    except
+      on E: EMCPSchema do
+        ErrorMessage := E.Message;
+    end;
+    Expect<string>(ErrorMessage).ToBe('Schema was already built');
+    Expect<Integer>(Server.ToolCount).ToBe(1);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestPromptArgumentsBuildReuse;
+var
+  Arguments: TMCPPromptArguments;
+  BuiltArguments: TJSONArray;
+  ErrorMessage: string;
+begin
+  Arguments := PromptArguments.Add('value');
+  BuiltArguments := Arguments.Build;
+  ErrorMessage := '';
+  try
+    Arguments.Build;
+  except
+    on E: EMCPServer do
+      ErrorMessage := E.Message;
+  end;
+  Expect<string>(ErrorMessage).ToBe('Prompt arguments were already built');
+  BuiltArguments.Free;
+end;
+
+procedure TRegistrationGuards.TestPromptArgumentsAddReuse;
+var
+  Arguments: TMCPPromptArguments;
+  BuiltArguments: TJSONArray;
+  ErrorMessage: string;
+begin
+  Arguments := PromptArguments;
+  BuiltArguments := Arguments.Build;
+  ErrorMessage := '';
+  try
+    Arguments.Add('late');
+  except
+    on E: EMCPServer do
+      ErrorMessage := E.Message;
+  end;
+  Expect<string>(ErrorMessage).ToBe('Prompt arguments were already built');
+  BuiltArguments.Free;
+end;
+
+procedure TRegistrationGuards.TestPromptArgumentsConsumedByRegistration;
+var
+  Arguments: TMCPPromptArguments;
+  ErrorMessage: string;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Arguments := PromptArguments.Add('value');
+    Server.RegisterPrompt('first', 'desc', Arguments, HelloPromptHandler);
+    ErrorMessage := '';
+    try
+      Server.RegisterPrompt('second', 'desc', Arguments, HelloPromptHandler);
+    except
+      on E: EMCPServer do
+        ErrorMessage := E.Message;
+    end;
+    Expect<string>(ErrorMessage).ToBe('Prompt arguments were already built');
+    Expect<Integer>(Server.PromptCount).ToBe(1);
   finally
     Server.Free;
   end;
@@ -1111,7 +1695,37 @@ procedure TRegistrationGuards.SetupTests;
 begin
   Test('duplicate tool name rejected', TestDuplicateTool);
   Test('invalid schema JSON rejected', TestBadSchema);
+  Test('nil tool handler rejected with UTF-8 name', TestNilToolHandler);
+  Test('nil tool method rejected', TestNilToolMethod);
+  Test('nil typed-tool handler rejected', TestNilTypedToolHandler);
+  Test('nil typed-tool method rejected', TestNilTypedToolMethod);
+  Test('nil typed-tool argument class rejected', TestNilTypedToolClass);
+  Test('nil tool definition rejected', TestNilToolDefinition);
+  Test('missing definition inputSchema rejected',
+    TestMissingDefinitionInputSchema);
+  Test('non-object definition inputSchema rejected',
+    TestNonObjectDefinitionInputSchema);
   Test('duplicate resource uri rejected', TestDuplicateResource);
+  Test('nil resource reader rejected', TestNilResourceReader);
+  Test('nil resource method rejected', TestNilResourceMethod);
+  Test('empty resource display name rejected', TestEmptyResourceName);
+  Test('nil resource-template reader rejected', TestNilTemplateReader);
+  Test('nil resource-template method rejected', TestNilTemplateMethod);
+  Test('empty resource-template display name rejected',
+    TestEmptyTemplateName);
+  Test('nil prompt handler rejected', TestNilPromptHandler);
+  Test('nil prompt method rejected', TestNilPromptMethod);
+  Test('empty prompt name rejected', TestEmptyPromptName);
+  Test('empty server name rejected', TestEmptyServerName);
+  Test('empty server version rejected', TestEmptyServerVersion);
+  Test('negative cache TTL rejected', TestNegativeCacheTtl);
+  Test('invalid cache scope rejected', TestInvalidCacheScope);
+  Test('tool registration consumes schema builder',
+    TestSchemaConsumedByRegistration);
+  Test('prompt argument Build rejects reuse', TestPromptArgumentsBuildReuse);
+  Test('prompt argument Add rejects reuse', TestPromptArgumentsAddReuse);
+  Test('prompt registration consumes argument builder',
+    TestPromptArgumentsConsumedByRegistration);
   Test('empty resource template rejected', TestEmptyResourceTemplate);
   Test('empty template variable rejected', TestEmptyTemplateVariable);
   Test('unclosed template variable rejected', TestUnclosedTemplateVariable);
@@ -1236,6 +1850,23 @@ begin
   Response.Free;
 end;
 
+procedure TResourceTemplates.TestEmptyMimeTypeOmitted;
+var
+  Response: TJSONObject;
+  Templates: TJSONArray;
+begin
+  FServer.RegisterResourceTemplate('mem://optional/{id}', 'optional', '',
+    PairReader);
+  Response := Call(
+    '{"jsonrpc":"2.0","id":1,"method":"resources/templates/list",' +
+    '"params":{' + META_MODERN + '}}');
+  Templates := TJSONArray(
+    TJSONObject(Response.Find('result')).Find('resourceTemplates'));
+  Expect<Integer>(Templates.Count).ToBe(2);
+  Expect<Boolean>(TJSONObject(Templates[1]).Find('mimeType') = nil).ToBe(True);
+  Response.Free;
+end;
+
 procedure TResourceTemplates.TestReadViaTemplate;
 var
   Response: TJSONObject;
@@ -1316,6 +1947,8 @@ begin
     TestMatcherPreservesPercentEncoding);
   Test('resources/templates/list: shape + cache fields',
     TestTemplatesList);
+  Test('resources/templates/list: empty mimeType omitted',
+    TestEmptyMimeTypeOmitted);
   Test('resources/read: template match with variables',
     TestReadViaTemplate);
   Test('resources/read: exact resource beats template',

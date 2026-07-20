@@ -73,6 +73,9 @@ type
     procedure TestRequiredByDefault;
     procedure TestOptionalOptOut;
     procedure TestNoRequiredKeyWhenEmpty;
+    procedure TestBuildReuseRaises;
+    procedure TestAddAfterBuildRaises;
+    procedure TestDuplicatePropertyRaises;
   end;
 
   TSchemaFromClass = class(TTestSuite)
@@ -170,6 +173,65 @@ begin
   Schema.Free;
 end;
 
+procedure TSchemaBuilder.TestBuildReuseRaises;
+var
+  Builder: TMCPSchema;
+  ErrorMessage: string;
+  Schema: TJSONObject;
+begin
+  Builder := ObjectSchema.AddString('name');
+  Schema := Builder.Build;
+  ErrorMessage := '';
+  try
+    Builder.Build;
+  except
+    on E: EMCPSchema do
+      ErrorMessage := E.Message;
+  end;
+  Expect<string>(ErrorMessage).ToBe('Schema was already built');
+  Schema.Free;
+end;
+
+procedure TSchemaBuilder.TestAddAfterBuildRaises;
+var
+  Builder: TMCPSchema;
+  ErrorMessage: string;
+  Schema: TJSONObject;
+begin
+  Builder := ObjectSchema;
+  Schema := Builder.Build;
+  ErrorMessage := '';
+  try
+    Builder.AddString('late');
+  except
+    on E: EMCPSchema do
+      ErrorMessage := E.Message;
+  end;
+  Expect<string>(ErrorMessage).ToBe('Schema was already built');
+  Schema.Free;
+end;
+
+procedure TSchemaBuilder.TestDuplicatePropertyRaises;
+var
+  Builder: TMCPSchema;
+  ErrorMessage: string;
+  Schema: TJSONObject;
+begin
+  Builder := ObjectSchema.AddString('duplicate');
+  ErrorMessage := '';
+  try
+    Builder.AddNumber('duplicate');
+  except
+    on E: EMCPSchema do
+      ErrorMessage := E.Message;
+  end;
+  Expect<string>(ErrorMessage)
+    .ToBe('Schema property "duplicate" is already defined');
+  Schema := Builder.Build;
+  Expect<Integer>(TJSONObject(Schema.Find('properties')).Count).ToBe(1);
+  Schema.Free;
+end;
+
 procedure TSchemaBuilder.SetupTests;
 begin
   Test('object envelope with properties', TestObjectEnvelope);
@@ -179,6 +241,9 @@ begin
   Test('ARequired = False leaves a property optional', TestOptionalOptOut);
   Test('no required key when nothing is required',
     TestNoRequiredKeyWhenEmpty);
+  Test('Build rejects builder reuse', TestBuildReuseRaises);
+  Test('property add rejects builder reuse', TestAddAfterBuildRaises);
+  Test('duplicate property names rejected', TestDuplicatePropertyRaises);
 end;
 
 procedure TSchemaFromClass.TestTypeMapping;
