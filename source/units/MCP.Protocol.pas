@@ -63,12 +63,27 @@ type
   // extracted from the request's _meta. ClientCapabilities is a
   // borrowed reference into the request tree — valid for the duration
   // of the handler call, never to be freed or retained.
+  // Signature of the server's notification emitter, surfaced to
+  // handlers through the request context. AParams ownership transfers
+  // to the emitter. Nil when the active transport cannot deliver
+  // server-to-client notifications.
+  TMCPNotifier = procedure(const AMethod: string;
+    AParams: TJSONObject) of object;
+
   TMCPRequestContext = record
     ProtocolVersion: string;
     ClientName: string;          // '' when clientInfo absent
     ClientVersion: string;
     ClientCapabilities: TJSONObject;
     LogLevel: string;            // '' when absent
+    // progressToken from params._meta (both eras): opaque string or
+    // number, preserved verbatim for echoing into
+    // notifications/progress.
+    HasProgressToken: Boolean;
+    ProgressToken: string;
+    ProgressTokenIsString: Boolean;
+    // Set by the dispatching server, not by ExtractRequestContext.
+    Notifier: TMCPNotifier;
     function HasCapability(const AName: string): Boolean;
   end;
 
@@ -77,6 +92,12 @@ type
     Message: string;
     Data: TJSONData; // ownership transfers to the caller (nil if none)
   end;
+
+// Pull params._meta.progressToken (string or number) into ACtx.
+// Exposed separately because the legacy dispatch path builds its
+// context from handshake state, not from ExtractRequestContext.
+procedure ExtractProgressToken(AMeta: TJSONObject;
+  var ACtx: TMCPRequestContext);
 
 // Validate the required per-request _meta fields and extract the
 // context. Returns False with AError filled when the request must be
@@ -201,7 +222,35 @@ begin
   if (LevelData <> nil) and (LevelData.JSONType = jtString) then
     ACtx.LogLevel := LevelData.AsString;
 
+  ExtractProgressToken(Meta, ACtx);
+
   Result := True;
+end;
+
+procedure ExtractProgressToken(AMeta: TJSONObject;
+  var ACtx: TMCPRequestContext);
+var
+  TokenData: TJSONData;
+begin
+  if AMeta = nil then
+    Exit;
+  TokenData := AMeta.Find('progressToken');
+  if TokenData = nil then
+    Exit;
+  case TokenData.JSONType of
+    jtString:
+      begin
+        ACtx.HasProgressToken := True;
+        ACtx.ProgressTokenIsString := True;
+        ACtx.ProgressToken := TokenData.AsString;
+      end;
+    jtNumber:
+      begin
+        ACtx.HasProgressToken := True;
+        ACtx.ProgressTokenIsString := False;
+        ACtx.ProgressToken := TokenData.AsJSON;
+      end;
+  end;
 end;
 
 procedure StampResult(AResult: TJSONObject;

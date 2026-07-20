@@ -151,6 +151,11 @@ type
     function Build: TJSONArray;
   end;
 
+  // Where the server writes server-to-client notification lines
+  // (notifications/progress, notifications/message). Plain procedure +
+  // user data so procedural transports can register without objects.
+  TMCPLineSink = procedure(const ALine: string; AUserData: Pointer);
+
   TMCPServer = class
   private
     FName: string;
@@ -159,6 +164,8 @@ type
     FCacheTtlMs: Integer;
     FCacheScope: string;
     FDualEra: Boolean;
+    FSink: TMCPLineSink;
+    FSinkData: Pointer;
     // Legacy-era session state (dual-era mode only): the compatibility
     // model scopes initialize-negotiated semantics to the process, so
     // this is the one deliberate piece of cross-request state.
@@ -208,8 +215,9 @@ type
       const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
     function ResultResponse(const AMessage: TJSONRPCMessage;
       AResult: TJSONObject; ALegacy: Boolean): string;
-    function LegacyContext: TMCPRequestContext;
+    function LegacyContext(AParams: TJSONObject): TMCPRequestContext;
     procedure AddCacheFields(AResult: TJSONObject; ATtlMs: Integer);
+    procedure EmitNotification(const AMethod: string; AParams: TJSONObject);
   public
     constructor Create(const AName, AVersion: string);
     destructor Destroy; override;
@@ -240,6 +248,11 @@ type
     // buffer (length cap). Kept here so the error shape remains a
     // protocol decision — transports move lines only.
     function OversizedLineResponse(AMaxLineLength: Integer): string;
+
+    // Transport registration for server-to-client notification lines.
+    // Without a sink, MCPReportProgress/MCPLogMessage are no-ops —
+    // HandleMessage stays a pure line-in/line-out function.
+    procedure SetLineSink(ASink: TMCPLineSink; AUserData: Pointer);
 
     // AInputSchemaJson is parsed at registration and raises EMCPServer
     // on invalid JSON — a bad schema is a programming error, not a
@@ -333,6 +346,18 @@ function MCPUserMessage(const AText: string): TJSONObject;
 function MCPAssistantMessage(const AText: string): TJSONObject;
 function MCPMessages(const AMessages: array of TJSONObject): TJSONArray;
 
+// In-request notifications, callable from any handler. Both are
+// silent no-ops when the precondition is missing, so handlers can
+// call them unconditionally:
+//   - progress requires the request to carry _meta.progressToken;
+//   - log messages require the per-request logLevel opt-in (the spec
+//     forbids notifications/message without it) and drop entries less
+//     severe than the requested level (RFC 5424 ordering).
+procedure MCPReportProgress(const ACtx: TMCPRequestContext;
+  AProgress: Double; ATotal: Double = -1; const AMessage: string = '');
+procedure MCPLogMessage(const ACtx: TMCPRequestContext;
+  const ALevel, AData: string; const ALogger: string = '');
+
 implementation
 
 { ───────── prompt builders ───────── }
@@ -391,6 +416,60 @@ begin
   Result := TJSONArray.Create;
   for I := 0 to High(AMessages) do
     Result.Add(AMessages[I]);
+end;
+
+{ ───────── in-request notifications ───────── }
+
+// RFC 5424 severity rank; higher is more severe. Unknown levels rank
+// lowest so a typo cannot flood the client.
+function LogSeverity(const ALevel: string): Integer;
+const
+  LEVELS: array[0..7] of string = ('debug', 'info', 'notice', 'warning',
+    'error', 'critical', 'alert', 'emergency');
+var
+  I: Integer;
+begin
+  for I := 0 to High(LEVELS) do
+    if LEVELS[I] = ALevel then
+      Exit(I);
+  Result := -1;
+end;
+
+procedure MCPReportProgress(const ACtx: TMCPRequestContext;
+  AProgress: Double; ATotal: Double; const AMessage: string);
+var
+  Params: TJSONObject;
+begin
+  if not (ACtx.HasProgressToken and Assigned(ACtx.Notifier)) then
+    Exit;
+  Params := TJSONObject.Create;
+  if ACtx.ProgressTokenIsString then
+    Params.Add('progressToken', ACtx.ProgressToken)
+  else
+    Params.Add('progressToken', GetJSON(ACtx.ProgressToken));
+  Params.Add('progress', AProgress);
+  if ATotal >= 0 then
+    Params.Add('total', ATotal);
+  if AMessage <> '' then
+    Params.Add('message', AMessage);
+  ACtx.Notifier('notifications/progress', Params);
+end;
+
+procedure MCPLogMessage(const ACtx: TMCPRequestContext;
+  const ALevel, AData: string; const ALogger: string);
+var
+  Params: TJSONObject;
+begin
+  if (ACtx.LogLevel = '') or not Assigned(ACtx.Notifier) then
+    Exit;
+  if LogSeverity(ALevel) < LogSeverity(ACtx.LogLevel) then
+    Exit;
+  Params := TJSONObject.Create;
+  Params.Add('level', ALevel);
+  if ALogger <> '' then
+    Params.Add('logger', ALogger);
+  Params.Add('data', AData);
+  ACtx.Notifier('notifications/message', Params);
 end;
 
 { ───────── content builders ───────── }
@@ -986,6 +1065,7 @@ begin
     Ctx, MetaErr) then
     Exit(BuildErrorResponse(AMessage.Id, MetaErr.Code, MetaErr.Message,
       MetaErr.Data));
+  Ctx.Notifier := EmitNotification;
 
   if AMessage.Method = 'server/discover' then
     Exit(HandleDiscover(AMessage));
@@ -1027,15 +1107,15 @@ begin
   if AMessage.Method = 'tools/list' then
     Exit(HandleToolsList(AMessage, True));
   if AMessage.Method = 'tools/call' then
-    Exit(HandleToolsCall(AMessage, LegacyContext, True));
+    Exit(HandleToolsCall(AMessage, LegacyContext(AMessage.Params), True));
   if AMessage.Method = 'resources/list' then
     Exit(HandleResourcesList(AMessage, True));
   if AMessage.Method = 'resources/read' then
-    Exit(HandleResourcesRead(AMessage, LegacyContext, True));
+    Exit(HandleResourcesRead(AMessage, LegacyContext(AMessage.Params), True));
   if AMessage.Method = 'prompts/list' then
     Exit(HandlePromptsList(AMessage, True));
   if AMessage.Method = 'prompts/get' then
-    Exit(HandlePromptsGet(AMessage, LegacyContext, True));
+    Exit(HandlePromptsGet(AMessage, LegacyContext(AMessage.Params), True));
 
   Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
     'Method not found: ' + AMessage.Method);
@@ -1095,13 +1175,39 @@ begin
   Result := BuildResultResponse(AMessage.Id, InitResult);
 end;
 
-function TMCPServer.LegacyContext: TMCPRequestContext;
+function TMCPServer.LegacyContext(AParams: TJSONObject): TMCPRequestContext;
+var
+  MetaData: TJSONData;
 begin
   Result := Default(TMCPRequestContext);
   Result.ProtocolVersion := FLegacyProtocolVersion;
   Result.ClientName := FLegacyClientName;
   Result.ClientVersion := FLegacyClientVersion;
   Result.ClientCapabilities := FLegacyClientCapabilities;
+  Result.Notifier := EmitNotification;
+  // progressToken is per-request in every era.
+  if AParams <> nil then
+  begin
+    MetaData := AParams.Find('_meta');
+    if (MetaData <> nil) and (MetaData.JSONType = jtObject) then
+      ExtractProgressToken(TJSONObject(MetaData), Result);
+  end;
+end;
+
+procedure TMCPServer.SetLineSink(ASink: TMCPLineSink; AUserData: Pointer);
+begin
+  FSink := ASink;
+  FSinkData := AUserData;
+end;
+
+procedure TMCPServer.EmitNotification(const AMethod: string;
+  AParams: TJSONObject);
+var
+  Line: string;
+begin
+  Line := BuildNotification(AMethod, AParams);
+  if Assigned(FSink) then
+    FSink(Line, FSinkData);
 end;
 
 function TMCPServer.OversizedLineResponse(AMaxLineLength: Integer): string;

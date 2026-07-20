@@ -91,6 +91,28 @@ begin
   AProcess.Input.Write(Payload[1], Length(Payload));
 end;
 
+// Read and parse the next line without sending anything — for
+// sequences where one request produces several lines (notifications
+// followed by the response).
+function NextJson(AProcess: TProcess): TJSONObject;
+var
+  Line: string;
+  Data: TJSONData;
+begin
+  Result := nil;
+  if not ReadLine(AProcess, Line) then
+    Exit;
+  try
+    Data := GetJSON(Line);
+  except
+    Exit;
+  end;
+  if (Data <> nil) and (Data.JSONType = jtObject) then
+    Result := TJSONObject(Data)
+  else
+    Data.Free;
+end;
+
 // Send one request, read one response, parse it. nil on transport
 // failure (counted by the caller via Check).
 function RoundTrip(AProcess: TProcess; const ARequest: string): TJSONObject;
@@ -290,6 +312,37 @@ begin
       '"name":"greet",' + META_MODERN + '}}');
     Check(PathInt(Response, 'error.code') = -32602,
       'prompts/get: missing required argument → -32602');
+    Response.Free;
+
+    // In-request notifications: with progressToken + logLevel opted
+    // in, echo emits progress(0.5) + log(info) + progress(1.0) before
+    // its response — four lines total, in order.
+    SendLine(Demo,
+      '{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{' +
+      '"name":"echo","arguments":{"message":"noisy hi"},' +
+      '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+      '"io.modelcontextprotocol/clientCapabilities":{},' +
+      '"io.modelcontextprotocol/logLevel":"info",' +
+      '"progressToken":5}}}');
+    Response := NextJson(Demo);
+    Check(PathString(Response, 'method') = 'notifications/progress',
+      'notify: first line is progress');
+    Check(PathInt(Response, 'params.progressToken') = 5,
+      'notify: token echoed');
+    Response.Free;
+    Response := NextJson(Demo);
+    Check(PathString(Response, 'method') = 'notifications/message',
+      'notify: log message with opt-in');
+    Check(PathString(Response, 'params.level') = 'info',
+      'notify: log level carried');
+    Response.Free;
+    Response := NextJson(Demo);
+    Check(PathString(Response, 'method') = 'notifications/progress',
+      'notify: completion progress');
+    Response.Free;
+    Response := NextJson(Demo);
+    Check(PathString(Response, 'result.content[0].text') = 'noisy hi',
+      'notify: response arrives after notifications');
     Response.Free;
 
     // ── Legacy era (dual-era default): the path today's clients

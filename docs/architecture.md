@@ -60,6 +60,18 @@ processes), what `RunMCPStdioLoop` calls in a loop, and what
 mirrors duetto's `WS.Protocol` discipline: one tested core, transports
 as delivery.
 
+The one addition to the line-in/line-out model is the **notification
+sink**: a transport may register a line sink
+(`TMCPServer.SetLineSink`), and handlers can then emit request-scoped
+notifications (`MCPReportProgress`, `MCPLogMessage`) that the
+transport writes before the response — exactly the request-scoped
+notification stream the spec describes for both stdio and Streamable
+HTTP (where the same sink becomes SSE events on the POST response).
+Emission is strictly opt-in per request (`_meta.progressToken` for
+progress; the `logLevel` key for log messages, severity-filtered per
+RFC 5424) and both helpers are no-ops without a sink, so the core
+stays testable as a pure function.
+
 Because the 2026-07-28 revision is **stateless** — servers must not
 infer anything from prior requests on the same connection — the serial
 read-handle-write loop is not a simplification but the spec's own

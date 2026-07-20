@@ -65,6 +65,10 @@ procedure FreeJSONRPCMessage(var AMessage: TJSONRPCMessage);
 // JSON-RPC prescribes when the request id was unreadable); AResult /
 // AData ownership transfers to the response.
 function BuildResultResponse(AId: TJSONData; AResult: TJSONObject): string;
+// Server-to-client notification line (no id). AParams owned; nil for
+// parameter-less notifications.
+function BuildNotification(const AMethod: string;
+  AParams: TJSONObject): string;
 function BuildErrorResponse(AId: TJSONData; ACode: Integer;
   const AMessage: string; AData: TJSONData = nil): string;
 
@@ -179,6 +183,23 @@ begin
     Result := SerializeCompact(Response);
   finally
     Response.Free;
+  end;
+end;
+
+function BuildNotification(const AMethod: string;
+  AParams: TJSONObject): string;
+var
+  Notification: TJSONObject;
+begin
+  Notification := TJSONObject.Create;
+  try
+    Notification.Add('jsonrpc', JSONRPC_VERSION);
+    Notification.Add('method', AMethod);
+    if AParams <> nil then
+      Notification.Add('params', AParams);
+    Result := SerializeCompact(Notification);
+  finally
+    Notification.Free;
   end;
 end;
 

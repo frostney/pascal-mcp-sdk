@@ -28,7 +28,12 @@ uses
 function EchoHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
+  // In-request notifications are no-ops unless the client opted in
+  // (_meta.progressToken / logLevel) — safe to call unconditionally.
+  MCPReportProgress(ACtx, 0.5, 1.0, 'echoing');
+  MCPLogMessage(ACtx, 'info', 'echo invoked');
   Result := MCPTextResult(AArguments.Get('message', ''));
+  MCPReportProgress(ACtx, 1.0, 1.0);
 end;
 
 type

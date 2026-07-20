@@ -154,6 +154,7 @@ six files, RTL + fpjson only.
 | `tools/list`, `tools/call` | ✅ text / structured content, in-band execution errors |
 | `resources/list`, `resources/read` | ✅ static + dynamic, text + blob builders |
 | `prompts/list`, `prompts/get` | ✅ fluent argument declaration, message builders, spec error codes |
+| `notifications/progress`, `notifications/message` | ✅ `MCPReportProgress` / `MCPLogMessage` from any handler; strictly opt-in per request (`progressToken` / `logLevel`), severity-filtered, emitted before the response |
 | `_meta` validation, version negotiation | ✅ `-32602` / `-32021` / `-32022` per spec |
 | `ttlMs` / `cacheScope` caching hints (SEP-2549) | ✅ on discover/list/read, tunable via `CacheTtlMs`/`CacheScope` |
 | Legacy era (`initialize`, 2024-11-05…2025-11-25) | ✅ dual-era default: era-faithful dialect (unstamped results, `-32002`, `ping`); `DualEra := False` for strict modern-only |

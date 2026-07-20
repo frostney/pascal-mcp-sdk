@@ -13,6 +13,7 @@ program MCP.Server.Test;
 {$I Shared.inc}
 
 uses
+  Classes,
   SysUtils,
 
   fpjson,
@@ -82,6 +83,25 @@ type
     procedure TestDuplicateTool;
     procedure TestBadSchema;
     procedure TestDuplicateResource;
+  end;
+
+  TNotificationEmission = class(TDispatchSuite)
+  private
+    FLines: TStringList;
+    function Notification(AIndex: Integer): TJSONObject;
+  protected
+    procedure BeforeEach; override;
+    procedure AfterEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestProgressEmitted;
+    procedure TestProgressWithoutToken;
+    procedure TestStringTokenPreserved;
+    procedure TestLogEmittedAtLevel;
+    procedure TestLogFilteredBelowLevel;
+    procedure TestLogWithoutOptIn;
+    procedure TestLegacyProgress;
+    procedure TestNoSinkStillServes;
   end;
 
   TPromptDispatch = class(TDispatchSuite)
@@ -215,6 +235,22 @@ begin
   raise Exception.Create('prompt boom');
 end;
 
+// Emits progress and two log severities; every emission is gated on
+// the client's own opt-ins, so the same tool serves all the cases.
+function NoisyHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  MCPReportProgress(ACtx, 0.25, 1.0, 'working');
+  MCPLogMessage(ACtx, 'warning', 'careful');
+  MCPLogMessage(ACtx, 'debug', 'details');
+  Result := MCPTextResult('noise done');
+end;
+
+procedure CaptureSink(const ALine: string; AUserData: Pointer);
+begin
+  TStringList(AUserData).Add(ALine);
+end;
+
 { ───────── shared fixture ───────── }
 
 procedure TDispatchSuite.BeforeEach;
@@ -240,6 +276,8 @@ begin
     'static text');
   FServer.RegisterResource('mem://clock', 'clock', 'text/plain',
     ClockReader);
+  FServer.RegisterTool('noisy', 'Emits notifications',
+    '{"type":"object"}', NoisyHandler);
   FServer.RegisterPrompt('review', 'Ask for a code review',
     PromptArguments.Add('code', 'The code to review')
                    .Add('style', 'Review style', False),
@@ -380,7 +418,7 @@ begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/list",' +
     '"params":{' + META_MODERN + '}}');
   Tools := TJSONArray(TJSONObject(Response.Find('result')).Find('tools'));
-  Expect<Integer>(Tools.Count).ToBe(6);
+  Expect<Integer>(Tools.Count).ToBe(7);
   Expect<string>(TJSONObject(Tools[0]).Get('name', '')).ToBe('echo');
   Expect<Boolean>(
     TJSONObject(Tools[0]).Find('inputSchema') <> nil).ToBe(True);
@@ -730,6 +768,174 @@ begin
   Test('duplicate resource uri rejected', TestDuplicateResource);
 end;
 
+{ ───────── notification emission ───────── }
+
+procedure TNotificationEmission.BeforeEach;
+begin
+  inherited BeforeEach;
+  FLines := TStringList.Create;
+  FServer.SetLineSink(CaptureSink, FLines);
+end;
+
+procedure TNotificationEmission.AfterEach;
+begin
+  FreeAndNil(FLines);
+  inherited AfterEach;
+end;
+
+function TNotificationEmission.Notification(AIndex: Integer): TJSONObject;
+begin
+  Result := TJSONObject(GetJSON(FLines[AIndex]));
+end;
+
+procedure TNotificationEmission.TestProgressEmitted;
+var
+  Response, Note: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"noisy","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"progressToken":7}}}');
+  Expect<Integer>(FLines.Count).ToBe(1);
+  Note := Notification(0);
+  Expect<string>(Note.Get('method', '')).ToBe('notifications/progress');
+  Expect<Integer>(
+    TJSONData(Note.FindPath('params.progressToken')).AsInteger).ToBe(7);
+  Expect<Boolean>(
+    TJSONData(Note.FindPath('params.progressToken')).JSONType = jtNumber)
+    .ToBe(True);
+  Expect<string>(
+    TJSONData(Note.FindPath('params.message')).AsString).ToBe('working');
+  Expect<Boolean>(Note.Find('id') = nil).ToBe(True);
+  Note.Free;
+  Response.Free;
+end;
+
+procedure TNotificationEmission.TestProgressWithoutToken;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"noisy",' + META_MODERN + '}}');
+  Expect<Integer>(FLines.Count).ToBe(0);
+  Response.Free;
+end;
+
+procedure TNotificationEmission.TestStringTokenPreserved;
+var
+  Response, Note: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"noisy","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"progressToken":"op-42"}}}');
+  Note := Notification(0);
+  Expect<string>(
+    TJSONData(Note.FindPath('params.progressToken')).AsString)
+    .ToBe('op-42');
+  Expect<Boolean>(
+    TJSONData(Note.FindPath('params.progressToken')).JSONType = jtString)
+    .ToBe(True);
+  Note.Free;
+  Response.Free;
+end;
+
+procedure TNotificationEmission.TestLogEmittedAtLevel;
+var
+  Response, Note: TJSONObject;
+begin
+  // logLevel debug → warning and debug both pass the filter.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"noisy","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"io.modelcontextprotocol/logLevel":"debug"}}}');
+  Expect<Integer>(FLines.Count).ToBe(2);
+  Note := Notification(0);
+  Expect<string>(Note.Get('method', '')).ToBe('notifications/message');
+  Expect<string>(
+    TJSONData(Note.FindPath('params.level')).AsString).ToBe('warning');
+  Note.Free;
+  Response.Free;
+end;
+
+procedure TNotificationEmission.TestLogFilteredBelowLevel;
+var
+  Response: TJSONObject;
+begin
+  // logLevel error → warning and debug are both dropped.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"noisy","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"io.modelcontextprotocol/logLevel":"error"}}}');
+  Expect<Integer>(FLines.Count).ToBe(0);
+  Response.Free;
+end;
+
+procedure TNotificationEmission.TestLogWithoutOptIn;
+var
+  Response: TJSONObject;
+begin
+  // No logLevel in _meta: the spec forbids notifications/message.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"noisy",' + META_MODERN + '}}');
+  Expect<Integer>(FLines.Count).ToBe(0);
+  Response.Free;
+end;
+
+procedure TNotificationEmission.TestLegacyProgress;
+var
+  Response, Note: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{}}}');
+  Response.Free;
+  // progressToken is per-request in every era; no logLevel opt-in
+  // exists in the legacy path, so only progress is emitted.
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"noisy","_meta":{"progressToken":9}}}');
+  Expect<Integer>(FLines.Count).ToBe(1);
+  Note := Notification(0);
+  Expect<string>(Note.Get('method', '')).ToBe('notifications/progress');
+  Expect<Integer>(
+    TJSONData(Note.FindPath('params.progressToken')).AsInteger).ToBe(9);
+  Note.Free;
+  Response.Free;
+end;
+
+procedure TNotificationEmission.TestNoSinkStillServes;
+var
+  Response: TJSONObject;
+begin
+  FServer.SetLineSink(nil, nil);
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"noisy","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"progressToken":7}}}');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('noise done');
+  Response.Free;
+end;
+
+procedure TNotificationEmission.SetupTests;
+begin
+  Test('progress emitted with numeric token', TestProgressEmitted);
+  Test('no progress without a token', TestProgressWithoutToken);
+  Test('string token preserved verbatim', TestStringTokenPreserved);
+  Test('log messages emitted at requested level', TestLogEmittedAtLevel);
+  Test('log messages below requested level dropped',
+    TestLogFilteredBelowLevel);
+  Test('no log messages without the opt-in', TestLogWithoutOptIn);
+  Test('legacy era: progress works, logging stays quiet',
+    TestLegacyProgress);
+  Test('no sink: handlers still serve', TestNoSinkStillServes);
+end;
+
 { ───────── prompts ───────── }
 
 procedure TPromptDispatch.TestList;
@@ -1046,6 +1252,8 @@ begin
   TestRunnerProgram.AddSuite(TToolDispatch.Create('Server: tools'));
   TestRunnerProgram.AddSuite(TResourceDispatch.Create('Server: resources'));
   TestRunnerProgram.AddSuite(TPromptDispatch.Create('Server: prompts'));
+  TestRunnerProgram.AddSuite(
+    TNotificationEmission.Create('Server: in-request notifications'));
   TestRunnerProgram.AddSuite(
     TRegistrationGuards.Create('Server: registration guards'));
   TestRunnerProgram.AddSuite(TLegacyEra.Create('Server: legacy era'));

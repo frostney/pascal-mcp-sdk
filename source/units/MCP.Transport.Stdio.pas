@@ -98,31 +98,48 @@ begin
   Result := True;
 end;
 
+type
+  PText = ^Text;
+
+// Notification sink: in-request notifications (progress, log
+// messages) are written to the same output stream as responses, one
+// line each, flushed immediately so they precede the response.
+procedure StdioNotificationSink(const ALine: string; AUserData: Pointer);
+begin
+  Write(PText(AUserData)^, ALine, #10);
+  Flush(PText(AUserData)^);
+end;
+
 procedure RunMCPStdioLoop(var AInput, AOutput: Text; AServer: TMCPServer;
   AMaxLineLength: Integer);
 var
   Line, Response: string;
   Overflow: Boolean;
 begin
-  while ReadBoundedLine(AInput, AMaxLineLength, Line, Overflow) do
-  begin
-    if Overflow then
+  AServer.SetLineSink(StdioNotificationSink, @AOutput);
+  try
+    while ReadBoundedLine(AInput, AMaxLineLength, Line, Overflow) do
     begin
-      Write(AOutput, AServer.OversizedLineResponse(AMaxLineLength), #10);
-      Flush(AOutput);
-      Continue;
+      if Overflow then
+      begin
+        Write(AOutput, AServer.OversizedLineResponse(AMaxLineLength), #10);
+        Flush(AOutput);
+        Continue;
+      end;
+      // A client writing CRLF line endings leaves a trailing CR on
+      // non-Windows reads; it is insignificant whitespace either way.
+      while (Line <> '') and (Line[Length(Line)] in [#13, #10]) do
+        SetLength(Line, Length(Line) - 1);
+      if Line = '' then
+        Continue;
+      if AServer.HandleMessage(Line, Response) then
+      begin
+        Write(AOutput, Response, #10);
+        Flush(AOutput);
+      end;
     end;
-    // A client writing CRLF line endings leaves a trailing CR on
-    // non-Windows reads; it is insignificant whitespace either way.
-    while (Line <> '') and (Line[Length(Line)] in [#13, #10]) do
-      SetLength(Line, Length(Line) - 1);
-    if Line = '' then
-      Continue;
-    if AServer.HandleMessage(Line, Response) then
-    begin
-      Write(AOutput, Response, #10);
-      Flush(AOutput);
-    end;
+  finally
+    AServer.SetLineSink(nil, nil);
   end;
 end;
 
