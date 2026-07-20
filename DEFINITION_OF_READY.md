@@ -32,6 +32,9 @@ applicable only with a recorded reason.
 - The planned change fits the bottom-up layering (`MCP.JsonRpc` →
   `MCP.Protocol` → `MCP.Server` → transports); any protocol rule lands
   in the layer that owns it, never in a transport.
+- When more than one viable approach existed, the issue records the
+  chosen option and the rejected alternatives with a one-line reason
+  each.
 - New dependencies are not part of the plan; if one seems necessary,
   maintainer approval is obtained first.
 - The verification story is known in advance: which co-located suite

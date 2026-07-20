@@ -44,9 +44,11 @@ lantaarn is its first named consumer, mirroring duetto → lantaarn.
   requests, subscriptions, setLevel) are not implemented, and the
   legacy dialect sunsets when the ecosystem's clients finish
   migrating.
-- **No JSON-Schema validation engine.** Tool handlers validate their own
-  arguments and report problems as in-band `isError` results; shipping a
-  schema validator is out of scope for a dependency-light library.
+- **No general JSON-Schema validation engine.** Handlers own argument
+  validation in the stdio era and report problems as in-band `isError`
+  results; the schema subset the library itself emits becomes
+  server-enforced when Streamable HTTP lands (#23) — arbitrary/foreign
+  schema dialects stay out of scope for a dependency-light library.
 - **No framework ambitions.** pascal-mcp-sdk registers tools and moves
   messages; logging policy, auth, and application state belong to the
   host program.
