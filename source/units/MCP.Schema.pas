@@ -46,6 +46,11 @@ unit MCP.Schema;
 //    per-property descriptions use the fluent builder; RTTI carries
 //    no place to put them.
 //
+// Only constant `stored` directives are supported for optionality.
+// Field- and method-based `stored` expressions are unsupported because
+// schema generation evaluates a fresh instance while argument binding
+// evaluates the partially populated request instance.
+//
 // Properties are required by default (pass ARequired = False for
 // optional ones). Build finalizes and transfers ownership of the
 // finished TJSONObject; TMCPServer's registration overloads call it
@@ -157,6 +162,24 @@ begin
     not IsStoredProp(AInstance, AProp);
 end;
 
+function GetQWordProperty(AInstance: TObject; AProp: PPropInfo): QWord;
+var
+  SignedBits: Int64;
+begin
+  // FPC 3.2.2 has tkQWord RTTI but exposes only signed Int64 property
+  // accessors. Preserve the returned bits instead of interpreting the
+  // value as signed.
+  SignedBits := GetInt64Prop(AInstance, AProp);
+  Move(SignedBits, Result, SizeOf(Result));
+end;
+
+function GetUnsignedOrdProperty(AInstance: TObject;
+  AProp: PPropInfo): QWord;
+begin
+  // GetOrdProp sign-extends otULong values on FPC 3.2.2.
+  Result := QWord(LongWord(GetOrdProp(AInstance, AProp)));
+end;
+
 function SchemaFrom(AClass: TMCPArgsClass): TMCPSchema;
 var
   Info: PTypeInfo;
@@ -174,8 +197,8 @@ begin
   Count := GetTypeData(Info)^.PropCount;
   if Count = 0 then
     Exit;
-  // A throwaway instance lets IsStoredProp evaluate `stored`
-  // expressions of any kind (constant, field, or method).
+  // A throwaway instance lets IsStoredProp evaluate the supported
+  // constant `stored` directives.
   Probe := AClass.Create;
   GetMem(Props, Count * SizeOf(Pointer));
   try
@@ -245,6 +268,7 @@ var
   Props: PPropList;
   Count, I: Integer;
   Prop: PPropInfo;
+  TypeData: PTypeData;
 begin
   Result := TJSONObject.Create;
   Info := PTypeInfo(AObj.ClassInfo);
@@ -263,9 +287,17 @@ begin
         tkFloat:
           Result.Add(Prop^.Name, GetFloatProp(AObj, Prop));
         tkInteger:
-          Result.Add(Prop^.Name, GetOrdProp(AObj, Prop));
-        tkInt64, tkQWord:
+          begin
+            TypeData := GetTypeData(Prop^.PropType);
+            if TypeData^.OrdType in [otUByte, otUWord, otULong] then
+              Result.Add(Prop^.Name, GetUnsignedOrdProperty(AObj, Prop))
+            else
+              Result.Add(Prop^.Name, GetOrdProp(AObj, Prop));
+          end;
+        tkInt64:
           Result.Add(Prop^.Name, GetInt64Prop(AObj, Prop));
+        tkQWord:
+          Result.Add(Prop^.Name, GetQWordProperty(AObj, Prop));
         tkBool:
           Result.Add(Prop^.Name, GetOrdProp(AObj, Prop) <> 0);
         tkEnumeration:

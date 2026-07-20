@@ -66,6 +66,8 @@ type
     procedure TestTypedArgsSchemaDerived;
     procedure TestTypedArgsDefaultSeeded;
     procedure TestTypedArgsDefaultOverridden;
+    procedure TestTypedOrdinalBounds;
+    procedure TestTypedQWordRoundTrip;
     procedure TestTypedOutputClass;
     procedure TestFluentAnnotations;
   end;
@@ -223,6 +225,50 @@ type
     property count: Integer read FCount write FCount default 2;
   end;
 
+  TByteArgs = class(TMCPArgs)
+  private
+    FValue: Byte;
+  published
+    property value: Byte read FValue write FValue;
+  end;
+
+  TWordArgs = class(TMCPArgs)
+  private
+    FValue: Word;
+  published
+    property value: Word read FValue write FValue;
+  end;
+
+  TCardinalArgs = class(TMCPArgs)
+  private
+    FValue: Cardinal;
+  published
+    property value: Cardinal read FValue write FValue;
+  end;
+
+  TBoundedOrdinal = 10..20;
+
+  TSubrangeArgs = class(TMCPArgs)
+  private
+    FValue: TBoundedOrdinal;
+  published
+    property value: TBoundedOrdinal read FValue write FValue;
+  end;
+
+  TInt64Args = class(TMCPArgs)
+  private
+    FValue: Int64;
+  published
+    property value: Int64 read FValue write FValue;
+  end;
+
+  TQWordArgs = class(TMCPArgs)
+  private
+    FValue: QWord;
+  published
+    property value: QWord read FValue write FValue;
+  end;
+
 // Typed output: copies the bound input into a fresh instance and
 // returns it as structuredContent.
 function MirrorHandler(AArgs: TMCPArgs;
@@ -249,6 +295,12 @@ begin
   for I := 1 to Args.count do
     S := S + Args.word;
   Result := MCPTextResult(S);
+end;
+
+function OrdinalHandler(AArgs: TMCPArgs;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult('bound', MCPSerialize(AArgs));
 end;
 
 function ClockReader(const AUri: string;
@@ -647,10 +699,120 @@ begin
     TestTypedArgsDefaultSeeded);
   Test('typed args: explicit value overrides default',
     TestTypedArgsDefaultOverridden);
+  Test('typed args: ordinal RTTI bounds enforced',
+    TestTypedOrdinalBounds);
+  Test('typed args: QWord boundaries round-trip exactly',
+    TestTypedQWordRoundTrip);
   Test('typed output class: derived outputSchema + serialized result',
     TestTypedOutputClass);
   Test('fluent decoration: title + annotation hints',
     TestFluentAnnotations);
+end;
+
+procedure TToolDispatch.TestTypedOrdinalBounds;
+
+  procedure ExpectBound(const ATool, AValue: string;
+    const AExpected: QWord);
+  var
+    Response: TJSONObject;
+  begin
+    Response := Call('{' +
+      '"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+      '"params":{"name":"' + ATool + '","arguments":{"value":' +
+      AValue + '},' + META_MODERN + '}}');
+    Expect<QWord>(
+      TJSONData(Response.FindPath('result.structuredContent.value')).AsQWord)
+      .ToBe(AExpected);
+    Response.Free;
+  end;
+
+  procedure ExpectIntegerError(const ATool, AValue: string);
+  var
+    Response: TJSONObject;
+  begin
+    Response := Call('{' +
+      '"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+      '"params":{"name":"' + ATool + '","arguments":{"value":' +
+      AValue + '},' + META_MODERN + '}}');
+    Expect<Boolean>(
+      TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+    Expect<string>(
+      TJSONData(Response.FindPath('result.content[0].text')).AsString)
+      .ToBe('Argument "value" must be an integer');
+    Response.Free;
+  end;
+
+begin
+  FServer.RegisterTool('byte', 'Bind Byte', TByteArgs, OrdinalHandler);
+  FServer.RegisterTool('word', 'Bind Word', TWordArgs, OrdinalHandler);
+  FServer.RegisterTool('cardinal', 'Bind Cardinal',
+    TCardinalArgs, OrdinalHandler);
+  FServer.RegisterTool('subrange', 'Bind subrange',
+    TSubrangeArgs, OrdinalHandler);
+  FServer.RegisterTool('int64', 'Bind Int64', TInt64Args, OrdinalHandler);
+
+  ExpectBound('byte', '0', 0);
+  ExpectBound('byte', '255', 255);
+  ExpectIntegerError('byte', '300');
+  ExpectIntegerError('byte', '-5');
+  ExpectIntegerError('byte', '4294967596');
+  ExpectBound('word', '0', 0);
+  ExpectBound('word', '65535', 65535);
+  ExpectIntegerError('word', '65536');
+  ExpectBound('cardinal', '0', 0);
+  ExpectBound('cardinal', '4294967295', 4294967295);
+  ExpectIntegerError('cardinal', '-1');
+  ExpectIntegerError('cardinal', '4294967296');
+  ExpectBound('subrange', '10', 10);
+  ExpectBound('subrange', '20', 20);
+  ExpectIntegerError('subrange', '9');
+  ExpectIntegerError('subrange', '21');
+  ExpectBound('int64', '9223372036854775807', QWord(High(Int64)));
+  ExpectIntegerError('int64', '9223372036854775808');
+end;
+
+procedure TToolDispatch.TestTypedQWordRoundTrip;
+var
+  Response: TJSONObject;
+  Value: TJSONData;
+begin
+  FServer.RegisterTool('qword', 'Bind QWord', TQWordArgs, OrdinalHandler);
+
+  Response := Call('{' +
+    '"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"qword","arguments":' +
+    '{"value":9223372036854775807},' + META_MODERN + '}}');
+  Value := Response.FindPath('result.structuredContent.value');
+  Expect<QWord>(Value.AsQWord).ToBe(QWord(High(Int64)));
+  Response.Free;
+
+  Response := Call('{' +
+    '"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"qword","arguments":' +
+    '{"value":9223372036854775808},' + META_MODERN + '}}');
+  Value := Response.FindPath('result.structuredContent.value');
+  Expect<QWord>(Value.AsQWord).ToBe(QWord(High(Int64)) + 1);
+  Response.Free;
+
+  Response := Call('{' +
+    '"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+    '"params":{"name":"qword","arguments":' +
+    '{"value":18446744073709551615},' + META_MODERN + '}}');
+  Value := Response.FindPath('result.structuredContent.value');
+  Expect<Integer>(Ord(TJSONNumber(Value).NumberType)).ToBe(Ord(ntQWord));
+  Expect<QWord>(Value.AsQWord).ToBe(High(QWord));
+  Response.Free;
+
+  Response := Call('{' +
+    '"jsonrpc":"2.0","id":4,"method":"tools/call",' +
+    '"params":{"name":"qword","arguments":{"value":-1},' +
+    META_MODERN + '}}');
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Argument "value" must be an integer');
+  Response.Free;
 end;
 
 procedure TToolDispatch.TestFluentAnnotations;

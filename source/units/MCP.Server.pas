@@ -953,6 +953,44 @@ end;
 function BindProperty(AInstance: TMCPArgs; AProp: PPropInfo;
   AValue: TJSONData; out AError: string): Boolean;
 
+  function ReadSignedInteger(out AResult: Int64): Boolean;
+  var
+    UnsignedValue: QWord;
+  begin
+    Result := (AValue.JSONType = jtNumber) and
+      (TJSONNumber(AValue).NumberType in [ntInteger, ntInt64, ntQWord]);
+    if not Result then
+      Exit;
+    if TJSONNumber(AValue).NumberType = ntQWord then
+    begin
+      UnsignedValue := AValue.AsQWord;
+      if UnsignedValue > QWord(High(Int64)) then
+        Exit(False);
+      AResult := Int64(UnsignedValue);
+    end
+    else
+      AResult := AValue.AsInt64;
+  end;
+
+  function ReadUnsignedInteger(out AResult: QWord): Boolean;
+  var
+    SignedValue: Int64;
+  begin
+    Result := (AValue.JSONType = jtNumber) and
+      (TJSONNumber(AValue).NumberType in [ntInteger, ntInt64, ntQWord]);
+    if not Result then
+      Exit;
+    if TJSONNumber(AValue).NumberType = ntQWord then
+      AResult := AValue.AsQWord
+    else
+    begin
+      SignedValue := AValue.AsInt64;
+      if SignedValue < 0 then
+        Exit(False);
+      AResult := QWord(SignedValue);
+    end;
+  end;
+
   function Mismatch(const AExpected: string): Boolean;
   begin
     AError := Format('Argument "%s" must be %s',
@@ -960,6 +998,20 @@ function BindProperty(AInstance: TMCPArgs; AProp: PPropInfo;
     Result := False;
   end;
 
+  procedure SetQWordProperty(const AValue: QWord);
+  var
+    SignedBits: Int64;
+  begin
+    // FPC 3.2.2 has tkQWord RTTI but exposes only signed Int64 property
+    // accessors. Pass the unsigned value's bits through unchanged.
+    Move(AValue, SignedBits, SizeOf(SignedBits));
+    SetInt64Prop(AInstance, AProp, SignedBits);
+  end;
+
+var
+  TypeData: PTypeData;
+  SignedValue: Int64;
+  UnsignedValue, Minimum, Maximum: QWord;
 begin
   Result := True;
   case AProp^.PropType^.Kind of
@@ -974,15 +1026,35 @@ begin
       else
         Exit(Mismatch('a number'));
     tkInteger:
-      if (AValue.JSONType = jtNumber) and
-        (TJSONNumber(AValue).NumberType in [ntInteger, ntInt64]) then
-        SetOrdProp(AInstance, AProp, AValue.AsInteger)
+      begin
+        TypeData := GetTypeData(AProp^.PropType);
+        if TypeData^.OrdType in [otUByte, otUWord, otULong] then
+        begin
+          if not ReadUnsignedInteger(UnsignedValue) then
+            Exit(Mismatch('an integer'));
+          Minimum := QWord(LongWord(TypeData^.MinValue));
+          Maximum := QWord(LongWord(TypeData^.MaxValue));
+          if (UnsignedValue < Minimum) or (UnsignedValue > Maximum) then
+            Exit(Mismatch('an integer'));
+          SetOrdProp(AInstance, AProp, Int64(UnsignedValue));
+        end
+        else
+        begin
+          if not ReadSignedInteger(SignedValue) or
+            (SignedValue < TypeData^.MinValue) or
+            (SignedValue > TypeData^.MaxValue) then
+            Exit(Mismatch('an integer'));
+          SetOrdProp(AInstance, AProp, SignedValue);
+        end;
+      end;
+    tkInt64:
+      if ReadSignedInteger(SignedValue) then
+        SetInt64Prop(AInstance, AProp, SignedValue)
       else
         Exit(Mismatch('an integer'));
-    tkInt64, tkQWord:
-      if (AValue.JSONType = jtNumber) and
-        (TJSONNumber(AValue).NumberType in [ntInteger, ntInt64]) then
-        SetInt64Prop(AInstance, AProp, AValue.AsInt64)
+    tkQWord:
+      if ReadUnsignedInteger(UnsignedValue) then
+        SetQWordProperty(UnsignedValue)
       else
         Exit(Mismatch('an integer'));
     tkBool:
