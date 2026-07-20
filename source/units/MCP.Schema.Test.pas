@@ -41,6 +41,22 @@ type
     property payload: TObject read FPayload write FPayload;
   end;
 
+  // Optionality via standard property directives.
+  TOptionalArgs = class(TMCPArgs)
+  private
+    FQuery: string;
+    FRetries: Integer;
+    FVerbose: Boolean;
+    FColor: TProbeColor;
+    FNickname: string;
+  published
+    property query: string read FQuery write FQuery;
+    property retries: Integer read FRetries write FRetries default 3;
+    property verbose: Boolean read FVerbose write FVerbose default False;
+    property color: TProbeColor read FColor write FColor default pcGreen;
+    property nickname: string read FNickname write FNickname stored False;
+  end;
+
   TSchemaBuilder = class(TTestSuite)
   public
     procedure SetupTests; override;
@@ -59,6 +75,8 @@ type
     procedure TestEnumValues;
     procedure TestAllRequiredDeclarationOrder;
     procedure TestUnmappableKindRaises;
+    procedure TestDefaultsBecomeOptional;
+    procedure TestStoredFalseBecomesOptional;
   end;
 
 procedure TSchemaBuilder.TestObjectEnvelope;
@@ -218,6 +236,41 @@ begin
   Expect<Boolean>(Raised).ToBe(True);
 end;
 
+procedure TSchemaFromClass.TestDefaultsBecomeOptional;
+var
+  Schema: TJSONObject;
+  Required: TJSONArray;
+begin
+  Schema := SchemaFrom(TOptionalArgs).Build;
+  // Only `query` is required; the defaults and stored-False are not.
+  Required := TJSONArray(Schema.Find('required'));
+  Expect<Integer>(Required.Count).ToBe(1);
+  Expect<string>(Required[0].AsString).ToBe('query');
+  Expect<Integer>(
+    TJSONData(Schema.FindPath('properties.retries.default')).AsInteger)
+    .ToBe(3);
+  Expect<Boolean>(
+    TJSONData(Schema.FindPath('properties.verbose.default')).AsBoolean)
+    .ToBe(False);
+  Expect<string>(
+    TJSONData(Schema.FindPath('properties.color.default')).AsString)
+    .ToBe('pcGreen');
+  Schema.Free;
+end;
+
+procedure TSchemaFromClass.TestStoredFalseBecomesOptional;
+var
+  Schema: TJSONObject;
+begin
+  Schema := SchemaFrom(TOptionalArgs).Build;
+  // stored False → optional without a default key.
+  Expect<Boolean>(
+    Schema.FindPath('properties.nickname.default') = nil).ToBe(True);
+  Expect<Boolean>(
+    Schema.FindPath('properties.nickname.type') <> nil).ToBe(True);
+  Schema.Free;
+end;
+
 procedure TSchemaFromClass.SetupTests;
 begin
   Test('published properties map to schema types', TestTypeMapping);
@@ -226,6 +279,9 @@ begin
     TestAllRequiredDeclarationOrder);
   Test('unmappable property kinds raise EMCPSchema',
     TestUnmappableKindRaises);
+  Test('default directives become optional with schema default',
+    TestDefaultsBecomeOptional);
+  Test('stored False becomes optional', TestStoredFalseBecomesOptional);
 end;
 
 begin

@@ -598,9 +598,18 @@ begin
       Value := AArguments.Find(Props^[I]^.Name);
       if Value = nil then
       begin
-        AError := Format('Missing required argument "%s"',
-          [Props^[I]^.Name]);
-        Exit(False);
+        // The `default` directive is streaming metadata, not field
+        // initialization — seed it explicitly. `stored False`
+        // properties simply stay zero-initialized.
+        if MCPPropHasDefault(Props^[I]) then
+          SetOrdProp(AInstance, Props^[I], Props^[I]^.Default)
+        else if IsStoredProp(AInstance, Props^[I]) then
+        begin
+          AError := Format('Missing required argument "%s"',
+            [Props^[I]^.Name]);
+          Exit(False);
+        end;
+        Continue;
       end;
       if not BindProperty(AInstance, Props^[I], Value, AError) then
         Exit(False);

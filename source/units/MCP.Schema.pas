@@ -111,13 +111,44 @@ function ObjectSchema: TMCPSchema;
 // Derive a schema from AClass's published properties (see the unit
 // header for the type mapping). Raises EMCPSchema for property kinds
 // with no JSON Schema mapping (objects, arrays, sets, ...).
+//
+// Optionality comes from standard property directives:
+//   property retries: Integer ... default 3;   → optional, "default": 3
+//   property note: string ... stored False;    → optional, no default
+// Ordinal kinds (integer, boolean, enum) can carry `default`; any
+// property can opt out via `stored False`. Everything else is
+// required.
 function SchemaFrom(AClass: TMCPArgsClass): TMCPSchema;
+
+// The optionality predicates SchemaFrom and the server's argument
+// binder share. AInstance is any instance of the declaring class
+// (needed to evaluate `stored` expressions).
+function MCPPropHasDefault(AProp: PPropInfo): Boolean;
+function MCPPropIsOptional(AInstance: TObject; AProp: PPropInfo): Boolean;
 
 implementation
 
 constructor TMCPArgs.Create;
 begin
   inherited Create;
+end;
+
+const
+  // The compiler stores this sentinel when a property declares no
+  // `default` directive (same convention as Delphi's NoDefault).
+  MCP_NO_DEFAULT = Longint($80000000);
+
+function MCPPropHasDefault(AProp: PPropInfo): Boolean;
+begin
+  // `default` is only expressible on ordinal properties.
+  Result := (AProp^.PropType^.Kind in [tkInteger, tkBool, tkEnumeration])
+    and (AProp^.Default <> MCP_NO_DEFAULT);
+end;
+
+function MCPPropIsOptional(AInstance: TObject; AProp: PPropInfo): Boolean;
+begin
+  Result := MCPPropHasDefault(AProp) or
+    not IsStoredProp(AInstance, AProp);
 end;
 
 function SchemaFrom(AClass: TMCPArgsClass): TMCPSchema;
@@ -129,12 +160,17 @@ var
   EnumInfo: PTypeInfo;
   EnumValues: TJSONArray;
   PropObj: TJSONObject;
+  Probe: TMCPArgs;
+  Req: Boolean;
 begin
   Result := ObjectSchema;
   Info := PTypeInfo(AClass.ClassInfo);
   Count := GetTypeData(Info)^.PropCount;
   if Count = 0 then
     Exit;
+  // A throwaway instance lets IsStoredProp evaluate `stored`
+  // expressions of any kind (constant, field, or method).
+  Probe := AClass.Create;
   GetMem(Props, Count * SizeOf(Pointer));
   try
     // GetPropInfos preserves declaration order — the deterministic
@@ -143,20 +179,21 @@ begin
     for I := 0 to Count - 1 do
     begin
       Prop := Props^[I];
+      Req := not MCPPropIsOptional(Probe, Prop);
       case Prop^.PropType^.Kind of
         tkSString, tkLString, tkAString, tkWString, tkUString:
-          Result := Result.AddString(Prop^.Name);
+          Result := Result.AddString(Prop^.Name, '', Req);
         tkFloat:
-          Result := Result.AddNumber(Prop^.Name);
+          Result := Result.AddNumber(Prop^.Name, '', Req);
         tkInteger, tkInt64, tkQWord:
-          Result := Result.AddInteger(Prop^.Name);
+          Result := Result.AddInteger(Prop^.Name, '', Req);
         tkBool:
-          Result := Result.AddBoolean(Prop^.Name);
+          Result := Result.AddBoolean(Prop^.Name, '', Req);
         tkEnumeration:
           begin
             // Enums map to a string with the enum names as the
             // allowed values.
-            Result := Result.AddString(Prop^.Name);
+            Result := Result.AddString(Prop^.Name, '', Req);
             EnumInfo := Prop^.PropType;
             EnumValues := TJSONArray.Create;
             for E := GetTypeData(EnumInfo)^.MinValue to
@@ -176,9 +213,23 @@ begin
             [Prop^.Name, AClass.ClassName]);
         end;
       end;
+      if MCPPropHasDefault(Prop) then
+      begin
+        PropObj := TJSONObject(Result.FProperties.Find(Prop^.Name));
+        case Prop^.PropType^.Kind of
+          tkInteger:
+            PropObj.Add('default', Prop^.Default);
+          tkBool:
+            PropObj.Add('default', Prop^.Default <> 0);
+          tkEnumeration:
+            PropObj.Add('default',
+              GetEnumName(Prop^.PropType, Prop^.Default));
+        end;
+      end;
     end;
   finally
     FreeMem(Props);
+    Probe.Free;
   end;
 end;
 

@@ -63,6 +63,8 @@ type
     procedure TestTypedArgsMissing;
     procedure TestTypedArgsMistyped;
     procedure TestTypedArgsSchemaDerived;
+    procedure TestTypedArgsDefaultSeeded;
+    procedure TestTypedArgsDefaultOverridden;
   end;
 
   TResourceDispatch = class(TDispatchSuite)
@@ -151,6 +153,30 @@ begin
   Result := MCPTextResult(FloatToStr(Args.value * Args.times));
 end;
 
+type
+  TRepeatArgs = class(TMCPArgs)
+  private
+    FWord: string;
+    FCount: Integer;
+  published
+    property word: string read FWord write FWord;
+    property count: Integer read FCount write FCount default 2;
+  end;
+
+function RepeatHandler(AArgs: TMCPArgs;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Args: TRepeatArgs;
+  I: Integer;
+  S: string;
+begin
+  Args := AArgs as TRepeatArgs;
+  S := '';
+  for I := 1 to Args.count do
+    S := S + Args.word;
+  Result := MCPTextResult(S);
+end;
+
 function ClockReader(const AUri: string;
   const ACtx: TMCPRequestContext): TJSONArray;
 begin
@@ -176,6 +202,8 @@ begin
     '{"type":"object"}', WhoAmIHandler);
   FServer.RegisterTool('scale', 'Multiply value by times',
     TScaleArgs, ScaleHandler);
+  FServer.RegisterTool('repeat', 'Repeat a word count times',
+    TRepeatArgs, RepeatHandler);
   FServer.RegisterTextResource('mem://static', 'static', 'text/plain',
     'static text');
   FServer.RegisterResource('mem://clock', 'clock', 'text/plain',
@@ -314,7 +342,7 @@ begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/list",' +
     '"params":{' + META_MODERN + '}}');
   Tools := TJSONArray(TJSONObject(Response.Find('result')).Find('tools'));
-  Expect<Integer>(Tools.Count).ToBe(5);
+  Expect<Integer>(Tools.Count).ToBe(6);
   Expect<string>(TJSONObject(Tools[0]).Get('name', '')).ToBe('echo');
   Expect<Boolean>(
     TJSONObject(Tools[0]).Find('inputSchema') <> nil).ToBe(True);
@@ -484,6 +512,37 @@ begin
   Test('typed args: mistyped argument → isError', TestTypedArgsMistyped);
   Test('typed args: schema derived from the class',
     TestTypedArgsSchemaDerived);
+  Test('typed args: default directive seeds missing argument',
+    TestTypedArgsDefaultSeeded);
+  Test('typed args: explicit value overrides default',
+    TestTypedArgsDefaultOverridden);
+end;
+
+procedure TToolDispatch.TestTypedArgsDefaultSeeded;
+var
+  Response: TJSONObject;
+begin
+  // count omitted → default 2 applies.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"repeat","arguments":{"word":"ha"},' +
+    META_MODERN + '}}');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('haha');
+  Response.Free;
+end;
+
+procedure TToolDispatch.TestTypedArgsDefaultOverridden;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"repeat","arguments":{"word":"ha","count":3},' +
+    META_MODERN + '}}');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('hahaha');
+  Response.Free;
 end;
 
 { ───────── resources ───────── }
