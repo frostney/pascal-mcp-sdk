@@ -32,9 +32,10 @@ recorded reason.
   reachable end-to-end, an `mcpsmoke` check.
 - Tests for surfaces that carry string payloads include at least one
   non-ASCII case (multi-byte UTF-8, ideally adjacent multi-byte
-  characters and an astral-plane character) asserting byte-exact
-  round-trip. The 1.0.0 wire-corruption bug shipped green because every
-  payload in the stack was ASCII (#10, #26).
+  characters and an astral-plane character), asserted byte-exact on the
+  encoded wire line — not on decoded string values, where a symmetric
+  encode/decode regression cancels out. The 1.0.0 wire-corruption bug
+  shipped green because every payload in the stack was ASCII (#10, #26).
 - The no-lwpt path still works when the dependency set or layout
   changed: `fpc @lwpt.cfg source/apps/mcpdemo.pas` compiles on a fresh
   checkout.
