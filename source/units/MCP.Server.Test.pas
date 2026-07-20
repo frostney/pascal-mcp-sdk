@@ -66,6 +66,7 @@ type
     procedure TestTypedArgsSchemaDerived;
     procedure TestTypedArgsDefaultSeeded;
     procedure TestTypedArgsDefaultOverridden;
+    procedure TestTypedOutputClass;
   end;
 
   TResourceDispatch = class(TDispatchSuite)
@@ -209,6 +210,20 @@ type
     property word: string read FWord write FWord;
     property count: Integer read FCount write FCount default 2;
   end;
+
+// Typed output: copies the bound input into a fresh instance and
+// returns it as structuredContent.
+function MirrorHandler(AArgs: TMCPArgs;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Args, Copy: TScaleArgs;
+begin
+  Args := AArgs as TScaleArgs;
+  Copy := TScaleArgs.Create;
+  Copy.value := Args.value;
+  Copy.times := Args.times;
+  Result := MCPStructuredResult('mirrored', Copy);
+end;
 
 function RepeatHandler(AArgs: TMCPArgs;
   const ACtx: TMCPRequestContext): TMCPToolResult;
@@ -619,6 +634,36 @@ begin
     TestTypedArgsDefaultSeeded);
   Test('typed args: explicit value overrides default',
     TestTypedArgsDefaultOverridden);
+  Test('typed output class: derived outputSchema + serialized result',
+    TestTypedOutputClass);
+end;
+
+procedure TToolDispatch.TestTypedOutputClass;
+var
+  Response: TJSONObject;
+  Tools: TJSONArray;
+begin
+  FServer.RegisterTool('mirror', 'Mirror the scale arguments',
+    TScaleArgs, TScaleArgs, MirrorHandler);
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/list",' +
+    '"params":{' + META_MODERN + '}}');
+  Tools := TJSONArray(TJSONObject(Response.Find('result')).Find('tools'));
+  Expect<string>(
+    TJSONData(TJSONObject(Tools[Tools.Count - 1])
+    .FindPath('outputSchema.properties.value.type')).AsString)
+    .ToBe('number');
+  Response.Free;
+
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"mirror","arguments":{"value":2.5,"times":4},' +
+    META_MODERN + '}}');
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.structuredContent.value'))
+    .AsFloat = 2.5).ToBe(True);
+  Expect<Integer>(
+    TJSONData(Response.FindPath('result.structuredContent.times'))
+    .AsInteger).ToBe(4);
+  Response.Free;
 end;
 
 procedure TToolDispatch.TestTypedArgsDefaultSeeded;

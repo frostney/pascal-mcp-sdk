@@ -126,6 +126,12 @@ function SchemaFrom(AClass: TMCPArgsClass): TMCPSchema;
 function MCPPropHasDefault(AProp: PPropInfo): Boolean;
 function MCPPropIsOptional(AInstance: TObject; AProp: PPropInfo): Boolean;
 
+// The reverse of argument binding: serialize an instance's published
+// properties to a JSON object (enums as their names). The typed
+// structured-output path — MCPStructuredResult(text, instance) —
+// pairs this with SchemaFrom(outputClass).
+function MCPSerialize(AObj: TMCPArgs): TJSONObject;
+
 implementation
 
 constructor TMCPArgs.Create;
@@ -230,6 +236,51 @@ begin
   finally
     FreeMem(Props);
     Probe.Free;
+  end;
+end;
+
+function MCPSerialize(AObj: TMCPArgs): TJSONObject;
+var
+  Info: PTypeInfo;
+  Props: PPropList;
+  Count, I: Integer;
+  Prop: PPropInfo;
+begin
+  Result := TJSONObject.Create;
+  Info := PTypeInfo(AObj.ClassInfo);
+  Count := GetTypeData(Info)^.PropCount;
+  if Count = 0 then
+    Exit;
+  GetMem(Props, Count * SizeOf(Pointer));
+  try
+    GetPropInfos(Info, Props);
+    for I := 0 to Count - 1 do
+    begin
+      Prop := Props^[I];
+      case Prop^.PropType^.Kind of
+        tkSString, tkLString, tkAString, tkWString, tkUString:
+          Result.Add(Prop^.Name, GetStrProp(AObj, Prop));
+        tkFloat:
+          Result.Add(Prop^.Name, GetFloatProp(AObj, Prop));
+        tkInteger:
+          Result.Add(Prop^.Name, GetOrdProp(AObj, Prop));
+        tkInt64, tkQWord:
+          Result.Add(Prop^.Name, GetInt64Prop(AObj, Prop));
+        tkBool:
+          Result.Add(Prop^.Name, GetOrdProp(AObj, Prop) <> 0);
+        tkEnumeration:
+          Result.Add(Prop^.Name, GetEnumProp(AObj, Prop));
+      else
+        begin
+          Result.Free;
+          raise EMCPSchema.CreateFmt(
+            'Property "%s" of %s has no JSON mapping',
+            [Prop^.Name, AObj.ClassName]);
+        end;
+      end;
+    end;
+  finally
+    FreeMem(Props);
   end;
 end;
 

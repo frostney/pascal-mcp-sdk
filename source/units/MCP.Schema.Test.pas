@@ -77,6 +77,7 @@ type
     procedure TestUnmappableKindRaises;
     procedure TestDefaultsBecomeOptional;
     procedure TestStoredFalseBecomesOptional;
+    procedure TestSerializeRoundTrip;
   end;
 
 procedure TSchemaBuilder.TestObjectEnvelope;
@@ -282,6 +283,30 @@ begin
   Test('default directives become optional with schema default',
     TestDefaultsBecomeOptional);
   Test('stored False becomes optional', TestStoredFalseBecomesOptional);
+  Test('MCPSerialize mirrors published properties',
+    TestSerializeRoundTrip);
+end;
+
+procedure TSchemaFromClass.TestSerializeRoundTrip;
+var
+  Obj: TProbeArgs;
+  Json: TJSONObject;
+begin
+  Obj := TProbeArgs.Create;
+  Obj.labelText := 'probe';
+  Obj.count := 5;
+  Obj.ratio := 1.5;
+  Obj.flag := True;
+  Obj.color := pcBlue;
+  Json := MCPSerialize(Obj);
+  Expect<string>(Json.Get('labelText', '')).ToBe('probe');
+  Expect<Integer>(Json.Get('count', 0)).ToBe(5);
+  Expect<Boolean>(Json.Get('ratio', 0.0) = 1.5).ToBe(True);
+  Expect<Boolean>(Json.Get('flag', False)).ToBe(True);
+  // Enums serialize as their names, matching the derived schema.
+  Expect<string>(Json.Get('color', '')).ToBe('pcBlue');
+  Json.Free;
+  Obj.Free;
 end;
 
 begin

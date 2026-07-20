@@ -48,6 +48,15 @@ type
     property b: Double read FB write FB;
   end;
 
+  // The result class is the output schema the same way; the handler
+  // returns an instance and MCPStructuredResult serializes it.
+  TSumResult = class(TMCPArgs)
+  private
+    FSum: Double;
+  published
+    property sum: Double read FSum write FSum;
+  end;
+
 // Template reader: AVars carries the variables matched from the URI.
 function ShoutReader(const AUri: string; AVars: TJSONObject;
   const ACtx: TMCPRequestContext): TJSONArray;
@@ -69,13 +78,12 @@ function AddHandler(AArgs: TMCPArgs;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 var
   Args: TAddArgs;
-  Structured: TJSONObject;
+  Res: TSumResult;
 begin
   Args := AArgs as TAddArgs;
-  Structured := TJSONObject.Create;
-  Structured.Add('sum', Args.a + Args.b);
-  Result := MCPStructuredResult('The sum is ' + FloatToStr(Args.a + Args.b),
-    Structured);
+  Res := TSumResult.Create;
+  Res.sum := Args.a + Args.b;
+  Result := MCPStructuredResult('The sum is ' + FloatToStr(Res.sum), Res);
 end;
 
 var
@@ -94,9 +102,7 @@ begin
       EchoHandler);
 
     Server.RegisterTool('add', 'Add two numbers and return the sum',
-      TAddArgs,
-      ObjectSchema.AddNumber('sum', 'The sum of a and b'),
-      AddHandler);
+      TAddArgs, TSumResult, AddHandler);
 
     Server.RegisterPrompt('greet', 'Compose a friendly greeting',
       PromptArguments.Add('name', 'Who to greet'), GreetPromptHandler);

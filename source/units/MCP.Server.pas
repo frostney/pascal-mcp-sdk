@@ -307,7 +307,9 @@ type
 
     // Typed-argument overloads: the argument class IS the schema
     // (SchemaFrom) and the handler receives a populated, validated
-    // instance. Optional output schema as in the fluent overloads.
+    // instance. The output schema can be fluent or itself a class
+    // (paired with MCPStructuredResult(text, instance) in the
+    // handler).
     procedure RegisterTool(const AName, ADescription: string;
       AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler); overload;
     procedure RegisterTool(const AName, ADescription: string;
@@ -317,6 +319,12 @@ type
       AHandler: TMCPArgsHandler); overload;
     procedure RegisterTool(const AName, ADescription: string;
       AArgsClass: TMCPArgsClass; const AOutputSchema: TMCPSchema;
+      AMethod: TMCPArgsMethod); overload;
+    procedure RegisterTool(const AName, ADescription: string;
+      AArgsClass, AOutputClass: TMCPArgsClass;
+      AHandler: TMCPArgsHandler); overload;
+    procedure RegisterTool(const AName, ADescription: string;
+      AArgsClass, AOutputClass: TMCPArgsClass;
       AMethod: TMCPArgsMethod); overload;
 
     procedure RegisterTextResource(const AUri, AName, AMimeType, AText: string;
@@ -366,7 +374,11 @@ type
 function MCPTextResult(const AText: string): TMCPToolResult;
 function MCPErrorResult(const AText: string): TMCPToolResult;
 function MCPStructuredResult(const AText: string;
-  AStructured: TJSONData): TMCPToolResult;
+  AStructured: TJSONData): TMCPToolResult; overload;
+// Typed structured output: serializes the instance's published
+// properties (MCPSerialize) and frees it.
+function MCPStructuredResult(const AText: string;
+  AObj: TMCPArgs): TMCPToolResult; overload;
 function MCPTextContents(const AUri, AMimeType, AText: string): TJSONArray;
 function MCPBlobContents(const AUri, AMimeType, ABase64: string): TJSONArray;
 
@@ -599,6 +611,16 @@ begin
   Result.StructuredContent := AStructured;
 end;
 
+function MCPStructuredResult(const AText: string;
+  AObj: TMCPArgs): TMCPToolResult;
+begin
+  try
+    Result := MCPStructuredResult(AText, MCPSerialize(AObj));
+  finally
+    AObj.Free;
+  end;
+end;
+
 function MCPTextContents(const AUri, AMimeType, AText: string): TJSONArray;
 var
   Item: TJSONObject;
@@ -827,6 +849,22 @@ procedure TMCPServer.RegisterTool(const AName, ADescription: string;
 begin
   AddTypedTool(SchemaDefinition(AName, ADescription,
     SchemaFrom(AArgsClass).Build, AOutputSchema.Build),
+    AArgsClass, nil, AMethod);
+end;
+
+procedure TMCPServer.RegisterTool(const AName, ADescription: string;
+  AArgsClass, AOutputClass: TMCPArgsClass; AHandler: TMCPArgsHandler);
+begin
+  AddTypedTool(SchemaDefinition(AName, ADescription,
+    SchemaFrom(AArgsClass).Build, SchemaFrom(AOutputClass).Build),
+    AArgsClass, AHandler, nil);
+end;
+
+procedure TMCPServer.RegisterTool(const AName, ADescription: string;
+  AArgsClass, AOutputClass: TMCPArgsClass; AMethod: TMCPArgsMethod);
+begin
+  AddTypedTool(SchemaDefinition(AName, ADescription,
+    SchemaFrom(AArgsClass).Build, SchemaFrom(AOutputClass).Build),
     AArgsClass, nil, AMethod);
 end;
 
