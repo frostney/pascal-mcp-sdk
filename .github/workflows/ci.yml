@@ -191,7 +191,7 @@ jobs:
       - name: lwpt build (mcpdemo + mcpsmoke)
         run: lwpt build
 
-      - name: lwpt test (four co-located unit suites)
+      - name: lwpt test (five co-located unit suites)
         run: lwpt test
 
       - name: mcpsmoke (example-server E2E battery over real pipes)
