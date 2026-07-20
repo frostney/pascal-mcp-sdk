@@ -236,6 +236,15 @@ begin
       'tools/call echo: text mirrored');
     Response.Free;
 
+    // Raw handlers validate arguments against their advertised schema.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{' +
+      '"name":"echo","arguments":{},' + META_MODERN + '}}');
+    Check((FindPath(Response, 'result.isError') <> nil) and
+      FindPath(Response, 'result.isError').AsBoolean,
+      'tools/call echo (bad args): isError true');
+    Response.Free;
+
     // tools/call add — structured content.
     Response := RoundTrip(Demo,
       '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{' +
