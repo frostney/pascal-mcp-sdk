@@ -30,7 +30,7 @@ program myserver;
 
 uses
   fpjson,
-  MCP.Protocol, MCP.Server, MCP.Transport.Stdio;
+  MCP.Protocol, MCP.Schema, MCP.Server, MCP.Transport.Stdio;
 
 function Greet(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
@@ -44,8 +44,7 @@ begin
   Server := TMCPServer.Create('my-server', '1.0.0');
   try
     Server.RegisterTool('greet', 'Greet someone by name',
-      '{"type":"object","properties":{"name":{"type":"string"}},' +
-      '"required":["name"]}',
+      ObjectSchema.AddString('name', 'Who to greet'),
       Greet);
     RunMCPStdioServer(Server);  // serves until the client closes stdin
   finally
@@ -55,8 +54,13 @@ end.
 ```
 
 Handlers are synchronous plain functions or methods (`of object` —
-both registration overloads exist). Tool input schemas are JSON Schema
-passed as strings and validated for well-formedness at registration.
+both registration overloads exist). Tool schemas are built with the
+fluent `MCP.Schema` API (`ObjectSchema.AddString(...).AddNumber(...)`;
+properties are required unless opted out, and an output schema can be
+passed alongside the input schema). For richer schemas ($ref, enums,
+nested objects, title/annotations) the JSON-string and
+definition-object registration overloads remain available, validated
+for well-formedness at registration.
 Results are built with `MCPTextResult` / `MCPErrorResult` /
 `MCPStructuredResult`; handler exceptions become in-band
 `isError: true` tool results automatically. Resources register either

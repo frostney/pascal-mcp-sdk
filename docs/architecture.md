@@ -72,10 +72,14 @@ no `listChanged`/`subscribe` capability is advertised and
 `subscriptions/listen` is out of v1). Handlers are synchronous and come
 in two shapes per registry — plain function pointers and `of object`
 method pointers — so both programs and class-based hosts (lantaarn)
-register naturally. Tool input schemas are JSON Schema as strings,
-parsed for well-formedness at registration (`EMCPServer` on error);
-argument validation beyond that is the handler's job, reported as
-in-band `isError` results that a model can read and correct against.
+register naturally. Tool schemas are built with the fluent
+`MCP.Schema` API (`ObjectSchema.AddString(...)...` — a JSON Schema
+2020-12 subset covering the flat object schemas most tools need, with
+input and output schema overloads); richer schemas use the JSON-string
+or definition-object overloads, parsed for well-formedness at
+registration (`EMCPServer` on error). Argument validation beyond that
+is the handler's job, reported as in-band `isError` results that a
+model can read and correct against.
 
 ## Spec grounding
 

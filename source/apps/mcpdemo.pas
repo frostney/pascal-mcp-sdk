@@ -1,8 +1,8 @@
 program mcpdemo;
 
 // Example stdio MCP server: the smallest complete pascal-mcp-sdk program.
-// Exposes two tools (echo, add — one via the simple registration form,
-// one via a full definition with an outputSchema) and one static
+// Exposes two tools (echo, add — registered through the fluent
+// MCP.Schema builder, add with an output schema) and one static
 // resource, then serves newline-delimited JSON-RPC on stdin/stdout
 // until the client closes stdin.
 //
@@ -19,6 +19,7 @@ uses
   fpjson,
 
   MCP.Protocol,
+  MCP.Schema,
   MCP.Server,
   MCP.Transport.Stdio;
 
@@ -44,21 +45,6 @@ begin
   Result := MCPStructuredResult('The sum is ' + FloatToStr(Sum), Structured);
 end;
 
-function AddToolDefinition: TJSONObject;
-begin
-  Result := TJSONObject.Create;
-  Result.Add('name', 'add');
-  Result.Add('title', 'Adder');
-  Result.Add('description', 'Add two numbers and return the sum');
-  Result.Add('inputSchema', GetJSON(
-    '{"type":"object","properties":{' +
-    '"a":{"type":"number"},"b":{"type":"number"}},' +
-    '"required":["a","b"]}'));
-  Result.Add('outputSchema', GetJSON(
-    '{"type":"object","properties":{"sum":{"type":"number"}},' +
-    '"required":["sum"]}'));
-end;
-
 var
   Server: TMCPServer;
 
@@ -71,11 +57,14 @@ begin
       'for a hello.';
 
     Server.RegisterTool('echo', 'Echo a message back to the caller',
-      '{"type":"object","properties":{"message":{"type":"string"}},' +
-      '"required":["message"]}',
+      ObjectSchema.AddString('message', 'Text to echo back'),
       EchoHandler);
 
-    Server.RegisterTool(AddToolDefinition, AddHandler);
+    Server.RegisterTool('add', 'Add two numbers and return the sum',
+      ObjectSchema.AddNumber('a', 'First addend')
+                  .AddNumber('b', 'Second addend'),
+      ObjectSchema.AddNumber('sum', 'The sum of a and b'),
+      AddHandler);
 
     Server.RegisterTextResource('mcp://pascal-mcp-sdk/greeting', 'greeting',
       'text/plain', 'Hello from pascal-mcp-sdk, a FreePascal MCP server.',

@@ -64,7 +64,8 @@ uses
   jsonparser,
   jsonscanner,
   MCP.JSONRPC,
-  MCP.Protocol;
+  MCP.Protocol,
+  MCP.Schema;
 
 type
   // Result of one tool invocation. Content is a JSON array of content
@@ -187,6 +188,20 @@ type
     procedure RegisterTool(ADefinition: TJSONObject;
       AHandler: TMCPToolHandler); overload;
     procedure RegisterTool(ADefinition: TJSONObject;
+      AMethod: TMCPToolMethod); overload;
+
+    // Fluent-schema overloads (MCP.Schema): the idiomatic registration
+    // path for flat object schemas — no JSON strings. The overloads
+    // call Build and take ownership of the finished schemas.
+    procedure RegisterTool(const AName, ADescription: string;
+      const AInputSchema: TMCPSchema; AHandler: TMCPToolHandler); overload;
+    procedure RegisterTool(const AName, ADescription: string;
+      const AInputSchema: TMCPSchema; AMethod: TMCPToolMethod); overload;
+    procedure RegisterTool(const AName, ADescription: string;
+      const AInputSchema, AOutputSchema: TMCPSchema;
+      AHandler: TMCPToolHandler); overload;
+    procedure RegisterTool(const AName, ADescription: string;
+      const AInputSchema, AOutputSchema: TMCPSchema;
       AMethod: TMCPToolMethod); overload;
 
     procedure RegisterTextResource(const AUri, AName, AMimeType, AText: string;
@@ -378,6 +393,47 @@ procedure TMCPServer.RegisterTool(ADefinition: TJSONObject;
   AMethod: TMCPToolMethod);
 begin
   AddTool(ADefinition, nil, AMethod);
+end;
+
+// Shared assembly for the fluent-schema overloads. AOutputSchema may
+// be nil (the two-schema overloads pass the built output schema).
+function SchemaDefinition(const AName, ADescription: string;
+  AInputSchema, AOutputSchema: TJSONObject): TJSONObject;
+begin
+  Result := TJSONObject.Create;
+  Result.Add('name', AName);
+  Result.Add('description', ADescription);
+  Result.Add('inputSchema', AInputSchema);
+  if AOutputSchema <> nil then
+    Result.Add('outputSchema', AOutputSchema);
+end;
+
+procedure TMCPServer.RegisterTool(const AName, ADescription: string;
+  const AInputSchema: TMCPSchema; AHandler: TMCPToolHandler);
+begin
+  AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build, nil),
+    AHandler, nil);
+end;
+
+procedure TMCPServer.RegisterTool(const AName, ADescription: string;
+  const AInputSchema: TMCPSchema; AMethod: TMCPToolMethod);
+begin
+  AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build, nil),
+    nil, AMethod);
+end;
+
+procedure TMCPServer.RegisterTool(const AName, ADescription: string;
+  const AInputSchema, AOutputSchema: TMCPSchema; AHandler: TMCPToolHandler);
+begin
+  AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build,
+    AOutputSchema.Build), AHandler, nil);
+end;
+
+procedure TMCPServer.RegisterTool(const AName, ADescription: string;
+  const AInputSchema, AOutputSchema: TMCPSchema; AMethod: TMCPToolMethod);
+begin
+  AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build,
+    AOutputSchema.Build), nil, AMethod);
 end;
 
 procedure TMCPServer.AddResource(const AUri, AName, AMimeType,

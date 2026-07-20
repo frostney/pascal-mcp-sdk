@@ -63,7 +63,7 @@ program myserver;
 
 uses
   fpjson,
-  MCP.Protocol, MCP.Server, MCP.Transport.Stdio;
+  MCP.Protocol, MCP.Schema, MCP.Server, MCP.Transport.Stdio;
 
 function Greet(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
@@ -78,8 +78,7 @@ begin
   try
     Server.Instructions := 'Greets people.';   // surfaced via server/discover
     Server.RegisterTool('greet', 'Greet someone by name',
-      '{"type":"object","properties":{"name":{"type":"string"}},' +
-      '"required":["name"]}',
+      ObjectSchema.AddString('name', 'Who to greet'),
       Greet);
     Server.RegisterTextResource('mcp://my-server/motd', 'motd',
       'text/plain', 'Be excellent to each other.');
