@@ -84,6 +84,18 @@ type
     procedure TestDuplicateResource;
   end;
 
+  TPromptDispatch = class(TDispatchSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestList;
+    procedure TestGet;
+    procedure TestGetNoArgsPrompt;
+    procedure TestGetUnknown;
+    procedure TestGetMissingRequired;
+    procedure TestGetHandlerRaises;
+    procedure TestLegacyDialect;
+  end;
+
   TLegacyEra = class(TDispatchSuite)
   private
     procedure DoInitialize(const AVersion: string);
@@ -183,6 +195,26 @@ begin
   Result := MCPTextContents(AUri, 'text/plain', 'tick');
 end;
 
+function ReviewPromptHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPMessages([
+    MCPUserMessage('Review this: ' + AArguments.Get('code', '')),
+    MCPAssistantMessage('Certainly.')]);
+end;
+
+function HelloPromptHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPMessages([MCPUserMessage('Say hello.')]);
+end;
+
+function BoomPromptHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  raise Exception.Create('prompt boom');
+end;
+
 { ───────── shared fixture ───────── }
 
 procedure TDispatchSuite.BeforeEach;
@@ -208,6 +240,12 @@ begin
     'static text');
   FServer.RegisterResource('mem://clock', 'clock', 'text/plain',
     ClockReader);
+  FServer.RegisterPrompt('review', 'Ask for a code review',
+    PromptArguments.Add('code', 'The code to review')
+                   .Add('style', 'Review style', False),
+    ReviewPromptHandler);
+  FServer.RegisterPrompt('hello', 'A canned hello', HelloPromptHandler);
+  FServer.RegisterPrompt('promptboom', 'Always raises', BoomPromptHandler);
 end;
 
 procedure TDispatchSuite.AfterEach;
@@ -692,6 +730,136 @@ begin
   Test('duplicate resource uri rejected', TestDuplicateResource);
 end;
 
+{ ───────── prompts ───────── }
+
+procedure TPromptDispatch.TestList;
+var
+  Response: TJSONObject;
+  Prompts: TJSONArray;
+  Review: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"prompts/list",' +
+    '"params":{' + META_MODERN + '}}');
+  Prompts := TJSONArray(TJSONObject(Response.Find('result')).Find('prompts'));
+  Expect<Integer>(Prompts.Count).ToBe(3);
+  Review := TJSONObject(Prompts[0]);
+  Expect<string>(Review.Get('name', '')).ToBe('review');
+  Expect<string>(
+    TJSONData(Review.FindPath('arguments[0].name')).AsString).ToBe('code');
+  Expect<Boolean>(
+    TJSONData(Review.FindPath('arguments[0].required')).AsBoolean)
+    .ToBe(True);
+  // Optional arguments carry no required flag.
+  Expect<Boolean>(
+    Review.FindPath('arguments[1].required') = nil).ToBe(True);
+  // Required CacheableResult fields (SEP-2549).
+  Expect<Integer>(
+    TJSONObject(Response.Find('result')).Get('ttlMs', -1)).ToBe(300000);
+  Response.Free;
+end;
+
+procedure TPromptDispatch.TestGet;
+var
+  Response: TJSONObject;
+  ResultObj: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"prompts/get",' +
+    '"params":{"name":"review","arguments":{"code":"x := 1"},' +
+    META_MODERN + '}}');
+  ResultObj := TJSONObject(Response.Find('result'));
+  Expect<string>(ResultObj.Get('description', ''))
+    .ToBe('Ask for a code review');
+  Expect<string>(
+    TJSONData(ResultObj.FindPath('messages[0].content.text')).AsString)
+    .ToBe('Review this: x := 1');
+  Expect<string>(
+    TJSONData(ResultObj.FindPath('messages[1].role')).AsString)
+    .ToBe('assistant');
+  Expect<string>(ResultObj.Get('resultType', '')).ToBe('complete');
+  // GetPromptResult carries no cache fields (they are list/read-only).
+  Expect<Boolean>(ResultObj.Find('ttlMs') = nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TPromptDispatch.TestGetNoArgsPrompt;
+var
+  Response: TJSONObject;
+begin
+  // arguments omitted entirely is valid for an argument-less prompt.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"prompts/get",' +
+    '"params":{"name":"hello",' + META_MODERN + '}}');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.messages[0].content.text'))
+    .AsString).ToBe('Say hello.');
+  Response.Free;
+end;
+
+procedure TPromptDispatch.TestGetUnknown;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"prompts/get",' +
+    '"params":{"name":"nope",' + META_MODERN + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INVALID_PARAMS);
+  Response.Free;
+end;
+
+procedure TPromptDispatch.TestGetMissingRequired;
+var
+  Response: TJSONObject;
+begin
+  // Prompts surface missing arguments as protocol errors, not isError.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"prompts/get",' +
+    '"params":{"name":"review","arguments":{"style":"brief"},' +
+    META_MODERN + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INVALID_PARAMS);
+  Response.Free;
+end;
+
+procedure TPromptDispatch.TestGetHandlerRaises;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"prompts/get",' +
+    '"params":{"name":"promptboom",' + META_MODERN + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INTERNAL_ERROR);
+  Response.Free;
+end;
+
+procedure TPromptDispatch.TestLegacyDialect;
+var
+  Response: TJSONObject;
+  ResultObj: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{}}}');
+  Expect<Boolean>(
+    Response.FindPath('result.capabilities.prompts') <> nil).ToBe(True);
+  Response.Free;
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"prompts/list",' +
+    '"params":{}}');
+  ResultObj := TJSONObject(Response.Find('result'));
+  Expect<Integer>(TJSONArray(ResultObj.Find('prompts')).Count).ToBe(3);
+  Expect<Boolean>(ResultObj.Find('ttlMs') = nil).ToBe(True);
+  Expect<Boolean>(ResultObj.Find('resultType') = nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TPromptDispatch.SetupTests;
+begin
+  Test('prompts/list: definitions + cache fields', TestList);
+  Test('prompts/get: messages + description', TestGet);
+  Test('prompts/get: argument-less prompt', TestGetNoArgsPrompt);
+  Test('prompts/get: unknown prompt → -32602', TestGetUnknown);
+  Test('prompts/get: missing required argument → -32602',
+    TestGetMissingRequired);
+  Test('prompts/get: handler exception → -32603', TestGetHandlerRaises);
+  Test('prompts served in the legacy dialect', TestLegacyDialect);
+end;
+
 { ───────── legacy era (dual-era mode) ───────── }
 
 procedure TLegacyEra.DoInitialize(const AVersion: string);
@@ -877,6 +1045,7 @@ begin
     TDiscoverAndErrors.Create('Server: discover + protocol errors'));
   TestRunnerProgram.AddSuite(TToolDispatch.Create('Server: tools'));
   TestRunnerProgram.AddSuite(TResourceDispatch.Create('Server: resources'));
+  TestRunnerProgram.AddSuite(TPromptDispatch.Create('Server: prompts'));
   TestRunnerProgram.AddSuite(
     TRegistrationGuards.Create('Server: registration guards'));
   TestRunnerProgram.AddSuite(TLegacyEra.Create('Server: legacy era'));

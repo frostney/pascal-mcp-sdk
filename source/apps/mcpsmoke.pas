@@ -267,6 +267,31 @@ begin
       'unsupported version: supported list in data');
     Response.Free;
 
+    // prompts/list + prompts/get.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":8,"method":"prompts/list","params":{' +
+      META_MODERN + '}}');
+    Check(PathString(Response, 'result.prompts[0].name') = 'greet',
+      'prompts/list: greet present');
+    Check(FindPath(Response, 'result.ttlMs') <> nil,
+      'prompts/list: ttlMs present (SEP-2549)');
+    Response.Free;
+
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":9,"method":"prompts/get","params":{' +
+      '"name":"greet","arguments":{"name":"Ada"},' + META_MODERN + '}}');
+    Check(Pos('Ada', PathString(Response,
+      'result.messages[0].content.text')) > 0,
+      'prompts/get: argument woven into message');
+    Response.Free;
+
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":10,"method":"prompts/get","params":{' +
+      '"name":"greet",' + META_MODERN + '}}');
+    Check(PathInt(Response, 'error.code') = -32602,
+      'prompts/get: missing required argument → -32602');
+    Response.Free;
+
     // ── Legacy era (dual-era default): the path today's clients
     //    (Claude Code / Claude Desktop) actually take. ──
 

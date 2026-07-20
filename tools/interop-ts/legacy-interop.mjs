@@ -79,6 +79,20 @@ try {
     'resources/read: greeting text',
   );
 
+  const prompts = await client.listPrompts();
+  check(
+    prompts.prompts?.[0]?.name === 'greet',
+    'prompts/list: greet present',
+  );
+  const prompt = await client.getPrompt({
+    name: 'greet',
+    arguments: { name: 'Ada' },
+  });
+  check(
+    prompt.messages?.[0]?.content?.text?.includes('Ada'),
+    'prompts/get: argument woven into message',
+  );
+
   // v1 SDKs map the legacy -32002 resource-not-found to an error.
   let notFound = false;
   try {

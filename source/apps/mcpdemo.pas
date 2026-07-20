@@ -43,6 +43,15 @@ type
     property b: Double read FB write FB;
   end;
 
+// Prompt handler: returns the messages a client feeds to its model.
+function GreetPromptHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPMessages([MCPUserMessage(
+    'Compose a short, friendly greeting for ' +
+    AArguments.Get('name', 'the user') + '.')]);
+end;
+
 function AddHandler(AArgs: TMCPArgs;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 var
@@ -76,12 +85,15 @@ begin
       ObjectSchema.AddNumber('sum', 'The sum of a and b'),
       AddHandler);
 
+    Server.RegisterPrompt('greet', 'Compose a friendly greeting',
+      PromptArguments.Add('name', 'Who to greet'), GreetPromptHandler);
+
     Server.RegisterTextResource('mcp://pascal-mcp-sdk/greeting', 'greeting',
       'text/plain', 'Hello from pascal-mcp-sdk, a FreePascal MCP server.',
       'A static greeting resource');
 
     MCPLogToStderr('mcpdemo: serving MCP ' + MCP_PROTOCOL_VERSION +
-      ' on stdio (2 tools, 1 resource)');
+      ' on stdio (2 tools, 1 resource, 1 prompt)');
     RunMCPStdioServer(Server);
   finally
     Server.Free;

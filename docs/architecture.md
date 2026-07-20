@@ -41,7 +41,8 @@ Rules live in the layer that owns them and nowhere else:
   mismatch, and the response-side stamping (`resultType: "complete"`,
   `serverInfo`). Knows nothing about tools or resources.
 - **`MCP.Server`** — method dispatch (`server/discover`, `tools/*`,
-  `resources/*`), the registries, in-band vs. protocol error policy
+  `resources/*`, `prompts/*`), the registries, in-band vs. protocol
+  error policy
   (handler exceptions → `isError: true` results; dispatch faults →
   JSON-RPC errors), the legacy-`initialize` rejection that names
   supported versions. Knows nothing about bytes or streams.

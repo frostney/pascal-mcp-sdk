@@ -84,6 +84,20 @@ async function battery(label, versionNegotiation) {
     'resources/read: greeting text',
   );
 
+  const prompts = await client.listPrompts();
+  check(
+    prompts.prompts?.[0]?.name === 'greet',
+    'prompts/list: greet present',
+  );
+  const prompt = await client.getPrompt({
+    name: 'greet',
+    arguments: { name: 'Ada' },
+  });
+  check(
+    prompt.messages?.[0]?.content?.text?.includes('Ada'),
+    'prompts/get: argument woven into message (validated shape)',
+  );
+
   // Unknown tool must surface as a protocol error (-32602), not a result.
   let unknownRejected = false;
   try {

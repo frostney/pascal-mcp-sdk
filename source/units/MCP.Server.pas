@@ -23,10 +23,12 @@ unit MCP.Server;
 //     server/discover                  (mandatory in 2026-07-28)
 //     tools/list, tools/call
 //     resources/list, resources/read
+//     prompts/list, prompts/get
 //   legacy era (dual-era mode, after initialize):
 //     initialize, ping
 //     tools/list, tools/call
 //     resources/list, resources/read
+//     prompts/list, prompts/get
 //     — responses omit the modern-only stamps (resultType, serverInfo
 //       _meta, ttlMs/cacheScope) and resource-not-found is the legacy
 //       -32002, so each era sees its own wire dialect
@@ -120,6 +122,35 @@ type
     Method: TMCPResourceMethod;
   end;
 
+  // Prompt handlers return the GetPromptResult "messages" array
+  // (owned; use MCPMessages / MCPUserMessage / MCPAssistantMessage).
+  // Prompt errors are protocol errors per spec (-32602 for unknown
+  // prompts and missing required arguments, -32603 for handler
+  // failures) — unlike tools, there is no in-band isError channel.
+  TMCPPromptHandler = function(AArguments: TJSONObject;
+    const ACtx: TMCPRequestContext): TJSONArray;
+  TMCPPromptMethod = function(AArguments: TJSONObject;
+    const ACtx: TMCPRequestContext): TJSONArray of object;
+
+  TMCPPromptRegistration = record
+    Definition: TJSONObject; // owned: name/description/arguments
+    Description: string;     // echoed as GetPromptResult.description
+    Handler: TMCPPromptHandler;
+    Method: TMCPPromptMethod;
+  end;
+
+  // Fluent declaration of a prompt's flat argument list (name /
+  // description / required — prompts do not use JSON Schema). Same
+  // value semantics as TMCPSchema: registration calls Build.
+  TMCPPromptArguments = record
+  private
+    FList: TJSONArray;
+  public
+    function Add(const AName: string; const ADescription: string = '';
+      ARequired: Boolean = True): TMCPPromptArguments;
+    function Build: TJSONArray;
+  end;
+
   TMCPServer = class
   private
     FName: string;
@@ -138,6 +169,7 @@ type
     FLegacyClientCapabilities: TJSONObject; // owned clone from initialize
     FTools: array of TMCPToolRegistration;
     FResources: array of TMCPResourceRegistration;
+    FPrompts: array of TMCPPromptRegistration;
 
     function ParseSchema(const ASchemaJson, AToolName: string): TJSONObject;
     function BuildToolDefinition(const AName, ADescription,
@@ -152,6 +184,11 @@ type
       const AStaticText: string; AHasStaticText: Boolean);
     function FindTool(const AName: string): Integer;
     function FindResource(const AUri: string): Integer;
+    function FindPrompt(const AName: string): Integer;
+    procedure AddPrompt(const AName, ADescription: string;
+      AArguments: TJSONArray; AHandler: TMCPPromptHandler;
+      AMethod: TMCPPromptMethod);
+    function ServerCapabilities: TJSONObject;
 
     function DispatchRequest(const AMessage: TJSONRPCMessage): string;
     function DispatchLegacyRequest(const AMessage: TJSONRPCMessage): string;
@@ -164,6 +201,10 @@ type
     function HandleResourcesList(const AMessage: TJSONRPCMessage;
       ALegacy: Boolean): string;
     function HandleResourcesRead(const AMessage: TJSONRPCMessage;
+      const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
+    function HandlePromptsList(const AMessage: TJSONRPCMessage;
+      ALegacy: Boolean): string;
+    function HandlePromptsGet(const AMessage: TJSONRPCMessage;
       const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
     function ResultResponse(const AMessage: TJSONRPCMessage;
       AResult: TJSONObject; ALegacy: Boolean): string;
@@ -249,6 +290,20 @@ type
     procedure RegisterResource(const AUri, AName, AMimeType: string;
       AMethod: TMCPResourceMethod; const ADescription: string = ''); overload;
 
+    // Prompts (prompts/list + prompts/get). Argument-less overloads
+    // and overloads with a fluent argument list; registration takes
+    // ownership of the built arguments.
+    procedure RegisterPrompt(const AName, ADescription: string;
+      AHandler: TMCPPromptHandler); overload;
+    procedure RegisterPrompt(const AName, ADescription: string;
+      AMethod: TMCPPromptMethod); overload;
+    procedure RegisterPrompt(const AName, ADescription: string;
+      const AArguments: TMCPPromptArguments;
+      AHandler: TMCPPromptHandler); overload;
+    procedure RegisterPrompt(const AName, ADescription: string;
+      const AArguments: TMCPPromptArguments;
+      AMethod: TMCPPromptMethod); overload;
+
     // The core entry point: one inbound line in, at most one response
     // line out. Returns True when AResponse must be written (requests
     // and malformed input), False when there is nothing to send
@@ -257,6 +312,7 @@ type
 
     function ToolCount: Integer;
     function ResourceCount: Integer;
+    function PromptCount: Integer;
   end;
 
   EMCPServer = class(Exception);
@@ -269,7 +325,73 @@ function MCPStructuredResult(const AText: string;
 function MCPTextContents(const AUri, AMimeType, AText: string): TJSONArray;
 function MCPBlobContents(const AUri, AMimeType, ABase64: string): TJSONArray;
 
+// Prompt builders: a fresh argument list to chain onto, and message
+// constructors for prompt handlers.
+function PromptArguments: TMCPPromptArguments;
+function MCPPromptMessage(const ARole, AText: string): TJSONObject;
+function MCPUserMessage(const AText: string): TJSONObject;
+function MCPAssistantMessage(const AText: string): TJSONObject;
+function MCPMessages(const AMessages: array of TJSONObject): TJSONArray;
+
 implementation
+
+{ ───────── prompt builders ───────── }
+
+function PromptArguments: TMCPPromptArguments;
+begin
+  Result.FList := TJSONArray.Create;
+end;
+
+function TMCPPromptArguments.Add(const AName: string;
+  const ADescription: string; ARequired: Boolean): TMCPPromptArguments;
+var
+  Arg: TJSONObject;
+begin
+  Arg := TJSONObject.Create;
+  Arg.Add('name', AName);
+  if ADescription <> '' then
+    Arg.Add('description', ADescription);
+  if ARequired then
+    Arg.Add('required', True);
+  FList.Add(Arg);
+  Result := Self;
+end;
+
+function TMCPPromptArguments.Build: TJSONArray;
+begin
+  Result := FList;
+end;
+
+function MCPPromptMessage(const ARole, AText: string): TJSONObject;
+var
+  Content: TJSONObject;
+begin
+  Content := TJSONObject.Create;
+  Content.Add('type', 'text');
+  Content.Add('text', AText);
+  Result := TJSONObject.Create;
+  Result.Add('role', ARole);
+  Result.Add('content', Content);
+end;
+
+function MCPUserMessage(const AText: string): TJSONObject;
+begin
+  Result := MCPPromptMessage('user', AText);
+end;
+
+function MCPAssistantMessage(const AText: string): TJSONObject;
+begin
+  Result := MCPPromptMessage('assistant', AText);
+end;
+
+function MCPMessages(const AMessages: array of TJSONObject): TJSONArray;
+var
+  I: Integer;
+begin
+  Result := TJSONArray.Create;
+  for I := 0 to High(AMessages) do
+    Result.Add(AMessages[I]);
+end;
 
 { ───────── content builders ───────── }
 
@@ -344,8 +466,21 @@ begin
     FTools[I].Definition.Free;
   for I := 0 to High(FResources) do
     FResources[I].Definition.Free;
+  for I := 0 to High(FPrompts) do
+    FPrompts[I].Definition.Free;
   FLegacyClientCapabilities.Free;
   inherited Destroy;
+end;
+
+// The capability objects stay empty: no listChanged / subscribe —
+// registries are fixed after startup, so there is nothing to notify.
+// Shared by server/discover (modern) and initialize (legacy).
+function TMCPServer.ServerCapabilities: TJSONObject;
+begin
+  Result := TJSONObject.Create;
+  Result.Add('tools', TJSONObject.Create);
+  Result.Add('resources', TJSONObject.Create);
+  Result.Add('prompts', TJSONObject.Create);
 end;
 
 { ───────── TMCPServer: registration ───────── }
@@ -687,6 +822,64 @@ begin
   Result := -1;
 end;
 
+function TMCPServer.FindPrompt(const AName: string): Integer;
+var
+  I: Integer;
+begin
+  for I := 0 to High(FPrompts) do
+    if FPrompts[I].Definition.Get('name', '') = AName then
+      Exit(I);
+  Result := -1;
+end;
+
+procedure TMCPServer.AddPrompt(const AName, ADescription: string;
+  AArguments: TJSONArray; AHandler: TMCPPromptHandler;
+  AMethod: TMCPPromptMethod);
+var
+  Definition: TJSONObject;
+begin
+  if FindPrompt(AName) >= 0 then
+  begin
+    AArguments.Free;
+    raise EMCPServer.CreateFmt('Prompt "%s" is already registered', [AName]);
+  end;
+  Definition := TJSONObject.Create;
+  Definition.Add('name', AName);
+  if ADescription <> '' then
+    Definition.Add('description', ADescription);
+  if AArguments <> nil then
+    Definition.Add('arguments', AArguments);
+  SetLength(FPrompts, Length(FPrompts) + 1);
+  FPrompts[High(FPrompts)].Definition := Definition;
+  FPrompts[High(FPrompts)].Description := ADescription;
+  FPrompts[High(FPrompts)].Handler := AHandler;
+  FPrompts[High(FPrompts)].Method := AMethod;
+end;
+
+procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
+  AHandler: TMCPPromptHandler);
+begin
+  AddPrompt(AName, ADescription, nil, AHandler, nil);
+end;
+
+procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
+  AMethod: TMCPPromptMethod);
+begin
+  AddPrompt(AName, ADescription, nil, nil, AMethod);
+end;
+
+procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
+  const AArguments: TMCPPromptArguments; AHandler: TMCPPromptHandler);
+begin
+  AddPrompt(AName, ADescription, AArguments.Build, AHandler, nil);
+end;
+
+procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
+  const AArguments: TMCPPromptArguments; AMethod: TMCPPromptMethod);
+begin
+  AddPrompt(AName, ADescription, AArguments.Build, nil, AMethod);
+end;
+
 function TMCPServer.ToolCount: Integer;
 begin
   Result := Length(FTools);
@@ -695,6 +888,11 @@ end;
 function TMCPServer.ResourceCount: Integer;
 begin
   Result := Length(FResources);
+end;
+
+function TMCPServer.PromptCount: Integer;
+begin
+  Result := Length(FPrompts);
 end;
 
 { ───────── TMCPServer: dispatch ───────── }
@@ -799,6 +997,10 @@ begin
     Exit(HandleResourcesList(AMessage, False));
   if AMessage.Method = 'resources/read' then
     Exit(HandleResourcesRead(AMessage, Ctx, False));
+  if AMessage.Method = 'prompts/list' then
+    Exit(HandlePromptsList(AMessage, False));
+  if AMessage.Method = 'prompts/get' then
+    Exit(HandlePromptsGet(AMessage, Ctx, False));
 
   Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
     'Method not found: ' + AMessage.Method);
@@ -830,6 +1032,10 @@ begin
     Exit(HandleResourcesList(AMessage, True));
   if AMessage.Method = 'resources/read' then
     Exit(HandleResourcesRead(AMessage, LegacyContext, True));
+  if AMessage.Method = 'prompts/list' then
+    Exit(HandlePromptsList(AMessage, True));
+  if AMessage.Method = 'prompts/get' then
+    Exit(HandlePromptsGet(AMessage, LegacyContext, True));
 
   Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
     'Method not found: ' + AMessage.Method);
@@ -873,9 +1079,7 @@ begin
     FLegacyClientCapabilities := TJSONObject(CapsData.Clone);
   FLegacyInitialized := True;
 
-  Capabilities := TJSONObject.Create;
-  Capabilities.Add('tools', TJSONObject.Create);
-  Capabilities.Add('resources', TJSONObject.Create);
+  Capabilities := ServerCapabilities;
   ServerInfo := TJSONObject.Create;
   ServerInfo.Add('name', FName);
   ServerInfo.Add('version', FVersion);
@@ -927,11 +1131,7 @@ begin
   Versions := TJSONArray.Create;
   Versions.Add(MCP_PROTOCOL_VERSION);
 
-  // The capability objects stay empty: no listChanged / subscribe —
-  // registries are fixed after startup, so there is nothing to notify.
-  Capabilities := TJSONObject.Create;
-  Capabilities.Add('tools', TJSONObject.Create);
-  Capabilities.Add('resources', TJSONObject.Create);
+  Capabilities := ServerCapabilities;
 
   // serverInfo is a required TOP-LEVEL DiscoverResult field in the RC
   // wire schema — the _meta stamp alone is not enough; the official
@@ -1124,6 +1324,99 @@ begin
   if not ALegacy then
     AddCacheFields(ReadResult, ReadTtlMs);
   Result := ResultResponse(AMessage, ReadResult, ALegacy);
+end;
+
+function TMCPServer.HandlePromptsList(const AMessage: TJSONRPCMessage;
+  ALegacy: Boolean): string;
+var
+  ListResult: TJSONObject;
+  Prompts: TJSONArray;
+  I: Integer;
+begin
+  Prompts := TJSONArray.Create;
+  for I := 0 to High(FPrompts) do
+    Prompts.Add(FPrompts[I].Definition.Clone);
+  ListResult := TJSONObject.Create;
+  ListResult.Add('prompts', Prompts);
+  if not ALegacy then
+    AddCacheFields(ListResult, FCacheTtlMs);
+  Result := ResultResponse(AMessage, ListResult, ALegacy);
+end;
+
+function TMCPServer.HandlePromptsGet(const AMessage: TJSONRPCMessage;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
+var
+  NameData, ArgsData, DeclaredData: TJSONData;
+  PromptName: string;
+  Index, I: Integer;
+  Arguments, OwnedEmpty, GetResult, Declared: TJSONObject;
+  DeclaredArgs: TJSONArray;
+  Messages: TJSONArray;
+begin
+  NameData := AMessage.Params.Find('name');
+  if (NameData = nil) or (NameData.JSONType <> jtString) then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: name must be a string'));
+  PromptName := NameData.AsString;
+
+  Index := FindPrompt(PromptName);
+  if Index < 0 then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Unknown prompt: ' + PromptName));
+
+  ArgsData := AMessage.Params.Find('arguments');
+  if (ArgsData <> nil) and (ArgsData.JSONType <> jtObject) then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: arguments must be an object'));
+
+  OwnedEmpty := nil;
+  if ArgsData <> nil then
+    Arguments := TJSONObject(ArgsData)
+  else
+  begin
+    OwnedEmpty := TJSONObject.Create;
+    Arguments := OwnedEmpty;
+  end;
+
+  try
+    // Missing required arguments are protocol errors for prompts
+    // (spec: -32602), unlike the tools' in-band isError channel.
+    DeclaredData := FPrompts[Index].Definition.Find('arguments');
+    if (DeclaredData <> nil) and (DeclaredData.JSONType = jtArray) then
+    begin
+      DeclaredArgs := TJSONArray(DeclaredData);
+      for I := 0 to DeclaredArgs.Count - 1 do
+      begin
+        Declared := TJSONObject(DeclaredArgs[I]);
+        if Declared.Get('required', False) and
+          (Arguments.Find(Declared.Get('name', '')) = nil) then
+          Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+            'Missing required argument "' + Declared.Get('name', '') + '"'));
+      end;
+    end;
+
+    try
+      if Assigned(FPrompts[Index].Method) then
+        Messages := FPrompts[Index].Method(Arguments, ACtx)
+      else
+        Messages := FPrompts[Index].Handler(Arguments, ACtx);
+    except
+      on E: Exception do
+        Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
+          'Prompt handler failed: ' + E.Message));
+    end;
+    if Messages = nil then
+      Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
+        'Prompt handler for "' + PromptName + '" returned no messages'));
+  finally
+    OwnedEmpty.Free;
+  end;
+
+  GetResult := TJSONObject.Create;
+  if FPrompts[Index].Description <> '' then
+    GetResult.Add('description', FPrompts[Index].Description);
+  GetResult.Add('messages', Messages);
+  Result := ResultResponse(AMessage, GetResult, ALegacy);
 end;
 
 end.
