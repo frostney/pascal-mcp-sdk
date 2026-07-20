@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "skills": {
+    "create-issue": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "create-issue/SKILL.md",
+      "computedHash": "93bb1928f0998a9196323769320f9ce5a7f8cec910d56dc69bb705586108916d"
+    },
+    "create-pr": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "create-pr/SKILL.md",
+      "computedHash": "974dfa9074f2c84bb651a05d0e28d2b6fb40767862b87f4cc95195ea5b3da799"
+    },
+    "domain-modeling": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/domain-modeling/SKILL.md",
+      "computedHash": "363cb0f53b0b431e7c00086ad1f823500b7e1b70b5616ee969c979f0934e9e6e"
+    },
+    "git-workflow": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "git-workflow/SKILL.md",
+      "computedHash": "43054469e8e1bc41ad19e3fcb8a6a1872f01c19b70c7a1561b43419ee06073bd"
+    },
+    "grill-with-docs": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/grill-with-docs/SKILL.md",
+      "computedHash": "9c460cbd94fd3c63cdef967dbdb6e66ca687103cdc380cd37834e4d10b738f78"
+    },
+    "grilling": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/productivity/grilling/SKILL.md",
+      "computedHash": "368d3dd7251247c69f3656d93dc83c8f1577792eacac2111f1e7981db2ece49b"
+    },
+    "implement-idea": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "implement-idea/SKILL.md",
+      "computedHash": "e7a33b2ebecf370cda52885da9bcc716dac9a7be6e35921fdde9ffcd16890ce7"
+    },
+    "implement-issue": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "implement-issue/SKILL.md",
+      "computedHash": "9a79e3051f972351181a384e628853730b7865a7170cec5d1d79a654534a98ac"
+    },
+    "improve-codebase-architecture": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/improve-codebase-architecture/SKILL.md",
+      "computedHash": "66e8a50c83c3c724fcfe0769701b665c56cec220cc4f49cc1aee8bdfc07de94a"
+    },
+    "native-nostalgia-stack": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "native-nostalgia-stack/SKILL.md",
+      "computedHash": "8bd127a7c047d4254cb4a1ef0bb8f51ce62cf55db43f3b1ccb6eb48645eeb79f"
+    },
+    "project-structure": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "project-structure/SKILL.md",
+      "computedHash": "7c58c0a24ddbe1881bd151bdcb47a607060e5ece48953abe6434b1ca860e402f"
+    },
+    "roadmap-review": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "roadmap-review/SKILL.md",
+      "computedHash": "13851a5016e0dedcc4552e900451866b72bd54b81b33eec5d2c2e1c1c8744152"
+    },
+    "software-engineering-excellence": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "software-engineering-excellence/SKILL.md",
+      "computedHash": "280adbf81867bd3d6fdf012d61206e016fc22df60f3856433aca3c2ee83bbd69"
+    }
+  }
+}
