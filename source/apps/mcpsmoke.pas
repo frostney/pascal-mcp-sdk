@@ -28,6 +28,7 @@ const
     '"io.modelcontextprotocol/clientInfo":{"name":"mcpsmoke","version":"0.1.0"},' +
     '"io.modelcontextprotocol/clientCapabilities":{}}';
   UTF8_PAYLOAD = 'h' + #$C3#$A9 + 'llo ' + #$E4#$B8#$96 + #$E7#$95#$8C;
+  UTF8_WORLD = #$E4#$B8#$96 + #$E7#$95#$8C;
 
 var
   Failures: Integer = 0;
@@ -251,6 +252,14 @@ begin
       META_MODERN + '}}', ResponseLine);
     Check(Pos('"text" : "' + UTF8_PAYLOAD + '"', ResponseLine) > 0,
       'tools/call echo: non-ASCII bytes mirrored as UTF-8');
+    Response.Free;
+
+    Response := RoundTripWithLine(Demo,
+      '{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{' +
+      '"name":"echo","arguments":{"message":"a\u4e16\u754cb"},' +
+      META_MODERN + '}}', ResponseLine);
+    Check(Pos('"text" : "a' + UTF8_WORLD + 'b"', ResponseLine) > 0,
+      'tools/call echo: adjacent escapes mirrored as exact UTF-8 bytes');
     Response.Free;
 
     // Raw handlers validate arguments against their advertised schema.

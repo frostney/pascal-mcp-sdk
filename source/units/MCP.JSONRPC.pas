@@ -13,7 +13,9 @@ unit MCP.JSONRPC;
 //
 // MCP transports carry UTF-8 JSON. This bottom serialization unit links
 // the platform RTL widestring manager so fpjson conversions preserve
-// UTF-8 bytes for every consumer, including sans-I/O embeddings.
+// UTF-8 bytes for every consumer, including sans-I/O embeddings. Its
+// inbound parser also normalizes non-ASCII Unicode escapes before the
+// FPC 3.2.2 scanner sees them, avoiding its adjacent-escape corruption.
 // UTF-8 transport requirement verified 2026-07-20:
 // https://modelcontextprotocol.io/specification/draft/basic/transports/stdio
 //
@@ -92,11 +94,125 @@ function SerializeCompact(AData: TJSONData): string;
 
 implementation
 
+function HexDigitValue(AChar: Char): Integer;
+begin
+  case AChar of
+    '0'..'9': Result := Ord(AChar) - Ord('0');
+    'a'..'f': Result := Ord(AChar) - Ord('a') + 10;
+    'A'..'F': Result := Ord(AChar) - Ord('A') + 10;
+    else
+      Result := -1;
+  end;
+end;
+
+function TryReadCodeUnit(const ALine: string; AStart: Integer;
+  out ACodeUnit: Cardinal): Boolean;
+var
+  Index, Value: Integer;
+begin
+  Result := False;
+  if AStart + 3 > Length(ALine) then
+    Exit;
+  ACodeUnit := 0;
+  for Index := AStart to AStart + 3 do
+  begin
+    Value := HexDigitValue(ALine[Index]);
+    if Value < 0 then
+      Exit;
+    ACodeUnit := (ACodeUnit shl 4) or Cardinal(Value);
+  end;
+  Result := True;
+end;
+
+procedure AppendUTF8CodePoint(var AOutput: string; var AOutputIndex: Integer;
+  ACodePoint: Cardinal);
+begin
+  if ACodePoint <= $7FF then
+  begin
+    Inc(AOutputIndex);
+    AOutput[AOutputIndex] := Chr($C0 or (ACodePoint shr 6));
+    Inc(AOutputIndex);
+    AOutput[AOutputIndex] := Chr($80 or (ACodePoint and $3F));
+  end
+  else
+  begin
+    Inc(AOutputIndex);
+    AOutput[AOutputIndex] := Chr($E0 or (ACodePoint shr 12));
+    Inc(AOutputIndex);
+    AOutput[AOutputIndex] := Chr($80 or ((ACodePoint shr 6) and $3F));
+    Inc(AOutputIndex);
+    AOutput[AOutputIndex] := Chr($80 or (ACodePoint and $3F));
+  end;
+end;
+
+// Accepted trade-off: parse failures remain -32700, but fpjson positions refer
+// to the normalized line rather than the original wire line because decoded
+// escapes shrink byte offsets.
+function DecodeNonASCIIUnicodeEscapes(const ALine: string): string;
+var
+  CodeUnit: Cardinal;
+  InString: Boolean;
+  InputIndex, OutputIndex: Integer;
+begin
+  SetLength(Result, Length(ALine));
+  InputIndex := 1;
+  OutputIndex := 0;
+  InString := False;
+  while InputIndex <= Length(ALine) do
+  begin
+    if ALine[InputIndex] = '"' then
+    begin
+      Inc(OutputIndex);
+      Result[OutputIndex] := ALine[InputIndex];
+      InString := not InString;
+      Inc(InputIndex);
+    end
+    else if InString and (ALine[InputIndex] = '\') and
+      (InputIndex < Length(ALine)) then
+    begin
+      if ALine[InputIndex + 1] <> 'u' then
+      begin
+        Inc(OutputIndex);
+        Result[OutputIndex] := ALine[InputIndex];
+        Inc(OutputIndex);
+        Result[OutputIndex] := ALine[InputIndex + 1];
+        Inc(InputIndex, 2);
+      end
+      else if not TryReadCodeUnit(ALine, InputIndex + 2, CodeUnit) then
+      begin
+        Inc(OutputIndex);
+        Result[OutputIndex] := ALine[InputIndex];
+        Inc(InputIndex);
+      end
+      else if (CodeUnit >= $80) and
+        not ((CodeUnit >= $D800) and (CodeUnit <= $DFFF)) then
+      begin
+        AppendUTF8CodePoint(Result, OutputIndex, CodeUnit);
+        Inc(InputIndex, 6);
+      end
+      else
+      begin
+        Move(ALine[InputIndex], Result[OutputIndex + 1], 6);
+        Inc(OutputIndex, 6);
+        Inc(InputIndex, 6);
+      end;
+    end
+    else
+    begin
+      Inc(OutputIndex);
+      Result[OutputIndex] := ALine[InputIndex];
+      Inc(InputIndex);
+    end;
+  end;
+  SetLength(Result, OutputIndex);
+end;
+
 function ParseJson(const ALine: string): TJSONData;
 var
   Parser: TJSONParser;
 begin
-  Parser := TJSONParser.Create(ALine, [joUTF8, joStrict]);
+  Parser := TJSONParser.Create(DecodeNonASCIIUnicodeEscapes(ALine),
+    [joUTF8, joStrict]);
   try
     Result := Parser.Parse;
   finally
