@@ -150,7 +150,7 @@ procedure TParseInvalid.TestBatchRejected;
 var
   Msg: TJSONRPCMessage;
 begin
-  // MCP removed JSON-RPC batching; arrays are invalid requests.
+  // The advertised revisions use single-message receive; arrays are invalid.
   Msg := ParseJSONRPCMessage(
     '[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]');
   Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkInvalid));
@@ -216,7 +216,8 @@ procedure TParseInvalid.SetupTests;
 begin
   Test('unparseable input → -32700', TestGarbage);
   Test('non-object → -32600', TestNonObject);
-  Test('batch array → -32600 (MCP has no batching)', TestBatchRejected);
+  Test('batch array → -32600 (advertised revisions are single-message)',
+    TestBatchRejected);
   Test('jsonrpc ≠ "2.0" → -32600', TestWrongVersion);
   Test('missing method → -32600', TestMissingMethod);
   Test('null id → -32600 (MCP forbids null ids)', TestNullId);

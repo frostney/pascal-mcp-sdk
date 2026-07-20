@@ -139,6 +139,7 @@ type
   public
     procedure SetupTests; override;
     procedure TestKnownVersionEchoed;
+    procedure TestBatchRevisionAnswersLatestLegacy;
     procedure TestUnknownVersionAnswersLatestLegacy;
     procedure TestInitializeResultShape;
     procedure TestRequestBeforeInitialize;
@@ -1345,6 +1346,18 @@ begin
   Response.Free;
 end;
 
+procedure TLegacyEra.TestBatchRevisionAnswersLatestLegacy;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-03-26","capabilities":{}}}');
+  Expect<string>(
+    TJSONObject(Response.Find('result')).Get('protocolVersion', ''))
+    .ToBe('2025-11-25');
+  Response.Free;
+end;
+
 procedure TLegacyEra.TestUnknownVersionAnswersLatestLegacy;
 var
   Response: TJSONObject;
@@ -1487,6 +1500,8 @@ end;
 procedure TLegacyEra.SetupTests;
 begin
   Test('initialize echoes a known legacy version', TestKnownVersionEchoed);
+  Test('2025-03-26 initialize → 2025-11-25',
+    TestBatchRevisionAnswersLatestLegacy);
   Test('unknown version → latest legacy answered',
     TestUnknownVersionAnswersLatestLegacy);
   Test('initialize result shape, unstamped', TestInitializeResultShape);

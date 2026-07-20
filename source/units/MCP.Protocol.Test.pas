@@ -45,6 +45,12 @@ type
     procedure TestIdempotent;
   end;
 
+  TLegacyVersions = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestBatchRevisionExcluded;
+  end;
+
 const
   VALID_META =
     '{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
@@ -300,9 +306,23 @@ begin
   Test('stamping is idempotent', TestIdempotent);
 end;
 
+{ ───────── legacy versions ───────── }
+
+procedure TLegacyVersions.TestBatchRevisionExcluded;
+begin
+  Expect<Boolean>(IsLegacyProtocolVersion('2025-03-26')).ToBe(False);
+end;
+
+procedure TLegacyVersions.SetupTests;
+begin
+  Test('2025-03-26 batch revision excluded', TestBatchRevisionExcluded);
+end;
+
 begin
   TestRunnerProgram.AddSuite(
     TMetaValidation.Create('Protocol: _meta validation'));
   TestRunnerProgram.AddSuite(TStamping.Create('Protocol: result stamping'));
+  TestRunnerProgram.AddSuite(
+    TLegacyVersions.Create('Protocol: legacy versions'));
   TestRunnerProgram.Run;
 end.

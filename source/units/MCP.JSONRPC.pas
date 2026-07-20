@@ -1,13 +1,15 @@
 unit MCP.JSONRPC;
 
 // JSON-RPC 2.0 message layer, restricted to the profile MCP mandates
-// (spec revision 2026-07-28, "Base Protocol"): every message is a
-// single JSON object — batching is not part of MCP — request ids are
-// strings or numbers and MUST NOT be null, and params, when present,
+// (spec revision 2026-07-28, "Base Protocol"): every accepted message
+// is a single JSON object. The batch-requiring 2025-03-26 legacy
+// revision is deliberately not advertised by this library. Request ids
+// are strings or numbers and MUST NOT be null, and params, when present,
 // is an object. Wire framing (one message per line) belongs to the
-// transport (MCP.Transport.Stdio); this unit only turns one line into
-// a decoded message and result/error payloads back into compact
-// single-line JSON.
+// transport (MCP.Transport.Stdio); this unit only turns one line into a
+// decoded message and result/error payloads back into compact single-line
+// JSON. Batch requirement verified 2026-07-20:
+// modelcontextprotocol.io/specification/2025-03-26/basic
 //
 // Ownership: TJSONRPCMessage.Raw owns the whole parse tree; Id and
 // Params are borrowed views into it. Free with FreeJSONRPCMessage.

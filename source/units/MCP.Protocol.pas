@@ -35,9 +35,13 @@ const
   // The surface pascal-mcp-sdk serves (tools/list+call, resources) is
   // wire-stable across these: later revisions only added fields
   // (structuredContent, title) that older clients ignore.
+  // 2025-03-26 is deliberately omitted because its Base Protocol requires
+  // receivers to accept JSON-RPC batches, which this library does not.
+  // Verified 2026-07-20:
+  // modelcontextprotocol.io/specification/2025-03-26/basic
   LATEST_LEGACY_PROTOCOL_VERSION = '2025-11-25';
-  LEGACY_PROTOCOL_VERSIONS: array[0..3] of string = (
-    '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05');
+  LEGACY_PROTOCOL_VERSIONS: array[0..2] of string = (
+    '2025-11-25', '2025-06-18', '2024-11-05');
 
   // Legacy-era resource-not-found code (2025-11-25 and earlier). The
   // modern revision replaced it with -32602 and forbids emitting it;
