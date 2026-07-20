@@ -1,6 +1,6 @@
 program mcpdemo;
 
-// Example stdio MCP server: the smallest complete pascal-mcp program.
+// Example stdio MCP server: the smallest complete pascal-mcp-sdk program.
 // Exposes two tools (echo, add — one via the simple registration form,
 // one via a full definition with an outputSchema) and one static
 // resource, then serves newline-delimited JSON-RPC on stdin/stdout
@@ -63,11 +63,11 @@ var
   Server: TMcpServer;
 
 begin
-  Server := TMcpServer.Create('pascal-mcp-demo', '0.1.0');
+  Server := TMcpServer.Create('pascal-mcp-sdk-demo', '0.1.0');
   try
     Server.Instructions :=
-      'Demo server for the pascal-mcp library. Use "echo" to mirror a ' +
-      'message, "add" to add two numbers; read mcp://pascal-mcp/greeting ' +
+      'Demo server for the pascal-mcp-sdk library. Use "echo" to mirror a ' +
+      'message, "add" to add two numbers; read mcp://pascal-mcp-sdk/greeting ' +
       'for a hello.';
 
     Server.RegisterTool('echo', 'Echo a message back to the caller',
@@ -77,8 +77,8 @@ begin
 
     Server.RegisterTool(AddToolDefinition, AddHandler);
 
-    Server.RegisterTextResource('mcp://pascal-mcp/greeting', 'greeting',
-      'text/plain', 'Hello from pascal-mcp, a FreePascal MCP server.',
+    Server.RegisterTextResource('mcp://pascal-mcp-sdk/greeting', 'greeting',
+      'text/plain', 'Hello from pascal-mcp-sdk, a FreePascal MCP server.',
       'A static greeting resource');
 
     McpLogToStderr('mcpdemo: serving MCP ' + MCP_PROTOCOL_VERSION +

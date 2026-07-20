@@ -1,7 +1,7 @@
 # Definition of Ready
 
 Use this gate before implementing an issue, idea, refactor, or
-documentation change in pascal-mcp. A requirement may be marked not
+documentation change in pascal-mcp-sdk. A requirement may be marked not
 applicable only with a recorded reason.
 
 ## Ready to investigate

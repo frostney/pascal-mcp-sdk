@@ -43,7 +43,7 @@ duetto's `cli` package joins only if an app grows real flag parsing —
 `lefthook install` once per clone. Pre-commit runs `lwpt format` on
 staged Pascal/TOML files and re-stages what it rewrites
 (`stage_fixed: true`). Heavy gates (build, test, mcpsmoke) live in CI,
-not in the hook. Override the binary with `PASCALMCP_LWPT=...` when
+not in the hook. Override the binary with `PASCAL_MCP_SDK_LWPT=...` when
 lwpt is not on PATH.
 
 ## Changelog — git-cliff

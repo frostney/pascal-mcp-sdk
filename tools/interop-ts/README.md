@@ -1,7 +1,7 @@
 # interop-ts — official-SDK cross-check
 
 Runs the **official MCP TypeScript clients** against `build/mcpdemo`
-over real stdio — the reference-implementation net for pascal-mcp,
+over real stdio — the reference-implementation net for pascal-mcp-sdk,
 mirroring duetto's `tools/crosscheck.py` (which checks against the
 Python `websockets` reference). Two batteries:
 

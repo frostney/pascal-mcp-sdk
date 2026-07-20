@@ -22,8 +22,8 @@ binary into any MCP client as a stdio server.
 ## Build and verify
 
 ```sh
-git clone https://github.com/frostney/pascal-mcp
-cd pascal-mcp
+git clone https://github.com/frostney/pascal-mcp-sdk
+cd pascal-mcp-sdk
 lwpt install       # resolves the dev-time testing dep, writes lwpt.cfg
 lwpt build         # build/mcpdemo, build/mcpsmoke
 lwpt test          # 4 co-located suites

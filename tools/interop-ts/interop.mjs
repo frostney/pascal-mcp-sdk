@@ -1,6 +1,6 @@
 // Cross-implementation interop: the OFFICIAL MCP TypeScript client beta
 // (@modelcontextprotocol/client 2.0.0-beta.4, the 2026-07-28 RC client)
-// against pascal-mcp's mcpdemo over real stdio.
+// against pascal-mcp-sdk's mcpdemo over real stdio.
 //
 // Runs the battery twice:
 //   1. pinned to 2026-07-28  (modern era, no probe-and-fallback)
@@ -72,15 +72,15 @@ async function battery(label, versionNegotiation) {
 
   const resources = await client.listResources();
   check(
-    resources.resources?.[0]?.uri === 'mcp://pascal-mcp/greeting',
+    resources.resources?.[0]?.uri === 'mcp://pascal-mcp-sdk/greeting',
     'resources/list: greeting present',
   );
 
   const contents = await client.readResource({
-    uri: 'mcp://pascal-mcp/greeting',
+    uri: 'mcp://pascal-mcp-sdk/greeting',
   });
   check(
-    contents.contents?.[0]?.text?.includes('Hello from pascal-mcp'),
+    contents.contents?.[0]?.text?.includes('Hello from pascal-mcp-sdk'),
     'resources/read: greeting text',
   );
 

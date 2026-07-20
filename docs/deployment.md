@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-A pascal-mcp server deploys as a single static-ish native binary per
+A pascal-mcp-sdk server deploys as a single static-ish native binary per
 platform: build with `-dPRODUCTION`, ship the executable, register its
 absolute path in the MCP client's server configuration. There is no
 runtime, no config file, no network listener — the client launches the
@@ -25,7 +25,7 @@ natively on Linux, macOS, and Windows instead.
 
 - **The client owns the process.** It launches the binary, writes
   requests to stdin, reads responses from stdout, and closes stdin to
-  shut it down. A pascal-mcp server exits promptly on EOF — do not wrap
+  shut it down. A pascal-mcp-sdk server exits promptly on EOF — do not wrap
   it in a restart loop that fights the client's lifecycle (clients
   restart stateless servers themselves).
 - **stdout is sacred.** Only MCP messages. Anything a server wants to

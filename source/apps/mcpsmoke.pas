@@ -183,9 +183,9 @@ begin
     else
       ServerInfo := nil;
     Check((ServerInfo <> nil) and (ServerInfo.JSONType = jtObject) and
-      (TJSONObject(ServerInfo).Get('name', '') = 'pascal-mcp-demo'),
+      (TJSONObject(ServerInfo).Get('name', '') = 'pascal-mcp-sdk-demo'),
       'discover: serverInfo stamped');
-    Check(PathString(Response, 'result.serverInfo.name') = 'pascal-mcp-demo',
+    Check(PathString(Response, 'result.serverInfo.name') = 'pascal-mcp-sdk-demo',
       'discover: top-level serverInfo (required by RC wire schema)');
     Check(FindPath(Response, 'result.ttlMs') <> nil,
       'discover: ttlMs present (SEP-2549)');
@@ -244,14 +244,14 @@ begin
       '{"jsonrpc":"2.0","id":7,"method":"resources/list","params":{' +
       META_MODERN + '}}');
     Check(PathString(Response, 'result.resources[0].uri') =
-      'mcp://pascal-mcp/greeting',
+      'mcp://pascal-mcp-sdk/greeting',
       'resources/list: greeting present');
     Response.Free;
 
     Response := RoundTrip(Demo,
       '{"jsonrpc":"2.0","id":8,"method":"resources/read","params":{' +
-      '"uri":"mcp://pascal-mcp/greeting",' + META_MODERN + '}}');
-    Check(Pos('Hello from pascal-mcp',
+      '"uri":"mcp://pascal-mcp-sdk/greeting",' + META_MODERN + '}}');
+    Check(Pos('Hello from pascal-mcp-sdk',
       PathString(Response, 'result.contents[0].text')) > 0,
       'resources/read: greeting text');
     Response.Free;
@@ -291,7 +291,7 @@ begin
       '"clientInfo":{"name":"legacy-smoke","version":"0"}}}');
     Check(PathString(Response, 'result.protocolVersion') = '2025-06-18',
       'legacy: initialize echoes 2025-06-18');
-    Check(PathString(Response, 'result.serverInfo.name') = 'pascal-mcp-demo',
+    Check(PathString(Response, 'result.serverInfo.name') = 'pascal-mcp-sdk-demo',
       'legacy: initialize serverInfo');
     Check(FindPath(Response, 'result.resultType') = nil,
       'legacy: initialize result unstamped');

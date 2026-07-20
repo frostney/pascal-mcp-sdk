@@ -54,7 +54,7 @@ procedure TStdioLoop.BeforeEach;
 begin
   FServer := TMcpServer.Create('stdio-test', '1.0');
   FServer.RegisterTool('ping', 'Ping', '{"type":"object"}', PingHandler);
-  FDir := GetTempDir + 'pascal-mcp-stdio-test' + PathDelim;
+  FDir := GetTempDir + 'pascal-mcp-sdk-stdio-test' + PathDelim;
   ForceDirectories(FDir);
 end;
 

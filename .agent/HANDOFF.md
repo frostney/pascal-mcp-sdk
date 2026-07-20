@@ -4,7 +4,7 @@ Updated: 2026-07-20 (session: initial scaffold, branch `scaffold-v1-stdio`)
 
 ## Current task
 
-Scaffold pascal-mcp — FreePascal-native MCP server library, lwpt
+Scaffold pascal-mcp-sdk — FreePascal-native MCP server library, lwpt
 sibling of duetto — **complete and verified locally**. Five commits on
 `scaffold-v1-stdio` off `main`, not pushed (no push/PR without
 explicit maintainer go-ahead).
@@ -35,9 +35,9 @@ no-lwpt path            ✅ fpc @lwpt.cfg -FEbuild source/apps/mcpdemo.pas
 - **Apps**: `mcpdemo` (echo + add + static resource),
   `mcpsmoke` (TProcess E2E battery — CI's smoke leg).
 - **Governance**: AGENTS.md (+CLAUDE.md symlink), VISION.md, DoR, DoD,
-  README (incl. "Using pascal-mcp without lwpt"), docs/ ×5 with
+  README (incl. "Using pascal-mcp-sdk without lwpt"), docs/ ×5 with
   Executive Summaries.
-- **Tooling**: lefthook (PASCALMCP_LWPT override), cliff.toml +
+- **Tooling**: lefthook (PASCAL_MCP_SDK_LWPT override), cliff.toml +
   generated CHANGELOG.md, markdownlint, editorconfig, lwpt-convention
   .gitignore.
 - **CI**: pr.yml (Linux/macOS/win64 + docs job + no-lwpt leg), ci.yml
@@ -117,12 +117,27 @@ and v1 SDK (`legacy-interop.mjs`, the Claude Code client library) —
 and **Claude Code itself: `claude mcp add` + `claude mcp list` health
 check → Connected** (config added and removed cleanly).
 
+## Rename: pascal-mcp → pascal-mcp-sdk (same session, user decision)
+
+After a community-naming survey (language-first is the majority order;
+`<lang>-mcp-sdk` — rust-/cpp-/scala-/ocaml-/raku-/matlab-mcp-sdk — is
+the de facto community convention for unofficial language SDKs, and
+bare `<lang>-mcp` collides with the "MCP server *about* a language"
+crowd, e.g. the Python-based tina4stack/claude-pascal-mcp), the user
+chose **pascal-mcp-sdk**. Renamed end-to-end: GitHub repo (gh repo
+rename; old URLs redirect), local remote, Herakles registration
+(CLI remove/add → `github:frostney/pascal-mcp-sdk`), directory
+(`open-source/pascal-mcp-sdk`), lwpt package name, all docs/source
+references incl. demo identifiers (`pascal-mcp-sdk-demo`,
+`mcp://pascal-mcp-sdk/greeting`) and the lefthook env override
+(`PASCAL_MCP_SDK_LWPT`).
+
 ## Open questions
 
 - **Push + PR**: awaiting maintainer go-ahead. Suggested PR title:
   `feat: v1 stdio MCP server library (stateless 2026-07-28 spec)`.
-- **GitHub repo**: no remote configured yet (`frostney/pascal-mcp`
-  presumably; create + `git push -u origin` when authorized).
+  Remote exists and is renamed: `frostney/pascal-mcp-sdk` (public;
+  only the README stub is pushed).
 - **lwpt CI asset names** assume the same release layout as duetto's
   workflows (they were copied verbatim on that point) — will be proven
   on first CI run.

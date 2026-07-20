@@ -1,6 +1,6 @@
 // Legacy-era interop: the OFFICIAL v1 MCP TypeScript SDK client
 // (@modelcontextprotocol/sdk — the client library today's clients such
-// as Claude Code and Claude Desktop are built on) against pascal-mcp's
+// as Claude Code and Claude Desktop are built on) against pascal-mcp-sdk's
 // mcpdemo over stdio. connect() performs the classic initialize
 // handshake; this proves the dual-era server serves the legacy era a
 // real 2025 client speaks.
@@ -33,7 +33,7 @@ try {
   check(true, 'initialize handshake completed (v1 SDK connect)');
 
   const server = client.getServerVersion();
-  check(server?.name === 'pascal-mcp-demo', 'serverInfo from initialize');
+  check(server?.name === 'pascal-mcp-sdk-demo', 'serverInfo from initialize');
   check(
     typeof client.getInstructions() === 'string' &&
       client.getInstructions().length > 0,
@@ -67,15 +67,15 @@ try {
 
   const resources = await client.listResources();
   check(
-    resources.resources?.[0]?.uri === 'mcp://pascal-mcp/greeting',
+    resources.resources?.[0]?.uri === 'mcp://pascal-mcp-sdk/greeting',
     'resources/list: greeting present',
   );
 
   const contents = await client.readResource({
-    uri: 'mcp://pascal-mcp/greeting',
+    uri: 'mcp://pascal-mcp-sdk/greeting',
   });
   check(
-    contents.contents?.[0]?.text?.includes('Hello from pascal-mcp'),
+    contents.contents?.[0]?.text?.includes('Hello from pascal-mcp-sdk'),
     'resources/read: greeting text',
   );
 

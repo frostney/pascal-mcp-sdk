@@ -32,7 +32,7 @@ const
   MCP_PROTOCOL_VERSION = '2026-07-28';
 
   // Legacy (initialize-handshake) revisions a dual-era server answers.
-  // The surface pascal-mcp serves (tools/list+call, resources) is
+  // The surface pascal-mcp-sdk serves (tools/list+call, resources) is
   // wire-stable across these: later revisions only added fields
   // (structuredContent, title) that older clients ignore.
   LATEST_LEGACY_PROTOCOL_VERSION = '2025-11-25';

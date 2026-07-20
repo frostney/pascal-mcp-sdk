@@ -1,13 +1,13 @@
-# pascal-mcp — FreePascal-native MCP (Model Context Protocol) server library.
+# pascal-mcp-sdk — FreePascal-native MCP (Model Context Protocol) server library.
 # Bootstrapped with `lwpt init`; built/tested/formatted via lwpt.
 
 [package]
-name = "pascal-mcp"
+name = "pascal-mcp-sdk"
 version = "0.1.0"
 # lwpt 0.2.0 discovers dep units through nested manifests, so only
-# pascal-mcp's own source dir is listed here. Dep test files are
+# pascal-mcp-sdk's own source dir is listed here. Dep test files are
 # excluded at fetch time so `lwpt test` (which walks every units dir)
-# only discovers pascal-mcp's own suites; [format] likewise excludes
+# only discovers pascal-mcp-sdk's own suites; [format] likewise excludes
 # .lwpt so the formatter never rewrites fetched modules out from under
 # the lockfile hash.
 units = ["source/units"]

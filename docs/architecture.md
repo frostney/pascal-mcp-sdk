@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-pascal-mcp is four units layered strictly bottom-up: `MCP.JsonRpc`
+pascal-mcp-sdk is four units layered strictly bottom-up: `MCP.JsonRpc`
 (the JSON-RPC 2.0 profile MCP mandates), `MCP.Protocol` (the stateless
 per-request `_meta` model of spec revision 2026-07-28), `MCP.Server`
 (the sans-I/O dispatch core holding the tool/resource registries), and
@@ -113,7 +113,7 @@ Verified 2026-07-20 against the official spec (modelcontextprotocol.io):
   [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/draft/schema.ts)
   and a real RC implementation, not prose alone.
 
-pascal-mcp is a **dual-era server** (spec's compatibility matrix, on
+pascal-mcp-sdk is a **dual-era server** (spec's compatibility matrix, on
 by default): era selection follows how the client opens. A request
 carrying the modern per-request `_meta` protocol-version key is served
 statelessly per 2026-07-28; an `initialize` request selects legacy

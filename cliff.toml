@@ -1,6 +1,6 @@
-# git-cliff configuration for pascal-mcp's CHANGELOG.md.
+# git-cliff configuration for pascal-mcp-sdk's CHANGELOG.md.
 #
-# pascal-mcp uses Conventional Commits from the first commit, so this
+# pascal-mcp-sdk uses Conventional Commits from the first commit, so this
 # config maps commit types directly to changelog sections (mirroring
 # duetto). Preview locally with:
 #
@@ -11,7 +11,7 @@
 header = """
 # Changelog
 
-All notable changes to pascal-mcp are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); entries are generated from Conventional Commits by git-cliff.
+All notable changes to pascal-mcp-sdk are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); entries are generated from Conventional Commits by git-cliff.
 """
 body = """
 {% if version -%}

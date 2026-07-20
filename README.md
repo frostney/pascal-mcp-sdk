@@ -1,4 +1,4 @@
-# pascal-mcp
+# pascal-mcp-sdk
 
 **The first FreePascal-native MCP (Model Context Protocol) server
 library.** Dependency-light, cross-platform (Linux, macOS, Windows),
@@ -76,7 +76,7 @@ lwpt test          # co-located unit suites
 ./build/mcpsmoke   # end-to-end battery against the real subprocess
 ```
 
-## Using pascal-mcp without lwpt
+## Using pascal-mcp-sdk without lwpt
 
 lwpt projects are **zero-install**: the dependency modules under
 `.lwpt/modules/` and the generated FPC response file `lwpt.cfg` are
@@ -101,7 +101,7 @@ fpc -Fusource/units -Fisource/units \
 programs; the library and `mcpdemo` compile with `-Fusource/units`
 alone.)
 
-To **vendor** pascal-mcp into a non-lwpt project, copy
+To **vendor** pascal-mcp-sdk into a non-lwpt project, copy
 `source/units/MCP.*.pas` (minus the `.Test.pas` files) plus
 `source/units/Shared.inc` into your unit path — the library is those
 five files, RTL + fpjson only.
