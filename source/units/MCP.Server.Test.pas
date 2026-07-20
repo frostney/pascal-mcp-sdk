@@ -116,6 +116,8 @@ type
     procedure TestStringTokenPreserved;
     procedure TestLogEmittedAtLevel;
     procedure TestLogFilteredBelowLevel;
+    procedure TestUnknownLogLevelRejected;
+    procedure TestWrongCaseLogLevelRejected;
     procedure TestLogWithoutOptIn;
     procedure TestLegacyProgress;
     procedure TestNoSinkStillServes;
@@ -1130,6 +1132,36 @@ begin
   Response.Free;
 end;
 
+procedure TNotificationEmission.TestUnknownLogLevelRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"noisy","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"io.modelcontextprotocol/logLevel":"verbose"}}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INVALID_PARAMS);
+  Expect<Integer>(FLines.Count).ToBe(0);
+  Response.Free;
+end;
+
+procedure TNotificationEmission.TestWrongCaseLogLevelRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"noisy","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"io.modelcontextprotocol/logLevel":"INFO"}}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INVALID_PARAMS);
+  Expect<Integer>(FLines.Count).ToBe(0);
+  Response.Free;
+end;
+
 procedure TNotificationEmission.TestLogWithoutOptIn;
 var
   Response: TJSONObject;
@@ -1185,6 +1217,10 @@ begin
   Test('log messages emitted at requested level', TestLogEmittedAtLevel);
   Test('log messages below requested level dropped',
     TestLogFilteredBelowLevel);
+  Test('unknown logLevel rejected with -32602',
+    TestUnknownLogLevelRejected);
+  Test('wrong-case logLevel rejected with -32602',
+    TestWrongCaseLogLevelRejected);
   Test('no log messages without the opt-in', TestLogWithoutOptIn);
   Test('legacy era: progress works, logging stays quiet',
     TestLegacyProgress);

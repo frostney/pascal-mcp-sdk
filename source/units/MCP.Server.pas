@@ -553,17 +553,15 @@ end;
 
 { ───────── in-request notifications ───────── }
 
-// RFC 5424 severity rank; higher is more severe. Unknown levels rank
-// lowest so a typo cannot flood the client.
+// RFC 5424 severity rank; higher is more severe. Request thresholds
+// have already been validated by ExtractRequestContext; -1 guards
+// against an invalid level emitted by server code.
 function LogSeverity(const ALevel: string): Integer;
-const
-  LEVELS: array[0..7] of string = ('debug', 'info', 'notice', 'warning',
-    'error', 'critical', 'alert', 'emergency');
 var
   I: Integer;
 begin
-  for I := 0 to High(LEVELS) do
-    if LEVELS[I] = ALevel then
+  for I := Low(MCP_LOG_LEVELS) to High(MCP_LOG_LEVELS) do
+    if MCP_LOG_LEVELS[I] = ALevel then
       Exit(I);
   Result := -1;
 end;

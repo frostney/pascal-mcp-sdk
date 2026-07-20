@@ -33,6 +33,8 @@ type
     procedure TestValidMinimal;
     procedure TestClientInfoExtracted;
     procedure TestLogLevelExtracted;
+    procedure TestUnknownLogLevelRejected;
+    procedure TestWrongCaseLogLevelRejected;
     procedure TestHasCapability;
   end;
 
@@ -217,6 +219,42 @@ begin
   Params.Free;
 end;
 
+procedure TMetaValidation.TestUnknownLogLevelRejected;
+var
+  Params: TJSONObject;
+  Ctx: TMCPRequestContext;
+  MetaErr: TMCPMetaError;
+begin
+  Params := ParseObj(
+    '{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/logLevel":"verbose",' +
+    '"io.modelcontextprotocol/clientCapabilities":{}}}');
+  Expect<Boolean>(
+    ExtractRequestContext(Params, Supported, Ctx, MetaErr)).ToBe(False);
+  Expect<Integer>(MetaErr.Code).ToBe(JSONRPC_INVALID_PARAMS);
+  Expect<Boolean>(Pos('logLevel', MetaErr.Message) > 0).ToBe(True);
+  FreeMetaError(MetaErr);
+  Params.Free;
+end;
+
+procedure TMetaValidation.TestWrongCaseLogLevelRejected;
+var
+  Params: TJSONObject;
+  Ctx: TMCPRequestContext;
+  MetaErr: TMCPMetaError;
+begin
+  Params := ParseObj(
+    '{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/logLevel":"INFO",' +
+    '"io.modelcontextprotocol/clientCapabilities":{}}}');
+  Expect<Boolean>(
+    ExtractRequestContext(Params, Supported, Ctx, MetaErr)).ToBe(False);
+  Expect<Integer>(MetaErr.Code).ToBe(JSONRPC_INVALID_PARAMS);
+  Expect<Boolean>(Pos('logLevel', MetaErr.Message) > 0).ToBe(True);
+  FreeMetaError(MetaErr);
+  Params.Free;
+end;
+
 procedure TMetaValidation.TestHasCapability;
 var
   Params: TJSONObject;
@@ -245,6 +283,8 @@ begin
   Test('minimal valid _meta accepted', TestValidMinimal);
   Test('clientInfo extracted', TestClientInfoExtracted);
   Test('logLevel extracted', TestLogLevelExtracted);
+  Test('unknown logLevel → -32602', TestUnknownLogLevelRejected);
+  Test('wrong-case logLevel → -32602', TestWrongCaseLogLevelRejected);
   Test('HasCapability lookup', TestHasCapability);
 end;
 
