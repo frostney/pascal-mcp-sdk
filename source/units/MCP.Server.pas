@@ -124,9 +124,10 @@ type
 
   // Template readers additionally receive the variables extracted
   // from the URI template match (owned by the server; borrowed by the
-  // reader). Matching is RFC 6570 level 1: {var} captures one or more
-  // characters excluding '/'; variables must be separated by literal
-  // text.
+  // reader). Matching is the RFC 6570 level-1 simple-variable subset:
+  // {var} captures one or more characters excluding '/', variables
+  // must be separated by literal text, and captures remain
+  // percent-encoded.
   TMCPTemplateReader = function(const AUri: string; AVars: TJSONObject;
     const ACtx: TMCPRequestContext): TJSONArray;
   TMCPTemplateMethod = function(const AUri: string; AVars: TJSONObject;
@@ -405,10 +406,13 @@ function MCPStructuredResult(const AText: string;
 function MCPTextContents(const AUri, AMimeType, AText: string): TJSONArray;
 function MCPBlobContents(const AUri, AMimeType, ABase64: string): TJSONArray;
 
-// RFC 6570 level-1 template match: {var} captures one or more
-// characters excluding '/', delimited by the surrounding literal
-// text. On success AVars carries the captured variables (caller
-// frees). Exposed for tests.
+// RFC 6570 level-1 simple-variable template match: {var} captures one
+// or more characters excluding '/', delimited by the complete
+// following literal with backtracking. Captures are raw URI substrings;
+// percent-decoding is deliberately not performed. On success AVars
+// carries the captured variables (caller frees). Exposed for tests.
+// Resource-template semantics verified 2026-07-20:
+// https://modelcontextprotocol.io/specification/draft/server/resources
 function MatchUriTemplate(const ATemplate, AUri: string;
   out AVars: TJSONObject): Boolean;
 
@@ -494,61 +498,119 @@ end;
 
 { ───────── URI templates ───────── }
 
-function MatchUriTemplate(const ATemplate, AUri: string;
-  out AVars: TJSONObject): Boolean;
+function TryValidateUriTemplate(const ATemplate: string;
+  out AError: string): Boolean;
 var
-  TI, UI, CloseBrace, Start: Integer;
-  VarName, Value: string;
-  Delimiter: Char;
+  CloseBrace, Index: Integer;
+  PreviousWasVariable: Boolean;
 begin
   Result := False;
-  AVars := TJSONObject.Create;
-  TI := 1;
-  UI := 1;
-  while TI <= Length(ATemplate) do
+  AError := '';
+  if ATemplate = '' then
   begin
-    if ATemplate[TI] = '{' then
-    begin
-      CloseBrace := TI;
-      while (CloseBrace <= Length(ATemplate)) and
-        (ATemplate[CloseBrace] <> '}') do
-        Inc(CloseBrace);
-      if CloseBrace > Length(ATemplate) then
-        Break; // malformed template: never matches
-      VarName := Copy(ATemplate, TI + 1, CloseBrace - TI - 1);
-      if CloseBrace < Length(ATemplate) then
-        Delimiter := ATemplate[CloseBrace + 1]
-      else
-        Delimiter := #0;
-      // Capture until the literal that follows the variable (or the
-      // end of the URI), never across '/'.
-      Start := UI;
-      while (UI <= Length(AUri)) and (AUri[UI] <> '/') and
-        ((Delimiter = #0) or (AUri[UI] <> Delimiter)) do
-        Inc(UI);
-      Value := Copy(AUri, Start, UI - Start);
-      if Value = '' then
-      begin
-        FreeAndNil(AVars);
-        Exit;
-      end;
-      AVars.Add(VarName, Value);
-      TI := CloseBrace + 1;
-    end
-    else
-    begin
-      if (UI > Length(AUri)) or (AUri[UI] <> ATemplate[TI]) then
-      begin
-        FreeAndNil(AVars);
-        Exit;
-      end;
-      Inc(TI);
-      Inc(UI);
-    end;
+    AError := 'Resource template registration requires a non-empty uriTemplate';
+    Exit;
   end;
-  Result := (TI > Length(ATemplate)) and (UI > Length(AUri));
+  Index := 1;
+  PreviousWasVariable := False;
+  while Index <= Length(ATemplate) do
+  begin
+    if ATemplate[Index] <> '{' then
+    begin
+      PreviousWasVariable := False;
+      Inc(Index);
+      Continue;
+    end;
+    if PreviousWasVariable then
+    begin
+      AError := Format('Invalid resource template "%s": adjacent variables ' +
+        'require separating literal text', [ATemplate]);
+      Exit;
+    end;
+    CloseBrace := Index + 1;
+    while (CloseBrace <= Length(ATemplate)) and
+      (ATemplate[CloseBrace] <> '}') do
+      Inc(CloseBrace);
+    if CloseBrace > Length(ATemplate) then
+    begin
+      AError := Format('Invalid resource template "%s": unclosed variable ' +
+        'at character %d', [ATemplate, Index]);
+      Exit;
+    end;
+    if CloseBrace = Index + 1 then
+    begin
+      AError := Format('Invalid resource template "%s": variable name must ' +
+        'not be empty', [ATemplate]);
+      Exit;
+    end;
+    PreviousWasVariable := True;
+    Index := CloseBrace + 1;
+  end;
+  Result := True;
+end;
+
+function MatchUriTemplate(const ATemplate, AUri: string;
+  out AVars: TJSONObject): Boolean;
+type
+  TVariableCapture = record
+    Name: string;
+    Value: string;
+  end;
+  TVariableCaptures = array of TVariableCapture;
+var
+  Captures: TVariableCaptures;
+  I: Integer;
+  ValidationError: string;
+
+  function MatchFrom(ATemplateIndex, AUriIndex: Integer): Boolean;
+  var
+    CaptureIndex, CloseBrace, MaxValueEnd, ValueEnd: Integer;
+  begin
+    while ATemplateIndex <= Length(ATemplate) do
+    begin
+      if ATemplate[ATemplateIndex] = '{' then
+      begin
+        CloseBrace := ATemplateIndex + 1;
+        while ATemplate[CloseBrace] <> '}' do
+          Inc(CloseBrace);
+        MaxValueEnd := AUriIndex;
+        while (MaxValueEnd <= Length(AUri)) and
+          (AUri[MaxValueEnd] <> '/') do
+          Inc(MaxValueEnd);
+        for ValueEnd := AUriIndex + 1 to MaxValueEnd do
+        begin
+          CaptureIndex := Length(Captures);
+          SetLength(Captures, CaptureIndex + 1);
+          Captures[CaptureIndex].Name := Copy(ATemplate,
+            ATemplateIndex + 1, CloseBrace - ATemplateIndex - 1);
+          Captures[CaptureIndex].Value := Copy(AUri, AUriIndex,
+            ValueEnd - AUriIndex);
+          if MatchFrom(CloseBrace + 1, ValueEnd) then
+            Exit(True);
+          SetLength(Captures, CaptureIndex);
+        end;
+        Exit(False);
+      end;
+      if (AUriIndex > Length(AUri)) or
+        (ATemplate[ATemplateIndex] <> AUri[AUriIndex]) then
+        Exit(False);
+      Inc(ATemplateIndex);
+      Inc(AUriIndex);
+    end;
+    Result := AUriIndex > Length(AUri);
+  end;
+
+begin
+  AVars := nil;
+  if not TryValidateUriTemplate(ATemplate, ValidationError) then
+    Exit(False);
+  SetLength(Captures, 0);
+  Result := MatchFrom(1, 1);
   if not Result then
-    FreeAndNil(AVars);
+    Exit;
+  AVars := TJSONObject.Create;
+  for I := 0 to High(Captures) do
+    AVars.Add(Captures[I].Name, Captures[I].Value);
 end;
 
 { ───────── in-request notifications ───────── }
@@ -1197,7 +1259,10 @@ procedure TMCPServer.AddTemplate(const AUriTemplate, AName, AMimeType,
 var
   I: Integer;
   Definition: TJSONObject;
+  ValidationError: string;
 begin
+  if not TryValidateUriTemplate(AUriTemplate, ValidationError) then
+    raise EMCPServer.Create(ValidationError);
   for I := 0 to High(FTemplates) do
     if FTemplates[I].UriTemplate = AUriTemplate then
       raise EMCPServer.CreateFmt(

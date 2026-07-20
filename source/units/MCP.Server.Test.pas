@@ -6,7 +6,7 @@
   the initialize rejection naming supported versions, method-not-found,
   notifications producing no response, malformed lines answered with
   the right JSON-RPC error, and registration guards (duplicate names,
-  bad schema JSON → EMCPServer). }
+  bad schema JSON and malformed resource templates → EMCPServer). }
 
 program MCP.Server.Test;
 
@@ -87,6 +87,10 @@ type
     procedure TestDuplicateTool;
     procedure TestBadSchema;
     procedure TestDuplicateResource;
+    procedure TestEmptyResourceTemplate;
+    procedure TestEmptyTemplateVariable;
+    procedure TestUnclosedTemplateVariable;
+    procedure TestAdjacentTemplateVariables;
   end;
 
   TResourceTemplates = class(TDispatchSuite)
@@ -97,6 +101,9 @@ type
     procedure TestMatcherRejectsSlash;
     procedure TestMatcherLiteralMismatch;
     procedure TestMatcherTrailingExcess;
+    procedure TestMatcherFullFollowingLiteral;
+    procedure TestMatcherBacktracks;
+    procedure TestMatcherPreservesPercentEncoding;
     procedure TestTemplatesList;
     procedure TestReadViaTemplate;
     procedure TestExactResourceWins;
@@ -350,6 +357,28 @@ function PairReader(const AUri: string; AVars: TJSONObject;
 begin
   Result := MCPTextContents(AUri, 'text/plain',
     AVars.Get('a', '') + '|' + AVars.Get('b', ''));
+end;
+
+procedure ExpectTemplateRegistrationError(const ATemplate,
+  AExpectedMessage: string);
+var
+  ErrorMessage: string;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    ErrorMessage := '';
+    try
+      Server.RegisterResourceTemplate(ATemplate, 'template', 'text/plain',
+        PairReader);
+    except
+      on E: EMCPServer do
+        ErrorMessage := E.Message;
+    end;
+    Expect<string>(ErrorMessage).ToBe(AExpectedMessage);
+  finally
+    Server.Free;
+  end;
 end;
 
 { ───────── shared fixture ───────── }
@@ -1039,11 +1068,39 @@ begin
   end;
 end;
 
+procedure TRegistrationGuards.TestEmptyResourceTemplate;
+begin
+  ExpectTemplateRegistrationError('',
+    'Resource template registration requires a non-empty uriTemplate');
+end;
+
+procedure TRegistrationGuards.TestEmptyTemplateVariable;
+begin
+  ExpectTemplateRegistrationError('mem://item/{}',
+    'Invalid resource template "mem://item/{}": variable name must not be empty');
+end;
+
+procedure TRegistrationGuards.TestUnclosedTemplateVariable;
+begin
+  ExpectTemplateRegistrationError('mem://item/{name',
+    'Invalid resource template "mem://item/{name": unclosed variable at character 12');
+end;
+
+procedure TRegistrationGuards.TestAdjacentTemplateVariables;
+begin
+  ExpectTemplateRegistrationError('mem://item/{group}{name}',
+    'Invalid resource template "mem://item/{group}{name}": adjacent variables require separating literal text');
+end;
+
 procedure TRegistrationGuards.SetupTests;
 begin
   Test('duplicate tool name rejected', TestDuplicateTool);
   Test('invalid schema JSON rejected', TestBadSchema);
   Test('duplicate resource uri rejected', TestDuplicateResource);
+  Test('empty resource template rejected', TestEmptyResourceTemplate);
+  Test('empty template variable rejected', TestEmptyTemplateVariable);
+  Test('unclosed template variable rejected', TestUnclosedTemplateVariable);
+  Test('adjacent template variables rejected', TestAdjacentTemplateVariables);
 end;
 
 { ───────── resource templates ───────── }
@@ -1097,6 +1154,39 @@ begin
   Expect<Boolean>(
     MatchUriTemplate('mem://pair/{a}/x', 'mem://pair/v/xy', Vars))
     .ToBe(False);
+end;
+
+procedure TResourceTemplates.TestMatcherFullFollowingLiteral;
+var
+  Vars: TJSONObject;
+begin
+  Expect<Boolean>(
+    MatchUriTemplate('mcp://example/{name}.json',
+      'mcp://example/a.b.json', Vars)).ToBe(True);
+  Expect<string>(Vars.Get('name', '')).ToBe('a.b');
+  Vars.Free;
+end;
+
+procedure TResourceTemplates.TestMatcherBacktracks;
+var
+  Vars: TJSONObject;
+begin
+  Expect<Boolean>(
+    MatchUriTemplate('mcp://example/{name}.meta.json',
+      'mcp://example/a.meta.meta.json', Vars)).ToBe(True);
+  Expect<string>(Vars.Get('name', '')).ToBe('a.meta');
+  Vars.Free;
+end;
+
+procedure TResourceTemplates.TestMatcherPreservesPercentEncoding;
+var
+  Vars: TJSONObject;
+begin
+  Expect<Boolean>(
+    MatchUriTemplate('mcp://example/{name}',
+      'mcp://example/hello%20world', Vars)).ToBe(True);
+  Expect<string>(Vars.Get('name', '')).ToBe('hello%20world');
+  Vars.Free;
 end;
 
 procedure TResourceTemplates.TestTemplatesList;
@@ -1187,6 +1277,12 @@ begin
   Test('matcher: variables never cross /', TestMatcherRejectsSlash);
   Test('matcher: literal mismatch fails', TestMatcherLiteralMismatch);
   Test('matcher: trailing excess fails', TestMatcherTrailingExcess);
+  Test('matcher: complete following literal delimits variable',
+    TestMatcherFullFollowingLiteral);
+  Test('matcher: backtracks to a later following literal',
+    TestMatcherBacktracks);
+  Test('matcher: percent encoding remains encoded',
+    TestMatcherPreservesPercentEncoding);
   Test('resources/templates/list: shape + cache fields',
     TestTemplatesList);
   Test('resources/read: template match with variables',

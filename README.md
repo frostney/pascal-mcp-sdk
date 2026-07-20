@@ -161,6 +161,11 @@ six files, RTL + fpjson only.
 | `subscriptions/listen`, list-changed | ⏳ follow-up (registries are static in v1) |
 | Streamable HTTP transport | ⏳ follow-up (`MCP.Transport.HTTP` seam reserved) |
 
+Resource-template matching is intentionally limited to simple `{var}`
+expressions. Variables must be non-empty and separated by literal text; matching
+uses the complete following literal and may backtrack. Captured values are passed
+to readers exactly as encoded in the URI—percent-decoding is not performed.
+
 Spec facts verified against the official
 [MCP specification](https://modelcontextprotocol.io/specification/draft/basic/transports/stdio)
 on 2026-07-20, and the full surface **interop-tested against both
