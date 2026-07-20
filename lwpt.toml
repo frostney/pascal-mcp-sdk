@@ -3,7 +3,7 @@
 
 [package]
 name = "pascal-mcp-sdk"
-version = "1.0.0"
+version = "1.0.1"
 # lwpt 0.2.0 discovers dep units through nested manifests, so only
 # pascal-mcp-sdk's own source dir is listed here. Dep test files are
 # excluded at fetch time so `lwpt test` (which walks every units dir)
