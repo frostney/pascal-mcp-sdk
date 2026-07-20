@@ -161,9 +161,18 @@ begin
   Expect<Boolean>(
     ResultObj.FindPath('capabilities.resources') <> nil).ToBe(True);
   Expect<string>(ResultObj.Get('instructions', '')).ToBe('test instructions');
+  // serverInfo is a required TOP-LEVEL DiscoverResult field in the RC
+  // wire schema (the official client beta rejects a discover result
+  // without it), in addition to the _meta stamp.
+  Expect<string>(
+    TJSONObject(ResultObj.Find('serverInfo')).Get('name', ''))
+    .ToBe('test-server');
   Expect<string>(
     TJSONObject(TJSONObject(ResultObj.Find('_meta'))
       .Find(META_KEY_SERVER_INFO)).Get('name', '')).ToBe('test-server');
+  // CacheableResult fields (SEP-2549) are required on discover.
+  Expect<Integer>(ResultObj.Get('ttlMs', -1)).ToBe(300000);
+  Expect<string>(ResultObj.Get('cacheScope', '')).ToBe('private');
   Response.Free;
 end;
 
@@ -249,6 +258,12 @@ begin
   Expect<string>(TJSONObject(Tools[0]).Get('name', '')).ToBe('echo');
   Expect<Boolean>(
     TJSONObject(Tools[0]).Find('inputSchema') <> nil).ToBe(True);
+  // Required CacheableResult fields (SEP-2549).
+  Expect<Integer>(
+    TJSONObject(Response.Find('result')).Get('ttlMs', -1)).ToBe(300000);
+  Expect<string>(
+    TJSONObject(Response.Find('result')).Get('cacheScope', ''))
+    .ToBe('private');
   Response.Free;
 end;
 
@@ -371,6 +386,9 @@ begin
   Expect<string>(
     TJSONData(Response.FindPath('result.contents[0].mimeType')).AsString)
     .ToBe('text/plain');
+  // Static text is fixed for the process lifetime → registry ttl.
+  Expect<Integer>(
+    TJSONObject(Response.Find('result')).Get('ttlMs', -1)).ToBe(300000);
   Response.Free;
 end;
 
@@ -383,6 +401,9 @@ begin
   Expect<string>(
     TJSONData(Response.FindPath('result.contents[0].text')).AsString)
     .ToBe('tick');
+  // Dynamic readers advertise ttl 0 — always revalidate.
+  Expect<Integer>(
+    TJSONObject(Response.Find('result')).Get('ttlMs', -1)).ToBe(0);
   Response.Free;
 end;
 

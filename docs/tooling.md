@@ -77,3 +77,11 @@ Two workflows, mirroring duetto's split (see
   markdownlint job.
 - **ci.yml** — push to main: the same battery as the post-merge
   confirmation signal.
+
+## Cross-implementation check — tools/interop-ts
+
+The official MCP TypeScript client beta run against `build/mcpdemo`
+over stdio, in both pinned-`2026-07-28` and `auto`-probe modes (see
+[tools/interop-ts/README.md](../tools/interop-ts/README.md)). Manual
+for now (the SDK is beta); run it whenever the protocol surface
+changes.

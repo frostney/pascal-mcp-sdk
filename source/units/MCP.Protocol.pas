@@ -40,6 +40,12 @@ const
 
   RESULT_TYPE_COMPLETE = 'complete';
 
+  // CacheableResult scopes (SEP-2549): whether shared intermediaries
+  // may cache a response. "private" is the safe default for local
+  // stdio servers.
+  CACHE_SCOPE_PRIVATE = 'private';
+  CACHE_SCOPE_PUBLIC  = 'public';
+
 type
   // Everything a handler may want to know about the requesting client,
   // extracted from the request's _meta. ClientCapabilities is a

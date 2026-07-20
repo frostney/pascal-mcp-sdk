@@ -185,6 +185,10 @@ begin
     Check((ServerInfo <> nil) and (ServerInfo.JSONType = jtObject) and
       (TJSONObject(ServerInfo).Get('name', '') = 'pascal-mcp-demo'),
       'discover: serverInfo stamped');
+    Check(PathString(Response, 'result.serverInfo.name') = 'pascal-mcp-demo',
+      'discover: top-level serverInfo (required by RC wire schema)');
+    Check(FindPath(Response, 'result.ttlMs') <> nil,
+      'discover: ttlMs present (SEP-2549)');
     Response.Free;
 
     // tools/list.
@@ -197,6 +201,8 @@ begin
       'tools/list: add second');
     Check(FindPath(Response, 'result.tools[1].outputSchema') <> nil,
       'tools/list: add carries outputSchema');
+    Check(PathString(Response, 'result.cacheScope') = 'private',
+      'tools/list: cacheScope present (SEP-2549)');
     Response.Free;
 
     // tools/call echo.

@@ -58,7 +58,7 @@ no-lwpt path            ✅ fpc @lwpt.cfg -FEbuild source/apps/mcpdemo.pas
 2. **Modern-only server** — legacy `initialize` gets the
    spec-recommended diagnostic naming supported versions; dual-era is
    a documented follow-up seam (`ExtractRequestContext` supported-list
-   + a legacy branch in `DispatchRequest`), not implemented.
+   plus a legacy branch in `DispatchRequest`), not implemented.
 3. **API shape** (in lieu of a grill session; documented in
    docs/architecture.md + code-style.md): synchronous handlers, both
    plain-function and `of object` overloads; tool schemas as JSON
@@ -72,6 +72,29 @@ no-lwpt path            ✅ fpc @lwpt.cfg -FEbuild source/apps/mcpdemo.pas
    `input_required`, no JSON-Schema argument validation, no
    subscriptions — all recorded in VISION.md not-goals / MCP.Server
    header.
+
+## Post-scaffold: RC interop verified (same session)
+
+The full surface was interop-tested against the **official MCP
+TypeScript client beta** (`@modelcontextprotocol/client` 2.0.0-beta.4)
+over real stdio, in both pinned-`2026-07-28` and `auto`-probe modes —
+all checks pass; harness kept at `tools/interop-ts/` (the duetto
+`crosscheck` pattern, manual while the SDK is beta). Two RC wire-schema
+requirements the prose docs underplayed were found and fixed:
+top-level `serverInfo` required on `DiscoverResult` (the `_meta` stamp
+alone classifies the server as legacy), and `ttlMs`+`cacheScope`
+(SEP-2549) required on discover/list/read results — now emitted, with
+`CacheTtlMs`/`CacheScope` knobs on `TMcpServer` (dynamic-reader reads
+advertise ttl 0). The earlier "ttlMs gap" note is closed.
+
+Client-adoption reality (checked 2026-07-20): official SDK betas exist
+for all four Tier 1 SDKs (Python `mcp==2.0.0b1`, TS
+`@modelcontextprotocol/{server,client}@beta`, Go v1.7.0-pre.1, C#
+v2.0.0-preview.1); inspectors (e.g. MCPJam) can pin the RC version.
+Mainstream end-user clients (Claude Desktop/Code) still speak the
+legacy handshake — until they adopt the RC, they will hit our
+initialize rejection. This makes the dual-era follow-up a real
+adoption question, not just a spec footnote.
 
 ## Open questions
 

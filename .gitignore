@@ -19,6 +19,10 @@ build/
 *.rsj
 *.compiled
 
+# Node state for the tools/interop-ts cross-check harness.
+node_modules/
+package-lock.json
+
 # OS noise.
 .DS_Store
 Thumbs.db

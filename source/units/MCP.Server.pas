@@ -89,6 +89,8 @@ type
     FName: string;
     FVersion: string;
     FInstructions: string;
+    FCacheTtlMs: Integer;
+    FCacheScope: string;
     FTools: array of TMcpToolRegistration;
     FResources: array of TMcpResourceRegistration;
 
@@ -113,6 +115,7 @@ type
       const ACtx: TMcpRequestContext): string;
     function ResultResponse(const AMessage: TJsonRpcMessage;
       AResult: TJSONObject): string;
+    procedure AddCacheFields(AResult: TJSONObject; ATtlMs: Integer);
   public
     constructor Create(const AName, AVersion: string);
     destructor Destroy; override;
@@ -121,6 +124,15 @@ type
     property Instructions: string read FInstructions write FInstructions;
     property Name: string read FName;
     property Version: string read FVersion;
+
+    // CacheableResult fields (SEP-2549), required on discover/list/read
+    // results. Registries are fixed after startup, so registry metadata
+    // is honestly cacheable: default ttl 300000 (5 min, the spec's
+    // tools/list example) with "private" scope. Reads served by a
+    // dynamic reader always advertise ttl 0 (revalidate) — the library
+    // cannot know how fresh a callback's data stays.
+    property CacheTtlMs: Integer read FCacheTtlMs write FCacheTtlMs;
+    property CacheScope: string read FCacheScope write FCacheScope;
 
     // AInputSchemaJson is parsed at registration and raises EMcpServer
     // on invalid JSON — a bad schema is a programming error, not a
@@ -225,6 +237,8 @@ begin
   inherited Create;
   FName := AName;
   FVersion := AVersion;
+  FCacheTtlMs := 300000;
+  FCacheScope := CACHE_SCOPE_PRIVATE;
 end;
 
 destructor TMcpServer.Destroy;
@@ -480,9 +494,19 @@ begin
     'Method not found: ' + AMessage.Method);
 end;
 
+procedure TMcpServer.AddCacheFields(AResult: TJSONObject; ATtlMs: Integer);
+begin
+  // CacheableResult (SEP-2549): ttlMs + cacheScope are REQUIRED on
+  // discover/list/read results — the official RC SDKs reject results
+  // without them (verified against @modelcontextprotocol/client
+  // 2.0.0-beta.4, whose wire schema marks them non-optional).
+  AResult.Add('ttlMs', ATtlMs);
+  AResult.Add('cacheScope', FCacheScope);
+end;
+
 function TMcpServer.HandleDiscover(const AMessage: TJsonRpcMessage): string;
 var
-  DiscoverResult, Capabilities: TJSONObject;
+  DiscoverResult, Capabilities, ServerInfo: TJSONObject;
   Versions: TJSONArray;
 begin
   Versions := TJSONArray.Create;
@@ -494,11 +518,21 @@ begin
   Capabilities.Add('tools', TJSONObject.Create);
   Capabilities.Add('resources', TJSONObject.Create);
 
+  // serverInfo is a required TOP-LEVEL DiscoverResult field in the RC
+  // wire schema — the _meta stamp alone is not enough; the official
+  // client beta classifies a server without it as legacy (verified
+  // against @modelcontextprotocol/client 2.0.0-beta.4).
+  ServerInfo := TJSONObject.Create;
+  ServerInfo.Add('name', FName);
+  ServerInfo.Add('version', FVersion);
+
   DiscoverResult := TJSONObject.Create;
   DiscoverResult.Add('supportedVersions', Versions);
   DiscoverResult.Add('capabilities', Capabilities);
+  DiscoverResult.Add('serverInfo', ServerInfo);
   if FInstructions <> '' then
     DiscoverResult.Add('instructions', FInstructions);
+  AddCacheFields(DiscoverResult, FCacheTtlMs);
 
   Result := ResultResponse(AMessage, DiscoverResult);
 end;
@@ -516,6 +550,7 @@ begin
     Tools.Add(FTools[I].Definition.Clone);
   ListResult := TJSONObject.Create;
   ListResult.Add('tools', Tools);
+  AddCacheFields(ListResult, FCacheTtlMs);
   Result := ResultResponse(AMessage, ListResult);
 end;
 
@@ -594,6 +629,7 @@ begin
     Resources.Add(FResources[I].Definition.Clone);
   ListResult := TJSONObject.Create;
   ListResult.Add('resources', Resources);
+  AddCacheFields(ListResult, FCacheTtlMs);
   Result := ResultResponse(AMessage, ListResult);
 end;
 
@@ -602,7 +638,7 @@ function TMcpServer.HandleResourcesRead(const AMessage: TJsonRpcMessage;
 var
   UriData: TJSONData;
   Uri, MimeType: string;
-  Index: Integer;
+  Index, ReadTtlMs: Integer;
   Contents: TJSONArray;
   ReadResult, NotFoundData: TJSONObject;
 begin
@@ -623,6 +659,10 @@ begin
       'Resource not found', NotFoundData));
   end;
 
+  // Dynamic readers advertise ttl 0 (always revalidate) — the library
+  // cannot know how fresh a callback's data stays; static text is
+  // fixed for the process lifetime and uses the registry ttl.
+  ReadTtlMs := 0;
   if Assigned(FResources[Index].Method) then
     Contents := FResources[Index].Method(Uri, ACtx)
   else if Assigned(FResources[Index].Reader) then
@@ -631,6 +671,7 @@ begin
   begin
     MimeType := FResources[Index].Definition.Get('mimeType', 'text/plain');
     Contents := McpTextContents(Uri, MimeType, FResources[Index].StaticText);
+    ReadTtlMs := FCacheTtlMs;
   end;
   if Contents = nil then
     raise EMcpServer.CreateFmt(
@@ -638,6 +679,7 @@ begin
 
   ReadResult := TJSONObject.Create;
   ReadResult.Add('contents', Contents);
+  AddCacheFields(ReadResult, ReadTtlMs);
   Result := ResultResponse(AMessage, ReadResult);
 end;
 

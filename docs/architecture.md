@@ -100,6 +100,18 @@ Verified 2026-07-20 against the official spec (modelcontextprotocol.io):
   [resources](https://modelcontextprotocol.io/specification/draft/server/resources).
 - When the final `2026-07-28` text publishes, re-verify the implemented
   surface against it; any drift from the RC is a `fix(protocol)`.
+- **The prose pages are not the whole truth — the schema anchor is.**
+  Interop against the official TypeScript client beta
+  (`@modelcontextprotocol/client` 2.0.0-beta.4, via
+  `tools/interop-ts/`) surfaced two requirements the prose pages
+  underplay: `DiscoverResult` requires a **top-level `serverInfo`**
+  field (the `_meta` stamp alone reads as a legacy server to the
+  probe), and `ttlMs` + `cacheScope` (SEP-2549 CacheableResult) are
+  **required** on discover/list/read results. Both are implemented and
+  pinned by unit tests, `mcpsmoke`, and the interop battery. Protocol
+  claims should be checked against the
+  [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/draft/schema.ts)
+  and a real RC implementation, not prose alone.
 
 pascal-mcp is **modern-only**: the legacy era (2025-11-25 and earlier)
 is answered with the recommended diagnostic naming the supported

@@ -51,6 +51,7 @@ lwpt test              # four co-located unit suites
 | --- | --- |
 | `source/units/` | Library: `MCP.JsonRpc` (JSON-RPC 2.0 profile), `MCP.Protocol` (per-request `_meta` model), `MCP.Server` (sans-I/O dispatch core, tool/resource registries), `MCP.Transport.Stdio` (newline-delimited stdio binding) |
 | `source/apps/` | Programs: `mcpdemo` (example stdio server), `mcpsmoke` (subprocess E2E battery) |
+| `tools/` | Cross-implementation checks: `interop-ts/` (official MCP TypeScript client beta vs `mcpdemo`) |
 | `docs/` | Architecture, quick-start, tooling, code style, deployment |
 
 Layering is strictly bottom-up: `MCP.JsonRpc` → `MCP.Protocol` →

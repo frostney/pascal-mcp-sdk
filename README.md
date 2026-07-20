@@ -112,14 +112,18 @@ five files, RTL + fpjson only.
 | `tools/list`, `tools/call` | ✅ text / structured content, in-band execution errors |
 | `resources/list`, `resources/read` | ✅ static + dynamic, text + blob builders |
 | `_meta` validation, version negotiation | ✅ `-32602` / `-32021` / `-32022` per spec |
+| `ttlMs` / `cacheScope` caching hints (SEP-2549) | ✅ on discover/list/read, tunable via `CacheTtlMs`/`CacheScope` |
 | Legacy `initialize` | ✅ rejected with the supported versions named (spec guidance) |
 | `subscriptions/listen`, list-changed | ⏳ follow-up (registries are static in v1) |
 | Streamable HTTP transport | ⏳ follow-up (`MCP.Transport.Http` seam reserved) |
 
 Spec facts verified against the official
 [MCP specification](https://modelcontextprotocol.io/specification/draft/basic/transports/stdio)
-on 2026-07-20 — see [docs/architecture.md](docs/architecture.md) for
-the grounding notes and citations.
+on 2026-07-20, and the full surface **interop-tested against the
+official MCP TypeScript client beta** (`@modelcontextprotocol/client`
+2.0.0-beta.4) in both pinned and probing modes — see
+[tools/interop-ts/](tools/interop-ts/) and
+[docs/architecture.md](docs/architecture.md) for the grounding notes.
 
 ## License
 
