@@ -92,6 +92,12 @@ end.
 Compile it inside this repo's unit paths (`fpc @lwpt.cfg ...`), or in
 your own project with `-Fu<path-to>/source/units`.
 
+Prefer typed arguments? Declare a `TMCPArgs` descendant and register
+the class — it expands into the schema, and your handler receives a
+populated, validated instance (see the `add` tool in
+[mcpdemo.pas](../source/apps/mcpdemo.pas) and the README's typed
+example).
+
 Key behaviours you get for free:
 
 - **Validation errors** (`-32602`), **version negotiation** (`-32022`

@@ -17,7 +17,7 @@ One transport-agnostic core (`MCP.Server` over `MCP.Protocol` and
 `MCP.JSONRPC`) owns every protocol rule and performs no I/O. Transports
 are thin bindings around it: **stdio** (newline-delimited JSON-RPC, pure
 RTL — v1, complete) and, as an explicit follow-up, **Streamable HTTP**
-(`MCP.Transport.Http`). The same tested core sits behind every binding
+(`MCP.Transport.HTTP`). The same tested core sits behind every binding
 unchanged — the sans-I/O discipline proven in duetto.
 
 Cross-platform coverage (Linux, macOS, Windows) and embeddability (a

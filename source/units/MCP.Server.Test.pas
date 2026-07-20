@@ -19,6 +19,7 @@ uses
   jsonparser,
   MCP.JSONRPC,
   MCP.Protocol,
+  MCP.Schema,
   MCP.Server,
   TestingPascalLibrary;
 
@@ -58,6 +59,10 @@ type
     procedure TestCallHandlerRaises;
     procedure TestCallUnknown;
     procedure TestCallBadName;
+    procedure TestTypedArgsBound;
+    procedure TestTypedArgsMissing;
+    procedure TestTypedArgsMistyped;
+    procedure TestTypedArgsSchemaDerived;
   end;
 
   TResourceDispatch = class(TDispatchSuite)
@@ -125,6 +130,27 @@ begin
   Result := MCPTextResult(ACtx.ProtocolVersion + '|' + ACtx.ClientName);
 end;
 
+type
+  TScaleArgs = class(TMCPArgs)
+  private
+    FValue: Double;
+    FTimes: Integer;
+  published
+    property value: Double read FValue write FValue;
+    property times: Integer read FTimes write FTimes;
+  end;
+
+// Typed handler: binding has already validated and populated the
+// instance, so this is arithmetic only.
+function ScaleHandler(AArgs: TMCPArgs;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Args: TScaleArgs;
+begin
+  Args := AArgs as TScaleArgs;
+  Result := MCPTextResult(FloatToStr(Args.value * Args.times));
+end;
+
 function ClockReader(const AUri: string;
   const ACtx: TMCPRequestContext): TJSONArray;
 begin
@@ -148,6 +174,8 @@ begin
     '{"type":"object"}', BoomHandler);
   FServer.RegisterTool('whoami', 'Mirror the request context',
     '{"type":"object"}', WhoAmIHandler);
+  FServer.RegisterTool('scale', 'Multiply value by times',
+    TScaleArgs, ScaleHandler);
   FServer.RegisterTextResource('mem://static', 'static', 'text/plain',
     'static text');
   FServer.RegisterResource('mem://clock', 'clock', 'text/plain',
@@ -286,7 +314,7 @@ begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/list",' +
     '"params":{' + META_MODERN + '}}');
   Tools := TJSONArray(TJSONObject(Response.Find('result')).Find('tools'));
-  Expect<Integer>(Tools.Count).ToBe(4);
+  Expect<Integer>(Tools.Count).ToBe(5);
   Expect<string>(TJSONObject(Tools[0]).Get('name', '')).ToBe('echo');
   Expect<Boolean>(
     TJSONObject(Tools[0]).Find('inputSchema') <> nil).ToBe(True);
@@ -378,6 +406,70 @@ begin
   Response.Free;
 end;
 
+procedure TToolDispatch.TestTypedArgsBound;
+var
+  Response: TJSONObject;
+begin
+  // value=2.5, times=4 → the handler sees populated typed fields.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"scale","arguments":{"value":2.5,"times":4},' +
+    META_MODERN + '}}');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('10');
+  Response.Free;
+end;
+
+procedure TToolDispatch.TestTypedArgsMissing;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"scale","arguments":{"value":2.5},' +
+    META_MODERN + '}}');
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Missing required argument "times"');
+  Response.Free;
+end;
+
+procedure TToolDispatch.TestTypedArgsMistyped;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"scale","arguments":{"value":2.5,"times":"four"},' +
+    META_MODERN + '}}');
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Argument "times" must be an integer');
+  Response.Free;
+end;
+
+procedure TToolDispatch.TestTypedArgsSchemaDerived;
+var
+  Response: TJSONObject;
+  Tools: TJSONArray;
+  Scale: TJSONObject;
+begin
+  // tools/list carries the schema derived from TScaleArgs.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/list",' +
+    '"params":{' + META_MODERN + '}}');
+  Tools := TJSONArray(TJSONObject(Response.Find('result')).Find('tools'));
+  Scale := TJSONObject(Tools[4]);
+  Expect<string>(
+    TJSONData(Scale.FindPath('inputSchema.properties.value.type')).AsString)
+    .ToBe('number');
+  Expect<string>(
+    TJSONData(Scale.FindPath('inputSchema.properties.times.type')).AsString)
+    .ToBe('integer');
+  Response.Free;
+end;
+
 procedure TToolDispatch.SetupTests;
 begin
   Test('tools/list: all tools, registration order', TestList);
@@ -387,6 +479,11 @@ begin
   Test('tools/call: handler exception → isError', TestCallHandlerRaises);
   Test('tools/call: unknown tool → -32602', TestCallUnknown);
   Test('tools/call: non-string name → -32602', TestCallBadName);
+  Test('typed args: bound and populated', TestTypedArgsBound);
+  Test('typed args: missing argument → isError', TestTypedArgsMissing);
+  Test('typed args: mistyped argument → isError', TestTypedArgsMistyped);
+  Test('typed args: schema derived from the class',
+    TestTypedArgsSchemaDerived);
 end;
 
 { ───────── resources ───────── }

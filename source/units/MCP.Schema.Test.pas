@@ -1,6 +1,8 @@
-{ MCP.Schema.Test — the fluent schema builder: object envelope, all
+{ MCP.Schema.Test — the fluent schema builder (object envelope, all
   four property types, description handling, required-by-default with
-  opt-out, and the empty-required case (no "required" key at all). }
+  opt-out, the empty-required case) and class-derived schemas
+  (SchemaFrom: published-property type mapping incl. enum values,
+  declaration order, and the unsupported-kind registration error). }
 
 program MCP.Schema.Test;
 
@@ -14,6 +16,31 @@ uses
   TestingPascalLibrary;
 
 type
+  TProbeColor = (pcRed, pcGreen, pcBlue);
+
+  TProbeArgs = class(TMCPArgs)
+  private
+    FLabelText: string;
+    FCount: Integer;
+    FRatio: Double;
+    FFlag: Boolean;
+    FColor: TProbeColor;
+  published
+    property labelText: string read FLabelText write FLabelText;
+    property count: Integer read FCount write FCount;
+    property ratio: Double read FRatio write FRatio;
+    property flag: Boolean read FFlag write FFlag;
+    property color: TProbeColor read FColor write FColor;
+  end;
+
+  // tkClass has no JSON Schema mapping — registration must fail.
+  TUnmappableArgs = class(TMCPArgs)
+  private
+    FPayload: TObject;
+  published
+    property payload: TObject read FPayload write FPayload;
+  end;
+
   TSchemaBuilder = class(TTestSuite)
   public
     procedure SetupTests; override;
@@ -23,6 +50,15 @@ type
     procedure TestRequiredByDefault;
     procedure TestOptionalOptOut;
     procedure TestNoRequiredKeyWhenEmpty;
+  end;
+
+  TSchemaFromClass = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestTypeMapping;
+    procedure TestEnumValues;
+    procedure TestAllRequiredDeclarationOrder;
+    procedure TestUnmappableKindRaises;
   end;
 
 procedure TSchemaBuilder.TestObjectEnvelope;
@@ -118,7 +154,83 @@ begin
     TestNoRequiredKeyWhenEmpty);
 end;
 
+procedure TSchemaFromClass.TestTypeMapping;
+var
+  Schema: TJSONObject;
+begin
+  Schema := SchemaFrom(TProbeArgs).Build;
+  Expect<string>(Schema.Get('type', '')).ToBe('object');
+  Expect<string>(
+    TJSONData(Schema.FindPath('properties.labelText.type')).AsString)
+    .ToBe('string');
+  Expect<string>(
+    TJSONData(Schema.FindPath('properties.count.type')).AsString)
+    .ToBe('integer');
+  Expect<string>(
+    TJSONData(Schema.FindPath('properties.ratio.type')).AsString)
+    .ToBe('number');
+  Expect<string>(
+    TJSONData(Schema.FindPath('properties.flag.type')).AsString)
+    .ToBe('boolean');
+  Expect<string>(
+    TJSONData(Schema.FindPath('properties.color.type')).AsString)
+    .ToBe('string');
+  Schema.Free;
+end;
+
+procedure TSchemaFromClass.TestEnumValues;
+var
+  Schema: TJSONObject;
+  Values: TJSONArray;
+begin
+  Schema := SchemaFrom(TProbeArgs).Build;
+  Values := TJSONArray(Schema.FindPath('properties.color.enum'));
+  Expect<Integer>(Values.Count).ToBe(3);
+  Expect<string>(Values[0].AsString).ToBe('pcRed');
+  Expect<string>(Values[2].AsString).ToBe('pcBlue');
+  Schema.Free;
+end;
+
+procedure TSchemaFromClass.TestAllRequiredDeclarationOrder;
+var
+  Schema: TJSONObject;
+  Required: TJSONArray;
+begin
+  Schema := SchemaFrom(TProbeArgs).Build;
+  Required := TJSONArray(Schema.Find('required'));
+  Expect<Integer>(Required.Count).ToBe(5);
+  Expect<string>(Required[0].AsString).ToBe('labelText');
+  Expect<string>(Required[4].AsString).ToBe('color');
+  Schema.Free;
+end;
+
+procedure TSchemaFromClass.TestUnmappableKindRaises;
+var
+  Raised: Boolean;
+begin
+  Raised := False;
+  try
+    SchemaFrom(TUnmappableArgs);
+  except
+    on EMCPSchema do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+end;
+
+procedure TSchemaFromClass.SetupTests;
+begin
+  Test('published properties map to schema types', TestTypeMapping);
+  Test('enum properties carry their allowed values', TestEnumValues);
+  Test('all properties required, declaration order',
+    TestAllRequiredDeclarationOrder);
+  Test('unmappable property kinds raise EMCPSchema',
+    TestUnmappableKindRaises);
+end;
+
 begin
   TestRunnerProgram.AddSuite(TSchemaBuilder.Create('Schema: fluent builder'));
+  TestRunnerProgram.AddSuite(
+    TSchemaFromClass.Create('Schema: derived from classes'));
   TestRunnerProgram.Run;
 end.

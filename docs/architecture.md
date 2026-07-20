@@ -2,11 +2,13 @@
 
 ## Executive Summary
 
-pascal-mcp-sdk is four units layered strictly bottom-up: `MCP.JSONRPC`
+pascal-mcp-sdk is five units layered strictly bottom-up: `MCP.JSONRPC`
 (the JSON-RPC 2.0 profile MCP mandates), `MCP.Protocol` (the stateless
-per-request `_meta` model of spec revision 2026-07-28), `MCP.Server`
-(the sans-I/O dispatch core holding the tool/resource registries), and
-`MCP.Transport.Stdio` (the newline-delimited stdio binding). The core
+per-request `_meta` model of spec revision 2026-07-28), `MCP.Schema`
+(tool schemas as Pascal — fluent builder and RTTI-derived argument
+classes), `MCP.Server` (the sans-I/O dispatch core holding the
+tool/resource registries), and `MCP.Transport.Stdio` (the
+newline-delimited stdio binding). The core
 performs no I/O — `HandleMessage` maps one inbound line to at most one
 response line — so the planned Streamable HTTP binding wraps the same
 tested core without touching it. The runtime dependency set is FPC's
@@ -53,7 +55,7 @@ Rules live in the layer that owns them and nowhere else:
 `TMCPServer.HandleMessage(const ALine; out AResponse): Boolean` is the
 entire protocol surface. It is what the unit tests drive (no pipes, no
 processes), what `RunMCPStdioLoop` calls in a loop, and what
-`MCP.Transport.Http` will call per POST body when it lands. This
+`MCP.Transport.HTTP` will call per POST body when it lands. This
 mirrors duetto's `WS.Protocol` discipline: one tested core, transports
 as delivery.
 
@@ -72,14 +74,19 @@ no `listChanged`/`subscribe` capability is advertised and
 `subscriptions/listen` is out of v1). Handlers are synchronous and come
 in two shapes per registry — plain function pointers and `of object`
 method pointers — so both programs and class-based hosts (lantaarn)
-register naturally. Tool schemas are built with the fluent
-`MCP.Schema` API (`ObjectSchema.AddString(...)...` — a JSON Schema
+register naturally. Tool schemas come from `MCP.Schema` in two forms:
+the fluent builder (`ObjectSchema.AddString(...)...` — a JSON Schema
 2020-12 subset covering the flat object schemas most tools need, with
-input and output schema overloads); richer schemas use the JSON-string
-or definition-object overloads, parsed for well-formedness at
-registration (`EMCPServer` on error). Argument validation beyond that
-is the handler's job, reported as in-band `isError` results that a
-model can read and correct against.
+input and output schema overloads) and **argument classes** —
+`TMCPArgs` descendants whose published properties expand into the
+schema via RTTI (`SchemaFrom`), with the server binding, validating,
+and populating a typed instance per call (missing/mistyped arguments
+become in-band `isError` results before the handler runs; classes
+rather than records because FPC 3.2.2 RTTI has no record field names).
+Richer schemas use the JSON-string or definition-object overloads,
+parsed for well-formedness at registration (`EMCPServer` on error).
+Deeper validation is the handler's job, reported as in-band `isError`
+results that a model can read and correct against.
 
 ## Spec grounding
 
@@ -137,7 +144,7 @@ Claude Code itself connects via `claude mcp add`.
 
 ## The HTTP follow-up
 
-`MCP.Transport.Http` (Streamable HTTP: JSON-RPC per POST, SSE response
+`MCP.Transport.HTTP` (Streamable HTTP: JSON-RPC per POST, SSE response
 streams, `Mcp-Method`/`Mcp-Name` header mirroring) is deliberately not
 in v1. Default server primitive when it lands: FPC's `fphttpserver`
 (fcl-web, ships with FPC, cross-platform); fallback is a minimal

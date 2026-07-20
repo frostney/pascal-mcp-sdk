@@ -15,7 +15,7 @@ unit MCP.Server;
 // decoded JSON-RPC line into at most one response line via
 // HandleMessage — the whole protocol surface is testable without any
 // I/O, mirroring duetto's sans-I/O discipline. MCP.Transport.Stdio
-// (and a future MCP.Transport.Http) are thin byte-moving shells
+// (and a future MCP.Transport.HTTP) are thin byte-moving shells
 // around this.
 //
 // v1 protocol surface:
@@ -43,9 +43,11 @@ unit MCP.Server;
 // Not in v1 (deliberate): subscriptions/listen and the listChanged
 // capability flags (registries are fixed after startup, so there is
 // nothing to notify), pagination cursors (lists are returned whole),
-// MRTR input_required results, and JSON-Schema validation of tool
-// arguments (handlers validate their own inputs and report problems as
-// isError tool results, which is what models can act on).
+// MRTR input_required results, and a general JSON-Schema validation
+// engine — typed-argument tools (MCP.Schema argument classes) get
+// presence and type checking bound from the class; beyond that,
+// handlers validate their own inputs and report problems as isError
+// tool results, which is what models can act on.
 //
 // Handlers are synchronous and may be plain functions or methods (both
 // overloads are provided). A handler that raises becomes an isError
@@ -59,6 +61,7 @@ interface
 
 uses
   SysUtils,
+  typinfo,
 
   fpjson,
   jsonparser,
@@ -82,6 +85,16 @@ type
   TMCPToolMethod = function(AArguments: TJSONObject;
     const ACtx: TMCPRequestContext): TMCPToolResult of object;
 
+  // Typed-argument handlers (MCP.Schema argument classes): the server
+  // derives the schema from the class, instantiates and populates it
+  // per call, rejects missing/mistyped arguments as in-band isError
+  // results before the handler runs, and frees the instance after.
+  // Handlers downcast to their concrete class: AArgs as TAddArgs.
+  TMCPArgsHandler = function(AArgs: TMCPArgs;
+    const ACtx: TMCPRequestContext): TMCPToolResult;
+  TMCPArgsMethod = function(AArgs: TMCPArgs;
+    const ACtx: TMCPRequestContext): TMCPToolResult of object;
+
   // Resource readers return the "contents" array of a resources/read
   // result (owned; use MCPTextContents / MCPBlobContents).
   TMCPResourceReader = function(const AUri: string;
@@ -93,6 +106,9 @@ type
     Definition: TJSONObject; // owned: name/description/inputSchema/...
     Handler: TMCPToolHandler;
     Method: TMCPToolMethod;
+    ArgsClass: TMCPArgsClass; // non-nil marks a typed-argument tool
+    ArgsHandler: TMCPArgsHandler;
+    ArgsMethod: TMCPArgsMethod;
   end;
 
   TMCPResourceRegistration = record
@@ -128,6 +144,9 @@ type
       AInputSchemaJson: string): TJSONObject;
     procedure AddTool(ADefinition: TJSONObject; AHandler: TMCPToolHandler;
       AMethod: TMCPToolMethod);
+    procedure AddTypedTool(ADefinition: TJSONObject;
+      AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler;
+      AMethod: TMCPArgsMethod);
     procedure AddResource(const AUri, AName, AMimeType, ADescription: string;
       AReader: TMCPResourceReader; AMethod: TMCPResourceMethod;
       const AStaticText: string; AHasStaticText: Boolean);
@@ -203,6 +222,20 @@ type
     procedure RegisterTool(const AName, ADescription: string;
       const AInputSchema, AOutputSchema: TMCPSchema;
       AMethod: TMCPToolMethod); overload;
+
+    // Typed-argument overloads: the argument class IS the schema
+    // (SchemaFrom) and the handler receives a populated, validated
+    // instance. Optional output schema as in the fluent overloads.
+    procedure RegisterTool(const AName, ADescription: string;
+      AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler); overload;
+    procedure RegisterTool(const AName, ADescription: string;
+      AArgsClass: TMCPArgsClass; AMethod: TMCPArgsMethod); overload;
+    procedure RegisterTool(const AName, ADescription: string;
+      AArgsClass: TMCPArgsClass; const AOutputSchema: TMCPSchema;
+      AHandler: TMCPArgsHandler); overload;
+    procedure RegisterTool(const AName, ADescription: string;
+      AArgsClass: TMCPArgsClass; const AOutputSchema: TMCPSchema;
+      AMethod: TMCPArgsMethod); overload;
 
     procedure RegisterTextResource(const AUri, AName, AMimeType, AText: string;
       const ADescription: string = '');
@@ -369,6 +402,16 @@ begin
   FTools[High(FTools)].Method := AMethod;
 end;
 
+procedure TMCPServer.AddTypedTool(ADefinition: TJSONObject;
+  AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler;
+  AMethod: TMCPArgsMethod);
+begin
+  AddTool(ADefinition, nil, nil);
+  FTools[High(FTools)].ArgsClass := AArgsClass;
+  FTools[High(FTools)].ArgsHandler := AHandler;
+  FTools[High(FTools)].ArgsMethod := AMethod;
+end;
+
 procedure TMCPServer.RegisterTool(const AName, ADescription,
   AInputSchemaJson: string; AHandler: TMCPToolHandler);
 begin
@@ -434,6 +477,135 @@ procedure TMCPServer.RegisterTool(const AName, ADescription: string;
 begin
   AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build,
     AOutputSchema.Build), nil, AMethod);
+end;
+
+procedure TMCPServer.RegisterTool(const AName, ADescription: string;
+  AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler);
+begin
+  AddTypedTool(SchemaDefinition(AName, ADescription,
+    SchemaFrom(AArgsClass).Build, nil), AArgsClass, AHandler, nil);
+end;
+
+procedure TMCPServer.RegisterTool(const AName, ADescription: string;
+  AArgsClass: TMCPArgsClass; AMethod: TMCPArgsMethod);
+begin
+  AddTypedTool(SchemaDefinition(AName, ADescription,
+    SchemaFrom(AArgsClass).Build, nil), AArgsClass, nil, AMethod);
+end;
+
+procedure TMCPServer.RegisterTool(const AName, ADescription: string;
+  AArgsClass: TMCPArgsClass; const AOutputSchema: TMCPSchema;
+  AHandler: TMCPArgsHandler);
+begin
+  AddTypedTool(SchemaDefinition(AName, ADescription,
+    SchemaFrom(AArgsClass).Build, AOutputSchema.Build),
+    AArgsClass, AHandler, nil);
+end;
+
+procedure TMCPServer.RegisterTool(const AName, ADescription: string;
+  AArgsClass: TMCPArgsClass; const AOutputSchema: TMCPSchema;
+  AMethod: TMCPArgsMethod);
+begin
+  AddTypedTool(SchemaDefinition(AName, ADescription,
+    SchemaFrom(AArgsClass).Build, AOutputSchema.Build),
+    AArgsClass, nil, AMethod);
+end;
+
+// Populate one published property from its JSON argument. False (with
+// AError set) on a type mismatch.
+function BindProperty(AInstance: TMCPArgs; AProp: PPropInfo;
+  AValue: TJSONData; out AError: string): Boolean;
+
+  function Mismatch(const AExpected: string): Boolean;
+  begin
+    AError := Format('Argument "%s" must be %s',
+      [AProp^.Name, AExpected]);
+    Result := False;
+  end;
+
+begin
+  Result := True;
+  case AProp^.PropType^.Kind of
+    tkSString, tkLString, tkAString, tkWString, tkUString:
+      if AValue.JSONType = jtString then
+        SetStrProp(AInstance, AProp, AValue.AsString)
+      else
+        Exit(Mismatch('a string'));
+    tkFloat:
+      if AValue.JSONType = jtNumber then
+        SetFloatProp(AInstance, AProp, AValue.AsFloat)
+      else
+        Exit(Mismatch('a number'));
+    tkInteger:
+      if (AValue.JSONType = jtNumber) and
+        (TJSONNumber(AValue).NumberType in [ntInteger, ntInt64]) then
+        SetOrdProp(AInstance, AProp, AValue.AsInteger)
+      else
+        Exit(Mismatch('an integer'));
+    tkInt64, tkQWord:
+      if (AValue.JSONType = jtNumber) and
+        (TJSONNumber(AValue).NumberType in [ntInteger, ntInt64]) then
+        SetInt64Prop(AInstance, AProp, AValue.AsInt64)
+      else
+        Exit(Mismatch('an integer'));
+    tkBool:
+      if AValue.JSONType = jtBoolean then
+        SetOrdProp(AInstance, AProp, Ord(AValue.AsBoolean))
+      else
+        Exit(Mismatch('a boolean'));
+    tkEnumeration:
+      if (AValue.JSONType = jtString) and
+        (GetEnumValue(AProp^.PropType, AValue.AsString) >= 0) then
+        SetEnumProp(AInstance, AProp, AValue.AsString)
+      else
+        Exit(Mismatch('a string from the declared enum values'));
+  else
+    // Unmappable kinds cannot get here: SchemaFrom rejected them at
+    // registration.
+    Exit(Mismatch('a supported type'));
+  end;
+end;
+
+// Instantiate AClass and fill its published properties from
+// AArguments. Every property is required; missing or mistyped
+// arguments produce False with AError set (the caller turns that into
+// an in-band isError result, which is what a model can act on).
+function BindArguments(AClass: TMCPArgsClass; AArguments: TJSONObject;
+  out AInstance: TMCPArgs; out AError: string): Boolean;
+var
+  Info: PTypeInfo;
+  Props: PPropList;
+  Count, I: Integer;
+  Value: TJSONData;
+begin
+  Result := False;
+  AError := '';
+  AInstance := AClass.Create;
+  Info := PTypeInfo(AClass.ClassInfo);
+  Count := GetTypeData(Info)^.PropCount;
+  if Count = 0 then
+    Exit(True);
+  GetMem(Props, Count * SizeOf(Pointer));
+  try
+    GetPropInfos(Info, Props);
+    for I := 0 to Count - 1 do
+    begin
+      Value := AArguments.Find(Props^[I]^.Name);
+      if Value = nil then
+      begin
+        AError := Format('Missing required argument "%s"',
+          [Props^[I]^.Name]);
+        Exit(False);
+      end;
+      if not BindProperty(AInstance, Props^[I], Value, AError) then
+        Exit(False);
+    end;
+    Result := True;
+  finally
+    FreeMem(Props);
+    if not Result then
+      FreeAndNil(AInstance);
+  end;
 end;
 
 procedure TMCPServer.AddResource(const AUri, AName, AMimeType,
@@ -780,10 +952,11 @@ function TMCPServer.HandleToolsCall(const AMessage: TJSONRPCMessage;
   const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
 var
   NameData, ArgsData: TJSONData;
-  ToolName: string;
+  ToolName, BindError: string;
   Index: Integer;
   Arguments, OwnedEmpty, CallResult: TJSONObject;
   ToolResult: TMCPToolResult;
+  ArgsInstance: TMCPArgs;
 begin
   NameData := AMessage.Params.Find('name');
   if (NameData = nil) or (NameData.JSONType <> jtString) then
@@ -813,7 +986,25 @@ begin
 
   try
     try
-      if Assigned(FTools[Index].Method) then
+      if FTools[Index].ArgsClass <> nil then
+      begin
+        // Typed path: bind + validate before the handler runs.
+        // Binding failures are argument errors the model can correct,
+        // so they travel in-band like any execution error.
+        if BindArguments(FTools[Index].ArgsClass, Arguments,
+          ArgsInstance, BindError) then
+        try
+          if Assigned(FTools[Index].ArgsMethod) then
+            ToolResult := FTools[Index].ArgsMethod(ArgsInstance, ACtx)
+          else
+            ToolResult := FTools[Index].ArgsHandler(ArgsInstance, ACtx);
+        finally
+          ArgsInstance.Free;
+        end
+        else
+          ToolResult := MCPErrorResult(BindError);
+      end
+      else if Assigned(FTools[Index].Method) then
         ToolResult := FTools[Index].Method(Arguments, ACtx)
       else
         ToolResult := FTools[Index].Handler(Arguments, ACtx);

@@ -1,10 +1,12 @@
 program mcpdemo;
 
 // Example stdio MCP server: the smallest complete pascal-mcp-sdk program.
-// Exposes two tools (echo, add — registered through the fluent
-// MCP.Schema builder, add with an output schema) and one static
-// resource, then serves newline-delimited JSON-RPC on stdin/stdout
-// until the client closes stdin.
+// Exposes two tools showing both registration styles — echo via the
+// fluent schema builder, add via a typed argument class (the class
+// expands into the schema, and the handler receives a populated,
+// validated instance) — plus one static resource, then serves
+// newline-delimited JSON-RPC on stdin/stdout until the client closes
+// stdin.
 //
 // Try it by hand (all on one line; _meta is required on every request):
 //   ./build/mcpdemo <<'EOF'
@@ -29,20 +31,29 @@ begin
   Result := MCPTextResult(AArguments.Get('message', ''));
 end;
 
-function AddHandler(AArguments: TJSONObject;
+type
+  // The argument class IS the input schema: two required numbers.
+  // The server validates and populates it before AddHandler runs, so
+  // the handler contains arithmetic and nothing else.
+  TAddArgs = class(TMCPArgs)
+  private
+    FA, FB: Double;
+  published
+    property a: Double read FA write FA;
+    property b: Double read FB write FB;
+  end;
+
+function AddHandler(AArgs: TMCPArgs;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 var
-  Sum: Double;
+  Args: TAddArgs;
   Structured: TJSONObject;
 begin
-  if (AArguments.Find('a') = nil) or (AArguments.Find('b') = nil) then
-    // Input problems are execution errors (isError: true): in-band
-    // text a model can read and act on, not a protocol error.
-    Exit(MCPErrorResult('Both "a" and "b" are required numbers'));
-  Sum := AArguments.Get('a', 0.0) + AArguments.Get('b', 0.0);
+  Args := AArgs as TAddArgs;
   Structured := TJSONObject.Create;
-  Structured.Add('sum', Sum);
-  Result := MCPStructuredResult('The sum is ' + FloatToStr(Sum), Structured);
+  Structured.Add('sum', Args.a + Args.b);
+  Result := MCPStructuredResult('The sum is ' + FloatToStr(Args.a + Args.b),
+    Structured);
 end;
 
 var
@@ -61,8 +72,7 @@ begin
       EchoHandler);
 
     Server.RegisterTool('add', 'Add two numbers and return the sum',
-      ObjectSchema.AddNumber('a', 'First addend')
-                  .AddNumber('b', 'Second addend'),
+      TAddArgs,
       ObjectSchema.AddNumber('sum', 'The sum of a and b'),
       AddHandler);
 

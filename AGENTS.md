@@ -41,7 +41,7 @@ lwpt install           # resolve deps, regenerate lwpt.cfg + lwpt.lock
 lwpt install --frozen  # CI mode: verify lockfile + committed modules, no network
 lwpt format --check    # formatter gate (no flag = rewrite in place)
 lwpt build             # mcpdemo + mcpsmoke
-lwpt test              # four co-located unit suites
+lwpt test              # five co-located unit suites
 ./build/mcpsmoke       # E2E battery: spawns mcpdemo, drives the protocol
 ```
 
@@ -49,14 +49,14 @@ lwpt test              # four co-located unit suites
 
 | Path | Role |
 | --- | --- |
-| `source/units/` | Library: `MCP.JSONRPC` (JSON-RPC 2.0 profile), `MCP.Protocol` (per-request `_meta` model), `MCP.Schema` (fluent tool-schema builder), `MCP.Server` (sans-I/O dispatch core, tool/resource registries), `MCP.Transport.Stdio` (newline-delimited stdio binding) |
+| `source/units/` | Library: `MCP.JSONRPC` (JSON-RPC 2.0 profile), `MCP.Protocol` (per-request `_meta` model), `MCP.Schema` (fluent schema builder + RTTI-derived argument classes), `MCP.Server` (sans-I/O dispatch core, tool/resource registries), `MCP.Transport.Stdio` (newline-delimited stdio binding) |
 | `source/apps/` | Programs: `mcpdemo` (example stdio server), `mcpsmoke` (subprocess E2E battery) |
 | `tools/` | Cross-implementation checks: `interop-ts/` (official MCP TypeScript client beta vs `mcpdemo`) |
 | `docs/` | Architecture, quick-start, tooling, code style, deployment |
 
 Layering is strictly bottom-up: `MCP.JSONRPC` → `MCP.Protocol` →
 `MCP.Server` → `MCP.Transport.Stdio`. The server core performs no I/O
-(`HandleMessage`: line in, line out) — the planned `MCP.Transport.Http`
+(`HandleMessage`: line in, line out) — the planned `MCP.Transport.HTTP`
 (Streamable HTTP) wraps the same core without changes, mirroring
 duetto's sans-I/O discipline. See
 [docs/architecture.md](docs/architecture.md).

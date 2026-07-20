@@ -21,7 +21,7 @@ unit MCP.Transport.Stdio;
 // write the response, flush. That serial model is what makes ignoring
 // notifications/cancelled correct (see MCP.Server).
 //
-// MCP.Transport.Http is the planned second binding (Streamable HTTP);
+// MCP.Transport.HTTP is the planned second binding (Streamable HTTP);
 // it will wrap the same TMCPServer without changes here.
 
 {$I Shared.inc}

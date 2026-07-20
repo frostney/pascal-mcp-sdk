@@ -57,10 +57,42 @@ Handlers are synchronous plain functions or methods (`of object` —
 both registration overloads exist). Tool schemas are built with the
 fluent `MCP.Schema` API (`ObjectSchema.AddString(...).AddNumber(...)`;
 properties are required unless opted out, and an output schema can be
-passed alongside the input schema). For richer schemas ($ref, enums,
-nested objects, title/annotations) the JSON-string and
-definition-object registration overloads remain available, validated
-for well-formedness at registration.
+passed alongside the input schema).
+
+Or skip the schema entirely and let an **argument class** expand into
+it — the handler then receives a populated, validated instance instead
+of raw JSON (missing/mistyped arguments are rejected as in-band
+`isError` results before the handler runs):
+
+```pascal
+type
+  TAddArgs = class(TMCPArgs)
+  private
+    FA, FB: Double;
+  published
+    property a: Double read FA write FA;
+    property b: Double read FB write FB;
+  end;
+
+function Add(AArgs: TMCPArgs;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  with AArgs as TAddArgs do
+    Result := MCPTextResult(FloatToStr(a + b));
+end;
+
+// the class IS the schema: {a: number, b: number}, both required
+Server.RegisterTool('add', 'Add two numbers', TAddArgs, Add);
+```
+
+Published properties map to JSON Schema types (string kinds →
+`string`, floats → `number`, integer kinds → `integer`, `Boolean` →
+`boolean`, enums → `string` with the enum names as allowed values).
+Classes rather than records because FPC 3.2.2 RTTI only exposes field
+names for published class properties. For richer schemas ($ref,
+nested objects, title/annotations, per-property descriptions) the
+fluent builder, JSON-string, and definition-object registration
+overloads remain available, validated at registration.
 Results are built with `MCPTextResult` / `MCPErrorResult` /
 `MCPStructuredResult`; handler exceptions become in-band
 `isError: true` tool results automatically. Resources register either
@@ -108,7 +140,7 @@ alone.)
 To **vendor** pascal-mcp-sdk into a non-lwpt project, copy
 `source/units/MCP.*.pas` (minus the `.Test.pas` files) plus
 `source/units/Shared.inc` into your unit path — the library is those
-five files, RTL + fpjson only.
+six files, RTL + fpjson only.
 
 ## Protocol coverage (v1)
 
@@ -121,7 +153,7 @@ five files, RTL + fpjson only.
 | `ttlMs` / `cacheScope` caching hints (SEP-2549) | ✅ on discover/list/read, tunable via `CacheTtlMs`/`CacheScope` |
 | Legacy era (`initialize`, 2024-11-05…2025-11-25) | ✅ dual-era default: era-faithful dialect (unstamped results, `-32002`, `ping`); `DualEra := False` for strict modern-only |
 | `subscriptions/listen`, list-changed | ⏳ follow-up (registries are static in v1) |
-| Streamable HTTP transport | ⏳ follow-up (`MCP.Transport.Http` seam reserved) |
+| Streamable HTTP transport | ⏳ follow-up (`MCP.Transport.HTTP` seam reserved) |
 
 Spec facts verified against the official
 [MCP specification](https://modelcontextprotocol.io/specification/draft/basic/transports/stdio)
