@@ -1,8 +1,8 @@
 # pascal-mcp-sdk
 
-**The first FreePascal-native MCP (Model Context Protocol) server
-library.** Dependency-light, cross-platform (Linux, macOS, Windows),
-targeting the current **stateless** protocol revision (`2026-07-28`).
+**A FreePascal-native MCP (Model Context Protocol) server library.**
+Dependency-light, cross-platform (Linux, macOS, Windows), targeting
+the current **stateless** protocol revision (`2026-07-28`).
 Expose tools and resources from any Pascal program to AI agents —
 no second language runtime, no framework.
 
@@ -14,8 +14,7 @@ no second language runtime, no framework.
   (per-request `_meta`, mandatory `server/discover`, no session
   handshake) *and* the legacy `initialize` handshake for today's
   clients: **Claude Code and Claude Desktop connect out of the box**
-  (verified). Existing Object Pascal MCP projects are Delphi-only and
-  target only the superseded session-based revisions.
+  (verified).
 - **lwpt ecosystem** — built/tested/formatted via
   [lwpt](https://github.com/frostney/lwpt); sibling of
   [duetto](https://github.com/frostney/duetto). Works without lwpt too

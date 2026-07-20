@@ -26,7 +26,7 @@ git clone https://github.com/frostney/pascal-mcp-sdk
 cd pascal-mcp-sdk
 lwpt install       # resolves the dev-time testing dep, writes lwpt.cfg
 lwpt build         # build/mcpdemo, build/mcpsmoke
-lwpt test          # 4 co-located suites
+lwpt test          # 5 co-located suites
 ./build/mcpsmoke   # 19-check E2E battery against the real subprocess
 ```
 
