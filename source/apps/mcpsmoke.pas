@@ -27,6 +27,7 @@ const
     '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
     '"io.modelcontextprotocol/clientInfo":{"name":"mcpsmoke","version":"0.1.0"},' +
     '"io.modelcontextprotocol/clientCapabilities":{}}';
+  UTF8_PAYLOAD = 'h' + #$C3#$A9 + 'llo ' + #$E4#$B8#$96 + #$E7#$95#$8C;
 
 var
   Failures: Integer = 0;
@@ -113,19 +114,19 @@ begin
     Data.Free;
 end;
 
-// Send one request, read one response, parse it. nil on transport
-// failure (counted by the caller via Check).
-function RoundTrip(AProcess: TProcess; const ARequest: string): TJSONObject;
+// Send one request, capture one response line, and parse it. nil on
+// transport failure (counted by the caller via Check).
+function RoundTripWithLine(AProcess: TProcess; const ARequest: string;
+  out ALine: string): TJSONObject;
 var
-  Line: string;
   Data: TJSONData;
 begin
   Result := nil;
   SendLine(AProcess, ARequest);
-  if not ReadLine(AProcess, Line) then
+  if not ReadLine(AProcess, ALine) then
     Exit;
   try
-    Data := GetJSON(Line);
+    Data := GetJSON(ALine);
   except
     Exit;
   end;
@@ -133,6 +134,13 @@ begin
     Result := TJSONObject(Data)
   else
     Data.Free;
+end;
+
+function RoundTrip(AProcess: TProcess; const ARequest: string): TJSONObject;
+var
+  Line: string;
+begin
+  Result := RoundTripWithLine(AProcess, ARequest, Line);
 end;
 
 function FindPath(AObj: TJSONObject; const APath: string): TJSONData;
@@ -168,6 +176,7 @@ end;
 var
   Demo: TProcess;
   Response: TJSONObject;
+  ResponseLine: string;
   ServerInfo: TJSONData;
   WaitedMs: Integer;
 
@@ -234,6 +243,23 @@ begin
       META_MODERN + '}}');
     Check(PathString(Response, 'result.content[0].text') = 'round trip',
       'tools/call echo: text mirrored');
+    Response.Free;
+
+    Response := RoundTripWithLine(Demo,
+      '{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{' +
+      '"name":"echo","arguments":{"message":"' + UTF8_PAYLOAD + '"},' +
+      META_MODERN + '}}', ResponseLine);
+    Check(Pos('"text" : "' + UTF8_PAYLOAD + '"', ResponseLine) > 0,
+      'tools/call echo: non-ASCII bytes mirrored as UTF-8');
+    Response.Free;
+
+    // Raw handlers validate arguments against their advertised schema.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{' +
+      '"name":"echo","arguments":{},' + META_MODERN + '}}');
+    Check((FindPath(Response, 'result.isError') <> nil) and
+      FindPath(Response, 'result.isError').AsBoolean,
+      'tools/call echo (bad args): isError true');
     Response.Free;
 
     // tools/call add — structured content.

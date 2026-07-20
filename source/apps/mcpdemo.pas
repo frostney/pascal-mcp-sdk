@@ -27,12 +27,20 @@ uses
 
 function EchoHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  MessageData: TJSONData;
 begin
+  MessageData := AArguments.Find('message');
+  if MessageData = nil then
+    Exit(MCPErrorResult('Missing required argument "message"'));
+  if MessageData.JSONType <> jtString then
+    Exit(MCPErrorResult('Argument "message" must be a string'));
+
   // In-request notifications are no-ops unless the client opted in
   // (_meta.progressToken / logLevel) — safe to call unconditionally.
   MCPReportProgress(ACtx, 0.5, 1.0, 'echoing');
   MCPLogMessage(ACtx, 'info', 'echo invoked');
-  Result := MCPTextResult(AArguments.Get('message', ''));
+  Result := MCPTextResult(MessageData.AsString);
   MCPReportProgress(ACtx, 1.0, 1.0);
 end;
 

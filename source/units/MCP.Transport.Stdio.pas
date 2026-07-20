@@ -5,10 +5,12 @@ unit MCP.Transport.Stdio;
 // This unit is a deliberately thin shell — every protocol decision
 // lives in MCP.Server.HandleMessage; here we only move lines.
 //
-// Binding rules implemented (spec .../draft/basic/transports/stdio):
+// Binding rules implemented (spec .../draft/basic/transports/stdio,
+// verified 2026-07-20):
 //   - one UTF-8 JSON-RPC message per line, no embedded newlines
 //     (fpjson escapes newlines inside strings, so serialized responses
-//     are single-line by construction);
+//     are single-line by construction); the transport links the RTL
+//     widestring manager so fpjson conversions preserve UTF-8 bytes;
 //   - stdout carries nothing but MCP messages — diagnostics belong on
 //     stderr (MCPLogToStderr);
 //   - responses are terminated with a bare LF on every platform (a
@@ -36,6 +38,12 @@ unit MCP.Transport.Stdio;
 interface
 
 uses
+  {$IFDEF UNIX}
+  cwstring,
+  {$ENDIF}
+  {$IFDEF WINDOWS}
+  fpwidestring,
+  {$ENDIF}
   SysUtils,
 
   MCP.Server;
@@ -153,5 +161,10 @@ begin
   Write(ErrOutput, AMessage, #10);
   Flush(ErrOutput);
 end;
+
+{$IFDEF WINDOWS}
+initialization
+  SetMultiByteConversionCodePage(CP_UTF8);
+{$ENDIF}
 
 end.
