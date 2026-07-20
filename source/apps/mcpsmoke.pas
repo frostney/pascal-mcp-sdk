@@ -1,0 +1,299 @@
+program mcpsmoke;
+
+// End-to-end smoke test: launches the mcpdemo binary as a real
+// subprocess (the way an MCP client launches a stdio server), drives
+// the full v1 surface over its actual stdin/stdout, and checks every
+// response — including the error paths a modern client relies on
+// (-32022 for an unsupported version, the initialize rejection, -32602
+// for an unknown tool) and the EOF shutdown contract. This is the
+// process-level complement to the in-process *.Test.pas suites; CI
+// runs it as the "example-server smoke test" leg.
+//
+// Usage: mcpsmoke [path-to-mcpdemo]   (default: ./build/mcpdemo)
+
+{$I Shared.inc}
+
+uses
+  SysUtils,
+  Classes,
+  Process,
+
+  fpjson,
+  jsonparser,
+  jsonscanner;
+
+const
+  META_MODERN =
+    '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientInfo":{"name":"mcpsmoke","version":"0.1.0"},' +
+    '"io.modelcontextprotocol/clientCapabilities":{}}';
+
+var
+  Failures: Integer = 0;
+
+procedure Check(ACondition: Boolean; const AWhat: string);
+begin
+  if ACondition then
+    WriteLn('ok    ', AWhat)
+  else
+  begin
+    WriteLn('FAIL  ', AWhat);
+    Inc(Failures);
+  end;
+end;
+
+function DemoBinary: string;
+begin
+  if ParamCount >= 1 then
+    Result := ParamStr(1)
+  else
+  begin
+    Result := 'build' + DirectorySeparator + 'mcpdemo';
+    {$IFDEF WINDOWS}
+    Result := Result + '.exe';
+    {$ENDIF}
+  end;
+end;
+
+// Blocking line read from the child's stdout. Byte-at-a-time is plenty
+// for a smoke test; a missing newline within the deadline is a failure.
+function ReadLine(AProcess: TProcess; out ALine: string): Boolean;
+var
+  B: Byte;
+  Deadline: QWord;
+begin
+  ALine := '';
+  Deadline := GetTickCount64 + 10000;
+  while GetTickCount64 < Deadline do
+  begin
+    if AProcess.Output.NumBytesAvailable > 0 then
+    begin
+      if AProcess.Output.Read(B, 1) <> 1 then
+        Exit(False);
+      if B = 10 then
+        Exit(True);
+      if B <> 13 then
+        ALine := ALine + Chr(B);
+    end
+    else if not AProcess.Running then
+      Exit(False)
+    else
+      Sleep(5);
+  end;
+  Result := False;
+end;
+
+procedure SendLine(AProcess: TProcess; const ALine: string);
+var
+  Payload: string;
+begin
+  Payload := ALine + #10;
+  AProcess.Input.Write(Payload[1], Length(Payload));
+end;
+
+// Send one request, read one response, parse it. nil on transport
+// failure (counted by the caller via Check).
+function RoundTrip(AProcess: TProcess; const ARequest: string): TJSONObject;
+var
+  Line: string;
+  Data: TJSONData;
+begin
+  Result := nil;
+  SendLine(AProcess, ARequest);
+  if not ReadLine(AProcess, Line) then
+    Exit;
+  try
+    Data := GetJSON(Line);
+  except
+    Exit;
+  end;
+  if (Data <> nil) and (Data.JSONType = jtObject) then
+    Result := TJSONObject(Data)
+  else
+    Data.Free;
+end;
+
+function FindPath(AObj: TJSONObject; const APath: string): TJSONData;
+begin
+  if AObj = nil then
+    Result := nil
+  else
+    Result := AObj.FindPath(APath);
+end;
+
+function PathString(AObj: TJSONObject; const APath: string): string;
+var
+  Data: TJSONData;
+begin
+  Data := FindPath(AObj, APath);
+  if (Data <> nil) and (Data.JSONType = jtString) then
+    Result := Data.AsString
+  else
+    Result := '';
+end;
+
+function PathInt(AObj: TJSONObject; const APath: string): Integer;
+var
+  Data: TJSONData;
+begin
+  Data := FindPath(AObj, APath);
+  if (Data <> nil) and (Data.JSONType = jtNumber) then
+    Result := Data.AsInteger
+  else
+    Result := 0;
+end;
+
+var
+  Demo: TProcess;
+  Response: TJSONObject;
+  ServerInfo: TJSONData;
+  WaitedMs: Integer;
+
+begin
+  Demo := TProcess.Create(nil);
+  try
+    Demo.Executable := DemoBinary;
+    Demo.Options := [poUsePipes];
+    try
+      Demo.Execute;
+    except
+      on E: Exception do
+      begin
+        WriteLn('FAIL  cannot launch ', DemoBinary, ': ', E.Message);
+        Halt(1);
+      end;
+    end;
+
+    // server/discover — the mandatory entry point.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{' +
+      META_MODERN + '}}');
+    Check(PathString(Response, 'result.resultType') = 'complete',
+      'discover: resultType complete');
+    Check(PathString(Response, 'result.supportedVersions[0]') = '2026-07-28',
+      'discover: supportedVersions lists 2026-07-28');
+    Check(FindPath(Response, 'result.capabilities.tools') <> nil,
+      'discover: tools capability');
+    // The serverInfo _meta key contains dots, so FindPath (which
+    // splits on dots) cannot address it — navigate by hand.
+    ServerInfo := FindPath(Response, 'result._meta');
+    if (ServerInfo <> nil) and (ServerInfo.JSONType = jtObject) then
+      ServerInfo := TJSONObject(ServerInfo).Find(
+        'io.modelcontextprotocol/serverInfo')
+    else
+      ServerInfo := nil;
+    Check((ServerInfo <> nil) and (ServerInfo.JSONType = jtObject) and
+      (TJSONObject(ServerInfo).Get('name', '') = 'pascal-mcp-demo'),
+      'discover: serverInfo stamped');
+    Response.Free;
+
+    // tools/list.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{' +
+      META_MODERN + '}}');
+    Check(PathString(Response, 'result.tools[0].name') = 'echo',
+      'tools/list: echo first (registration order)');
+    Check(PathString(Response, 'result.tools[1].name') = 'add',
+      'tools/list: add second');
+    Check(FindPath(Response, 'result.tools[1].outputSchema') <> nil,
+      'tools/list: add carries outputSchema');
+    Response.Free;
+
+    // tools/call echo.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{' +
+      '"name":"echo","arguments":{"message":"round trip"},' +
+      META_MODERN + '}}');
+    Check(PathString(Response, 'result.content[0].text') = 'round trip',
+      'tools/call echo: text mirrored');
+    Response.Free;
+
+    // tools/call add — structured content.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{' +
+      '"name":"add","arguments":{"a":19,"b":23},' + META_MODERN + '}}');
+    Check(PathInt(Response, 'result.structuredContent.sum') = 42,
+      'tools/call add: structuredContent.sum = 42');
+    Response.Free;
+
+    // tools/call add with missing argument — execution error in-band.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{' +
+      '"name":"add","arguments":{"a":19},' + META_MODERN + '}}');
+    Check((FindPath(Response, 'result.isError') <> nil) and
+      FindPath(Response, 'result.isError').AsBoolean,
+      'tools/call add (bad args): isError true');
+    Response.Free;
+
+    // tools/call unknown — protocol error.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{' +
+      '"name":"nope",' + META_MODERN + '}}');
+    Check(PathInt(Response, 'error.code') = -32602,
+      'tools/call unknown: -32602');
+    Response.Free;
+
+    // resources/list + read.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":7,"method":"resources/list","params":{' +
+      META_MODERN + '}}');
+    Check(PathString(Response, 'result.resources[0].uri') =
+      'mcp://pascal-mcp/greeting',
+      'resources/list: greeting present');
+    Response.Free;
+
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":8,"method":"resources/read","params":{' +
+      '"uri":"mcp://pascal-mcp/greeting",' + META_MODERN + '}}');
+    Check(Pos('Hello from pascal-mcp',
+      PathString(Response, 'result.contents[0].text')) > 0,
+      'resources/read: greeting text');
+    Response.Free;
+
+    // Unsupported protocol version — -32022 with the supported list.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":9,"method":"tools/list","params":{' +
+      '"_meta":{"io.modelcontextprotocol/protocolVersion":"1900-01-01",' +
+      '"io.modelcontextprotocol/clientCapabilities":{}}}}');
+    Check(PathInt(Response, 'error.code') = -32022,
+      'unsupported version: -32022');
+    Check(PathString(Response, 'error.data.supported[0]') = '2026-07-28',
+      'unsupported version: supported list in data');
+    Response.Free;
+
+    // Legacy initialize — rejected, supported versions named.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":10,"method":"initialize","params":{' +
+      '"protocolVersion":"2025-11-25","capabilities":{},' +
+      '"clientInfo":{"name":"legacy","version":"0"}}}');
+    Check(PathInt(Response, 'error.code') = -32601,
+      'initialize: rejected');
+    Check(Pos('2026-07-28', PathString(Response, 'error.message')) > 0,
+      'initialize: supported versions named in message');
+    Response.Free;
+
+    // EOF on stdin → prompt exit (the graceful-shutdown contract).
+    Demo.CloseInput;
+    WaitedMs := 0;
+    while Demo.Running and (WaitedMs < 5000) do
+    begin
+      Sleep(50);
+      Inc(WaitedMs, 50);
+    end;
+    Check(not Demo.Running, 'shutdown: exits on stdin EOF');
+    if Demo.Running then
+      Demo.Terminate(1)
+    else
+      Check(Demo.ExitStatus = 0, 'shutdown: exit status 0');
+  finally
+    Demo.Free;
+  end;
+
+  WriteLn;
+  if Failures = 0 then
+    WriteLn('mcpsmoke: all checks passed')
+  else
+    WriteLn('mcpsmoke: ', Failures, ' check(s) FAILED');
+  if Failures > 0 then
+    Halt(1);
+end.
