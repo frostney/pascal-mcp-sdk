@@ -168,6 +168,29 @@ type
     function Build: TJSONArray;
   end;
 
+  // Returned by every RegisterTool overload for optional fluent
+  // decoration of the just-registered tool — display title and the
+  // spec's behavior-hint annotations:
+  //
+  //   Server.RegisterTool('add', ..., AddHandler)
+  //     .Title('Adder').ReadOnlyHint.IdempotentHint;
+  //
+  // Ignoring the result is fine (extended syntax): a plain statement
+  // call registers the tool with no decoration.
+  TMCPToolOptions = record
+  private
+    FDefinition: TJSONObject; // borrowed: owned by the registry
+    function Annotations: TJSONObject;
+    function SetAnnotation(const AName: string;
+      AValue: Boolean): TMCPToolOptions;
+  public
+    function Title(const ATitle: string): TMCPToolOptions;
+    function ReadOnlyHint(AValue: Boolean = True): TMCPToolOptions;
+    function DestructiveHint(AValue: Boolean = True): TMCPToolOptions;
+    function IdempotentHint(AValue: Boolean = True): TMCPToolOptions;
+    function OpenWorldHint(AValue: Boolean = True): TMCPToolOptions;
+  end;
+
   // Where the server writes server-to-client notification lines
   // (notifications/progress, notifications/message). Plain procedure +
   // user data so procedural transports can register without objects.
@@ -199,11 +222,11 @@ type
     function ParseSchema(const ASchemaJson, AToolName: string): TJSONObject;
     function BuildToolDefinition(const AName, ADescription,
       AInputSchemaJson: string): TJSONObject;
-    procedure AddTool(ADefinition: TJSONObject; AHandler: TMCPToolHandler;
-      AMethod: TMCPToolMethod);
-    procedure AddTypedTool(ADefinition: TJSONObject;
+    function AddTool(ADefinition: TJSONObject; AHandler: TMCPToolHandler;
+      AMethod: TMCPToolMethod): TMCPToolOptions;
+    function AddTypedTool(ADefinition: TJSONObject;
       AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler;
-      AMethod: TMCPArgsMethod);
+      AMethod: TMCPArgsMethod): TMCPToolOptions;
     procedure AddResource(const AUri, AName, AMimeType, ADescription: string;
       AReader: TMCPResourceReader; AMethod: TMCPResourceMethod;
       const AStaticText: string; AHasStaticText: Boolean);
@@ -282,50 +305,50 @@ type
     // runtime condition. The definition-object overloads take
     // ownership of ADefinition for tools that need title/outputSchema/
     // annotations.
-    procedure RegisterTool(const AName, ADescription, AInputSchemaJson: string;
-      AHandler: TMCPToolHandler); overload;
-    procedure RegisterTool(const AName, ADescription, AInputSchemaJson: string;
-      AMethod: TMCPToolMethod); overload;
-    procedure RegisterTool(ADefinition: TJSONObject;
-      AHandler: TMCPToolHandler); overload;
-    procedure RegisterTool(ADefinition: TJSONObject;
-      AMethod: TMCPToolMethod); overload;
+    function RegisterTool(const AName, ADescription, AInputSchemaJson: string;
+      AHandler: TMCPToolHandler): TMCPToolOptions; overload;
+    function RegisterTool(const AName, ADescription, AInputSchemaJson: string;
+      AMethod: TMCPToolMethod): TMCPToolOptions; overload;
+    function RegisterTool(ADefinition: TJSONObject;
+      AHandler: TMCPToolHandler): TMCPToolOptions; overload;
+    function RegisterTool(ADefinition: TJSONObject;
+      AMethod: TMCPToolMethod): TMCPToolOptions; overload;
 
     // Fluent-schema overloads (MCP.Schema): the idiomatic registration
     // path for flat object schemas — no JSON strings. The overloads
     // call Build and take ownership of the finished schemas.
-    procedure RegisterTool(const AName, ADescription: string;
-      const AInputSchema: TMCPSchema; AHandler: TMCPToolHandler); overload;
-    procedure RegisterTool(const AName, ADescription: string;
-      const AInputSchema: TMCPSchema; AMethod: TMCPToolMethod); overload;
-    procedure RegisterTool(const AName, ADescription: string;
+    function RegisterTool(const AName, ADescription: string;
+      const AInputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions; overload;
+    function RegisterTool(const AName, ADescription: string;
+      const AInputSchema: TMCPSchema; AMethod: TMCPToolMethod): TMCPToolOptions; overload;
+    function RegisterTool(const AName, ADescription: string;
       const AInputSchema, AOutputSchema: TMCPSchema;
-      AHandler: TMCPToolHandler); overload;
-    procedure RegisterTool(const AName, ADescription: string;
+      AHandler: TMCPToolHandler): TMCPToolOptions; overload;
+    function RegisterTool(const AName, ADescription: string;
       const AInputSchema, AOutputSchema: TMCPSchema;
-      AMethod: TMCPToolMethod); overload;
+      AMethod: TMCPToolMethod): TMCPToolOptions; overload;
 
     // Typed-argument overloads: the argument class IS the schema
     // (SchemaFrom) and the handler receives a populated, validated
     // instance. The output schema can be fluent or itself a class
     // (paired with MCPStructuredResult(text, instance) in the
     // handler).
-    procedure RegisterTool(const AName, ADescription: string;
-      AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler); overload;
-    procedure RegisterTool(const AName, ADescription: string;
-      AArgsClass: TMCPArgsClass; AMethod: TMCPArgsMethod); overload;
-    procedure RegisterTool(const AName, ADescription: string;
+    function RegisterTool(const AName, ADescription: string;
+      AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler): TMCPToolOptions; overload;
+    function RegisterTool(const AName, ADescription: string;
+      AArgsClass: TMCPArgsClass; AMethod: TMCPArgsMethod): TMCPToolOptions; overload;
+    function RegisterTool(const AName, ADescription: string;
       AArgsClass: TMCPArgsClass; const AOutputSchema: TMCPSchema;
-      AHandler: TMCPArgsHandler); overload;
-    procedure RegisterTool(const AName, ADescription: string;
+      AHandler: TMCPArgsHandler): TMCPToolOptions; overload;
+    function RegisterTool(const AName, ADescription: string;
       AArgsClass: TMCPArgsClass; const AOutputSchema: TMCPSchema;
-      AMethod: TMCPArgsMethod); overload;
-    procedure RegisterTool(const AName, ADescription: string;
+      AMethod: TMCPArgsMethod): TMCPToolOptions; overload;
+    function RegisterTool(const AName, ADescription: string;
       AArgsClass, AOutputClass: TMCPArgsClass;
-      AHandler: TMCPArgsHandler); overload;
-    procedure RegisterTool(const AName, ADescription: string;
+      AHandler: TMCPArgsHandler): TMCPToolOptions; overload;
+    function RegisterTool(const AName, ADescription: string;
       AArgsClass, AOutputClass: TMCPArgsClass;
-      AMethod: TMCPArgsMethod); overload;
+      AMethod: TMCPArgsMethod): TMCPToolOptions; overload;
 
     procedure RegisterTextResource(const AUri, AName, AMimeType, AText: string;
       const ADescription: string = '');
@@ -721,8 +744,8 @@ begin
   Result.Add('inputSchema', ParseSchema(AInputSchemaJson, AName));
 end;
 
-procedure TMCPServer.AddTool(ADefinition: TJSONObject;
-  AHandler: TMCPToolHandler; AMethod: TMCPToolMethod);
+function TMCPServer.AddTool(ADefinition: TJSONObject;
+  AHandler: TMCPToolHandler; AMethod: TMCPToolMethod): TMCPToolOptions;
 var
   ToolName: string;
 begin
@@ -741,42 +764,101 @@ begin
   FTools[High(FTools)].Definition := ADefinition;
   FTools[High(FTools)].Handler := AHandler;
   FTools[High(FTools)].Method := AMethod;
+  Result.FDefinition := ADefinition;
 end;
 
-procedure TMCPServer.AddTypedTool(ADefinition: TJSONObject;
-  AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler;
-  AMethod: TMCPArgsMethod);
+{ ───────── fluent tool decoration ───────── }
+
+function TMCPToolOptions.Annotations: TJSONObject;
+var
+  Data: TJSONData;
 begin
-  AddTool(ADefinition, nil, nil);
+  Data := FDefinition.Find('annotations');
+  if (Data <> nil) and (Data.JSONType = jtObject) then
+    Exit(TJSONObject(Data));
+  Result := TJSONObject.Create;
+  FDefinition.Add('annotations', Result);
+end;
+
+function TMCPToolOptions.SetAnnotation(const AName: string;
+  AValue: Boolean): TMCPToolOptions;
+var
+  Obj: TJSONObject;
+  Index: Integer;
+begin
+  Obj := Annotations;
+  Index := Obj.IndexOfName(AName);
+  if Index >= 0 then
+    Obj.Delete(Index);
+  Obj.Add(AName, AValue);
+  Result := Self;
+end;
+
+function TMCPToolOptions.Title(const ATitle: string): TMCPToolOptions;
+var
+  Index: Integer;
+begin
+  Index := FDefinition.IndexOfName('title');
+  if Index >= 0 then
+    FDefinition.Delete(Index);
+  FDefinition.Add('title', ATitle);
+  Result := Self;
+end;
+
+function TMCPToolOptions.ReadOnlyHint(AValue: Boolean): TMCPToolOptions;
+begin
+  Result := SetAnnotation('readOnlyHint', AValue);
+end;
+
+function TMCPToolOptions.DestructiveHint(AValue: Boolean): TMCPToolOptions;
+begin
+  Result := SetAnnotation('destructiveHint', AValue);
+end;
+
+function TMCPToolOptions.IdempotentHint(AValue: Boolean): TMCPToolOptions;
+begin
+  Result := SetAnnotation('idempotentHint', AValue);
+end;
+
+function TMCPToolOptions.OpenWorldHint(AValue: Boolean): TMCPToolOptions;
+begin
+  Result := SetAnnotation('openWorldHint', AValue);
+end;
+
+function TMCPServer.AddTypedTool(ADefinition: TJSONObject;
+  AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler;
+  AMethod: TMCPArgsMethod): TMCPToolOptions;
+begin
+  Result := AddTool(ADefinition, nil, nil);
   FTools[High(FTools)].ArgsClass := AArgsClass;
   FTools[High(FTools)].ArgsHandler := AHandler;
   FTools[High(FTools)].ArgsMethod := AMethod;
 end;
 
-procedure TMCPServer.RegisterTool(const AName, ADescription,
-  AInputSchemaJson: string; AHandler: TMCPToolHandler);
+function TMCPServer.RegisterTool(const AName, ADescription,
+  AInputSchemaJson: string; AHandler: TMCPToolHandler): TMCPToolOptions;
 begin
-  AddTool(BuildToolDefinition(AName, ADescription, AInputSchemaJson),
+  Result := AddTool(BuildToolDefinition(AName, ADescription, AInputSchemaJson),
     AHandler, nil);
 end;
 
-procedure TMCPServer.RegisterTool(const AName, ADescription,
-  AInputSchemaJson: string; AMethod: TMCPToolMethod);
+function TMCPServer.RegisterTool(const AName, ADescription,
+  AInputSchemaJson: string; AMethod: TMCPToolMethod): TMCPToolOptions;
 begin
-  AddTool(BuildToolDefinition(AName, ADescription, AInputSchemaJson),
+  Result := AddTool(BuildToolDefinition(AName, ADescription, AInputSchemaJson),
     nil, AMethod);
 end;
 
-procedure TMCPServer.RegisterTool(ADefinition: TJSONObject;
-  AHandler: TMCPToolHandler);
+function TMCPServer.RegisterTool(ADefinition: TJSONObject;
+  AHandler: TMCPToolHandler): TMCPToolOptions;
 begin
-  AddTool(ADefinition, AHandler, nil);
+  Result := AddTool(ADefinition, AHandler, nil);
 end;
 
-procedure TMCPServer.RegisterTool(ADefinition: TJSONObject;
-  AMethod: TMCPToolMethod);
+function TMCPServer.RegisterTool(ADefinition: TJSONObject;
+  AMethod: TMCPToolMethod): TMCPToolOptions;
 begin
-  AddTool(ADefinition, nil, AMethod);
+  Result := AddTool(ADefinition, nil, AMethod);
 end;
 
 // Shared assembly for the fluent-schema overloads. AOutputSchema may
@@ -792,78 +874,78 @@ begin
     Result.Add('outputSchema', AOutputSchema);
 end;
 
-procedure TMCPServer.RegisterTool(const AName, ADescription: string;
-  const AInputSchema: TMCPSchema; AHandler: TMCPToolHandler);
+function TMCPServer.RegisterTool(const AName, ADescription: string;
+  const AInputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions;
 begin
-  AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build, nil),
+  Result := AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build, nil),
     AHandler, nil);
 end;
 
-procedure TMCPServer.RegisterTool(const AName, ADescription: string;
-  const AInputSchema: TMCPSchema; AMethod: TMCPToolMethod);
+function TMCPServer.RegisterTool(const AName, ADescription: string;
+  const AInputSchema: TMCPSchema; AMethod: TMCPToolMethod): TMCPToolOptions;
 begin
-  AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build, nil),
+  Result := AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build, nil),
     nil, AMethod);
 end;
 
-procedure TMCPServer.RegisterTool(const AName, ADescription: string;
-  const AInputSchema, AOutputSchema: TMCPSchema; AHandler: TMCPToolHandler);
+function TMCPServer.RegisterTool(const AName, ADescription: string;
+  const AInputSchema, AOutputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions;
 begin
-  AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build,
+  Result := AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build,
     AOutputSchema.Build), AHandler, nil);
 end;
 
-procedure TMCPServer.RegisterTool(const AName, ADescription: string;
-  const AInputSchema, AOutputSchema: TMCPSchema; AMethod: TMCPToolMethod);
+function TMCPServer.RegisterTool(const AName, ADescription: string;
+  const AInputSchema, AOutputSchema: TMCPSchema; AMethod: TMCPToolMethod): TMCPToolOptions;
 begin
-  AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build,
+  Result := AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build,
     AOutputSchema.Build), nil, AMethod);
 end;
 
-procedure TMCPServer.RegisterTool(const AName, ADescription: string;
-  AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler);
+function TMCPServer.RegisterTool(const AName, ADescription: string;
+  AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler): TMCPToolOptions;
 begin
-  AddTypedTool(SchemaDefinition(AName, ADescription,
+  Result := AddTypedTool(SchemaDefinition(AName, ADescription,
     SchemaFrom(AArgsClass).Build, nil), AArgsClass, AHandler, nil);
 end;
 
-procedure TMCPServer.RegisterTool(const AName, ADescription: string;
-  AArgsClass: TMCPArgsClass; AMethod: TMCPArgsMethod);
+function TMCPServer.RegisterTool(const AName, ADescription: string;
+  AArgsClass: TMCPArgsClass; AMethod: TMCPArgsMethod): TMCPToolOptions;
 begin
-  AddTypedTool(SchemaDefinition(AName, ADescription,
+  Result := AddTypedTool(SchemaDefinition(AName, ADescription,
     SchemaFrom(AArgsClass).Build, nil), AArgsClass, nil, AMethod);
 end;
 
-procedure TMCPServer.RegisterTool(const AName, ADescription: string;
+function TMCPServer.RegisterTool(const AName, ADescription: string;
   AArgsClass: TMCPArgsClass; const AOutputSchema: TMCPSchema;
-  AHandler: TMCPArgsHandler);
+  AHandler: TMCPArgsHandler): TMCPToolOptions;
 begin
-  AddTypedTool(SchemaDefinition(AName, ADescription,
+  Result := AddTypedTool(SchemaDefinition(AName, ADescription,
     SchemaFrom(AArgsClass).Build, AOutputSchema.Build),
     AArgsClass, AHandler, nil);
 end;
 
-procedure TMCPServer.RegisterTool(const AName, ADescription: string;
+function TMCPServer.RegisterTool(const AName, ADescription: string;
   AArgsClass: TMCPArgsClass; const AOutputSchema: TMCPSchema;
-  AMethod: TMCPArgsMethod);
+  AMethod: TMCPArgsMethod): TMCPToolOptions;
 begin
-  AddTypedTool(SchemaDefinition(AName, ADescription,
+  Result := AddTypedTool(SchemaDefinition(AName, ADescription,
     SchemaFrom(AArgsClass).Build, AOutputSchema.Build),
     AArgsClass, nil, AMethod);
 end;
 
-procedure TMCPServer.RegisterTool(const AName, ADescription: string;
-  AArgsClass, AOutputClass: TMCPArgsClass; AHandler: TMCPArgsHandler);
+function TMCPServer.RegisterTool(const AName, ADescription: string;
+  AArgsClass, AOutputClass: TMCPArgsClass; AHandler: TMCPArgsHandler): TMCPToolOptions;
 begin
-  AddTypedTool(SchemaDefinition(AName, ADescription,
+  Result := AddTypedTool(SchemaDefinition(AName, ADescription,
     SchemaFrom(AArgsClass).Build, SchemaFrom(AOutputClass).Build),
     AArgsClass, AHandler, nil);
 end;
 
-procedure TMCPServer.RegisterTool(const AName, ADescription: string;
-  AArgsClass, AOutputClass: TMCPArgsClass; AMethod: TMCPArgsMethod);
+function TMCPServer.RegisterTool(const AName, ADescription: string;
+  AArgsClass, AOutputClass: TMCPArgsClass; AMethod: TMCPArgsMethod): TMCPToolOptions;
 begin
-  AddTypedTool(SchemaDefinition(AName, ADescription,
+  Result := AddTypedTool(SchemaDefinition(AName, ADescription,
     SchemaFrom(AArgsClass).Build, SchemaFrom(AOutputClass).Build),
     AArgsClass, nil, AMethod);
 end;

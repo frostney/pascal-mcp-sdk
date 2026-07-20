@@ -102,7 +102,8 @@ begin
       EchoHandler);
 
     Server.RegisterTool('add', 'Add two numbers and return the sum',
-      TAddArgs, TSumResult, AddHandler);
+      TAddArgs, TSumResult, AddHandler)
+      .Title('Adder').ReadOnlyHint.IdempotentHint;
 
     Server.RegisterPrompt('greet', 'Compose a friendly greeting',
       PromptArguments.Add('name', 'Who to greet'), GreetPromptHandler);

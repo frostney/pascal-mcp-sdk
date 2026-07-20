@@ -67,6 +67,7 @@ type
     procedure TestTypedArgsDefaultSeeded;
     procedure TestTypedArgsDefaultOverridden;
     procedure TestTypedOutputClass;
+    procedure TestFluentAnnotations;
   end;
 
   TResourceDispatch = class(TDispatchSuite)
@@ -636,6 +637,37 @@ begin
     TestTypedArgsDefaultOverridden);
   Test('typed output class: derived outputSchema + serialized result',
     TestTypedOutputClass);
+  Test('fluent decoration: title + annotation hints',
+    TestFluentAnnotations);
+end;
+
+procedure TToolDispatch.TestFluentAnnotations;
+var
+  Response: TJSONObject;
+  Tools: TJSONArray;
+  Decorated: TJSONObject;
+begin
+  FServer.RegisterTool('careful', 'A decorated tool',
+    '{"type":"object"}', EchoHandler)
+    .Title('Careful Tool').ReadOnlyHint.DestructiveHint(False)
+    .IdempotentHint;
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/list",' +
+    '"params":{' + META_MODERN + '}}');
+  Tools := TJSONArray(TJSONObject(Response.Find('result')).Find('tools'));
+  Decorated := TJSONObject(Tools[Tools.Count - 1]);
+  Expect<string>(Decorated.Get('title', '')).ToBe('Careful Tool');
+  Expect<Boolean>(
+    TJSONData(Decorated.FindPath('annotations.readOnlyHint')).AsBoolean)
+    .ToBe(True);
+  Expect<Boolean>(
+    TJSONData(Decorated.FindPath('annotations.destructiveHint')).AsBoolean)
+    .ToBe(False);
+  Expect<Boolean>(
+    TJSONData(Decorated.FindPath('annotations.idempotentHint')).AsBoolean)
+    .ToBe(True);
+  Expect<Boolean>(
+    Decorated.FindPath('annotations.openWorldHint') = nil).ToBe(True);
+  Response.Free;
 end;
 
 procedure TToolDispatch.TestTypedOutputClass;
