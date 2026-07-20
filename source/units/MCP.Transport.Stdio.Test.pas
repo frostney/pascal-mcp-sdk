@@ -30,7 +30,8 @@ type
     FServer: TMCPServer;
     FDir: string;
     // Feed AInput through the loop; returns the raw bytes written out.
-    function RunLoop(const AInput: string): string;
+    function RunLoop(const AInput: string;
+      AMaxLineLength: Integer = MCP_STDIO_DEFAULT_MAX_LINE): string;
   protected
     procedure BeforeEach; override;
     procedure AfterEach; override;
@@ -42,6 +43,8 @@ type
     procedure TestBlankLinesSkipped;
     procedure TestNotificationNoOutput;
     procedure TestMultipleRequests;
+    procedure TestOversizedLineRejected;
+    procedure TestOversizedLineRecovery;
   end;
 
 function PingHandler(AArguments: TJSONObject;
@@ -66,7 +69,8 @@ begin
   RemoveDir(FDir);
 end;
 
-function TStdioLoop.RunLoop(const AInput: string): string;
+function TStdioLoop.RunLoop(const AInput: string;
+  AMaxLineLength: Integer): string;
 var
   InFile, OutFile: Text;
   Bytes: TStringStream;
@@ -86,7 +90,7 @@ begin
   Assign(OutFile, FDir + 'out.txt');
   Rewrite(OutFile);
   try
-    RunMCPStdioLoop(InFile, OutFile, FServer);
+    RunMCPStdioLoop(InFile, OutFile, FServer, AMaxLineLength);
   finally
     Close(InFile);
     Close(OutFile);
@@ -184,6 +188,37 @@ begin
   Expect<Boolean>(Pos('pong', Output) > 0).ToBe(True);
 end;
 
+procedure TStdioLoop.TestOversizedLineRejected;
+var
+  Output: string;
+  Parsed: TJSONObject;
+begin
+  // 200-byte cap, ~300-byte line: refused with -32700, null id.
+  Output := RunLoop(StringOfChar('x', 300) + #10, 200);
+  Parsed := TJSONObject(GetJSON(Copy(Output, 1, Length(Output) - 1)));
+  Expect<Integer>(
+    TJSONData(Parsed.FindPath('error.code')).AsInteger).ToBe(-32700);
+  Expect<Boolean>(Parsed.Find('id').JSONType = jtNull).ToBe(True);
+  Parsed.Free;
+end;
+
+procedure TStdioLoop.TestOversizedLineRecovery;
+var
+  Output: string;
+  I, Lines: Integer;
+begin
+  // The stream stays line-synchronized: the request after an
+  // oversized line is served normally.
+  Output := RunLoop(StringOfChar('x', 300) + #10 + DiscoverLine(2) + #10,
+    200);
+  Lines := 0;
+  for I := 1 to Length(Output) do
+    if Output[I] = #10 then
+      Inc(Lines);
+  Expect<Integer>(Lines).ToBe(2);
+  Expect<Boolean>(Pos('"supportedVersions"', Output) > 0).ToBe(True);
+end;
+
 procedure TStdioLoop.SetupTests;
 begin
   Test('one request line → one response line', TestOneLineInOneLineOut);
@@ -192,6 +227,9 @@ begin
   Test('blank lines skipped', TestBlankLinesSkipped);
   Test('notification writes nothing', TestNotificationNoOutput);
   Test('three requests → three responses', TestMultipleRequests);
+  Test('oversized line → -32700, null id', TestOversizedLineRejected);
+  Test('stream recovers after an oversized line',
+    TestOversizedLineRecovery);
 end;
 
 begin

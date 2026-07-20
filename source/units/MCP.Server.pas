@@ -195,6 +195,11 @@ type
     // versions.
     property DualEra: Boolean read FDualEra write FDualEra;
 
+    // The response a transport sends for an inbound line it refused to
+    // buffer (length cap). Kept here so the error shape remains a
+    // protocol decision — transports move lines only.
+    function OversizedLineResponse(AMaxLineLength: Integer): string;
+
     // AInputSchemaJson is parsed at registration and raises EMCPServer
     // on invalid JSON — a bad schema is a programming error, not a
     // runtime condition. The definition-object overloads take
@@ -884,6 +889,15 @@ begin
   Result.ClientName := FLegacyClientName;
   Result.ClientVersion := FLegacyClientVersion;
   Result.ClientCapabilities := FLegacyClientCapabilities;
+end;
+
+function TMCPServer.OversizedLineResponse(AMaxLineLength: Integer): string;
+begin
+  // Same family as an unparseable line: -32700 with a null id (the id,
+  // if any, was inside the line we refused to buffer).
+  Result := BuildErrorResponse(nil, JSONRPC_PARSE_ERROR, Format(
+    'Parse error: line exceeds the maximum length of %d bytes',
+    [AMaxLineLength]));
 end;
 
 procedure TMCPServer.AddCacheFields(AResult: TJSONObject; ATtlMs: Integer);
