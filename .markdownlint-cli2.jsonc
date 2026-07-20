@@ -23,7 +23,7 @@
   },
   "ignores": [
     "build/",
-    "**/node_modules/",
+    "**/node_modules/**",
     ".lwpt/",
     ".agents/",
     ".claude/",
