@@ -126,8 +126,8 @@ type
   // from the URI template match (owned by the server; borrowed by the
   // reader). Matching is the RFC 6570 level-1 simple-variable subset:
   // {var} captures one or more characters excluding '/', variables
-  // must be separated by literal text, and captures remain
-  // percent-encoded.
+  // use names from [A-Za-z0-9_], must be separated by literal text, and
+  // captures remain percent-encoded.
   TMCPTemplateReader = function(const AUri: string; AVars: TJSONObject;
     const ACtx: TMCPRequestContext): TJSONArray;
   TMCPTemplateMethod = function(const AUri: string; AVars: TJSONObject;
@@ -408,9 +408,10 @@ function MCPBlobContents(const AUri, AMimeType, ABase64: string): TJSONArray;
 
 // RFC 6570 level-1 simple-variable template match: {var} captures one
 // or more characters excluding '/', delimited by the complete
-// following literal with backtracking. Captures are raw URI substrings;
-// percent-decoding is deliberately not performed. On success AVars
-// carries the captured variables (caller frees). Exposed for tests.
+// following literal with bounded backtracking. Variable names use
+// [A-Za-z0-9_]. Captures are raw URI substrings; percent-decoding is
+// deliberately not performed. On success AVars carries the captured
+// variables (caller frees). Exposed for tests.
 // Resource-template semantics verified 2026-07-20:
 // https://modelcontextprotocol.io/specification/draft/server/resources
 function MatchUriTemplate(const ATemplate, AUri: string;
@@ -498,10 +499,15 @@ end;
 
 { ───────── URI templates ───────── }
 
+function IsUriTemplateVariableCharacter(ACharacter: Char): Boolean; inline;
+begin
+  Result := ACharacter in ['A'..'Z', 'a'..'z', '0'..'9', '_'];
+end;
+
 function TryValidateUriTemplate(const ATemplate: string;
   out AError: string): Boolean;
 var
-  CloseBrace, Index: Integer;
+  CloseBrace, Index, VariableIndex: Integer;
   PreviousWasVariable: Boolean;
 begin
   Result := False;
@@ -515,6 +521,12 @@ begin
   PreviousWasVariable := False;
   while Index <= Length(ATemplate) do
   begin
+    if ATemplate[Index] = '}' then
+    begin
+      AError := Format('Invalid resource template "%s": stray "}" at ' +
+        'character %d', [ATemplate, Index]);
+      Exit;
+    end;
     if ATemplate[Index] <> '{' then
     begin
       PreviousWasVariable := False;
@@ -543,6 +555,13 @@ begin
         'not be empty', [ATemplate]);
       Exit;
     end;
+    for VariableIndex := Index + 1 to CloseBrace - 1 do
+      if not IsUriTemplateVariableCharacter(ATemplate[VariableIndex]) then
+      begin
+        AError := Format('Invalid resource template "%s": variable name ' +
+          'must contain only A-Z, a-z, 0-9, and _', [ATemplate]);
+        Exit;
+      end;
     PreviousWasVariable := True;
     Index := CloseBrace + 1;
   end;
@@ -557,17 +576,55 @@ type
     Value: string;
   end;
   TVariableCaptures = array of TVariableCapture;
+  TFailedStateRow = array of Boolean;
+  TFailedStateRows = array of TFailedStateRow;
 var
   Captures: TVariableCaptures;
+  FailedStates: TFailedStateRows;
   I: Integer;
   ValidationError: string;
+
+  function IsFailedState(ATemplateIndex, AUriIndex: Integer): Boolean;
+  begin
+    Result := (Length(FailedStates[ATemplateIndex]) <> 0) and
+      FailedStates[ATemplateIndex][AUriIndex];
+  end;
+
+  procedure RememberFailedState(ATemplateIndex, AUriIndex: Integer);
+  begin
+    if Length(FailedStates[ATemplateIndex]) = 0 then
+      SetLength(FailedStates[ATemplateIndex], Length(AUri) + 2);
+    FailedStates[ATemplateIndex][AUriIndex] := True;
+  end;
+
+  procedure RememberFailedVariableStates(ATemplateIndex, AFirstUriIndex,
+    ALastUriIndex: Integer);
+  var
+    UriIndex: Integer;
+  begin
+    // With repeated-variable equality deliberately out of scope, a failed
+    // variable match also proves every later start in this path segment
+    // fails: each has a strict subset of the same possible endpoints.
+    for UriIndex := AFirstUriIndex to ALastUriIndex do
+      RememberFailedState(ATemplateIndex, UriIndex);
+  end;
 
   function MatchFrom(ATemplateIndex, AUriIndex: Integer): Boolean;
   var
     CaptureIndex, CloseBrace, MaxValueEnd, ValueEnd: Integer;
+    StartTemplateIndex, StartUriIndex: Integer;
   begin
+    StartTemplateIndex := ATemplateIndex;
+    StartUriIndex := AUriIndex;
+    if IsFailedState(StartTemplateIndex, StartUriIndex) then
+      Exit(False);
     while ATemplateIndex <= Length(ATemplate) do
     begin
+      if IsFailedState(ATemplateIndex, AUriIndex) then
+      begin
+        RememberFailedState(StartTemplateIndex, StartUriIndex);
+        Exit(False);
+      end;
       if ATemplate[ATemplateIndex] = '{' then
       begin
         CloseBrace := ATemplateIndex + 1;
@@ -589,15 +646,22 @@ var
             Exit(True);
           SetLength(Captures, CaptureIndex);
         end;
+        RememberFailedVariableStates(ATemplateIndex, AUriIndex, MaxValueEnd);
+        RememberFailedState(StartTemplateIndex, StartUriIndex);
         Exit(False);
       end;
       if (AUriIndex > Length(AUri)) or
         (ATemplate[ATemplateIndex] <> AUri[AUriIndex]) then
+      begin
+        RememberFailedState(StartTemplateIndex, StartUriIndex);
         Exit(False);
+      end;
       Inc(ATemplateIndex);
       Inc(AUriIndex);
     end;
     Result := AUriIndex > Length(AUri);
+    if not Result then
+      RememberFailedState(StartTemplateIndex, StartUriIndex);
   end;
 
 begin
@@ -605,6 +669,7 @@ begin
   if not TryValidateUriTemplate(ATemplate, ValidationError) then
     Exit(False);
   SetLength(Captures, 0);
+  SetLength(FailedStates, Length(ATemplate) + 2);
   Result := MatchFrom(1, 1);
   if not Result then
     Exit;

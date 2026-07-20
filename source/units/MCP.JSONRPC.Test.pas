@@ -3,7 +3,8 @@
   null), rejection of batches and non-object params, id preservation
   into error replies for malformed-but-parseable input, and the
   response builders (result / error shape, id cloning, null id for
-  unreadable requests, single-line output with escaped newlines). }
+  unreadable requests, single-line output with escaped newlines, and
+  byte-exact UTF-8 without importing a transport). }
 
 program MCP.JSONRPC.Test;
 
@@ -15,6 +16,9 @@ uses
   fpjson,
   MCP.JSONRPC,
   TestingPascalLibrary;
+
+const
+  UTF8_PAYLOAD = 'h' + #$C3#$A9 + 'llo ' + #$E4#$B8#$96 + #$E7#$95#$8C;
 
 type
   TParseValid = class(TTestSuite)
@@ -48,6 +52,7 @@ type
     procedure TestErrorWithData;
     procedure TestNullIdWhenUnreadable;
     procedure TestSingleLineWithEscapedNewline;
+    procedure TestUtf8Serialization;
   end;
 
 { ───────── helpers ───────── }
@@ -297,6 +302,17 @@ begin
   Expect<Boolean>(Pos('\n', Line) > 0).ToBe(True);
 end;
 
+procedure TResponseBuilders.TestUtf8Serialization;
+var
+  Payload: TJSONObject;
+  Line: string;
+begin
+  Payload := ParseObj('{"text":"' + UTF8_PAYLOAD + '"}');
+  Line := BuildResultResponse(nil, Payload);
+  Expect<string>(Line).ToBe('{ "jsonrpc" : "2.0", "id" : null, ' +
+    '"result" : { "text" : "' + UTF8_PAYLOAD + '" } }');
+end;
+
 procedure TResponseBuilders.SetupTests;
 begin
   Test('result response shape', TestResultShape);
@@ -304,6 +320,7 @@ begin
   Test('error data payload carried', TestErrorWithData);
   Test('nil id serializes as JSON null', TestNullIdWhenUnreadable);
   Test('single line, newlines escaped', TestSingleLineWithEscapedNewline);
+  Test('non-ASCII serializes as byte-exact UTF-8', TestUtf8Serialization);
 end;
 
 begin

@@ -9,8 +9,7 @@ unit MCP.Transport.Stdio;
 // verified 2026-07-20):
 //   - one UTF-8 JSON-RPC message per line, no embedded newlines
 //     (fpjson escapes newlines inside strings, so serialized responses
-//     are single-line by construction); the transport links the RTL
-//     widestring manager so fpjson conversions preserve UTF-8 bytes;
+//     are single-line by construction); UTF-8 setup lives in MCP.JSONRPC;
 //   - stdout carries nothing but MCP messages — diagnostics belong on
 //     stderr (MCPLogToStderr);
 //   - responses are terminated with a bare LF on every platform (a
@@ -38,12 +37,6 @@ unit MCP.Transport.Stdio;
 interface
 
 uses
-  {$IFDEF UNIX}
-  cwstring,
-  {$ENDIF}
-  {$IFDEF WINDOWS}
-  fpwidestring,
-  {$ENDIF}
   SysUtils,
 
   MCP.Server;
@@ -161,10 +154,5 @@ begin
   Write(ErrOutput, AMessage, #10);
   Flush(ErrOutput);
 end;
-
-{$IFDEF WINDOWS}
-initialization
-  SetMultiByteConversionCodePage(CP_UTF8);
-{$ENDIF}
 
 end.

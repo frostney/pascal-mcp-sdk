@@ -11,6 +11,12 @@ unit MCP.JSONRPC;
 // JSON. Batch requirement verified 2026-07-20:
 // modelcontextprotocol.io/specification/2025-03-26/basic
 //
+// MCP transports carry UTF-8 JSON. This bottom serialization unit links
+// the platform RTL widestring manager so fpjson conversions preserve
+// UTF-8 bytes for every consumer, including sans-I/O embeddings.
+// UTF-8 transport requirement verified 2026-07-20:
+// https://modelcontextprotocol.io/specification/draft/basic/transports/stdio
+//
 // Ownership: TJSONRPCMessage.Raw owns the whole parse tree; Id and
 // Params are borrowed views into it. Free with FreeJSONRPCMessage.
 // The Build* functions clone the id (so the message can be freed
@@ -21,6 +27,12 @@ unit MCP.JSONRPC;
 interface
 
 uses
+  {$IFDEF UNIX}
+  cwstring,
+  {$ENDIF}
+  {$IFDEF WINDOWS}
+  fpwidestring,
+  {$ENDIF}
   SysUtils,
 
   fpjson,
@@ -230,5 +242,10 @@ function SerializeCompact(AData: TJSONData): string;
 begin
   Result := AData.AsJSON;
 end;
+
+{$IFDEF WINDOWS}
+initialization
+  SetMultiByteConversionCodePage(CP_UTF8);
+{$ENDIF}
 
 end.

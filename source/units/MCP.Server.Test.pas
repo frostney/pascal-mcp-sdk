@@ -91,6 +91,8 @@ type
     procedure TestEmptyTemplateVariable;
     procedure TestUnclosedTemplateVariable;
     procedure TestAdjacentTemplateVariables;
+    procedure TestStrayTemplateCloseBrace;
+    procedure TestInvalidTemplateVariableCharacter;
   end;
 
   TResourceTemplates = class(TDispatchSuite)
@@ -103,6 +105,7 @@ type
     procedure TestMatcherTrailingExcess;
     procedure TestMatcherFullFollowingLiteral;
     procedure TestMatcherBacktracks;
+    procedure TestMatcherPathologicalNoMatch;
     procedure TestMatcherPreservesPercentEncoding;
     procedure TestTemplatesList;
     procedure TestReadViaTemplate;
@@ -1092,6 +1095,18 @@ begin
     'Invalid resource template "mem://item/{group}{name}": adjacent variables require separating literal text');
 end;
 
+procedure TRegistrationGuards.TestStrayTemplateCloseBrace;
+begin
+  ExpectTemplateRegistrationError('mem://item/name}',
+    'Invalid resource template "mem://item/name}": stray "}" at character 16');
+end;
+
+procedure TRegistrationGuards.TestInvalidTemplateVariableCharacter;
+begin
+  ExpectTemplateRegistrationError('mem://item/{+path}',
+    'Invalid resource template "mem://item/{+path}": variable name must contain only A-Z, a-z, 0-9, and _');
+end;
+
 procedure TRegistrationGuards.SetupTests;
 begin
   Test('duplicate tool name rejected', TestDuplicateTool);
@@ -1101,6 +1116,9 @@ begin
   Test('empty template variable rejected', TestEmptyTemplateVariable);
   Test('unclosed template variable rejected', TestUnclosedTemplateVariable);
   Test('adjacent template variables rejected', TestAdjacentTemplateVariables);
+  Test('stray template close brace rejected', TestStrayTemplateCloseBrace);
+  Test('invalid template variable character rejected',
+    TestInvalidTemplateVariableCharacter);
 end;
 
 { ───────── resource templates ───────── }
@@ -1176,6 +1194,17 @@ begin
       'mcp://example/a.meta.meta.json', Vars)).ToBe(True);
   Expect<string>(Vars.Get('name', '')).ToBe('a.meta');
   Vars.Free;
+end;
+
+procedure TResourceTemplates.TestMatcherPathologicalNoMatch;
+var
+  StartedAt: QWord;
+  Vars: TJSONObject;
+begin
+  StartedAt := GetTickCount64;
+  Expect<Boolean>(MatchUriTemplate('{a}x{b}x{c}x{d}x{e}x{f}xZ',
+    StringOfChar('x', 4096), Vars)).ToBe(False);
+  Expect<Boolean>(GetTickCount64 - StartedAt < 2000).ToBe(True);
 end;
 
 procedure TResourceTemplates.TestMatcherPreservesPercentEncoding;
@@ -1281,6 +1310,8 @@ begin
     TestMatcherFullFollowingLiteral);
   Test('matcher: backtracks to a later following literal',
     TestMatcherBacktracks);
+  Test('matcher: bounds pathological backtracking',
+    TestMatcherPathologicalNoMatch);
   Test('matcher: percent encoding remains encoded',
     TestMatcherPreservesPercentEncoding);
   Test('resources/templates/list: shape + cache fields',
