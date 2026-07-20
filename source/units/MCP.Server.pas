@@ -1,26 +1,45 @@
 unit MCP.Server;
 
-// Transport-agnostic MCP server core (spec revision 2026-07-28,
-// stateless). One instance holds the tool/resource registries and
-// turns one decoded JSON-RPC line into at most one response line via
-// HandleMessage — the whole protocol surface is testable without any
-// I/O, mirroring duetto's sans-I/O discipline. MCP.Transport.Stdio (and
-// a future MCP.Transport.Http) are thin byte-moving shells around this.
+// Transport-agnostic MCP server core, DUAL-ERA per the 2026-07-28
+// spec's compatibility model: requests carrying modern per-request
+// _meta are served statelessly (revision 2026-07-28); an `initialize`
+// request selects legacy semantics (2025-11-25 and earlier), scoped to
+// this server instance (= the stdio process); both eras are served
+// concurrently on the same instance, which is what lets current-day
+// legacy clients (Claude Code, Claude Desktop) and RC-era clients use
+// the same binary. Set DualEra := False for a strict modern-only
+// server that rejects initialize with a diagnostic naming its
+// supported versions, as the spec recommends.
 //
-// v1 protocol surface (complete for a stateless stdio server):
-//   server/discover                    (mandatory in 2026-07-28)
-//   tools/list, tools/call
-//   resources/list, resources/read
-//   initialize                         rejected with a diagnostic that
-//                                      names the supported versions, as
-//                                      the spec recommends for
-//                                      modern-only servers
+// One instance holds the tool/resource registries and turns one
+// decoded JSON-RPC line into at most one response line via
+// HandleMessage — the whole protocol surface is testable without any
+// I/O, mirroring duetto's sans-I/O discipline. MCP.Transport.Stdio
+// (and a future MCP.Transport.Http) are thin byte-moving shells
+// around this.
+//
+// v1 protocol surface:
+//   modern era (per-request _meta):
+//     server/discover                  (mandatory in 2026-07-28)
+//     tools/list, tools/call
+//     resources/list, resources/read
+//   legacy era (dual-era mode, after initialize):
+//     initialize, ping
+//     tools/list, tools/call
+//     resources/list, resources/read
+//     — responses omit the modern-only stamps (resultType, serverInfo
+//       _meta, ttlMs/cacheScope) and resource-not-found is the legacy
+//       -32002, so each era sees its own wire dialect
 //   notifications/*                    accepted and ignored; requests
 //                                      are handled strictly one at a
 //                                      time, so by the time a
 //                                      notifications/cancelled arrives
 //                                      the request it names has already
-//                                      completed
+//                                      completed. Era selection state
+//                                      (legacy initialized + negotiated
+//                                      version) is the one deliberate
+//                                      piece of per-process state the
+//                                      compatibility model prescribes.
 // Not in v1 (deliberate): subscriptions/listen and the listChanged
 // capability flags (registries are fixed after startup, so there is
 // nothing to notify), pagination cursors (lists are returned whole),
@@ -91,6 +110,15 @@ type
     FInstructions: string;
     FCacheTtlMs: Integer;
     FCacheScope: string;
+    FDualEra: Boolean;
+    // Legacy-era session state (dual-era mode only): the compatibility
+    // model scopes initialize-negotiated semantics to the process, so
+    // this is the one deliberate piece of cross-request state.
+    FLegacyInitialized: Boolean;
+    FLegacyProtocolVersion: string;
+    FLegacyClientName: string;
+    FLegacyClientVersion: string;
+    FLegacyClientCapabilities: TJSONObject; // owned clone from initialize
     FTools: array of TMcpToolRegistration;
     FResources: array of TMcpResourceRegistration;
 
@@ -106,15 +134,20 @@ type
     function FindResource(const AUri: string): Integer;
 
     function DispatchRequest(const AMessage: TJsonRpcMessage): string;
+    function DispatchLegacyRequest(const AMessage: TJsonRpcMessage): string;
+    function HandleInitialize(const AMessage: TJsonRpcMessage): string;
     function HandleDiscover(const AMessage: TJsonRpcMessage): string;
-    function HandleToolsList(const AMessage: TJsonRpcMessage): string;
+    function HandleToolsList(const AMessage: TJsonRpcMessage;
+      ALegacy: Boolean): string;
     function HandleToolsCall(const AMessage: TJsonRpcMessage;
-      const ACtx: TMcpRequestContext): string;
-    function HandleResourcesList(const AMessage: TJsonRpcMessage): string;
+      const ACtx: TMcpRequestContext; ALegacy: Boolean): string;
+    function HandleResourcesList(const AMessage: TJsonRpcMessage;
+      ALegacy: Boolean): string;
     function HandleResourcesRead(const AMessage: TJsonRpcMessage;
-      const ACtx: TMcpRequestContext): string;
+      const ACtx: TMcpRequestContext; ALegacy: Boolean): string;
     function ResultResponse(const AMessage: TJsonRpcMessage;
-      AResult: TJSONObject): string;
+      AResult: TJSONObject; ALegacy: Boolean): string;
+    function LegacyContext: TMcpRequestContext;
     procedure AddCacheFields(AResult: TJSONObject; ATtlMs: Integer);
   public
     constructor Create(const AName, AVersion: string);
@@ -133,6 +166,14 @@ type
     // cannot know how fresh a callback's data stays.
     property CacheTtlMs: Integer read FCacheTtlMs write FCacheTtlMs;
     property CacheScope: string read FCacheScope write FCacheScope;
+
+    // Dual-era mode (default True): answer the legacy initialize
+    // handshake (2025-11-25 and earlier) alongside stateless
+    // 2026-07-28 requests — today's clients (Claude Code, Claude
+    // Desktop) still open with initialize. False = strict modern-only:
+    // initialize is rejected with a diagnostic naming the supported
+    // versions.
+    property DualEra: Boolean read FDualEra write FDualEra;
 
     // AInputSchemaJson is parsed at registration and raises EMcpServer
     // on invalid JSON — a bad schema is a programming error, not a
@@ -239,6 +280,7 @@ begin
   FVersion := AVersion;
   FCacheTtlMs := 300000;
   FCacheScope := CACHE_SCOPE_PRIVATE;
+  FDualEra := True;
 end;
 
 destructor TMcpServer.Destroy;
@@ -249,6 +291,7 @@ begin
     FTools[I].Definition.Free;
   for I := 0 to High(FResources) do
     FResources[I].Definition.Free;
+  FLegacyClientCapabilities.Free;
   inherited Destroy;
 end;
 
@@ -415,9 +458,13 @@ end;
 { ───────── TMcpServer: dispatch ───────── }
 
 function TMcpServer.ResultResponse(const AMessage: TJsonRpcMessage;
-  AResult: TJSONObject): string;
+  AResult: TJSONObject; ALegacy: Boolean): string;
 begin
-  StampResult(AResult, FName, FVersion);
+  // The modern stamps (resultType, serverInfo _meta) belong to the
+  // 2026-07-28 dialect only; legacy responses stay byte-faithful to
+  // their negotiated revision.
+  if not ALegacy then
+    StampResult(AResult, FName, FVersion);
   Result := BuildResultResponse(AMessage.Id, AResult);
 end;
 
@@ -459,20 +506,41 @@ begin
   end;
 end;
 
+// The dual-era server "selects its behavior from how the client
+// opens" (spec compatibility matrix): the presence of the required
+// modern _meta key marks a modern request; an initialize request
+// selects legacy semantics. A legacy _meta like progressToken does
+// NOT mark a request modern — only the protocolVersion key does.
+function IsModernRequest(AParams: TJSONObject): Boolean;
+var
+  MetaData: TJSONData;
+begin
+  if AParams = nil then
+    Exit(False);
+  MetaData := AParams.Find('_meta');
+  Result := (MetaData <> nil) and (MetaData.JSONType = jtObject) and
+    (TJSONObject(MetaData).Find(META_KEY_PROTOCOL_VERSION) <> nil);
+end;
+
 function TMcpServer.DispatchRequest(const AMessage: TJsonRpcMessage): string;
 var
   Ctx: TMcpRequestContext;
   MetaErr: TMcpMetaError;
 begin
-  // Legacy handshake, rejected before _meta validation (a legacy
-  // initialize carries no modern _meta): a modern-only server SHOULD
-  // name its supported versions in the reply — it is the only
-  // diagnostic a legacy client can surface.
   if AMessage.Method = 'initialize' then
+  begin
+    if FDualEra then
+      Exit(HandleInitialize(AMessage));
+    // Modern-only servers SHOULD name their supported versions in the
+    // reply — it is the only diagnostic a legacy client can surface.
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
       'The initialize handshake is not supported; this server implements ' +
       'stateless MCP. Supported protocol versions: ' + MCP_PROTOCOL_VERSION,
       BuildUnsupportedVersionData([MCP_PROTOCOL_VERSION], 'initialize')));
+  end;
+
+  if FDualEra and not IsModernRequest(AMessage.Params) then
+    Exit(DispatchLegacyRequest(AMessage));
 
   if not ExtractRequestContext(AMessage.Params, [MCP_PROTOCOL_VERSION],
     Ctx, MetaErr) then
@@ -482,16 +550,112 @@ begin
   if AMessage.Method = 'server/discover' then
     Exit(HandleDiscover(AMessage));
   if AMessage.Method = 'tools/list' then
-    Exit(HandleToolsList(AMessage));
+    Exit(HandleToolsList(AMessage, False));
   if AMessage.Method = 'tools/call' then
-    Exit(HandleToolsCall(AMessage, Ctx));
+    Exit(HandleToolsCall(AMessage, Ctx, False));
   if AMessage.Method = 'resources/list' then
-    Exit(HandleResourcesList(AMessage));
+    Exit(HandleResourcesList(AMessage, False));
   if AMessage.Method = 'resources/read' then
-    Exit(HandleResourcesRead(AMessage, Ctx));
+    Exit(HandleResourcesRead(AMessage, Ctx, False));
 
   Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
     'Method not found: ' + AMessage.Method);
+end;
+
+function TMcpServer.DispatchLegacyRequest(
+  const AMessage: TJsonRpcMessage): string;
+begin
+  // ping is a legacy utility a client may send at any time, including
+  // before initialize (the modern revision removed it — a modern
+  // client never sends it).
+  if AMessage.Method = 'ping' then
+    Exit(BuildResultResponse(AMessage.Id, TJSONObject.Create));
+
+  if not FLegacyInitialized then
+    // Legacy lifecycle: non-ping requests are invalid before the
+    // handshake completes. The hint about _meta helps a misbehaving
+    // modern client that dropped its required envelope.
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_REQUEST,
+      'Received request before initialization: send initialize first ' +
+      '(legacy clients), or carry the required per-request _meta ' +
+      '(protocol 2026-07-28)'));
+
+  if AMessage.Method = 'tools/list' then
+    Exit(HandleToolsList(AMessage, True));
+  if AMessage.Method = 'tools/call' then
+    Exit(HandleToolsCall(AMessage, LegacyContext, True));
+  if AMessage.Method = 'resources/list' then
+    Exit(HandleResourcesList(AMessage, True));
+  if AMessage.Method = 'resources/read' then
+    Exit(HandleResourcesRead(AMessage, LegacyContext, True));
+
+  Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
+    'Method not found: ' + AMessage.Method);
+end;
+
+function TMcpServer.HandleInitialize(const AMessage: TJsonRpcMessage): string;
+var
+  VersionData, InfoData, CapsData: TJSONData;
+  Requested: string;
+  InitResult, Capabilities, ServerInfo: TJSONObject;
+begin
+  if AMessage.Params = nil then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: initialize requires protocolVersion'));
+  VersionData := AMessage.Params.Find('protocolVersion');
+  if (VersionData = nil) or (VersionData.JSONType <> jtString) then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: protocolVersion must be a string'));
+  Requested := VersionData.AsString;
+
+  // Legacy negotiation: echo a supported revision, otherwise answer
+  // with the latest legacy revision we speak (the client decides
+  // whether to proceed or disconnect).
+  if IsLegacyProtocolVersion(Requested) then
+    FLegacyProtocolVersion := Requested
+  else
+    FLegacyProtocolVersion := LATEST_LEGACY_PROTOCOL_VERSION;
+
+  // A re-initialize renegotiates: replace any earlier session state.
+  FLegacyClientName := '';
+  FLegacyClientVersion := '';
+  FreeAndNil(FLegacyClientCapabilities);
+  InfoData := AMessage.Params.Find('clientInfo');
+  if (InfoData <> nil) and (InfoData.JSONType = jtObject) then
+  begin
+    FLegacyClientName := TJSONObject(InfoData).Get('name', '');
+    FLegacyClientVersion := TJSONObject(InfoData).Get('version', '');
+  end;
+  CapsData := AMessage.Params.Find('capabilities');
+  if (CapsData <> nil) and (CapsData.JSONType = jtObject) then
+    FLegacyClientCapabilities := TJSONObject(CapsData.Clone);
+  FLegacyInitialized := True;
+
+  Capabilities := TJSONObject.Create;
+  Capabilities.Add('tools', TJSONObject.Create);
+  Capabilities.Add('resources', TJSONObject.Create);
+  ServerInfo := TJSONObject.Create;
+  ServerInfo.Add('name', FName);
+  ServerInfo.Add('version', FVersion);
+
+  InitResult := TJSONObject.Create;
+  InitResult.Add('protocolVersion', FLegacyProtocolVersion);
+  InitResult.Add('capabilities', Capabilities);
+  InitResult.Add('serverInfo', ServerInfo);
+  if FInstructions <> '' then
+    InitResult.Add('instructions', FInstructions);
+
+  // Legacy wire dialect: no resultType / serverInfo _meta stamping.
+  Result := BuildResultResponse(AMessage.Id, InitResult);
+end;
+
+function TMcpServer.LegacyContext: TMcpRequestContext;
+begin
+  Result := Default(TMcpRequestContext);
+  Result.ProtocolVersion := FLegacyProtocolVersion;
+  Result.ClientName := FLegacyClientName;
+  Result.ClientVersion := FLegacyClientVersion;
+  Result.ClientCapabilities := FLegacyClientCapabilities;
 end;
 
 procedure TMcpServer.AddCacheFields(AResult: TJSONObject; ATtlMs: Integer);
@@ -534,10 +698,11 @@ begin
     DiscoverResult.Add('instructions', FInstructions);
   AddCacheFields(DiscoverResult, FCacheTtlMs);
 
-  Result := ResultResponse(AMessage, DiscoverResult);
+  Result := ResultResponse(AMessage, DiscoverResult, False);
 end;
 
-function TMcpServer.HandleToolsList(const AMessage: TJsonRpcMessage): string;
+function TMcpServer.HandleToolsList(const AMessage: TJsonRpcMessage;
+  ALegacy: Boolean): string;
 var
   ListResult: TJSONObject;
   Tools: TJSONArray;
@@ -550,12 +715,13 @@ begin
     Tools.Add(FTools[I].Definition.Clone);
   ListResult := TJSONObject.Create;
   ListResult.Add('tools', Tools);
-  AddCacheFields(ListResult, FCacheTtlMs);
-  Result := ResultResponse(AMessage, ListResult);
+  if not ALegacy then
+    AddCacheFields(ListResult, FCacheTtlMs);
+  Result := ResultResponse(AMessage, ListResult, ALegacy);
 end;
 
 function TMcpServer.HandleToolsCall(const AMessage: TJsonRpcMessage;
-  const ACtx: TMcpRequestContext): string;
+  const ACtx: TMcpRequestContext; ALegacy: Boolean): string;
 var
   NameData, ArgsData: TJSONData;
   ToolName: string;
@@ -615,10 +781,11 @@ begin
   if ToolResult.StructuredContent <> nil then
     CallResult.Add('structuredContent', ToolResult.StructuredContent);
 
-  Result := ResultResponse(AMessage, CallResult);
+  Result := ResultResponse(AMessage, CallResult, ALegacy);
 end;
 
-function TMcpServer.HandleResourcesList(const AMessage: TJsonRpcMessage): string;
+function TMcpServer.HandleResourcesList(const AMessage: TJsonRpcMessage;
+  ALegacy: Boolean): string;
 var
   ListResult: TJSONObject;
   Resources: TJSONArray;
@@ -629,12 +796,13 @@ begin
     Resources.Add(FResources[I].Definition.Clone);
   ListResult := TJSONObject.Create;
   ListResult.Add('resources', Resources);
-  AddCacheFields(ListResult, FCacheTtlMs);
-  Result := ResultResponse(AMessage, ListResult);
+  if not ALegacy then
+    AddCacheFields(ListResult, FCacheTtlMs);
+  Result := ResultResponse(AMessage, ListResult, ALegacy);
 end;
 
 function TMcpServer.HandleResourcesRead(const AMessage: TJsonRpcMessage;
-  const ACtx: TMcpRequestContext): string;
+  const ACtx: TMcpRequestContext; ALegacy: Boolean): string;
 var
   UriData: TJSONData;
   Uri, MimeType: string;
@@ -651,10 +819,14 @@ begin
   Index := FindResource(Uri);
   if Index < 0 then
   begin
-    // Not found MUST be -32602 in this revision (-32002 is the legacy
-    // code this library never emits).
+    // Modern era: MUST be -32602 (the modern revision forbids -32002).
+    // Legacy era: -32002 is what that revision's clients expect.
     NotFoundData := TJSONObject.Create;
     NotFoundData.Add('uri', Uri);
+    if ALegacy then
+      Exit(BuildErrorResponse(AMessage.Id,
+        MCP_ERROR_LEGACY_RESOURCE_NOT_FOUND, 'Resource not found',
+        NotFoundData));
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
       'Resource not found', NotFoundData));
   end;
@@ -679,8 +851,9 @@ begin
 
   ReadResult := TJSONObject.Create;
   ReadResult.Add('contents', Contents);
-  AddCacheFields(ReadResult, ReadTtlMs);
-  Result := ResultResponse(AMessage, ReadResult);
+  if not ALegacy then
+    AddCacheFields(ReadResult, ReadTtlMs);
+  Result := ResultResponse(AMessage, ReadResult, ALegacy);
 end;
 
 end.

@@ -101,13 +101,25 @@ Key behaviours you get for free:
 - **Handler exceptions** become `isError: true` tool results — the
   in-band error channel models can self-correct against.
 - **`resultType` and `serverInfo`** are stamped on every result.
-- **Legacy clients** sending `initialize` get an error naming the
-  supported versions, the diagnostic the spec recommends.
+- **Legacy clients work out of the box**: the server is dual-era by
+  default, so a client opening with the classic `initialize` handshake
+  (Claude Code, Claude Desktop today) is served the legacy dialect
+  while modern `_meta` requests stay stateless — same registries, same
+  handlers. Set `Server.DualEra := False` for a strict modern-only
+  server that rejects `initialize` naming its supported versions.
 
 ## Register the server with an MCP client
 
-Any client that launches stdio servers works. The typical configuration
-shape:
+Any client that launches stdio servers works — legacy or RC-era, thanks
+to the dual-era default. With Claude Code it is one command
+(verified against `mcpdemo`):
+
+```sh
+claude mcp add my-server /absolute/path/to/myserver
+claude mcp list        # → my-server: … - ✔ Connected
+```
+
+The generic configuration shape:
 
 ```json
 {

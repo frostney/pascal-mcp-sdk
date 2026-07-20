@@ -34,10 +34,16 @@ lantaarn is its first named consumer, mirroring duetto → lantaarn.
 
 - **No MCP client.** v1 is a server library; a client (for Pascal
   programs that drive other MCP servers) is a separate decision.
-- **No legacy protocol revisions.** The initialize-handshake era
-  (2025-11-25 and earlier) is answered with a diagnostic naming the
-  supported versions, as the spec recommends — not implemented.
-  Dual-era support is a possible follow-up, not a default.
+- **Legacy is compatibility, not a second implementation.** The server
+  is dual-era by default — the initialize handshake (2025-11-25 and
+  earlier) is answered so today's clients (Claude Code, Claude
+  Desktop) work — but legacy support stays a thin dialect layer over
+  the one modern core: the same registries, handlers, and dispatch,
+  with era-specific stamps and error codes at the edges. Legacy-only
+  features that the modern revision removed (server-initiated
+  requests, subscriptions, setLevel) are not implemented, and the
+  legacy dialect sunsets when the ecosystem's clients finish
+  migrating.
 - **No JSON-Schema validation engine.** Tool handlers validate their own
   arguments and report problems as in-band `isError` results; shipping a
   schema validator is out of scope for a dependency-light library.

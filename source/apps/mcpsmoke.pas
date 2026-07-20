@@ -267,15 +267,65 @@ begin
       'unsupported version: supported list in data');
     Response.Free;
 
-    // Legacy initialize — rejected, supported versions named.
+    // ── Legacy era (dual-era default): the path today's clients
+    //    (Claude Code / Claude Desktop) actually take. ──
+
+    // Bare legacy request before the handshake → -32600.
     Response := RoundTrip(Demo,
-      '{"jsonrpc":"2.0","id":10,"method":"initialize","params":{' +
-      '"protocolVersion":"2025-11-25","capabilities":{},' +
-      '"clientInfo":{"name":"legacy","version":"0"}}}');
-    Check(PathInt(Response, 'error.code') = -32601,
-      'initialize: rejected');
-    Check(Pos('2026-07-28', PathString(Response, 'error.message')) > 0,
-      'initialize: supported versions named in message');
+      '{"jsonrpc":"2.0","id":10,"method":"tools/list","params":{}}');
+    Check(PathInt(Response, 'error.code') = -32600,
+      'legacy: request before initialize → -32600');
+    Response.Free;
+
+    // ping is valid at any time in the legacy era.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":11,"method":"ping"}');
+    Check((Response <> nil) and (Response.Find('result') <> nil),
+      'legacy: ping answered');
+    Response.Free;
+
+    // initialize — negotiate a legacy revision.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":12,"method":"initialize","params":{' +
+      '"protocolVersion":"2025-06-18","capabilities":{},' +
+      '"clientInfo":{"name":"legacy-smoke","version":"0"}}}');
+    Check(PathString(Response, 'result.protocolVersion') = '2025-06-18',
+      'legacy: initialize echoes 2025-06-18');
+    Check(PathString(Response, 'result.serverInfo.name') = 'pascal-mcp-demo',
+      'legacy: initialize serverInfo');
+    Check(FindPath(Response, 'result.resultType') = nil,
+      'legacy: initialize result unstamped');
+    Response.Free;
+
+    SendLine(Demo,
+      '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+
+    // Legacy tools/call — no _meta anywhere.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{' +
+      '"name":"echo","arguments":{"message":"legacy round trip"}}}');
+    Check(PathString(Response, 'result.content[0].text') =
+      'legacy round trip',
+      'legacy: tools/call echo works');
+    Check(FindPath(Response, 'result.resultType') = nil,
+      'legacy: tools/call result unstamped');
+    Response.Free;
+
+    // Legacy resource-not-found uses the era-correct -32002.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":14,"method":"resources/read","params":{' +
+      '"uri":"mcp://nope"}}');
+    Check(PathInt(Response, 'error.code') = -32002,
+      'legacy: resource not found → -32002');
+    Response.Free;
+
+    // Both eras concurrently: a modern request after the legacy
+    // handshake is still served statelessly with modern stamps.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":15,"method":"tools/list","params":{' +
+      META_MODERN + '}}');
+    Check(PathString(Response, 'result.resultType') = 'complete',
+      'dual-era: modern request after legacy handshake stays modern');
     Response.Free;
 
     // EOF on stdin → prompt exit (the graceful-shutdown contract).

@@ -10,10 +10,12 @@ no second language runtime, no framework.
 - **stdio transport, complete** — newline-delimited JSON-RPC 2.0 over
   stdin/stdout, the standard local-subprocess transport. Streamable
   HTTP is a planned follow-up behind the same transport-agnostic core.
-- **Stateless spec** — per-request `_meta` version/capability
-  negotiation, mandatory `server/discover`, no session handshake.
-  Existing Object Pascal MCP projects are Delphi-only and target the
-  superseded session-based revisions.
+- **Stateless spec, dual-era by default** — native 2026-07-28
+  (per-request `_meta`, mandatory `server/discover`, no session
+  handshake) *and* the legacy `initialize` handshake for today's
+  clients: **Claude Code and Claude Desktop connect out of the box**
+  (verified). Existing Object Pascal MCP projects are Delphi-only and
+  target only the superseded session-based revisions.
 - **lwpt ecosystem** — built/tested/formatted via
   [lwpt](https://github.com/frostney/lwpt); sibling of
   [duetto](https://github.com/frostney/duetto). Works without lwpt too
@@ -113,15 +115,17 @@ five files, RTL + fpjson only.
 | `resources/list`, `resources/read` | ✅ static + dynamic, text + blob builders |
 | `_meta` validation, version negotiation | ✅ `-32602` / `-32021` / `-32022` per spec |
 | `ttlMs` / `cacheScope` caching hints (SEP-2549) | ✅ on discover/list/read, tunable via `CacheTtlMs`/`CacheScope` |
-| Legacy `initialize` | ✅ rejected with the supported versions named (spec guidance) |
+| Legacy era (`initialize`, 2024-11-05…2025-11-25) | ✅ dual-era default: era-faithful dialect (unstamped results, `-32002`, `ping`); `DualEra := False` for strict modern-only |
 | `subscriptions/listen`, list-changed | ⏳ follow-up (registries are static in v1) |
 | Streamable HTTP transport | ⏳ follow-up (`MCP.Transport.Http` seam reserved) |
 
 Spec facts verified against the official
 [MCP specification](https://modelcontextprotocol.io/specification/draft/basic/transports/stdio)
-on 2026-07-20, and the full surface **interop-tested against the
-official MCP TypeScript client beta** (`@modelcontextprotocol/client`
-2.0.0-beta.4) in both pinned and probing modes — see
+on 2026-07-20, and the full surface **interop-tested against both
+official MCP TypeScript clients**: the v2 RC beta
+(`@modelcontextprotocol/client` 2.0.0-beta.4, pinned + auto-probe
+modes) and the v1 SDK (`@modelcontextprotocol/sdk`, the legacy era
+Claude Code speaks) — plus a live `claude mcp add` health check. See
 [tools/interop-ts/](tools/interop-ts/) and
 [docs/architecture.md](docs/architecture.md) for the grounding notes.
 

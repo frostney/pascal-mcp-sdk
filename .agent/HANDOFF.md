@@ -92,9 +92,30 @@ for all four Tier 1 SDKs (Python `mcp==2.0.0b1`, TS
 `@modelcontextprotocol/{server,client}@beta`, Go v1.7.0-pre.1, C#
 v2.0.0-preview.1); inspectors (e.g. MCPJam) can pin the RC version.
 Mainstream end-user clients (Claude Desktop/Code) still speak the
-legacy handshake — until they adopt the RC, they will hit our
-initialize rejection. This makes the dual-era follow-up a real
-adoption question, not just a spec footnote.
+legacy handshake.
+
+## Dual-era support (same session, user-requested)
+
+`TMcpServer` is now a dual-era server per the spec's compatibility
+matrix, **on by default** (`DualEra := False` restores strict
+modern-only). Era selection follows how the client opens: modern
+per-request `_meta` → stateless 2026-07-28; `initialize` → legacy
+semantics (2024-11-05…2025-11-25) scoped to the process — the one
+deliberate piece of cross-request state. Both eras serve concurrently;
+handlers are era-blind (same `TMcpRequestContext`). Legacy dialect is
+era-faithful: unstamped results, no cache fields, `-32002`
+resource-not-found, `ping` answered; unknown initialize versions are
+answered with `2025-11-25`. Legacy-only features the modern revision
+removed (server-initiated requests, subscriptions, setLevel) stay
+unimplemented by design (VISION.md).
+
+Verified: 68 unit tests (new `Server: legacy era` suite), 29 mcpsmoke
+checks (legacy battery incl. pre-init -32600 and era concurrency),
+`tools/interop-ts` green against BOTH official TS clients — v2 RC beta
+(pinned + auto-probe, negotiates modern against the dual-era server)
+and v1 SDK (`legacy-interop.mjs`, the Claude Code client library) —
+and **Claude Code itself: `claude mcp add` + `claude mcp list` health
+check → Connected** (config added and removed cleanly).
 
 ## Open questions
 

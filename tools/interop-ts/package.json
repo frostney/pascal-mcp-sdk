@@ -1,12 +1,13 @@
 {
   "name": "pascal-mcp-interop-ts",
   "private": true,
-  "description": "Cross-implementation check: the official MCP TypeScript client (2026-07-28 RC beta) against pascal-mcp's mcpdemo over stdio. Mirrors duetto's tools/crosscheck.py pattern.",
+  "description": "Cross-implementation checks: the official MCP TypeScript clients — v2 beta (2026-07-28 RC) and v1 (the legacy era Claude Code speaks) — against pascal-mcp's mcpdemo over stdio. Mirrors duetto's tools/crosscheck.py pattern.",
   "type": "module",
   "scripts": {
-    "interop": "node interop.mjs ../../build/mcpdemo"
+    "interop": "node interop.mjs ../../build/mcpdemo && node legacy-interop.mjs ../../build/mcpdemo"
   },
   "dependencies": {
-    "@modelcontextprotocol/client": "^2.0.0-beta.4"
+    "@modelcontextprotocol/client": "^2.0.0-beta.4",
+    "@modelcontextprotocol/sdk": "^1.29.0"
   }
 }

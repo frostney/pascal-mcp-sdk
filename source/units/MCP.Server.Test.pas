@@ -77,6 +77,23 @@ type
     procedure TestDuplicateResource;
   end;
 
+  TLegacyEra = class(TDispatchSuite)
+  private
+    procedure DoInitialize(const AVersion: string);
+  public
+    procedure SetupTests; override;
+    procedure TestKnownVersionEchoed;
+    procedure TestUnknownVersionAnswersLatestLegacy;
+    procedure TestInitializeResultShape;
+    procedure TestRequestBeforeInitialize;
+    procedure TestPingBeforeInitialize;
+    procedure TestLegacyToolCall;
+    procedure TestLegacyResponsesUnstamped;
+    procedure TestLegacyContextVisibleToHandlers;
+    procedure TestLegacyResourceNotFound;
+    procedure TestErasServedConcurrently;
+  end;
+
 { ───────── handlers under test ───────── }
 
 function EchoHandler(AArguments: TJSONObject;
@@ -101,6 +118,13 @@ begin
   raise Exception.Create('boom');
 end;
 
+// Mirrors the request context so era plumbing is handler-observable.
+function WhoAmIHandler(AArguments: TJSONObject;
+  const ACtx: TMcpRequestContext): TMcpToolResult;
+begin
+  Result := McpTextResult(ACtx.ProtocolVersion + '|' + ACtx.ClientName);
+end;
+
 function ClockReader(const AUri: string;
   const ACtx: TMcpRequestContext): TJSONArray;
 begin
@@ -122,6 +146,8 @@ begin
     SumHandler);
   FServer.RegisterTool('boom', 'Always raises',
     '{"type":"object"}', BoomHandler);
+  FServer.RegisterTool('whoami', 'Mirror the request context',
+    '{"type":"object"}', WhoAmIHandler);
   FServer.RegisterTextResource('mem://static', 'static', 'text/plain',
     'static text');
   FServer.RegisterResource('mem://clock', 'clock', 'text/plain',
@@ -180,6 +206,8 @@ procedure TDiscoverAndErrors.TestInitializeRejected;
 var
   Response: TJSONObject;
 begin
+  // Modern-only posture: DualEra off restores the strict rejection.
+  FServer.DualEra := False;
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
     '"params":{"protocolVersion":"2025-11-25","capabilities":{}}}');
   Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
@@ -227,6 +255,10 @@ procedure TDiscoverAndErrors.TestMissingMeta;
 var
   Response: TJSONObject;
 begin
+  // Modern-only posture: a bare request is a malformed modern request
+  // (-32602). In dual-era mode the same line is a legacy request and
+  // gets the pre-initialization -32600 instead (see TLegacyEra).
+  FServer.DualEra := False;
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/list",' +
     '"params":{}}');
   Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
@@ -254,7 +286,7 @@ begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/list",' +
     '"params":{' + META_MODERN + '}}');
   Tools := TJSONArray(TJSONObject(Response.Find('result')).Find('tools'));
-  Expect<Integer>(Tools.Count).ToBe(3);
+  Expect<Integer>(Tools.Count).ToBe(4);
   Expect<string>(TJSONObject(Tools[0]).Get('name', '')).ToBe('echo');
   Expect<Boolean>(
     TJSONObject(Tools[0]).Find('inputSchema') <> nil).ToBe(True);
@@ -504,6 +536,186 @@ begin
   Test('duplicate resource uri rejected', TestDuplicateResource);
 end;
 
+{ ───────── legacy era (dual-era mode) ───────── }
+
+procedure TLegacyEra.DoInitialize(const AVersion: string);
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":100,"method":"initialize",' +
+    '"params":{"protocolVersion":"' + AVersion + '",' +
+    '"capabilities":{"roots":{}},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+end;
+
+procedure TLegacyEra.TestKnownVersionEchoed;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-06-18","capabilities":{}}}');
+  Expect<string>(
+    TJSONObject(Response.Find('result')).Get('protocolVersion', ''))
+    .ToBe('2025-06-18');
+  Response.Free;
+end;
+
+procedure TLegacyEra.TestUnknownVersionAnswersLatestLegacy;
+var
+  Response: TJSONObject;
+begin
+  // Legacy negotiation: an unknown request gets the server's latest
+  // legacy revision; the client decides whether to proceed.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"1999-01-01","capabilities":{}}}');
+  Expect<string>(
+    TJSONObject(Response.Find('result')).Get('protocolVersion', ''))
+    .ToBe(LATEST_LEGACY_PROTOCOL_VERSION);
+  Response.Free;
+end;
+
+procedure TLegacyEra.TestInitializeResultShape;
+var
+  Response: TJSONObject;
+  ResultObj: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{}}}');
+  ResultObj := TJSONObject(Response.Find('result'));
+  Expect<string>(
+    TJSONObject(ResultObj.Find('serverInfo')).Get('name', ''))
+    .ToBe('test-server');
+  Expect<Boolean>(
+    ResultObj.FindPath('capabilities.tools') <> nil).ToBe(True);
+  Expect<string>(ResultObj.Get('instructions', '')).ToBe('test instructions');
+  // Legacy dialect: no modern stamps.
+  Expect<Boolean>(ResultObj.Find('resultType') = nil).ToBe(True);
+  Expect<Boolean>(ResultObj.Find('_meta') = nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TLegacyEra.TestRequestBeforeInitialize;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/list",' +
+    '"params":{}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INVALID_REQUEST);
+  Response.Free;
+end;
+
+procedure TLegacyEra.TestPingBeforeInitialize;
+var
+  Response: TJSONObject;
+begin
+  // ping is valid at any time in the legacy era.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"ping"}');
+  Expect<Boolean>(Response.Find('result') <> nil).ToBe(True);
+  Expect<Boolean>(Response.Find('error') = nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TLegacyEra.TestLegacyToolCall;
+var
+  Response: TJSONObject;
+begin
+  DoInitialize('2025-11-25');
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"echo","arguments":{"message":"legacy hi"}}}');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('legacy hi');
+  Response.Free;
+end;
+
+procedure TLegacyEra.TestLegacyResponsesUnstamped;
+var
+  Response: TJSONObject;
+  ResultObj: TJSONObject;
+begin
+  DoInitialize('2025-11-25');
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/list",' +
+    '"params":{}}');
+  ResultObj := TJSONObject(Response.Find('result'));
+  // Legacy dialect: no resultType, no serverInfo _meta, no SEP-2549
+  // cache fields (those are all 2026-07-28 vocabulary).
+  Expect<Boolean>(ResultObj.Find('resultType') = nil).ToBe(True);
+  Expect<Boolean>(ResultObj.Find('_meta') = nil).ToBe(True);
+  Expect<Boolean>(ResultObj.Find('ttlMs') = nil).ToBe(True);
+  Expect<Boolean>(ResultObj.Find('tools') <> nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TLegacyEra.TestLegacyContextVisibleToHandlers;
+var
+  Response: TJSONObject;
+begin
+  // Handlers see the negotiated legacy version + clientInfo from the
+  // handshake — the same TMcpRequestContext API as the modern era.
+  DoInitialize('2025-06-18');
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"whoami"}}');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('2025-06-18|legacy-client');
+  Response.Free;
+end;
+
+procedure TLegacyEra.TestLegacyResourceNotFound;
+var
+  Response: TJSONObject;
+begin
+  DoInitialize('2025-11-25');
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"resources/read",' +
+    '"params":{"uri":"mem://missing"}}');
+  // The legacy code (-32002), never the modern -32602, in this era.
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(MCP_ERROR_LEGACY_RESOURCE_NOT_FOUND);
+  Response.Free;
+end;
+
+procedure TLegacyEra.TestErasServedConcurrently;
+var
+  Response: TJSONObject;
+begin
+  // The spec allows a dual-era server to serve both eras on the same
+  // process; a modern _meta request after a legacy handshake stays
+  // fully modern (stamps, cache fields, modern error codes).
+  DoInitialize('2025-11-25');
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/list",' +
+    '"params":{' + META_MODERN + '}}');
+  Expect<string>(
+    TJSONObject(Response.Find('result')).Get('resultType', ''))
+    .ToBe('complete');
+  Expect<Integer>(
+    TJSONObject(Response.Find('result')).Get('ttlMs', -1)).ToBe(300000);
+  Response.Free;
+
+  Response := Call('{"jsonrpc":"2.0","id":3,"method":"resources/read",' +
+    '"params":{"uri":"mem://missing",' + META_MODERN + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INVALID_PARAMS);
+  Response.Free;
+end;
+
+procedure TLegacyEra.SetupTests;
+begin
+  Test('initialize echoes a known legacy version', TestKnownVersionEchoed);
+  Test('unknown version → latest legacy answered',
+    TestUnknownVersionAnswersLatestLegacy);
+  Test('initialize result shape, unstamped', TestInitializeResultShape);
+  Test('request before initialize → -32600', TestRequestBeforeInitialize);
+  Test('ping answered before initialize', TestPingBeforeInitialize);
+  Test('legacy tools/call after handshake', TestLegacyToolCall);
+  Test('legacy responses carry no modern stamps',
+    TestLegacyResponsesUnstamped);
+  Test('legacy context reaches handlers', TestLegacyContextVisibleToHandlers);
+  Test('legacy resource not found → -32002', TestLegacyResourceNotFound);
+  Test('modern and legacy served concurrently', TestErasServedConcurrently);
+end;
+
 begin
   TestRunnerProgram.AddSuite(
     TDiscoverAndErrors.Create('Server: discover + protocol errors'));
@@ -511,5 +723,6 @@ begin
   TestRunnerProgram.AddSuite(TResourceDispatch.Create('Server: resources'));
   TestRunnerProgram.AddSuite(
     TRegistrationGuards.Create('Server: registration guards'));
+  TestRunnerProgram.AddSuite(TLegacyEra.Create('Server: legacy era'));
   TestRunnerProgram.Run;
 end.

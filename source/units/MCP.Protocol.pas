@@ -27,10 +27,22 @@ uses
   MCP.JsonRpc;
 
 const
-  // The single protocol revision this library implements. The library
-  // is modern-only (no legacy initialize handshake); see
-  // docs/architecture.md for the dual-era follow-up seam.
+  // The modern (stateless, per-request-metadata) revision this library
+  // implements natively.
   MCP_PROTOCOL_VERSION = '2026-07-28';
+
+  // Legacy (initialize-handshake) revisions a dual-era server answers.
+  // The surface pascal-mcp serves (tools/list+call, resources) is
+  // wire-stable across these: later revisions only added fields
+  // (structuredContent, title) that older clients ignore.
+  LATEST_LEGACY_PROTOCOL_VERSION = '2025-11-25';
+  LEGACY_PROTOCOL_VERSIONS: array[0..3] of string = (
+    '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05');
+
+  // Legacy-era resource-not-found code (2025-11-25 and earlier). The
+  // modern revision replaced it with -32602 and forbids emitting it;
+  // a dual-era server still owes it to legacy clients.
+  MCP_ERROR_LEGACY_RESOURCE_NOT_FOUND = -32002;
 
   META_KEY_PROTOCOL_VERSION    = 'io.modelcontextprotocol/protocolVersion';
   META_KEY_CLIENT_INFO         = 'io.modelcontextprotocol/clientInfo';
@@ -85,7 +97,21 @@ function BuildUnsupportedVersionData(
   const ASupportedVersions: array of string;
   const ARequested: string): TJSONObject;
 
+// True when AVersion is one of the legacy revisions this library can
+// answer through the initialize handshake.
+function IsLegacyProtocolVersion(const AVersion: string): Boolean;
+
 implementation
+
+function IsLegacyProtocolVersion(const AVersion: string): Boolean;
+var
+  Version: string;
+begin
+  for Version in LEGACY_PROTOCOL_VERSIONS do
+    if Version = AVersion then
+      Exit(True);
+  Result := False;
+end;
 
 function TMcpRequestContext.HasCapability(const AName: string): Boolean;
 begin
