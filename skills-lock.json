@@ -13,6 +13,12 @@
       "skillPath": "create-pr/SKILL.md",
       "computedHash": "974dfa9074f2c84bb651a05d0e28d2b6fb40767862b87f4cc95195ea5b3da799"
     },
+    "create-release": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "create-release/SKILL.md",
+      "computedHash": "c17867cb9f362046f3afed9eda5716c914cdccd9bd39753ae535681162547f0f"
+    },
     "domain-modeling": {
       "source": "mattpocock/skills",
       "sourceType": "github",
