@@ -84,6 +84,20 @@ async function battery(label, versionNegotiation) {
     'resources/read: greeting text',
   );
 
+  const templates = await client.listResourceTemplates();
+  check(
+    templates.resourceTemplates?.[0]?.uriTemplate ===
+      'mcp://pascal-mcp-sdk/shout/{text}',
+    'resources/templates/list: shout template present',
+  );
+  const shouted = await client.readResource({
+    uri: 'mcp://pascal-mcp-sdk/shout/hey',
+  });
+  check(
+    shouted.contents?.[0]?.text === 'HEY',
+    'resources/read: template match (shout/hey → HEY)',
+  );
+
   const prompts = await client.listPrompts();
   check(
     prompts.prompts?.[0]?.name === 'greet',

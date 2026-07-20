@@ -85,6 +85,21 @@ type
     procedure TestDuplicateResource;
   end;
 
+  TResourceTemplates = class(TDispatchSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestMatcherSingleVar;
+    procedure TestMatcherMultiVar;
+    procedure TestMatcherRejectsSlash;
+    procedure TestMatcherLiteralMismatch;
+    procedure TestMatcherTrailingExcess;
+    procedure TestTemplatesList;
+    procedure TestReadViaTemplate;
+    procedure TestExactResourceWins;
+    procedure TestStillNotFound;
+    procedure TestLegacyDialect;
+  end;
+
   TNotificationEmission = class(TDispatchSuite)
   private
     FLines: TStringList;
@@ -251,6 +266,13 @@ begin
   TStringList(AUserData).Add(ALine);
 end;
 
+function PairReader(const AUri: string; AVars: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPTextContents(AUri, 'text/plain',
+    AVars.Get('a', '') + '|' + AVars.Get('b', ''));
+end;
+
 { ───────── shared fixture ───────── }
 
 procedure TDispatchSuite.BeforeEach;
@@ -276,6 +298,11 @@ begin
     'static text');
   FServer.RegisterResource('mem://clock', 'clock', 'text/plain',
     ClockReader);
+  FServer.RegisterResourceTemplate('mem://pair/{a}/{b}', 'pair',
+    'text/plain', PairReader, 'Joins two path segments');
+  // Registered after the template but must win over it on exact match.
+  FServer.RegisterTextResource('mem://pair/one/two', 'fixed-pair',
+    'text/plain', 'exact wins');
   FServer.RegisterTool('noisy', 'Emits notifications',
     '{"type":"object"}', NoisyHandler);
   FServer.RegisterPrompt('review', 'Ask for a code review',
@@ -632,7 +659,7 @@ begin
     '"params":{' + META_MODERN + '}}');
   Resources := TJSONArray(
     TJSONObject(Response.Find('result')).Find('resources'));
-  Expect<Integer>(Resources.Count).ToBe(2);
+  Expect<Integer>(Resources.Count).ToBe(3);
   Expect<string>(TJSONObject(Resources[0]).Get('uri', ''))
     .ToBe('mem://static');
   Response.Free;
@@ -766,6 +793,156 @@ begin
   Test('duplicate tool name rejected', TestDuplicateTool);
   Test('invalid schema JSON rejected', TestBadSchema);
   Test('duplicate resource uri rejected', TestDuplicateResource);
+end;
+
+{ ───────── resource templates ───────── }
+
+procedure TResourceTemplates.TestMatcherSingleVar;
+var
+  Vars: TJSONObject;
+begin
+  Expect<Boolean>(
+    MatchUriTemplate('mem://shout/{text}', 'mem://shout/hello', Vars))
+    .ToBe(True);
+  Expect<string>(Vars.Get('text', '')).ToBe('hello');
+  Vars.Free;
+end;
+
+procedure TResourceTemplates.TestMatcherMultiVar;
+var
+  Vars: TJSONObject;
+begin
+  Expect<Boolean>(
+    MatchUriTemplate('mem://pair/{a}/{b}', 'mem://pair/x/y', Vars))
+    .ToBe(True);
+  Expect<string>(Vars.Get('a', '')).ToBe('x');
+  Expect<string>(Vars.Get('b', '')).ToBe('y');
+  Vars.Free;
+end;
+
+procedure TResourceTemplates.TestMatcherRejectsSlash;
+var
+  Vars: TJSONObject;
+begin
+  // {text} must not swallow a path separator.
+  Expect<Boolean>(
+    MatchUriTemplate('mem://shout/{text}', 'mem://shout/a/b', Vars))
+    .ToBe(False);
+end;
+
+procedure TResourceTemplates.TestMatcherLiteralMismatch;
+var
+  Vars: TJSONObject;
+begin
+  Expect<Boolean>(
+    MatchUriTemplate('mem://shout/{text}', 'mem://whisper/hello', Vars))
+    .ToBe(False);
+end;
+
+procedure TResourceTemplates.TestMatcherTrailingExcess;
+var
+  Vars: TJSONObject;
+begin
+  Expect<Boolean>(
+    MatchUriTemplate('mem://pair/{a}/x', 'mem://pair/v/xy', Vars))
+    .ToBe(False);
+end;
+
+procedure TResourceTemplates.TestTemplatesList;
+var
+  Response: TJSONObject;
+  Templates: TJSONArray;
+begin
+  Response := Call(
+    '{"jsonrpc":"2.0","id":1,"method":"resources/templates/list",' +
+    '"params":{' + META_MODERN + '}}');
+  Templates := TJSONArray(
+    TJSONObject(Response.Find('result')).Find('resourceTemplates'));
+  Expect<Integer>(Templates.Count).ToBe(1);
+  Expect<string>(TJSONObject(Templates[0]).Get('uriTemplate', ''))
+    .ToBe('mem://pair/{a}/{b}');
+  Expect<Integer>(
+    TJSONObject(Response.Find('result')).Get('ttlMs', -1)).ToBe(300000);
+  Response.Free;
+end;
+
+procedure TResourceTemplates.TestReadViaTemplate;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"resources/read",' +
+    '"params":{"uri":"mem://pair/left/right",' + META_MODERN + '}}');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.contents[0].text')).AsString)
+    .ToBe('left|right');
+  // Template reads are dynamic: ttl 0.
+  Expect<Integer>(
+    TJSONObject(Response.Find('result')).Get('ttlMs', -1)).ToBe(0);
+  Response.Free;
+end;
+
+procedure TResourceTemplates.TestExactResourceWins;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"resources/read",' +
+    '"params":{"uri":"mem://pair/one/two",' + META_MODERN + '}}');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.contents[0].text')).AsString)
+    .ToBe('exact wins');
+  Response.Free;
+end;
+
+procedure TResourceTemplates.TestStillNotFound;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"resources/read",' +
+    '"params":{"uri":"mem://pair/only-one-segment",' + META_MODERN + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INVALID_PARAMS);
+  Response.Free;
+end;
+
+procedure TResourceTemplates.TestLegacyDialect;
+var
+  Response: TJSONObject;
+  ResultObj: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{}}}');
+  Response.Free;
+  Response := Call(
+    '{"jsonrpc":"2.0","id":2,"method":"resources/templates/list",' +
+    '"params":{}}');
+  ResultObj := TJSONObject(Response.Find('result'));
+  Expect<Integer>(
+    TJSONArray(ResultObj.Find('resourceTemplates')).Count).ToBe(1);
+  Expect<Boolean>(ResultObj.Find('ttlMs') = nil).ToBe(True);
+  Response.Free;
+  Response := Call('{"jsonrpc":"2.0","id":3,"method":"resources/read",' +
+    '"params":{"uri":"mem://pair/l/r"}}');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.contents[0].text')).AsString)
+    .ToBe('l|r');
+  Response.Free;
+end;
+
+procedure TResourceTemplates.SetupTests;
+begin
+  Test('matcher: single variable', TestMatcherSingleVar);
+  Test('matcher: multiple variables', TestMatcherMultiVar);
+  Test('matcher: variables never cross /', TestMatcherRejectsSlash);
+  Test('matcher: literal mismatch fails', TestMatcherLiteralMismatch);
+  Test('matcher: trailing excess fails', TestMatcherTrailingExcess);
+  Test('resources/templates/list: shape + cache fields',
+    TestTemplatesList);
+  Test('resources/read: template match with variables',
+    TestReadViaTemplate);
+  Test('resources/read: exact resource beats template',
+    TestExactResourceWins);
+  Test('resources/read: no match stays -32602', TestStillNotFound);
+  Test('templates served in the legacy dialect', TestLegacyDialect);
 end;
 
 { ───────── notification emission ───────── }
@@ -1251,6 +1428,8 @@ begin
     TDiscoverAndErrors.Create('Server: discover + protocol errors'));
   TestRunnerProgram.AddSuite(TToolDispatch.Create('Server: tools'));
   TestRunnerProgram.AddSuite(TResourceDispatch.Create('Server: resources'));
+  TestRunnerProgram.AddSuite(
+    TResourceTemplates.Create('Server: resource templates'));
   TestRunnerProgram.AddSuite(TPromptDispatch.Create('Server: prompts'));
   TestRunnerProgram.AddSuite(
     TNotificationEmission.Create('Server: in-request notifications'));

@@ -289,6 +289,22 @@ begin
       'unsupported version: supported list in data');
     Response.Free;
 
+    // resources/templates/list + a templated read.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":21,"method":"resources/templates/list",' +
+      '"params":{' + META_MODERN + '}}');
+    Check(PathString(Response, 'result.resourceTemplates[0].uriTemplate') =
+      'mcp://pascal-mcp-sdk/shout/{text}',
+      'templates/list: shout template present');
+    Response.Free;
+
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":22,"method":"resources/read","params":{' +
+      '"uri":"mcp://pascal-mcp-sdk/shout/hey",' + META_MODERN + '}}');
+    Check(PathString(Response, 'result.contents[0].text') = 'HEY',
+      'resources/read: template variable extracted (shout/hey → HEY)');
+    Response.Free;
+
     // prompts/list + prompts/get.
     Response := RoundTrip(Demo,
       '{"jsonrpc":"2.0","id":8,"method":"prompts/list","params":{' +

@@ -48,6 +48,14 @@ type
     property b: Double read FB write FB;
   end;
 
+// Template reader: AVars carries the variables matched from the URI.
+function ShoutReader(const AUri: string; AVars: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPTextContents(AUri, 'text/plain',
+    UpperCase(AVars.Get('text', '')));
+end;
+
 // Prompt handler: returns the messages a client feeds to its model.
 function GreetPromptHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TJSONArray;
@@ -97,8 +105,11 @@ begin
       'text/plain', 'Hello from pascal-mcp-sdk, a FreePascal MCP server.',
       'A static greeting resource');
 
+    Server.RegisterResourceTemplate('mcp://pascal-mcp-sdk/shout/{text}',
+      'shout', 'text/plain', ShoutReader, 'Uppercase echo of {text}');
+
     MCPLogToStderr('mcpdemo: serving MCP ' + MCP_PROTOCOL_VERSION +
-      ' on stdio (2 tools, 1 resource, 1 prompt)');
+      ' on stdio (2 tools, 1 resource, 1 template, 1 prompt)');
     RunMCPStdioServer(Server);
   finally
     Server.Free;

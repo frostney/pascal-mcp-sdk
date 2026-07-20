@@ -122,6 +122,23 @@ type
     Method: TMCPResourceMethod;
   end;
 
+  // Template readers additionally receive the variables extracted
+  // from the URI template match (owned by the server; borrowed by the
+  // reader). Matching is RFC 6570 level 1: {var} captures one or more
+  // characters excluding '/'; variables must be separated by literal
+  // text.
+  TMCPTemplateReader = function(const AUri: string; AVars: TJSONObject;
+    const ACtx: TMCPRequestContext): TJSONArray;
+  TMCPTemplateMethod = function(const AUri: string; AVars: TJSONObject;
+    const ACtx: TMCPRequestContext): TJSONArray of object;
+
+  TMCPTemplateRegistration = record
+    Definition: TJSONObject; // owned: uriTemplate/name/mimeType/...
+    UriTemplate: string;
+    Reader: TMCPTemplateReader;
+    Method: TMCPTemplateMethod;
+  end;
+
   // Prompt handlers return the GetPromptResult "messages" array
   // (owned; use MCPMessages / MCPUserMessage / MCPAssistantMessage).
   // Prompt errors are protocol errors per spec (-32602 for unknown
@@ -176,6 +193,7 @@ type
     FLegacyClientCapabilities: TJSONObject; // owned clone from initialize
     FTools: array of TMCPToolRegistration;
     FResources: array of TMCPResourceRegistration;
+    FTemplates: array of TMCPTemplateRegistration;
     FPrompts: array of TMCPPromptRegistration;
 
     function ParseSchema(const ASchemaJson, AToolName: string): TJSONObject;
@@ -195,7 +213,12 @@ type
     procedure AddPrompt(const AName, ADescription: string;
       AArguments: TJSONArray; AHandler: TMCPPromptHandler;
       AMethod: TMCPPromptMethod);
+    procedure AddTemplate(const AUriTemplate, AName, AMimeType,
+      ADescription: string; AReader: TMCPTemplateReader;
+      AMethod: TMCPTemplateMethod);
     function ServerCapabilities: TJSONObject;
+    function HandleTemplatesList(const AMessage: TJSONRPCMessage;
+      ALegacy: Boolean): string;
 
     function DispatchRequest(const AMessage: TJSONRPCMessage): string;
     function DispatchLegacyRequest(const AMessage: TJSONRPCMessage): string;
@@ -303,6 +326,15 @@ type
     procedure RegisterResource(const AUri, AName, AMimeType: string;
       AMethod: TMCPResourceMethod; const ADescription: string = ''); overload;
 
+    // Resource templates (resources/templates/list + matching in
+    // resources/read; exact resources win over templates).
+    procedure RegisterResourceTemplate(const AUriTemplate, AName,
+      AMimeType: string; AReader: TMCPTemplateReader;
+      const ADescription: string = ''); overload;
+    procedure RegisterResourceTemplate(const AUriTemplate, AName,
+      AMimeType: string; AMethod: TMCPTemplateMethod;
+      const ADescription: string = ''); overload;
+
     // Prompts (prompts/list + prompts/get). Argument-less overloads
     // and overloads with a fluent argument list; registration takes
     // ownership of the built arguments.
@@ -337,6 +369,13 @@ function MCPStructuredResult(const AText: string;
   AStructured: TJSONData): TMCPToolResult;
 function MCPTextContents(const AUri, AMimeType, AText: string): TJSONArray;
 function MCPBlobContents(const AUri, AMimeType, ABase64: string): TJSONArray;
+
+// RFC 6570 level-1 template match: {var} captures one or more
+// characters excluding '/', delimited by the surrounding literal
+// text. On success AVars carries the captured variables (caller
+// frees). Exposed for tests.
+function MatchUriTemplate(const ATemplate, AUri: string;
+  out AVars: TJSONObject): Boolean;
 
 // Prompt builders: a fresh argument list to chain onto, and message
 // constructors for prompt handlers.
@@ -416,6 +455,65 @@ begin
   Result := TJSONArray.Create;
   for I := 0 to High(AMessages) do
     Result.Add(AMessages[I]);
+end;
+
+{ ───────── URI templates ───────── }
+
+function MatchUriTemplate(const ATemplate, AUri: string;
+  out AVars: TJSONObject): Boolean;
+var
+  TI, UI, CloseBrace, Start: Integer;
+  VarName, Value: string;
+  Delimiter: Char;
+begin
+  Result := False;
+  AVars := TJSONObject.Create;
+  TI := 1;
+  UI := 1;
+  while TI <= Length(ATemplate) do
+  begin
+    if ATemplate[TI] = '{' then
+    begin
+      CloseBrace := TI;
+      while (CloseBrace <= Length(ATemplate)) and
+        (ATemplate[CloseBrace] <> '}') do
+        Inc(CloseBrace);
+      if CloseBrace > Length(ATemplate) then
+        Break; // malformed template: never matches
+      VarName := Copy(ATemplate, TI + 1, CloseBrace - TI - 1);
+      if CloseBrace < Length(ATemplate) then
+        Delimiter := ATemplate[CloseBrace + 1]
+      else
+        Delimiter := #0;
+      // Capture until the literal that follows the variable (or the
+      // end of the URI), never across '/'.
+      Start := UI;
+      while (UI <= Length(AUri)) and (AUri[UI] <> '/') and
+        ((Delimiter = #0) or (AUri[UI] <> Delimiter)) do
+        Inc(UI);
+      Value := Copy(AUri, Start, UI - Start);
+      if Value = '' then
+      begin
+        FreeAndNil(AVars);
+        Exit;
+      end;
+      AVars.Add(VarName, Value);
+      TI := CloseBrace + 1;
+    end
+    else
+    begin
+      if (UI > Length(AUri)) or (AUri[UI] <> ATemplate[TI]) then
+      begin
+        FreeAndNil(AVars);
+        Exit;
+      end;
+      Inc(TI);
+      Inc(UI);
+    end;
+  end;
+  Result := (TI > Length(ATemplate)) and (UI > Length(AUri));
+  if not Result then
+    FreeAndNil(AVars);
 end;
 
 { ───────── in-request notifications ───────── }
@@ -545,6 +643,8 @@ begin
     FTools[I].Definition.Free;
   for I := 0 to High(FResources) do
     FResources[I].Definition.Free;
+  for I := 0 to High(FTemplates) do
+    FTemplates[I].Definition.Free;
   for I := 0 to High(FPrompts) do
     FPrompts[I].Definition.Free;
   FLegacyClientCapabilities.Free;
@@ -901,6 +1001,44 @@ begin
   Result := -1;
 end;
 
+procedure TMCPServer.AddTemplate(const AUriTemplate, AName, AMimeType,
+  ADescription: string; AReader: TMCPTemplateReader;
+  AMethod: TMCPTemplateMethod);
+var
+  I: Integer;
+  Definition: TJSONObject;
+begin
+  for I := 0 to High(FTemplates) do
+    if FTemplates[I].UriTemplate = AUriTemplate then
+      raise EMCPServer.CreateFmt(
+        'Resource template "%s" is already registered', [AUriTemplate]);
+  Definition := TJSONObject.Create;
+  Definition.Add('uriTemplate', AUriTemplate);
+  Definition.Add('name', AName);
+  Definition.Add('mimeType', AMimeType);
+  if ADescription <> '' then
+    Definition.Add('description', ADescription);
+  SetLength(FTemplates, Length(FTemplates) + 1);
+  FTemplates[High(FTemplates)].Definition := Definition;
+  FTemplates[High(FTemplates)].UriTemplate := AUriTemplate;
+  FTemplates[High(FTemplates)].Reader := AReader;
+  FTemplates[High(FTemplates)].Method := AMethod;
+end;
+
+procedure TMCPServer.RegisterResourceTemplate(const AUriTemplate, AName,
+  AMimeType: string; AReader: TMCPTemplateReader;
+  const ADescription: string);
+begin
+  AddTemplate(AUriTemplate, AName, AMimeType, ADescription, AReader, nil);
+end;
+
+procedure TMCPServer.RegisterResourceTemplate(const AUriTemplate, AName,
+  AMimeType: string; AMethod: TMCPTemplateMethod;
+  const ADescription: string);
+begin
+  AddTemplate(AUriTemplate, AName, AMimeType, ADescription, nil, AMethod);
+end;
+
 function TMCPServer.FindPrompt(const AName: string): Integer;
 var
   I: Integer;
@@ -1077,6 +1215,8 @@ begin
     Exit(HandleResourcesList(AMessage, False));
   if AMessage.Method = 'resources/read' then
     Exit(HandleResourcesRead(AMessage, Ctx, False));
+  if AMessage.Method = 'resources/templates/list' then
+    Exit(HandleTemplatesList(AMessage, False));
   if AMessage.Method = 'prompts/list' then
     Exit(HandlePromptsList(AMessage, False));
   if AMessage.Method = 'prompts/get' then
@@ -1112,6 +1252,8 @@ begin
     Exit(HandleResourcesList(AMessage, True));
   if AMessage.Method = 'resources/read' then
     Exit(HandleResourcesRead(AMessage, LegacyContext(AMessage.Params), True));
+  if AMessage.Method = 'resources/templates/list' then
+    Exit(HandleTemplatesList(AMessage, True));
   if AMessage.Method = 'prompts/list' then
     Exit(HandlePromptsList(AMessage, True));
   if AMessage.Method = 'prompts/get' then
@@ -1384,7 +1526,7 @@ var
   Uri, MimeType: string;
   Index, ReadTtlMs: Integer;
   Contents: TJSONArray;
-  ReadResult, NotFoundData: TJSONObject;
+  ReadResult, NotFoundData, Vars: TJSONObject;
 begin
   UriData := AMessage.Params.Find('uri');
   if (UriData = nil) or (UriData.JSONType <> jtString) then
@@ -1392,34 +1534,57 @@ begin
       'Invalid params: uri must be a string'));
   Uri := UriData.AsString;
 
-  Index := FindResource(Uri);
-  if Index < 0 then
-  begin
-    // Modern era: MUST be -32602 (the modern revision forbids -32002).
-    // Legacy era: -32002 is what that revision's clients expect.
-    NotFoundData := TJSONObject.Create;
-    NotFoundData.Add('uri', Uri);
-    if ALegacy then
-      Exit(BuildErrorResponse(AMessage.Id,
-        MCP_ERROR_LEGACY_RESOURCE_NOT_FOUND, 'Resource not found',
-        NotFoundData));
-    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
-      'Resource not found', NotFoundData));
-  end;
-
-  // Dynamic readers advertise ttl 0 (always revalidate) — the library
-  // cannot know how fresh a callback's data stays; static text is
-  // fixed for the process lifetime and uses the registry ttl.
+  // Exact resources win; templates are the fallback, first match in
+  // registration order.
+  Contents := nil;
   ReadTtlMs := 0;
-  if Assigned(FResources[Index].Method) then
-    Contents := FResources[Index].Method(Uri, ACtx)
-  else if Assigned(FResources[Index].Reader) then
-    Contents := FResources[Index].Reader(Uri, ACtx)
+  Index := FindResource(Uri);
+  if Index >= 0 then
+  begin
+    // Dynamic readers advertise ttl 0 (always revalidate) — the
+    // library cannot know how fresh a callback's data stays; static
+    // text is fixed for the process lifetime and uses the registry
+    // ttl.
+    if Assigned(FResources[Index].Method) then
+      Contents := FResources[Index].Method(Uri, ACtx)
+    else if Assigned(FResources[Index].Reader) then
+      Contents := FResources[Index].Reader(Uri, ACtx)
+    else
+    begin
+      MimeType := FResources[Index].Definition.Get('mimeType', 'text/plain');
+      Contents := MCPTextContents(Uri, MimeType,
+        FResources[Index].StaticText);
+      ReadTtlMs := FCacheTtlMs;
+    end;
+  end
   else
   begin
-    MimeType := FResources[Index].Definition.Get('mimeType', 'text/plain');
-    Contents := MCPTextContents(Uri, MimeType, FResources[Index].StaticText);
-    ReadTtlMs := FCacheTtlMs;
+    for Index := 0 to High(FTemplates) do
+      if MatchUriTemplate(FTemplates[Index].UriTemplate, Uri, Vars) then
+      begin
+        try
+          if Assigned(FTemplates[Index].Method) then
+            Contents := FTemplates[Index].Method(Uri, Vars, ACtx)
+          else
+            Contents := FTemplates[Index].Reader(Uri, Vars, ACtx);
+        finally
+          Vars.Free;
+        end;
+        Break;
+      end;
+    if Contents = nil then
+    begin
+      // Modern era: MUST be -32602 (the modern revision forbids
+      // -32002). Legacy era: -32002 is what its clients expect.
+      NotFoundData := TJSONObject.Create;
+      NotFoundData.Add('uri', Uri);
+      if ALegacy then
+        Exit(BuildErrorResponse(AMessage.Id,
+          MCP_ERROR_LEGACY_RESOURCE_NOT_FOUND, 'Resource not found',
+          NotFoundData));
+      Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+        'Resource not found', NotFoundData));
+    end;
   end;
   if Contents = nil then
     raise EMCPServer.CreateFmt(
@@ -1430,6 +1595,23 @@ begin
   if not ALegacy then
     AddCacheFields(ReadResult, ReadTtlMs);
   Result := ResultResponse(AMessage, ReadResult, ALegacy);
+end;
+
+function TMCPServer.HandleTemplatesList(const AMessage: TJSONRPCMessage;
+  ALegacy: Boolean): string;
+var
+  ListResult: TJSONObject;
+  Templates: TJSONArray;
+  I: Integer;
+begin
+  Templates := TJSONArray.Create;
+  for I := 0 to High(FTemplates) do
+    Templates.Add(FTemplates[I].Definition.Clone);
+  ListResult := TJSONObject.Create;
+  ListResult.Add('resourceTemplates', Templates);
+  if not ALegacy then
+    AddCacheFields(ListResult, FCacheTtlMs);
+  Result := ResultResponse(AMessage, ListResult, ALegacy);
 end;
 
 function TMCPServer.HandlePromptsList(const AMessage: TJSONRPCMessage;
