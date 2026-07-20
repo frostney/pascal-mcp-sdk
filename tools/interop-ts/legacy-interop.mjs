@@ -71,6 +71,16 @@ try {
     'tools/call echo: text mirrored',
   );
 
+  const utf8Payload = 'h\u00e9llo \u4e16\u754c';
+  const utf8Echo = await client.callTool({
+    name: 'echo',
+    arguments: { message: utf8Payload },
+  });
+  check(
+    utf8Echo.content?.[0]?.text === utf8Payload,
+    'tools/call echo: non-ASCII text mirrored as UTF-8',
+  );
+
   const add = await client.callTool({
     name: 'add',
     arguments: { a: 19, b: 23 },
