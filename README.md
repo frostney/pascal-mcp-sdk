@@ -157,9 +157,14 @@ six files, RTL + fpjson only.
 | `notifications/progress`, `notifications/message` | ✅ `MCPReportProgress` / `MCPLogMessage` from any handler; strictly opt-in per request (`progressToken` / `logLevel`), severity-filtered, emitted before the response |
 | `_meta` validation, version negotiation | ✅ `-32602` / `-32021` / `-32022` per spec |
 | `ttlMs` / `cacheScope` caching hints (SEP-2549) | ✅ on discover/list/read, tunable via `CacheTtlMs`/`CacheScope` |
-| Legacy era (`initialize`, 2024-11-05…2025-11-25) | ✅ dual-era default: era-faithful dialect (unstamped results, `-32002`, `ping`); `DualEra := False` for strict modern-only |
+| Legacy era (`initialize`: 2024-11-05, 2025-06-18, 2025-11-25) | ✅ dual-era default: era-faithful dialect (unstamped results, `-32002`, `ping`); `DualEra := False` for strict modern-only |
 | `subscriptions/listen`, list-changed | ⏳ follow-up (registries are static in v1) |
 | Streamable HTTP transport | ⏳ follow-up (`MCP.Transport.HTTP` seam reserved) |
+
+Resource-template matching is intentionally limited to simple `{var}`
+expressions. Variables must be non-empty and separated by literal text; matching
+uses the complete following literal and may backtrack. Captured values are passed
+to readers exactly as encoded in the URI—percent-decoding is not performed.
 
 Spec facts verified against the official
 [MCP specification](https://modelcontextprotocol.io/specification/draft/basic/transports/stdio)

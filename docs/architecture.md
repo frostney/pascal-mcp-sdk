@@ -141,19 +141,23 @@ pascal-mcp-sdk is a **dual-era server** (spec's compatibility matrix, on
 by default): era selection follows how the client opens. A request
 carrying the modern per-request `_meta` protocol-version key is served
 statelessly per 2026-07-28; an `initialize` request selects legacy
-semantics (2024-11-05…2025-11-25), scoped to the server instance (=
-the stdio process) — the one deliberate piece of cross-request state
-the compatibility model prescribes. Both eras run concurrently on the
-same instance; handlers are era-blind (`TMCPRequestContext` is filled
-from `_meta` or from the stored handshake). The legacy dialect is
-era-faithful at the edges: no `resultType`/`serverInfo` stamps, no
-SEP-2549 cache fields, resource-not-found `-32002`, and `ping`
-answered. `DualEra := False` restores strict modern-only behavior
-(initialize rejected with a diagnostic naming supported versions, as
-the spec recommends). Proven end-to-end by `tools/interop-ts`: the v2
-RC beta client negotiates modern (auto-probe included), the v1 SDK
-client (Claude Code's library) completes the classic handshake, and
-Claude Code itself connects via `claude mcp add`.
+semantics for `2024-11-05`, `2025-06-18`, and `2025-11-25`, scoped to
+the server instance (= the stdio process) — the one deliberate piece of
+cross-request state the compatibility model prescribes. `2025-03-26`
+is excluded because its Base Protocol requires receivers to accept
+JSON-RPC batches, which this library does not implement
+([Base Protocol](https://modelcontextprotocol.io/specification/2025-03-26/basic),
+verified 2026-07-20). Both eras run concurrently on the same instance;
+handlers are era-blind (`TMCPRequestContext` is filled from `_meta` or
+from the stored handshake). The legacy dialect is era-faithful at the
+edges: no `resultType`/`serverInfo` stamps, no SEP-2549 cache fields,
+resource-not-found `-32002`, and `ping` answered. `DualEra := False`
+restores strict modern-only behavior (initialize rejected with a
+diagnostic naming supported versions, as the spec recommends). Proven
+end-to-end by `tools/interop-ts`: the v2 RC beta client negotiates modern
+(auto-probe included), the v1 SDK client (Claude Code's library)
+completes the classic handshake, and Claude Code itself connects via
+`claude mcp add`.
 
 ## The HTTP follow-up
 

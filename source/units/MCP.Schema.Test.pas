@@ -57,6 +57,13 @@ type
     property nickname: string read FNickname write FNickname stored False;
   end;
 
+  TQWordArgs = class(TMCPArgs)
+  private
+    FValue: QWord;
+  published
+    property value: QWord read FValue write FValue;
+  end;
+
   TSchemaBuilder = class(TTestSuite)
   public
     procedure SetupTests; override;
@@ -78,6 +85,7 @@ type
     procedure TestDefaultsBecomeOptional;
     procedure TestStoredFalseBecomesOptional;
     procedure TestSerializeRoundTrip;
+    procedure TestSerializeQWord;
   end;
 
 procedure TSchemaBuilder.TestObjectEnvelope;
@@ -285,6 +293,7 @@ begin
   Test('stored False becomes optional', TestStoredFalseBecomesOptional);
   Test('MCPSerialize mirrors published properties',
     TestSerializeRoundTrip);
+  Test('MCPSerialize preserves High(QWord)', TestSerializeQWord);
 end;
 
 procedure TSchemaFromClass.TestSerializeRoundTrip;
@@ -305,6 +314,22 @@ begin
   Expect<Boolean>(Json.Get('flag', False)).ToBe(True);
   // Enums serialize as their names, matching the derived schema.
   Expect<string>(Json.Get('color', '')).ToBe('pcBlue');
+  Json.Free;
+  Obj.Free;
+end;
+
+procedure TSchemaFromClass.TestSerializeQWord;
+var
+  Obj: TQWordArgs;
+  Json: TJSONObject;
+  Value: TJSONData;
+begin
+  Obj := TQWordArgs.Create;
+  Obj.value := High(QWord);
+  Json := MCPSerialize(Obj);
+  Value := Json.Find('value');
+  Expect<Integer>(Ord(TJSONNumber(Value).NumberType)).ToBe(Ord(ntQWord));
+  Expect<QWord>(Value.AsQWord).ToBe(High(QWord));
   Json.Free;
   Obj.Free;
 end;

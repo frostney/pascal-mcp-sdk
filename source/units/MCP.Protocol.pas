@@ -15,6 +15,8 @@ unit MCP.Protocol;
 //       modelcontextprotocol.io/specification/draft/basic/index#meta
 //   - version negotiation, UnsupportedProtocolVersionError (-32022):
 //       modelcontextprotocol.io/specification/draft/basic/versioning
+//   - exact lowercase RFC 5424-derived logging levels:
+//       modelcontextprotocol.io/specification/draft/server/utilities/logging
 
 {$I Shared.inc}
 
@@ -35,9 +37,13 @@ const
   // The surface pascal-mcp-sdk serves (tools/list+call, resources) is
   // wire-stable across these: later revisions only added fields
   // (structuredContent, title) that older clients ignore.
+  // 2025-03-26 is deliberately omitted because its Base Protocol requires
+  // receivers to accept JSON-RPC batches, which this library does not.
+  // Verified 2026-07-20:
+  // modelcontextprotocol.io/specification/2025-03-26/basic
   LATEST_LEGACY_PROTOCOL_VERSION = '2025-11-25';
-  LEGACY_PROTOCOL_VERSIONS: array[0..3] of string = (
-    '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05');
+  LEGACY_PROTOCOL_VERSIONS: array[0..2] of string = (
+    '2025-11-25', '2025-06-18', '2024-11-05');
 
   // Legacy-era resource-not-found code (2025-11-25 and earlier). The
   // modern revision replaced it with -32602 and forbids emitting it;
@@ -49,6 +55,12 @@ const
   META_KEY_CLIENT_CAPABILITIES = 'io.modelcontextprotocol/clientCapabilities';
   META_KEY_LOG_LEVEL           = 'io.modelcontextprotocol/logLevel';
   META_KEY_SERVER_INFO         = 'io.modelcontextprotocol/serverInfo';
+
+  // Exact lowercase logging levels from the official specification,
+  // verified 2026-07-20. Their order is increasing severity.
+  MCP_LOG_LEVELS: array[0..7] of string = (
+    'debug', 'info', 'notice', 'warning',
+    'error', 'critical', 'alert', 'emergency');
 
   RESULT_TYPE_COMPLETE = 'complete';
 
@@ -170,7 +182,7 @@ function ExtractRequestContext(AParams: TJSONObject;
 var
   MetaData, VersionData, CapsData, InfoData, LevelData: TJSONData;
   Meta, Info: TJSONObject;
-  Version: string;
+  Version, Level: string;
   Known: Boolean;
 begin
   ACtx := Default(TMCPRequestContext);
@@ -219,8 +231,24 @@ begin
   end;
 
   LevelData := Meta.Find(META_KEY_LOG_LEVEL);
-  if (LevelData <> nil) and (LevelData.JSONType = jtString) then
+  if LevelData <> nil then
+  begin
+    if LevelData.JSONType <> jtString then
+      Exit(MetaError(AError, JSONRPC_INVALID_PARAMS,
+        'Invalid params: _meta["' + META_KEY_LOG_LEVEL +
+        '"] must be a string'));
     ACtx.LogLevel := LevelData.AsString;
+    Known := False;
+    for Level in MCP_LOG_LEVELS do
+      if Level = ACtx.LogLevel then
+      begin
+        Known := True;
+        Break;
+      end;
+    if not Known then
+      Exit(MetaError(AError, JSONRPC_INVALID_PARAMS,
+        'Invalid params: unknown _meta["' + META_KEY_LOG_LEVEL + '"] value'));
+  end;
 
   ExtractProgressToken(Meta, ACtx);
 

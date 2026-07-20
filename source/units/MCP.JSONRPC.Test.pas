@@ -3,7 +3,8 @@
   null), rejection of batches and non-object params, id preservation
   into error replies for malformed-but-parseable input, and the
   response builders (result / error shape, id cloning, null id for
-  unreadable requests, single-line output with escaped newlines). }
+  unreadable requests, single-line output with escaped newlines, and
+  byte-exact UTF-8 without importing a transport). }
 
 program MCP.JSONRPC.Test;
 
@@ -15,6 +16,11 @@ uses
   fpjson,
   MCP.JSONRPC,
   TestingPascalLibrary;
+
+const
+  UTF8_WORLD = #$E4#$B8#$96 + #$E7#$95#$8C;
+  UTF8_PAYLOAD = 'h' + #$C3#$A9 + 'llo ' + UTF8_WORLD;
+  UTF8_GRINNING_FACE = #$F0#$9F#$98#$80;
 
 type
   TParseValid = class(TTestSuite)
@@ -40,6 +46,20 @@ type
     procedure TestIdPreservedOnInvalid;
   end;
 
+  TUnicodeEscapeInput = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestAdjacentBMP;
+    procedure TestAfterEscapedBackslash;
+    procedure TestSurrogatePair;
+    procedure TestHighHighLowMatchesFPJSON;
+    procedure TestBMPBeforeSurrogatePair;
+    procedure TestLoneSurrogate;
+    procedure TestASCII;
+    procedure TestMixedRawAndEscaped;
+    procedure TestMalformed;
+  end;
+
   TResponseBuilders = class(TTestSuite)
   public
     procedure SetupTests; override;
@@ -48,6 +68,7 @@ type
     procedure TestErrorWithData;
     procedure TestNullIdWhenUnreadable;
     procedure TestSingleLineWithEscapedNewline;
+    procedure TestUtf8Serialization;
   end;
 
 { ───────── helpers ───────── }
@@ -55,6 +76,21 @@ type
 function ParseObj(const AJson: string): TJSONObject;
 begin
   Result := TJSONObject(GetJSON(AJson));
+end;
+
+procedure ExpectParsedValue(const AWireValue, AExpected: string);
+var
+  Msg: TJSONRPCMessage;
+begin
+  Msg := ParseJSONRPCMessage(
+    '{"jsonrpc":"2.0","id":1,"method":"x","params":{"value":"' +
+    AWireValue + '"}}');
+  try
+    Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkRequest));
+    Expect<string>(Msg.Params.Get('value', '')).ToBe(AExpected);
+  finally
+    FreeJSONRPCMessage(Msg);
+  end;
 end;
 
 { ───────── valid input ───────── }
@@ -150,7 +186,7 @@ procedure TParseInvalid.TestBatchRejected;
 var
   Msg: TJSONRPCMessage;
 begin
-  // MCP removed JSON-RPC batching; arrays are invalid requests.
+  // The advertised revisions use single-message receive; arrays are invalid.
   Msg := ParseJSONRPCMessage(
     '[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]');
   Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkInvalid));
@@ -216,12 +252,96 @@ procedure TParseInvalid.SetupTests;
 begin
   Test('unparseable input → -32700', TestGarbage);
   Test('non-object → -32600', TestNonObject);
-  Test('batch array → -32600 (MCP has no batching)', TestBatchRejected);
+  Test('batch array → -32600 (advertised revisions are single-message)',
+    TestBatchRejected);
   Test('jsonrpc ≠ "2.0" → -32600', TestWrongVersion);
   Test('missing method → -32600', TestMissingMethod);
   Test('null id → -32600 (MCP forbids null ids)', TestNullId);
   Test('array params → -32600', TestArrayParams);
   Test('readable id preserved on invalid message', TestIdPreservedOnInvalid);
+end;
+
+{ ───────── Unicode escape input ───────── }
+
+procedure TUnicodeEscapeInput.TestAdjacentBMP;
+begin
+  ExpectParsedValue('a\u4e16\u754cb', 'a' + UTF8_WORLD + 'b');
+end;
+
+procedure TUnicodeEscapeInput.TestAfterEscapedBackslash;
+begin
+  ExpectParsedValue('C:\\u4e16', 'C:\u4e16');
+end;
+
+procedure TUnicodeEscapeInput.TestSurrogatePair;
+begin
+  ExpectParsedValue('\ud83d\ude00', UTF8_GRINNING_FACE);
+end;
+
+procedure TUnicodeEscapeInput.TestHighHighLowMatchesFPJSON;
+var
+  Baseline: TJSONObject;
+begin
+  Baseline := ParseObj('{"value":"\ud83d\ud83d\ude00"}');
+  try
+    ExpectParsedValue('\ud83d\ud83d\ude00', Baseline.Get('value', ''));
+  finally
+    Baseline.Free;
+  end;
+end;
+
+procedure TUnicodeEscapeInput.TestBMPBeforeSurrogatePair;
+begin
+  ExpectParsedValue('\u4e16\ud83d\ude00', #$E4#$B8#$96 +
+    UTF8_GRINNING_FACE);
+end;
+
+procedure TUnicodeEscapeInput.TestLoneSurrogate;
+begin
+  // Leave the lone high surrogate for fpjson, which drops it.
+  ExpectParsedValue('x\ud83dy', 'xy');
+end;
+
+procedure TUnicodeEscapeInput.TestASCII;
+begin
+  ExpectParsedValue('a\u0022b', 'a"b');
+end;
+
+procedure TUnicodeEscapeInput.TestMixedRawAndEscaped;
+begin
+  ExpectParsedValue(#$E4#$B8#$96 + '\u754c', UTF8_WORLD);
+end;
+
+procedure TUnicodeEscapeInput.TestMalformed;
+var
+  Msg: TJSONRPCMessage;
+begin
+  Msg := ParseJSONRPCMessage(
+    '{"jsonrpc":"2.0","id":1,"method":"x","params":{"value":"\u4g16"}}');
+  try
+    Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkInvalid));
+    Expect<Integer>(Msg.ErrorCode).ToBe(JSONRPC_PARSE_ERROR);
+  finally
+    FreeJSONRPCMessage(Msg);
+  end;
+end;
+
+procedure TUnicodeEscapeInput.SetupTests;
+begin
+  Test('adjacent non-ASCII BMP escapes decode to exact UTF-8',
+    TestAdjacentBMP);
+  Test('escape after escaped backslash stays literal',
+    TestAfterEscapedBackslash);
+  Test('surrogate pair round-trips as four-byte UTF-8 via fpjson',
+    TestSurrogatePair);
+  Test('high-high-low run keeps baseline fpjson behavior',
+    TestHighHighLowMatchesFPJSON);
+  Test('non-surrogate BMP before surrogate pair stays correct',
+    TestBMPBeforeSurrogatePair);
+  Test('lone surrogate keeps fpjson behavior', TestLoneSurrogate);
+  Test('ASCII Unicode escape stays escaped for fpjson', TestASCII);
+  Test('mixed raw and escaped non-ASCII input', TestMixedRawAndEscaped);
+  Test('malformed Unicode escape stays a parse error', TestMalformed);
 end;
 
 { ───────── response builders ───────── }
@@ -296,6 +416,17 @@ begin
   Expect<Boolean>(Pos('\n', Line) > 0).ToBe(True);
 end;
 
+procedure TResponseBuilders.TestUtf8Serialization;
+var
+  Payload: TJSONObject;
+  Line: string;
+begin
+  Payload := ParseObj('{"text":"' + UTF8_PAYLOAD + '"}');
+  Line := BuildResultResponse(nil, Payload);
+  Expect<string>(Line).ToBe('{ "jsonrpc" : "2.0", "id" : null, ' +
+    '"result" : { "text" : "' + UTF8_PAYLOAD + '" } }');
+end;
+
 procedure TResponseBuilders.SetupTests;
 begin
   Test('result response shape', TestResultShape);
@@ -303,11 +434,14 @@ begin
   Test('error data payload carried', TestErrorWithData);
   Test('nil id serializes as JSON null', TestNullIdWhenUnreadable);
   Test('single line, newlines escaped', TestSingleLineWithEscapedNewline);
+  Test('non-ASCII serializes as byte-exact UTF-8', TestUtf8Serialization);
 end;
 
 begin
   TestRunnerProgram.AddSuite(TParseValid.Create('JSONRPC: valid input'));
   TestRunnerProgram.AddSuite(TParseInvalid.Create('JSONRPC: invalid input'));
+  TestRunnerProgram.AddSuite(
+    TUnicodeEscapeInput.Create('JSONRPC: Unicode escape input'));
   TestRunnerProgram.AddSuite(
     TResponseBuilders.Create('JSONRPC: response builders'));
   TestRunnerProgram.Run;

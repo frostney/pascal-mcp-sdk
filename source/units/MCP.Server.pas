@@ -124,9 +124,10 @@ type
 
   // Template readers additionally receive the variables extracted
   // from the URI template match (owned by the server; borrowed by the
-  // reader). Matching is RFC 6570 level 1: {var} captures one or more
-  // characters excluding '/'; variables must be separated by literal
-  // text.
+  // reader). Matching is the RFC 6570 level-1 simple-variable subset:
+  // {var} captures one or more characters excluding '/', variables
+  // use names from [A-Za-z0-9_], must be separated by literal text, and
+  // captures remain percent-encoded.
   TMCPTemplateReader = function(const AUri: string; AVars: TJSONObject;
     const ACtx: TMCPRequestContext): TJSONArray;
   TMCPTemplateMethod = function(const AUri: string; AVars: TJSONObject;
@@ -405,10 +406,14 @@ function MCPStructuredResult(const AText: string;
 function MCPTextContents(const AUri, AMimeType, AText: string): TJSONArray;
 function MCPBlobContents(const AUri, AMimeType, ABase64: string): TJSONArray;
 
-// RFC 6570 level-1 template match: {var} captures one or more
-// characters excluding '/', delimited by the surrounding literal
-// text. On success AVars carries the captured variables (caller
-// frees). Exposed for tests.
+// RFC 6570 level-1 simple-variable template match: {var} captures one
+// or more characters excluding '/', delimited by the complete
+// following literal with bounded backtracking. Variable names use
+// [A-Za-z0-9_]. Captures are raw URI substrings; percent-decoding is
+// deliberately not performed. On success AVars carries the captured
+// variables (caller frees). Exposed for tests.
+// Resource-template semantics verified 2026-07-20:
+// https://modelcontextprotocol.io/specification/draft/server/resources
 function MatchUriTemplate(const ATemplate, AUri: string;
   out AVars: TJSONObject): Boolean;
 
@@ -494,76 +499,196 @@ end;
 
 { ───────── URI templates ───────── }
 
-function MatchUriTemplate(const ATemplate, AUri: string;
-  out AVars: TJSONObject): Boolean;
+function IsUriTemplateVariableCharacter(ACharacter: Char): Boolean; inline;
+begin
+  Result := ACharacter in ['A'..'Z', 'a'..'z', '0'..'9', '_'];
+end;
+
+function TryValidateUriTemplate(const ATemplate: string;
+  out AError: string): Boolean;
 var
-  TI, UI, CloseBrace, Start: Integer;
-  VarName, Value: string;
-  Delimiter: Char;
+  CloseBrace, Index, VariableIndex: Integer;
+  PreviousWasVariable: Boolean;
 begin
   Result := False;
-  AVars := TJSONObject.Create;
-  TI := 1;
-  UI := 1;
-  while TI <= Length(ATemplate) do
+  AError := '';
+  if ATemplate = '' then
   begin
-    if ATemplate[TI] = '{' then
-    begin
-      CloseBrace := TI;
-      while (CloseBrace <= Length(ATemplate)) and
-        (ATemplate[CloseBrace] <> '}') do
-        Inc(CloseBrace);
-      if CloseBrace > Length(ATemplate) then
-        Break; // malformed template: never matches
-      VarName := Copy(ATemplate, TI + 1, CloseBrace - TI - 1);
-      if CloseBrace < Length(ATemplate) then
-        Delimiter := ATemplate[CloseBrace + 1]
-      else
-        Delimiter := #0;
-      // Capture until the literal that follows the variable (or the
-      // end of the URI), never across '/'.
-      Start := UI;
-      while (UI <= Length(AUri)) and (AUri[UI] <> '/') and
-        ((Delimiter = #0) or (AUri[UI] <> Delimiter)) do
-        Inc(UI);
-      Value := Copy(AUri, Start, UI - Start);
-      if Value = '' then
-      begin
-        FreeAndNil(AVars);
-        Exit;
-      end;
-      AVars.Add(VarName, Value);
-      TI := CloseBrace + 1;
-    end
-    else
-    begin
-      if (UI > Length(AUri)) or (AUri[UI] <> ATemplate[TI]) then
-      begin
-        FreeAndNil(AVars);
-        Exit;
-      end;
-      Inc(TI);
-      Inc(UI);
-    end;
+    AError := 'Resource template registration requires a non-empty uriTemplate';
+    Exit;
   end;
-  Result := (TI > Length(ATemplate)) and (UI > Length(AUri));
+  Index := 1;
+  PreviousWasVariable := False;
+  while Index <= Length(ATemplate) do
+  begin
+    if ATemplate[Index] = '}' then
+    begin
+      AError := Format('Invalid resource template "%s": stray "}" at ' +
+        'character %d', [ATemplate, Index]);
+      Exit;
+    end;
+    if ATemplate[Index] <> '{' then
+    begin
+      PreviousWasVariable := False;
+      Inc(Index);
+      Continue;
+    end;
+    if PreviousWasVariable then
+    begin
+      AError := Format('Invalid resource template "%s": adjacent variables ' +
+        'require separating literal text', [ATemplate]);
+      Exit;
+    end;
+    CloseBrace := Index + 1;
+    while (CloseBrace <= Length(ATemplate)) and
+      (ATemplate[CloseBrace] <> '}') do
+      Inc(CloseBrace);
+    if CloseBrace > Length(ATemplate) then
+    begin
+      AError := Format('Invalid resource template "%s": unclosed variable ' +
+        'at character %d', [ATemplate, Index]);
+      Exit;
+    end;
+    if CloseBrace = Index + 1 then
+    begin
+      AError := Format('Invalid resource template "%s": variable name must ' +
+        'not be empty', [ATemplate]);
+      Exit;
+    end;
+    for VariableIndex := Index + 1 to CloseBrace - 1 do
+      if not IsUriTemplateVariableCharacter(ATemplate[VariableIndex]) then
+      begin
+        AError := Format('Invalid resource template "%s": variable name ' +
+          'must contain only A-Z, a-z, 0-9, and _', [ATemplate]);
+        Exit;
+      end;
+    PreviousWasVariable := True;
+    Index := CloseBrace + 1;
+  end;
+  Result := True;
+end;
+
+function MatchUriTemplate(const ATemplate, AUri: string;
+  out AVars: TJSONObject): Boolean;
+type
+  TVariableCapture = record
+    Name: string;
+    Value: string;
+  end;
+  TVariableCaptures = array of TVariableCapture;
+  TFailedStateRow = array of Boolean;
+  TFailedStateRows = array of TFailedStateRow;
+var
+  Captures: TVariableCaptures;
+  FailedStates: TFailedStateRows;
+  I: Integer;
+  ValidationError: string;
+
+  function IsFailedState(ATemplateIndex, AUriIndex: Integer): Boolean;
+  begin
+    Result := (Length(FailedStates[ATemplateIndex]) <> 0) and
+      FailedStates[ATemplateIndex][AUriIndex];
+  end;
+
+  procedure RememberFailedState(ATemplateIndex, AUriIndex: Integer);
+  begin
+    if Length(FailedStates[ATemplateIndex]) = 0 then
+      SetLength(FailedStates[ATemplateIndex], Length(AUri) + 2);
+    FailedStates[ATemplateIndex][AUriIndex] := True;
+  end;
+
+  procedure RememberFailedVariableStates(ATemplateIndex, AFirstUriIndex,
+    ALastUriIndex: Integer);
+  var
+    UriIndex: Integer;
+  begin
+    // With repeated-variable equality deliberately out of scope, a failed
+    // variable match also proves every later start in this path segment
+    // fails: each has a strict subset of the same possible endpoints.
+    for UriIndex := AFirstUriIndex to ALastUriIndex do
+      RememberFailedState(ATemplateIndex, UriIndex);
+  end;
+
+  function MatchFrom(ATemplateIndex, AUriIndex: Integer): Boolean;
+  var
+    CaptureIndex, CloseBrace, MaxValueEnd, ValueEnd: Integer;
+    StartTemplateIndex, StartUriIndex: Integer;
+  begin
+    StartTemplateIndex := ATemplateIndex;
+    StartUriIndex := AUriIndex;
+    if IsFailedState(StartTemplateIndex, StartUriIndex) then
+      Exit(False);
+    while ATemplateIndex <= Length(ATemplate) do
+    begin
+      if IsFailedState(ATemplateIndex, AUriIndex) then
+      begin
+        RememberFailedState(StartTemplateIndex, StartUriIndex);
+        Exit(False);
+      end;
+      if ATemplate[ATemplateIndex] = '{' then
+      begin
+        CloseBrace := ATemplateIndex + 1;
+        while ATemplate[CloseBrace] <> '}' do
+          Inc(CloseBrace);
+        MaxValueEnd := AUriIndex;
+        while (MaxValueEnd <= Length(AUri)) and
+          (AUri[MaxValueEnd] <> '/') do
+          Inc(MaxValueEnd);
+        for ValueEnd := AUriIndex + 1 to MaxValueEnd do
+        begin
+          CaptureIndex := Length(Captures);
+          SetLength(Captures, CaptureIndex + 1);
+          Captures[CaptureIndex].Name := Copy(ATemplate,
+            ATemplateIndex + 1, CloseBrace - ATemplateIndex - 1);
+          Captures[CaptureIndex].Value := Copy(AUri, AUriIndex,
+            ValueEnd - AUriIndex);
+          if MatchFrom(CloseBrace + 1, ValueEnd) then
+            Exit(True);
+          SetLength(Captures, CaptureIndex);
+        end;
+        RememberFailedVariableStates(ATemplateIndex, AUriIndex, MaxValueEnd);
+        RememberFailedState(StartTemplateIndex, StartUriIndex);
+        Exit(False);
+      end;
+      if (AUriIndex > Length(AUri)) or
+        (ATemplate[ATemplateIndex] <> AUri[AUriIndex]) then
+      begin
+        RememberFailedState(StartTemplateIndex, StartUriIndex);
+        Exit(False);
+      end;
+      Inc(ATemplateIndex);
+      Inc(AUriIndex);
+    end;
+    Result := AUriIndex > Length(AUri);
+    if not Result then
+      RememberFailedState(StartTemplateIndex, StartUriIndex);
+  end;
+
+begin
+  AVars := nil;
+  if not TryValidateUriTemplate(ATemplate, ValidationError) then
+    Exit(False);
+  SetLength(Captures, 0);
+  SetLength(FailedStates, Length(ATemplate) + 2);
+  Result := MatchFrom(1, 1);
   if not Result then
-    FreeAndNil(AVars);
+    Exit;
+  AVars := TJSONObject.Create;
+  for I := 0 to High(Captures) do
+    AVars.Add(Captures[I].Name, Captures[I].Value);
 end;
 
 { ───────── in-request notifications ───────── }
 
-// RFC 5424 severity rank; higher is more severe. Unknown levels rank
-// lowest so a typo cannot flood the client.
+// RFC 5424 severity rank; higher is more severe. Request thresholds
+// have already been validated by ExtractRequestContext; -1 guards
+// against an invalid level emitted by server code.
 function LogSeverity(const ALevel: string): Integer;
-const
-  LEVELS: array[0..7] of string = ('debug', 'info', 'notice', 'warning',
-    'error', 'critical', 'alert', 'emergency');
 var
   I: Integer;
 begin
-  for I := 0 to High(LEVELS) do
-    if LEVELS[I] = ALevel then
+  for I := Low(MCP_LOG_LEVELS) to High(MCP_LOG_LEVELS) do
+    if MCP_LOG_LEVELS[I] = ALevel then
       Exit(I);
   Result := -1;
 end;
@@ -955,6 +1080,44 @@ end;
 function BindProperty(AInstance: TMCPArgs; AProp: PPropInfo;
   AValue: TJSONData; out AError: string): Boolean;
 
+  function ReadSignedInteger(out AResult: Int64): Boolean;
+  var
+    UnsignedValue: QWord;
+  begin
+    Result := (AValue.JSONType = jtNumber) and
+      (TJSONNumber(AValue).NumberType in [ntInteger, ntInt64, ntQWord]);
+    if not Result then
+      Exit;
+    if TJSONNumber(AValue).NumberType = ntQWord then
+    begin
+      UnsignedValue := AValue.AsQWord;
+      if UnsignedValue > QWord(High(Int64)) then
+        Exit(False);
+      AResult := Int64(UnsignedValue);
+    end
+    else
+      AResult := AValue.AsInt64;
+  end;
+
+  function ReadUnsignedInteger(out AResult: QWord): Boolean;
+  var
+    SignedValue: Int64;
+  begin
+    Result := (AValue.JSONType = jtNumber) and
+      (TJSONNumber(AValue).NumberType in [ntInteger, ntInt64, ntQWord]);
+    if not Result then
+      Exit;
+    if TJSONNumber(AValue).NumberType = ntQWord then
+      AResult := AValue.AsQWord
+    else
+    begin
+      SignedValue := AValue.AsInt64;
+      if SignedValue < 0 then
+        Exit(False);
+      AResult := QWord(SignedValue);
+    end;
+  end;
+
   function Mismatch(const AExpected: string): Boolean;
   begin
     AError := Format('Argument "%s" must be %s',
@@ -962,6 +1125,20 @@ function BindProperty(AInstance: TMCPArgs; AProp: PPropInfo;
     Result := False;
   end;
 
+  procedure SetQWordProperty(const AValue: QWord);
+  var
+    SignedBits: Int64;
+  begin
+    // FPC 3.2.2 has tkQWord RTTI but exposes only signed Int64 property
+    // accessors. Pass the unsigned value's bits through unchanged.
+    Move(AValue, SignedBits, SizeOf(SignedBits));
+    SetInt64Prop(AInstance, AProp, SignedBits);
+  end;
+
+var
+  TypeData: PTypeData;
+  SignedValue: Int64;
+  UnsignedValue, Minimum, Maximum: QWord;
 begin
   Result := True;
   case AProp^.PropType^.Kind of
@@ -976,15 +1153,35 @@ begin
       else
         Exit(Mismatch('a number'));
     tkInteger:
-      if (AValue.JSONType = jtNumber) and
-        (TJSONNumber(AValue).NumberType in [ntInteger, ntInt64]) then
-        SetOrdProp(AInstance, AProp, AValue.AsInteger)
+      begin
+        TypeData := GetTypeData(AProp^.PropType);
+        if TypeData^.OrdType in [otUByte, otUWord, otULong] then
+        begin
+          if not ReadUnsignedInteger(UnsignedValue) then
+            Exit(Mismatch('an integer'));
+          Minimum := QWord(LongWord(TypeData^.MinValue));
+          Maximum := QWord(LongWord(TypeData^.MaxValue));
+          if (UnsignedValue < Minimum) or (UnsignedValue > Maximum) then
+            Exit(Mismatch('an integer'));
+          SetOrdProp(AInstance, AProp, Int64(UnsignedValue));
+        end
+        else
+        begin
+          if not ReadSignedInteger(SignedValue) or
+            (SignedValue < TypeData^.MinValue) or
+            (SignedValue > TypeData^.MaxValue) then
+            Exit(Mismatch('an integer'));
+          SetOrdProp(AInstance, AProp, SignedValue);
+        end;
+      end;
+    tkInt64:
+      if ReadSignedInteger(SignedValue) then
+        SetInt64Prop(AInstance, AProp, SignedValue)
       else
         Exit(Mismatch('an integer'));
-    tkInt64, tkQWord:
-      if (AValue.JSONType = jtNumber) and
-        (TJSONNumber(AValue).NumberType in [ntInteger, ntInt64]) then
-        SetInt64Prop(AInstance, AProp, AValue.AsInt64)
+    tkQWord:
+      if ReadUnsignedInteger(UnsignedValue) then
+        SetQWordProperty(UnsignedValue)
       else
         Exit(Mismatch('an integer'));
     tkBool:
@@ -1127,7 +1324,10 @@ procedure TMCPServer.AddTemplate(const AUriTemplate, AName, AMimeType,
 var
   I: Integer;
   Definition: TJSONObject;
+  ValidationError: string;
 begin
+  if not TryValidateUriTemplate(AUriTemplate, ValidationError) then
+    raise EMCPServer.Create(ValidationError);
   for I := 0 to High(FTemplates) do
     if FTemplates[I].UriTemplate = AUriTemplate then
       raise EMCPServer.CreateFmt(
@@ -1385,7 +1585,7 @@ end;
 
 function TMCPServer.HandleInitialize(const AMessage: TJSONRPCMessage): string;
 var
-  VersionData, InfoData, CapsData: TJSONData;
+  VersionData, InfoData, CapsData, NameData, ClientVersionData: TJSONData;
   Requested: string;
   InitResult, Capabilities, ServerInfo: TJSONObject;
 begin
@@ -1398,6 +1598,35 @@ begin
       'Invalid params: protocolVersion must be a string'));
   Requested := VersionData.AsString;
 
+  // InitializeRequest params require object-valued capabilities and
+  // clientInfo with string name and version members:
+  // https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle
+  // (verified 2026-07-20).
+  CapsData := AMessage.Params.Find('capabilities');
+  if CapsData = nil then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: initialize requires capabilities'));
+  if CapsData.JSONType <> jtObject then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: capabilities must be an object'));
+
+  InfoData := AMessage.Params.Find('clientInfo');
+  if InfoData = nil then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: initialize requires clientInfo'));
+  if InfoData.JSONType <> jtObject then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: clientInfo must be an object'));
+  NameData := TJSONObject(InfoData).Find('name');
+  if (NameData = nil) or (NameData.JSONType <> jtString) then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: clientInfo.name must be a string'));
+  ClientVersionData := TJSONObject(InfoData).Find('version');
+  if (ClientVersionData = nil) or
+    (ClientVersionData.JSONType <> jtString) then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: clientInfo.version must be a string'));
+
   // Legacy negotiation: echo a supported revision, otherwise answer
   // with the latest legacy revision we speak (the client decides
   // whether to proceed or disconnect).
@@ -1407,18 +1636,10 @@ begin
     FLegacyProtocolVersion := LATEST_LEGACY_PROTOCOL_VERSION;
 
   // A re-initialize renegotiates: replace any earlier session state.
-  FLegacyClientName := '';
-  FLegacyClientVersion := '';
+  FLegacyClientName := NameData.AsString;
+  FLegacyClientVersion := ClientVersionData.AsString;
   FreeAndNil(FLegacyClientCapabilities);
-  InfoData := AMessage.Params.Find('clientInfo');
-  if (InfoData <> nil) and (InfoData.JSONType = jtObject) then
-  begin
-    FLegacyClientName := TJSONObject(InfoData).Get('name', '');
-    FLegacyClientVersion := TJSONObject(InfoData).Get('version', '');
-  end;
-  CapsData := AMessage.Params.Find('capabilities');
-  if (CapsData <> nil) and (CapsData.JSONType = jtObject) then
-    FLegacyClientCapabilities := TJSONObject(CapsData.Clone);
+  FLegacyClientCapabilities := TJSONObject(CapsData.Clone);
   FLegacyInitialized := True;
 
   Capabilities := ServerCapabilities;
@@ -1549,6 +1770,9 @@ var
   ToolResult: TMCPToolResult;
   ArgsInstance: TMCPArgs;
 begin
+  if AMessage.Params = nil then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: params are required'));
   NameData := AMessage.Params.Find('name');
   if (NameData = nil) or (NameData.JSONType <> jtString) then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
@@ -1648,6 +1872,9 @@ var
   Contents: TJSONArray;
   ReadResult, NotFoundData, Vars: TJSONObject;
 begin
+  if AMessage.Params = nil then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: params are required'));
   UriData := AMessage.Params.Find('uri');
   if (UriData = nil) or (UriData.JSONType <> jtString) then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
@@ -1761,6 +1988,9 @@ var
   DeclaredArgs: TJSONArray;
   Messages: TJSONArray;
 begin
+  if AMessage.Params = nil then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: params are required'));
   NameData := AMessage.Params.Find('name');
   if (NameData = nil) or (NameData.JSONType <> jtString) then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,

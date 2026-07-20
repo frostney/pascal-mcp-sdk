@@ -6,7 +6,7 @@
   the initialize rejection naming supported versions, method-not-found,
   notifications producing no response, malformed lines answered with
   the right JSON-RPC error, and registration guards (duplicate names,
-  bad schema JSON → EMCPServer). }
+  bad schema JSON and malformed resource templates → EMCPServer). }
 
 program MCP.Server.Test;
 
@@ -66,6 +66,8 @@ type
     procedure TestTypedArgsSchemaDerived;
     procedure TestTypedArgsDefaultSeeded;
     procedure TestTypedArgsDefaultOverridden;
+    procedure TestTypedOrdinalBounds;
+    procedure TestTypedQWordRoundTrip;
     procedure TestTypedOutputClass;
     procedure TestFluentAnnotations;
   end;
@@ -85,6 +87,12 @@ type
     procedure TestDuplicateTool;
     procedure TestBadSchema;
     procedure TestDuplicateResource;
+    procedure TestEmptyResourceTemplate;
+    procedure TestEmptyTemplateVariable;
+    procedure TestUnclosedTemplateVariable;
+    procedure TestAdjacentTemplateVariables;
+    procedure TestStrayTemplateCloseBrace;
+    procedure TestInvalidTemplateVariableCharacter;
   end;
 
   TResourceTemplates = class(TDispatchSuite)
@@ -95,6 +103,10 @@ type
     procedure TestMatcherRejectsSlash;
     procedure TestMatcherLiteralMismatch;
     procedure TestMatcherTrailingExcess;
+    procedure TestMatcherFullFollowingLiteral;
+    procedure TestMatcherBacktracks;
+    procedure TestMatcherPathologicalNoMatch;
+    procedure TestMatcherPreservesPercentEncoding;
     procedure TestTemplatesList;
     procedure TestReadViaTemplate;
     procedure TestExactResourceWins;
@@ -116,6 +128,8 @@ type
     procedure TestStringTokenPreserved;
     procedure TestLogEmittedAtLevel;
     procedure TestLogFilteredBelowLevel;
+    procedure TestUnknownLogLevelRejected;
+    procedure TestWrongCaseLogLevelRejected;
     procedure TestLogWithoutOptIn;
     procedure TestLegacyProgress;
     procedure TestNoSinkStillServes;
@@ -136,14 +150,23 @@ type
   TLegacyEra = class(TDispatchSuite)
   private
     procedure DoInitialize(const AVersion: string);
+    procedure ExpectInvalidParams(const ALine: string);
   public
     procedure SetupTests; override;
     procedure TestKnownVersionEchoed;
+    procedure TestBatchRevisionAnswersLatestLegacy;
     procedure TestUnknownVersionAnswersLatestLegacy;
     procedure TestInitializeResultShape;
+    procedure TestInitializeMissingCapabilities;
+    procedure TestInitializeNonObjectCapabilities;
+    procedure TestInitializeMissingClientInfo;
+    procedure TestInitializeIncompleteClientInfo;
     procedure TestRequestBeforeInitialize;
     procedure TestPingBeforeInitialize;
     procedure TestLegacyToolCall;
+    procedure TestParamslessToolCall;
+    procedure TestParamslessResourceRead;
+    procedure TestParamslessPromptGet;
     procedure TestLegacyResponsesUnstamped;
     procedure TestLegacyContextVisibleToHandlers;
     procedure TestLegacyResourceNotFound;
@@ -212,6 +235,50 @@ type
     property count: Integer read FCount write FCount default 2;
   end;
 
+  TByteArgs = class(TMCPArgs)
+  private
+    FValue: Byte;
+  published
+    property value: Byte read FValue write FValue;
+  end;
+
+  TWordArgs = class(TMCPArgs)
+  private
+    FValue: Word;
+  published
+    property value: Word read FValue write FValue;
+  end;
+
+  TCardinalArgs = class(TMCPArgs)
+  private
+    FValue: Cardinal;
+  published
+    property value: Cardinal read FValue write FValue;
+  end;
+
+  TBoundedOrdinal = 10..20;
+
+  TSubrangeArgs = class(TMCPArgs)
+  private
+    FValue: TBoundedOrdinal;
+  published
+    property value: TBoundedOrdinal read FValue write FValue;
+  end;
+
+  TInt64Args = class(TMCPArgs)
+  private
+    FValue: Int64;
+  published
+    property value: Int64 read FValue write FValue;
+  end;
+
+  TQWordArgs = class(TMCPArgs)
+  private
+    FValue: QWord;
+  published
+    property value: QWord read FValue write FValue;
+  end;
+
 // Typed output: copies the bound input into a fresh instance and
 // returns it as structuredContent.
 function MirrorHandler(AArgs: TMCPArgs;
@@ -238,6 +305,12 @@ begin
   for I := 1 to Args.count do
     S := S + Args.word;
   Result := MCPTextResult(S);
+end;
+
+function OrdinalHandler(AArgs: TMCPArgs;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult('bound', MCPSerialize(AArgs));
 end;
 
 function ClockReader(const AUri: string;
@@ -287,6 +360,28 @@ function PairReader(const AUri: string; AVars: TJSONObject;
 begin
   Result := MCPTextContents(AUri, 'text/plain',
     AVars.Get('a', '') + '|' + AVars.Get('b', ''));
+end;
+
+procedure ExpectTemplateRegistrationError(const ATemplate,
+  AExpectedMessage: string);
+var
+  ErrorMessage: string;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    ErrorMessage := '';
+    try
+      Server.RegisterResourceTemplate(ATemplate, 'template', 'text/plain',
+        PairReader);
+    except
+      on E: EMCPServer do
+        ErrorMessage := E.Message;
+    end;
+    Expect<string>(ErrorMessage).ToBe(AExpectedMessage);
+  finally
+    Server.Free;
+  end;
 end;
 
 { ───────── shared fixture ───────── }
@@ -384,7 +479,8 @@ begin
   // Modern-only posture: DualEra off restores the strict rejection.
   FServer.DualEra := False;
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
-    '"params":{"protocolVersion":"2025-11-25","capabilities":{}}}');
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
     .ToBe(JSONRPC_METHOD_NOT_FOUND);
   // The reply MUST name the supported versions — the only diagnostic a
@@ -635,10 +731,120 @@ begin
     TestTypedArgsDefaultSeeded);
   Test('typed args: explicit value overrides default',
     TestTypedArgsDefaultOverridden);
+  Test('typed args: ordinal RTTI bounds enforced',
+    TestTypedOrdinalBounds);
+  Test('typed args: QWord boundaries round-trip exactly',
+    TestTypedQWordRoundTrip);
   Test('typed output class: derived outputSchema + serialized result',
     TestTypedOutputClass);
   Test('fluent decoration: title + annotation hints',
     TestFluentAnnotations);
+end;
+
+procedure TToolDispatch.TestTypedOrdinalBounds;
+
+  procedure ExpectBound(const ATool, AValue: string;
+    const AExpected: QWord);
+  var
+    Response: TJSONObject;
+  begin
+    Response := Call('{' +
+      '"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+      '"params":{"name":"' + ATool + '","arguments":{"value":' +
+      AValue + '},' + META_MODERN + '}}');
+    Expect<QWord>(
+      TJSONData(Response.FindPath('result.structuredContent.value')).AsQWord)
+      .ToBe(AExpected);
+    Response.Free;
+  end;
+
+  procedure ExpectIntegerError(const ATool, AValue: string);
+  var
+    Response: TJSONObject;
+  begin
+    Response := Call('{' +
+      '"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+      '"params":{"name":"' + ATool + '","arguments":{"value":' +
+      AValue + '},' + META_MODERN + '}}');
+    Expect<Boolean>(
+      TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+    Expect<string>(
+      TJSONData(Response.FindPath('result.content[0].text')).AsString)
+      .ToBe('Argument "value" must be an integer');
+    Response.Free;
+  end;
+
+begin
+  FServer.RegisterTool('byte', 'Bind Byte', TByteArgs, OrdinalHandler);
+  FServer.RegisterTool('word', 'Bind Word', TWordArgs, OrdinalHandler);
+  FServer.RegisterTool('cardinal', 'Bind Cardinal',
+    TCardinalArgs, OrdinalHandler);
+  FServer.RegisterTool('subrange', 'Bind subrange',
+    TSubrangeArgs, OrdinalHandler);
+  FServer.RegisterTool('int64', 'Bind Int64', TInt64Args, OrdinalHandler);
+
+  ExpectBound('byte', '0', 0);
+  ExpectBound('byte', '255', 255);
+  ExpectIntegerError('byte', '300');
+  ExpectIntegerError('byte', '-5');
+  ExpectIntegerError('byte', '4294967596');
+  ExpectBound('word', '0', 0);
+  ExpectBound('word', '65535', 65535);
+  ExpectIntegerError('word', '65536');
+  ExpectBound('cardinal', '0', 0);
+  ExpectBound('cardinal', '4294967295', 4294967295);
+  ExpectIntegerError('cardinal', '-1');
+  ExpectIntegerError('cardinal', '4294967296');
+  ExpectBound('subrange', '10', 10);
+  ExpectBound('subrange', '20', 20);
+  ExpectIntegerError('subrange', '9');
+  ExpectIntegerError('subrange', '21');
+  ExpectBound('int64', '9223372036854775807', QWord(High(Int64)));
+  ExpectIntegerError('int64', '9223372036854775808');
+end;
+
+procedure TToolDispatch.TestTypedQWordRoundTrip;
+var
+  Response: TJSONObject;
+  Value: TJSONData;
+begin
+  FServer.RegisterTool('qword', 'Bind QWord', TQWordArgs, OrdinalHandler);
+
+  Response := Call('{' +
+    '"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"qword","arguments":' +
+    '{"value":9223372036854775807},' + META_MODERN + '}}');
+  Value := Response.FindPath('result.structuredContent.value');
+  Expect<QWord>(Value.AsQWord).ToBe(QWord(High(Int64)));
+  Response.Free;
+
+  Response := Call('{' +
+    '"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"qword","arguments":' +
+    '{"value":9223372036854775808},' + META_MODERN + '}}');
+  Value := Response.FindPath('result.structuredContent.value');
+  Expect<QWord>(Value.AsQWord).ToBe(QWord(High(Int64)) + 1);
+  Response.Free;
+
+  Response := Call('{' +
+    '"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+    '"params":{"name":"qword","arguments":' +
+    '{"value":18446744073709551615},' + META_MODERN + '}}');
+  Value := Response.FindPath('result.structuredContent.value');
+  Expect<Integer>(Ord(TJSONNumber(Value).NumberType)).ToBe(Ord(ntQWord));
+  Expect<QWord>(Value.AsQWord).ToBe(High(QWord));
+  Response.Free;
+
+  Response := Call('{' +
+    '"jsonrpc":"2.0","id":4,"method":"tools/call",' +
+    '"params":{"name":"qword","arguments":{"value":-1},' +
+    META_MODERN + '}}');
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Argument "value" must be an integer');
+  Response.Free;
 end;
 
 procedure TToolDispatch.TestFluentAnnotations;
@@ -865,11 +1071,54 @@ begin
   end;
 end;
 
+procedure TRegistrationGuards.TestEmptyResourceTemplate;
+begin
+  ExpectTemplateRegistrationError('',
+    'Resource template registration requires a non-empty uriTemplate');
+end;
+
+procedure TRegistrationGuards.TestEmptyTemplateVariable;
+begin
+  ExpectTemplateRegistrationError('mem://item/{}',
+    'Invalid resource template "mem://item/{}": variable name must not be empty');
+end;
+
+procedure TRegistrationGuards.TestUnclosedTemplateVariable;
+begin
+  ExpectTemplateRegistrationError('mem://item/{name',
+    'Invalid resource template "mem://item/{name": unclosed variable at character 12');
+end;
+
+procedure TRegistrationGuards.TestAdjacentTemplateVariables;
+begin
+  ExpectTemplateRegistrationError('mem://item/{group}{name}',
+    'Invalid resource template "mem://item/{group}{name}": adjacent variables require separating literal text');
+end;
+
+procedure TRegistrationGuards.TestStrayTemplateCloseBrace;
+begin
+  ExpectTemplateRegistrationError('mem://item/name}',
+    'Invalid resource template "mem://item/name}": stray "}" at character 16');
+end;
+
+procedure TRegistrationGuards.TestInvalidTemplateVariableCharacter;
+begin
+  ExpectTemplateRegistrationError('mem://item/{+path}',
+    'Invalid resource template "mem://item/{+path}": variable name must contain only A-Z, a-z, 0-9, and _');
+end;
+
 procedure TRegistrationGuards.SetupTests;
 begin
   Test('duplicate tool name rejected', TestDuplicateTool);
   Test('invalid schema JSON rejected', TestBadSchema);
   Test('duplicate resource uri rejected', TestDuplicateResource);
+  Test('empty resource template rejected', TestEmptyResourceTemplate);
+  Test('empty template variable rejected', TestEmptyTemplateVariable);
+  Test('unclosed template variable rejected', TestUnclosedTemplateVariable);
+  Test('adjacent template variables rejected', TestAdjacentTemplateVariables);
+  Test('stray template close brace rejected', TestStrayTemplateCloseBrace);
+  Test('invalid template variable character rejected',
+    TestInvalidTemplateVariableCharacter);
 end;
 
 { ───────── resource templates ───────── }
@@ -923,6 +1172,50 @@ begin
   Expect<Boolean>(
     MatchUriTemplate('mem://pair/{a}/x', 'mem://pair/v/xy', Vars))
     .ToBe(False);
+end;
+
+procedure TResourceTemplates.TestMatcherFullFollowingLiteral;
+var
+  Vars: TJSONObject;
+begin
+  Expect<Boolean>(
+    MatchUriTemplate('mcp://example/{name}.json',
+      'mcp://example/a.b.json', Vars)).ToBe(True);
+  Expect<string>(Vars.Get('name', '')).ToBe('a.b');
+  Vars.Free;
+end;
+
+procedure TResourceTemplates.TestMatcherBacktracks;
+var
+  Vars: TJSONObject;
+begin
+  Expect<Boolean>(
+    MatchUriTemplate('mcp://example/{name}.meta.json',
+      'mcp://example/a.meta.meta.json', Vars)).ToBe(True);
+  Expect<string>(Vars.Get('name', '')).ToBe('a.meta');
+  Vars.Free;
+end;
+
+procedure TResourceTemplates.TestMatcherPathologicalNoMatch;
+var
+  StartedAt: QWord;
+  Vars: TJSONObject;
+begin
+  StartedAt := GetTickCount64;
+  Expect<Boolean>(MatchUriTemplate('{a}x{b}x{c}x{d}x{e}x{f}xZ',
+    StringOfChar('x', 4096), Vars)).ToBe(False);
+  Expect<Boolean>(GetTickCount64 - StartedAt < 2000).ToBe(True);
+end;
+
+procedure TResourceTemplates.TestMatcherPreservesPercentEncoding;
+var
+  Vars: TJSONObject;
+begin
+  Expect<Boolean>(
+    MatchUriTemplate('mcp://example/{name}',
+      'mcp://example/hello%20world', Vars)).ToBe(True);
+  Expect<string>(Vars.Get('name', '')).ToBe('hello%20world');
+  Vars.Free;
 end;
 
 procedure TResourceTemplates.TestTemplatesList;
@@ -987,7 +1280,8 @@ var
   ResultObj: TJSONObject;
 begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
-    '"params":{"protocolVersion":"2025-11-25","capabilities":{}}}');
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   Response.Free;
   Response := Call(
     '{"jsonrpc":"2.0","id":2,"method":"resources/templates/list",' +
@@ -1012,6 +1306,14 @@ begin
   Test('matcher: variables never cross /', TestMatcherRejectsSlash);
   Test('matcher: literal mismatch fails', TestMatcherLiteralMismatch);
   Test('matcher: trailing excess fails', TestMatcherTrailingExcess);
+  Test('matcher: complete following literal delimits variable',
+    TestMatcherFullFollowingLiteral);
+  Test('matcher: backtracks to a later following literal',
+    TestMatcherBacktracks);
+  Test('matcher: bounds pathological backtracking',
+    TestMatcherPathologicalNoMatch);
+  Test('matcher: percent encoding remains encoded',
+    TestMatcherPreservesPercentEncoding);
   Test('resources/templates/list: shape + cache fields',
     TestTemplatesList);
   Test('resources/read: template match with variables',
@@ -1129,6 +1431,36 @@ begin
   Response.Free;
 end;
 
+procedure TNotificationEmission.TestUnknownLogLevelRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"noisy","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"io.modelcontextprotocol/logLevel":"verbose"}}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INVALID_PARAMS);
+  Expect<Integer>(FLines.Count).ToBe(0);
+  Response.Free;
+end;
+
+procedure TNotificationEmission.TestWrongCaseLogLevelRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"noisy","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"io.modelcontextprotocol/logLevel":"INFO"}}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INVALID_PARAMS);
+  Expect<Integer>(FLines.Count).ToBe(0);
+  Response.Free;
+end;
+
 procedure TNotificationEmission.TestLogWithoutOptIn;
 var
   Response: TJSONObject;
@@ -1145,7 +1477,8 @@ var
   Response, Note: TJSONObject;
 begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
-    '"params":{"protocolVersion":"2025-11-25","capabilities":{}}}');
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   Response.Free;
   // progressToken is per-request in every era; no logLevel opt-in
   // exists in the legacy path, so only progress is emitted.
@@ -1184,6 +1517,10 @@ begin
   Test('log messages emitted at requested level', TestLogEmittedAtLevel);
   Test('log messages below requested level dropped',
     TestLogFilteredBelowLevel);
+  Test('unknown logLevel rejected with -32602',
+    TestUnknownLogLevelRejected);
+  Test('wrong-case logLevel rejected with -32602',
+    TestWrongCaseLogLevelRejected);
   Test('no log messages without the opt-in', TestLogWithoutOptIn);
   Test('legacy era: progress works, logging stays quiet',
     TestLegacyProgress);
@@ -1295,7 +1632,8 @@ var
   ResultObj: TJSONObject;
 begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
-    '"params":{"protocolVersion":"2025-11-25","capabilities":{}}}');
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   Expect<Boolean>(
     Response.FindPath('result.capabilities.prompts') <> nil).ToBe(True);
   Response.Free;
@@ -1333,15 +1671,39 @@ begin
   Response.Free;
 end;
 
+procedure TLegacyEra.ExpectInvalidParams(const ALine: string);
+var
+  Response: TJSONObject;
+begin
+  Response := Call(ALine);
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INVALID_PARAMS);
+  Response.Free;
+end;
+
 procedure TLegacyEra.TestKnownVersionEchoed;
 var
   Response: TJSONObject;
 begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
-    '"params":{"protocolVersion":"2025-06-18","capabilities":{}}}');
+    '"params":{"protocolVersion":"2025-06-18","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   Expect<string>(
     TJSONObject(Response.Find('result')).Get('protocolVersion', ''))
     .ToBe('2025-06-18');
+  Response.Free;
+end;
+
+procedure TLegacyEra.TestBatchRevisionAnswersLatestLegacy;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-03-26","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Expect<string>(
+    TJSONObject(Response.Find('result')).Get('protocolVersion', ''))
+    .ToBe('2025-11-25');
   Response.Free;
 end;
 
@@ -1352,7 +1714,8 @@ begin
   // Legacy negotiation: an unknown request gets the server's latest
   // legacy revision; the client decides whether to proceed.
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
-    '"params":{"protocolVersion":"1999-01-01","capabilities":{}}}');
+    '"params":{"protocolVersion":"1999-01-01","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   Expect<string>(
     TJSONObject(Response.Find('result')).Get('protocolVersion', ''))
     .ToBe(LATEST_LEGACY_PROTOCOL_VERSION);
@@ -1365,7 +1728,8 @@ var
   ResultObj: TJSONObject;
 begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
-    '"params":{"protocolVersion":"2025-11-25","capabilities":{}}}');
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   ResultObj := TJSONObject(Response.Find('result'));
   Expect<string>(
     TJSONObject(ResultObj.Find('serverInfo')).Get('name', ''))
@@ -1377,6 +1741,37 @@ begin
   Expect<Boolean>(ResultObj.Find('resultType') = nil).ToBe(True);
   Expect<Boolean>(ResultObj.Find('_meta') = nil).ToBe(True);
   Response.Free;
+end;
+
+procedure TLegacyEra.TestInitializeMissingCapabilities;
+begin
+  ExpectInvalidParams(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25",' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+end;
+
+procedure TLegacyEra.TestInitializeNonObjectCapabilities;
+begin
+  ExpectInvalidParams(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":"all",' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+end;
+
+procedure TLegacyEra.TestInitializeMissingClientInfo;
+begin
+  ExpectInvalidParams(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{}}}');
+end;
+
+procedure TLegacyEra.TestInitializeIncompleteClientInfo;
+begin
+  ExpectInvalidParams(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client"}}}');
 end;
 
 procedure TLegacyEra.TestRequestBeforeInitialize;
@@ -1412,6 +1807,27 @@ begin
     TJSONData(Response.FindPath('result.content[0].text')).AsString)
     .ToBe('legacy hi');
   Response.Free;
+end;
+
+procedure TLegacyEra.TestParamslessToolCall;
+begin
+  DoInitialize('2025-11-25');
+  ExpectInvalidParams(
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call"}');
+end;
+
+procedure TLegacyEra.TestParamslessResourceRead;
+begin
+  DoInitialize('2025-11-25');
+  ExpectInvalidParams(
+    '{"jsonrpc":"2.0","id":2,"method":"resources/read"}');
+end;
+
+procedure TLegacyEra.TestParamslessPromptGet;
+begin
+  DoInitialize('2025-11-25');
+  ExpectInvalidParams(
+    '{"jsonrpc":"2.0","id":2,"method":"prompts/get"}');
 end;
 
 procedure TLegacyEra.TestLegacyResponsesUnstamped;
@@ -1487,12 +1903,26 @@ end;
 procedure TLegacyEra.SetupTests;
 begin
   Test('initialize echoes a known legacy version', TestKnownVersionEchoed);
+  Test('2025-03-26 initialize → 2025-11-25',
+    TestBatchRevisionAnswersLatestLegacy);
   Test('unknown version → latest legacy answered',
     TestUnknownVersionAnswersLatestLegacy);
   Test('initialize result shape, unstamped', TestInitializeResultShape);
+  Test('initialize without capabilities → -32602',
+    TestInitializeMissingCapabilities);
+  Test('initialize with non-object capabilities → -32602',
+    TestInitializeNonObjectCapabilities);
+  Test('initialize without clientInfo → -32602',
+    TestInitializeMissingClientInfo);
+  Test('initialize with incomplete clientInfo → -32602',
+    TestInitializeIncompleteClientInfo);
   Test('request before initialize → -32600', TestRequestBeforeInitialize);
   Test('ping answered before initialize', TestPingBeforeInitialize);
   Test('legacy tools/call after handshake', TestLegacyToolCall);
+  Test('legacy tools/call without params → -32602', TestParamslessToolCall);
+  Test('legacy resources/read without params → -32602',
+    TestParamslessResourceRead);
+  Test('legacy prompts/get without params → -32602', TestParamslessPromptGet);
   Test('legacy responses carry no modern stamps',
     TestLegacyResponsesUnstamped);
   Test('legacy context reaches handlers', TestLegacyContextVisibleToHandlers);

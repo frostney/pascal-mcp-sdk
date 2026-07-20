@@ -7,8 +7,23 @@
 //
 // Usage: node legacy-interop.mjs /abs/path/to/mcpdemo
 
+import { readFileSync } from 'node:fs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+
+function installedVersion(packageName) {
+  const packageUrl = new URL(
+    `./node_modules/${packageName}/package.json`,
+    import.meta.url,
+  );
+  return JSON.parse(readFileSync(packageUrl, 'utf8')).version;
+}
+
+console.log(
+  'interop packages: ' +
+    `@modelcontextprotocol/client ${installedVersion('@modelcontextprotocol/client')}, ` +
+    `@modelcontextprotocol/sdk ${installedVersion('@modelcontextprotocol/sdk')}`,
+);
 
 const DEMO = process.argv[2];
 if (!DEMO) {
@@ -54,6 +69,16 @@ try {
   check(
     echo.content?.[0]?.text === 'legacy interop',
     'tools/call echo: text mirrored',
+  );
+
+  const utf8Payload = 'h\u00e9llo \u4e16\u754c';
+  const utf8Echo = await client.callTool({
+    name: 'echo',
+    arguments: { message: utf8Payload },
+  });
+  check(
+    utf8Echo.content?.[0]?.text === utf8Payload,
+    'tools/call echo: non-ASCII text mirrored as UTF-8',
   );
 
   const add = await client.callTool({

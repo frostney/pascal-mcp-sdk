@@ -23,6 +23,7 @@ const
   META_MODERN =
     '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
     '"io.modelcontextprotocol/clientCapabilities":{}}';
+  UTF8_PAYLOAD = 'h' + #$C3#$A9 + 'llo ' + #$E4#$B8#$96 + #$E7#$95#$8C;
 
 type
   TStdioLoop = class(TTestSuite)
@@ -43,6 +44,7 @@ type
     procedure TestBlankLinesSkipped;
     procedure TestNotificationNoOutput;
     procedure TestMultipleRequests;
+    procedure TestUtf8RoundTrip;
     procedure TestOversizedLineRejected;
     procedure TestOversizedLineRecovery;
   end;
@@ -53,10 +55,17 @@ begin
   Result := MCPTextResult('pong');
 end;
 
+function EchoHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPTextResult(AArguments.Get('message', ''));
+end;
+
 procedure TStdioLoop.BeforeEach;
 begin
   FServer := TMCPServer.Create('stdio-test', '1.0');
   FServer.RegisterTool('ping', 'Ping', '{"type":"object"}', PingHandler);
+  FServer.RegisterTool('echo', 'Echo', '{"type":"object"}', EchoHandler);
   FDir := GetTempDir + 'pascal-mcp-sdk-stdio-test' + PathDelim;
   ForceDirectories(FDir);
 end;
@@ -188,6 +197,18 @@ begin
   Expect<Boolean>(Pos('pong', Output) > 0).ToBe(True);
 end;
 
+procedure TStdioLoop.TestUtf8RoundTrip;
+var
+  Output: string;
+begin
+  Output := RunLoop(
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{' +
+    '"name":"echo","arguments":{"message":"' + UTF8_PAYLOAD + '"},' +
+    META_MODERN + '}}'#10);
+  Expect<Boolean>(Pos('"text" : "' + UTF8_PAYLOAD + '"', Output) > 0)
+    .ToBe(True);
+end;
+
 procedure TStdioLoop.TestOversizedLineRejected;
 var
   Output: string;
@@ -227,6 +248,7 @@ begin
   Test('blank lines skipped', TestBlankLinesSkipped);
   Test('notification writes nothing', TestNotificationNoOutput);
   Test('three requests → three responses', TestMultipleRequests);
+  Test('non-ASCII payload → byte-exact UTF-8', TestUtf8RoundTrip);
   Test('oversized line → -32700, null id', TestOversizedLineRejected);
   Test('stream recovers after an oversized line',
     TestOversizedLineRecovery);

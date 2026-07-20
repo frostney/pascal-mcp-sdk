@@ -5,10 +5,11 @@ unit MCP.Transport.Stdio;
 // This unit is a deliberately thin shell — every protocol decision
 // lives in MCP.Server.HandleMessage; here we only move lines.
 //
-// Binding rules implemented (spec .../draft/basic/transports/stdio):
+// Binding rules implemented (spec .../draft/basic/transports/stdio,
+// verified 2026-07-20):
 //   - one UTF-8 JSON-RPC message per line, no embedded newlines
 //     (fpjson escapes newlines inside strings, so serialized responses
-//     are single-line by construction);
+//     are single-line by construction); UTF-8 setup lives in MCP.JSONRPC;
 //   - stdout carries nothing but MCP messages — diagnostics belong on
 //     stderr (MCPLogToStderr);
 //   - responses are terminated with a bare LF on every platform (a
