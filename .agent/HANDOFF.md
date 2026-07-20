@@ -25,7 +25,7 @@ no-lwpt path            ✅ fpc @lwpt.cfg -FEbuild source/apps/mcpdemo.pas
 ## What was built
 
 - **Library** (`source/units/`, layered bottom-up, sans-I/O core):
-  `MCP.JsonRpc` (JSON-RPC 2.0, MCP profile: no batching, no null ids)
+  `MCP.JSONRPC` (JSON-RPC 2.0, MCP profile: no batching, no null ids)
   → `MCP.Protocol` (per-request `_meta`, -32602/-32021/-32022,
   result stamping) → `MCP.Server` (registries + `HandleMessage`
   dispatch: server/discover, tools/list+call, resources/list+read,
@@ -84,7 +84,7 @@ requirements the prose docs underplayed were found and fixed:
 top-level `serverInfo` required on `DiscoverResult` (the `_meta` stamp
 alone classifies the server as legacy), and `ttlMs`+`cacheScope`
 (SEP-2549) required on discover/list/read results — now emitted, with
-`CacheTtlMs`/`CacheScope` knobs on `TMcpServer` (dynamic-reader reads
+`CacheTtlMs`/`CacheScope` knobs on `TMCPServer` (dynamic-reader reads
 advertise ttl 0). The earlier "ttlMs gap" note is closed.
 
 Client-adoption reality (checked 2026-07-20): official SDK betas exist
@@ -96,13 +96,13 @@ legacy handshake.
 
 ## Dual-era support (same session, user-requested)
 
-`TMcpServer` is now a dual-era server per the spec's compatibility
+`TMCPServer` is now a dual-era server per the spec's compatibility
 matrix, **on by default** (`DualEra := False` restores strict
 modern-only). Era selection follows how the client opens: modern
 per-request `_meta` → stateless 2026-07-28; `initialize` → legacy
 semantics (2024-11-05…2025-11-25) scoped to the process — the one
 deliberate piece of cross-request state. Both eras serve concurrently;
-handlers are era-blind (same `TMcpRequestContext`). Legacy dialect is
+handlers are era-blind (same `TMCPRequestContext`). Legacy dialect is
 era-faithful: unstamped results, no cache fields, `-32002`
 resource-not-found, `ping` answered; unknown initialize versions are
 answered with `2025-11-25`. Legacy-only features the modern revision

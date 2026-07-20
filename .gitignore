@@ -26,3 +26,6 @@ package-lock.json
 # OS noise.
 .DS_Store
 Thumbs.db
+
+# Session handoff state is local, not tracked.
+.agent/
