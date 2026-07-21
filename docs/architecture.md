@@ -6,20 +6,21 @@ pascal-mcp-sdk is five units layered strictly bottom-up: `MCP.JSONRPC`
 (the JSON-RPC 2.0 profile MCP mandates), `MCP.Protocol` (the stateless
 per-request `_meta` model of spec revision 2026-07-28), `MCP.Schema`
 (tool schemas as Pascal — fluent builder and RTTI-derived argument
-classes), `MCP.Server` (the sans-I/O dispatch core holding the
-tool/resource registries), and `MCP.Transport.Stdio` (the
-newline-delimited stdio binding). The core
-performs no I/O — `HandleMessage` maps one inbound line to at most one
-response line — so the planned Streamable HTTP binding wraps the same
-tested core without touching it. The runtime dependency set is FPC's
-RTL + fpjson, nothing else.
+classes), `MCP.Server` (the sans-I/O dispatch core holding frozen
+tool/resource registries plus per-connection sessions), and
+`MCP.Transport.Stdio` (the newline-delimited stdio binding). The core
+performs no I/O — `CreateSession` binds connection state and
+`HandleMessage` maps one inbound line to at most one response line — so
+the planned Streamable HTTP binding wraps the same tested core without
+touching it. The runtime dependency set is FPC's RTL + fpjson, nothing
+else.
 
 ## Layering
 
 ```text
 MCP.Transport.Stdio      thin shell: lines in/out, LF framing, EOF = shutdown
         │
-MCP.Server               dispatch + registries; HandleMessage(line) → line
+MCP.Server               frozen core + session; HandleMessage(session, line) → line
         │
 MCP.Protocol             _meta validation, version negotiation, result stamping
         │
@@ -41,8 +42,9 @@ Rules live in the layer that owns them and nowhere else:
   mismatch, and the response-side stamping (`resultType: "complete"`,
   `serverInfo`). Knows nothing about tools or resources.
 - **`MCP.Server`** — method dispatch (`server/discover`, `tools/*`,
-  `resources/*`, `prompts/*`), the registries, in-band vs. protocol
-  error policy
+  `resources/*`, `prompts/*`), frozen registries and request-visible
+  configuration, per-connection legacy state, cooperative cancellation,
+  in-band vs. protocol error policy
   (handler exceptions → `isError: true` results; dispatch faults →
   JSON-RPC errors), the legacy-`initialize` rejection that names
   supported versions. Knows nothing about bytes or streams.
@@ -53,38 +55,48 @@ Rules live in the layer that owns them and nowhere else:
 
 ## The sans-I/O core
 
-`TMCPServer.HandleMessage(const ALine; out AResponse): Boolean` is the
-entire protocol surface. It is what the unit tests drive (no pipes, no
-processes), what `RunMCPStdioLoop` calls in a loop, and what
-`MCP.Transport.HTTP` will call per POST body when it lands. This
-mirrors duetto's `WS.Protocol` discipline: one tested core, transports
-as delivery.
+`TMCPServer.CreateSession` creates state bound to that server, and
+`TMCPServer.HandleMessage(ASession, const ALine; out AResponse): Boolean`
+is the line-oriented protocol surface. Unit tests drive both directly
+(no pipes, no processes); `RunMCPStdioLoop` creates one session for its
+connection and passes it on every call; `MCP.Transport.HTTP` will do the
+same for each connection/session lifetime when it lands. This mirrors
+duetto's `WS.Protocol` discipline: one tested core, transports as
+delivery. Passing nil or a session from another server is API misuse and
+raises `EMCPServer`; malformed wire input is still converted to JSON-RPC
+errors.
 
-The one addition to the line-in/line-out model is the **notification
-sink**: a transport may register a line sink
-(`TMCPServer.SetLineSink`), and handlers can then emit request-scoped
-notifications (`MCPReportProgress`, `MCPLogMessage`) that the
-transport writes before the response — exactly the request-scoped
-notification stream the spec describes for both stdio and Streamable
-HTTP (where the same sink becomes SSE events on the POST response).
-Emission is strictly opt-in per request (`_meta.progressToken` for
-progress; the `logLevel` key for log messages, severity-filtered per
-RFC 5424) and both helpers are no-ops without a sink, so the core
-stays testable as a pure function.
+The one addition to line-in/line-out is the **per-call notification
+sink**: the sink and its user data are arguments to the `HandleMessage`
+overload, so neither shared server state nor a session retains transport
+state. Handlers can emit request-scoped notifications
+(`MCPReportProgress`, `MCPLogMessage`) that the active transport writes
+before the response — exactly the stream the spec describes for both
+stdio and Streamable HTTP (where the same sink becomes SSE events on the
+POST response). Emission is strictly opt-in per request
+(`_meta.progressToken` for progress; the `logLevel` key for log messages,
+severity-filtered per RFC 5424) and both helpers are no-ops without a
+sink, so the core stays testable without I/O.
 
-Because the 2026-07-28 revision is **stateless** — servers must not
-infer anything from prior requests on the same connection — the serial
-read-handle-write loop is not a simplification but the spec's own
-model: every request re-validates its `_meta`, and process/connection
-identity carries no session meaning. This is also why ignoring
-`notifications/cancelled` is correct: requests are handled one at a
-time, so a cancellation can only arrive after its target completed.
+Modern 2026-07-28 requests remain **stateless**: every request validates
+its own `_meta`, and the session contributes no negotiated identity to
+that path. The session exists to isolate legacy lifecycle/identity and
+to expose the one currently active cooperative-cancellation token.
+`notifications/cancelled` validates its payload, matches string ids by
+decoded value and numeric ids by value, and flips that token; handlers
+poll `TMCPRequestContext.IsCancelled`, after which the server suppresses
+notifications and the final response. The synchronous stdio
+read-handle-write loop cannot receive a cancellation while a handler is
+running, so stdio handlers should stay short; a future transport with
+mid-request delivery points can use the same session entry point.
 
 ## Registration and handler model
 
-Registries are populated at startup and fixed afterwards (that is why
-no `listChanged`/`subscribe` capability is advertised and
-`subscriptions/listen` is out of v1). Handlers are synchronous and come
+Registries and request-visible configuration (`Instructions`, cache
+policy, error redaction, and dual-era mode) are populated at startup and
+freeze when the first session is created. That is why no
+`listChanged`/`subscribe` capability is advertised and
+`subscriptions/listen` is out of v1. Handlers are synchronous and come
 in two shapes per registry — plain function pointers and `of object`
 method pointers — so both programs and class-based hosts (lantaarn)
 register naturally. Tool schemas come from `MCP.Schema` in two forms:
@@ -142,8 +154,9 @@ by default): era selection follows how the client opens. A request
 carrying the modern per-request `_meta` protocol-version key is served
 statelessly per 2026-07-28; an `initialize` request selects legacy
 semantics for `2024-11-05`, `2025-06-18`, and `2025-11-25`, scoped to
-the server instance (= the stdio process) — the one deliberate piece of
-cross-request state the compatibility model prescribes. `2025-03-26`
+the connection's `TMCPSession` — the deliberate cross-request state the
+compatibility model prescribes, isolated even when sessions share one
+server core. `2025-03-26`
 is excluded because its Base Protocol requires receivers to accept
 JSON-RPC batches, which this library does not implement
 ([Base Protocol](https://modelcontextprotocol.io/specification/2025-03-26/basic),

@@ -449,6 +449,19 @@ begin
       'legacy: tools/call result unstamped');
     Response.Free;
 
+    // Serial stdio observes cancellation only after the target has
+    // finished. The notification is accepted silently and does not
+    // disturb the next request on the same session.
+    SendLine(Demo,
+      '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+      '"params":{"requestId":13,"reason":"finished already"}}');
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":122,"method":"ping"}');
+    Check((Response <> nil) and (PathInt(Response, 'id') = 122) and
+      (Response.Find('result') <> nil),
+      'legacy: cancellation for finished id silent; next request served');
+    Response.Free;
+
     Response := RoundTrip(Demo,
       '{"jsonrpc":"2.0","id":121,"method":"initialize","params":{' +
       '"protocolVersion":"2025-11-25","capabilities":{},' +

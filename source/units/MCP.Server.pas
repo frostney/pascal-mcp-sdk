@@ -4,19 +4,20 @@ unit MCP.Server;
 // spec's compatibility model: requests carrying modern per-request
 // _meta are served statelessly (revision 2026-07-28); an `initialize`
 // request selects legacy semantics (2025-11-25 and earlier), scoped to
-// this server instance (= the stdio process); both eras are served
-// concurrently on the same instance, which is what lets current-day
-// legacy clients (Claude Code, Claude Desktop) and RC-era clients use
-// the same binary. Set DualEra := False for a strict modern-only
-// server that rejects initialize with a diagnostic naming its
-// supported versions, as the spec recommends.
+// one TMCPSession; both eras share the same frozen registries, which is
+// what lets current-day legacy clients (Claude Code, Claude Desktop)
+// and RC-era clients use the same binary without sharing negotiated
+// identity. Set DualEra := False for a strict modern-only server that
+// rejects initialize with a diagnostic naming its supported versions,
+// as the spec recommends.
 //
-// One instance holds the tool/resource registries and turns one
-// decoded JSON-RPC line into at most one response line via
-// HandleMessage — the whole protocol surface is testable without a
-// transport, mirroring duetto's sans-I/O discipline. Redacted escaped
-// exceptions add only the stderr diagnostic described below.
-// MCP.Transport.Stdio (and a future MCP.Transport.HTTP) are thin
+// Three lifetimes stay separate: TMCPServer owns registries frozen when
+// the first session is created; TMCPSession owns one connection's
+// legacy lifecycle and cloned client capabilities; each HandleMessage
+// call owns its notification sink. The whole protocol surface remains
+// testable without a transport, mirroring duetto's sans-I/O discipline.
+// Redacted escaped exceptions add only the stderr diagnostic described
+// below. MCP.Transport.Stdio (and a future MCP.Transport.HTTP) are thin
 // byte-moving shells around this.
 //
 // v1 protocol surface:
@@ -34,16 +35,12 @@ unit MCP.Server;
 //       _meta, ttlMs/cacheScope) and resource-not-found is the legacy
 //       -32002, so each era sees its own wire dialect
 //   notifications/initialized          completes the legacy handshake
-//   other notifications/*              accepted and ignored; requests
-//                                      are handled strictly one at a
-//                                      time, so by the time a
-//                                      notifications/cancelled arrives
-//                                      the request it names has already
-//                                      completed. Era selection state
-//                                      (legacy lifecycle + negotiated
-//                                      version) is the one deliberate
-//                                      piece of per-process state the
-//                                      compatibility model prescribes.
+//   notifications/cancelled            cooperatively cancels the active
+//                                      request when its id matches
+//   other notifications/*              accepted and ignored. Legacy
+//                                      lifecycle, negotiated identity,
+//                                      and active-request cancellation
+//                                      belong to TMCPSession.
 // Not in v1 (deliberate): subscriptions/listen and the listChanged
 // capability flags (registries are fixed after startup, so there is
 // nothing to notify), pagination cursors (lists are returned whole),
@@ -64,6 +61,10 @@ unit MCP.Server;
 // remain verbatim. The stderr/stdout split follows the transport spec
 // (verified 2026-07-21):
 // https://modelcontextprotocol.io/specification/draft/basic/transports/stdio
+// Cancellation behavior (stop work, free resources, and send no response;
+// unknown, completed, and malformed targets are ignored) is verified
+// 2026-07-21 against:
+// https://modelcontextprotocol.io/specification/draft/basic/patterns/cancellation
 
 {$I Shared.inc}
 
@@ -170,6 +171,8 @@ type
     Method: TMCPPromptMethod;
   end;
 
+  TMCPServer = class;
+
   // Fluent declaration of a prompt's flat argument list (name /
   // description / required — prompts do not use JSON Schema). Same
   // value semantics as TMCPSchema: registration calls Build through
@@ -196,6 +199,7 @@ type
   TMCPToolOptions = record
   private
     FDefinition: TJSONObject; // borrowed: owned by the registry
+    FServer: TMCPServer;       // borrowed: guards post-freeze mutation
     function Annotations: TJSONObject;
     function SetAnnotation(const AName: string;
       AValue: Boolean): TMCPToolOptions;
@@ -212,6 +216,44 @@ type
   // user data so procedural transports can register without objects.
   TMCPLineSink = procedure(const ALine: string; AUserData: Pointer);
 
+  // One transport connection's legacy lifecycle. ClientCapabilities is
+  // an owned clone of initialize.params.capabilities; request contexts
+  // borrow it only for the synchronous handler call.
+  TMCPSession = class
+  private
+    // Legacy initialize MUST be first, and normal operations start only
+    // after notifications/initialized (ping remains valid throughout):
+    // https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle
+    // (verified 2026-07-21).
+    FLegacyState: TMCPLegacyState;
+    FLegacyIdentity: TObject;
+    FOwner: TMCPServer; // borrowed: the server must outlive its sessions
+    FCurrentRequestToken: TObject; // borrowed: dispatch owns the token
+    // ARequestId is borrowed; the returned token is owned by dispatch.
+    function BeginRequest(ARequestId: TJSONData): TObject;
+    procedure EndRequest(AToken: TObject);
+    function TryCancelRequest(ARequestId: TJSONData): Boolean;
+    procedure CompleteLegacyInitialize;
+    // Takes ownership of AClientCapabilities.
+    procedure CommitLegacyInitialize(const AProtocolVersion,
+      AClientName, AClientVersion: string;
+      AClientCapabilities: TJSONObject);
+    // AParams is borrowed for the synchronous handler call.
+    function LegacyContext(AParams: TJSONObject): TMCPRequestContext;
+    // Sessions are constructed only by their owning server — the
+    // non-public constructor is deliberate, so the compiler hint
+    // about it is suppressed for this one declaration.
+    {$PUSH}{$WARN 3018 OFF}
+    constructor Create(AOwner: TMCPServer);
+    {$POP}
+  public
+    destructor Destroy; override;
+    // Signal cooperative cancellation for ARequestId (borrowed). Only
+    // the currently active matching string/number id is accepted;
+    // unknown, finished, malformed, and repeated signals are no-ops.
+    procedure CancelRequest(ARequestId: TJSONData);
+  end;
+
   TMCPServer = class
   private
     FName: string;
@@ -221,24 +263,19 @@ type
     FCacheScope: string;
     FRedactErrorDetails: Boolean;
     FDualEra: Boolean;
-    FSink: TMCPLineSink;
-    FSinkData: Pointer;
-    // Legacy initialize MUST be first, and normal operations start only
-    // after notifications/initialized (ping remains valid throughout):
-    // https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle
-    // (verified 2026-07-21).
-    FLegacyState: TMCPLegacyState;
-    FLegacyProtocolVersion: string;
-    FLegacyClientName: string;
-    FLegacyClientVersion: string;
-    FLegacyClientCapabilities: TJSONObject; // owned clone from initialize
+    FFrozen: Boolean;
     FTools: array of TMCPToolRegistration;
     FResources: array of TMCPResourceRegistration;
     FTemplates: array of TMCPTemplateRegistration;
     FPrompts: array of TMCPPromptRegistration;
 
+    procedure EnsureMutable;
+    procedure FreezeConfiguration;
+    procedure SetInstructions(const AValue: string);
     procedure SetCacheTtlMs(AValue: Integer);
     procedure SetCacheScope(const AValue: string);
+    procedure SetRedactErrorDetails(AValue: Boolean);
+    procedure SetDualEra(AValue: Boolean);
     function ExceptionClientMessage(const ASite, AVerbosePrefix,
       ARedactedMessage: string; E: Exception): string;
     function ParseSchema(const ASchemaJson, AToolName: string): TJSONObject;
@@ -268,9 +305,14 @@ type
     function HandleTemplatesList(const AMessage: TJSONRPCMessage;
       ALegacy: Boolean): string;
 
-    function DispatchRequest(const AMessage: TJSONRPCMessage): string;
-    function DispatchLegacyRequest(const AMessage: TJSONRPCMessage): string;
-    function HandleInitialize(const AMessage: TJSONRPCMessage): string;
+    function DispatchRequest(ASession: TMCPSession;
+      ASink: TMCPLineSink; ASinkData: Pointer;
+      const AMessage: TJSONRPCMessage): string;
+    function DispatchLegacyRequest(ASession: TMCPSession;
+      ASink: TMCPLineSink; ASinkData: Pointer;
+      const AMessage: TJSONRPCMessage): string;
+    function HandleInitialize(ASession: TMCPSession;
+      const AMessage: TJSONRPCMessage): string;
     function HandleDiscover(const AMessage: TJSONRPCMessage): string;
     function HandleToolsList(const AMessage: TJSONRPCMessage;
       ALegacy: Boolean): string;
@@ -286,15 +328,13 @@ type
       const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
     function ResultResponse(const AMessage: TJSONRPCMessage;
       AResult: TJSONObject; ALegacy: Boolean): string;
-    function LegacyContext(AParams: TJSONObject): TMCPRequestContext;
     procedure AddCacheFields(AResult: TJSONObject; ATtlMs: Integer);
-    procedure EmitNotification(const AMethod: string; AParams: TJSONObject);
   public
     constructor Create(const AName, AVersion: string);
     destructor Destroy; override;
 
     // Natural-language guidance surfaced through server/discover.
-    property Instructions: string read FInstructions write FInstructions;
+    property Instructions: string read FInstructions write SetInstructions;
     property Name: string read FName;
     property Version: string read FVersion;
 
@@ -315,7 +355,7 @@ type
     // ignore so a closed stderr cannot kill the process; a host's own
     // SIGPIPE handling is left untouched).
     property RedactErrorDetails: Boolean read FRedactErrorDetails
-      write FRedactErrorDetails;
+      write SetRedactErrorDetails;
 
     // Dual-era mode (default True): answer the legacy initialize
     // handshake (2025-11-25 and earlier) alongside stateless
@@ -323,18 +363,17 @@ type
     // Desktop) still open with initialize. False = strict modern-only:
     // initialize is rejected with a diagnostic naming the supported
     // versions.
-    property DualEra: Boolean read FDualEra write FDualEra;
+    property DualEra: Boolean read FDualEra write SetDualEra;
 
     // The response a transport sends for an inbound line it refused to
     // buffer (length cap). Kept here so the error shape remains a
     // protocol decision — transports move lines only.
     function OversizedLineResponse(AMaxLineLength: Integer): string;
 
-    // Transport registration for server-to-client notification lines.
-    // Without a sink, MCPReportProgress/MCPLogMessage are no-ops.
-    // HandleMessage otherwise stays line-in/line-out; redacted escaped
-    // exceptions additionally write their correlated detail to stderr.
-    procedure SetLineSink(ASink: TMCPLineSink; AUserData: Pointer);
+    // Freezes request-visible configuration and returns one independent
+    // legacy session bound to this server. Transports create one per
+    // connection, free it after serving, and keep the server alive longer.
+    function CreateSession: TMCPSession;
 
     // AInputSchemaJson is parsed at registration and raises EMCPServer
     // on invalid JSON — a bad schema is a programming error, not a
@@ -417,10 +456,16 @@ type
       AMethod: TMCPPromptMethod); overload;
 
     // The core entry point: one inbound line in, at most one response
-    // line out. Returns True when AResponse must be written (requests
-    // and malformed input), False when there is nothing to send
-    // (notifications). Never raises.
-    function HandleMessage(const ALine: string; out AResponse: string): Boolean;
+    // line out. The sink overload binds server-to-client notifications
+    // to this call only. Returns True when AResponse must be written
+    // (requests and malformed input), False when there is nothing to
+    // send (notifications). Wire input never raises; a nil session or one
+    // created by another server raises EMCPServer as API misuse.
+    function HandleMessage(ASession: TMCPSession; const ALine: string;
+      out AResponse: string): Boolean; overload;
+    function HandleMessage(ASession: TMCPSession; const ALine: string;
+      ASink: TMCPLineSink; ASinkData: Pointer;
+      out AResponse: string): Boolean; overload;
 
     function ToolCount: Integer;
     function ResourceCount: Integer;
@@ -475,7 +520,152 @@ procedure MCPLogMessage(const ACtx: TMCPRequestContext;
 implementation
 
 var
+  // Process-global correlation references intentionally remain outside
+  // session/request state. Increment retains its single-threaded
+  // assumption and is deliberately non-atomic; no locking belongs in
+  // this lifetime split.
   ErrorSequence: QWord = 0;
+
+type
+  TMCPRequestCancellationToken = class
+  private
+    FRequestId: TJSONData;
+    FCancelled: Boolean;
+    function Matches(ARequestId: TJSONData): Boolean;
+  public
+    // ARequestId is borrowed; the token owns its clone.
+    constructor Create(ARequestId: TJSONData);
+    destructor Destroy; override;
+    function Cancel(ARequestId: TJSONData): Boolean;
+    function IsCancelled: Boolean;
+  end;
+
+  TMCPLegacyIdentity = class
+  public
+    ProtocolVersion: string;
+    ClientName: string;
+    ClientVersion: string;
+    ClientCapabilities: TJSONObject;
+    // AClientCapabilities is borrowed until construction succeeds.
+    constructor Create(const AProtocolVersion, AClientName,
+      AClientVersion: string; AClientCapabilities: TJSONObject);
+    destructor Destroy; override;
+  end;
+
+  // Lives for exactly one HandleMessage call. Handler contexts borrow
+  // its bound notifier only while dispatch remains on the stack.
+  TMCPRequestDispatch = class
+  private
+    FCancellationToken: TMCPRequestCancellationToken;
+    FSink: TMCPLineSink;
+    FSinkData: Pointer;
+  public
+    constructor Create(ACancellationToken: TMCPRequestCancellationToken;
+      ASink: TMCPLineSink; ASinkData: Pointer);
+    function IsCancelled: Boolean;
+    // Takes ownership of AParams.
+    procedure EmitNotification(const AMethod: string;
+      AParams: TJSONObject);
+  end;
+
+constructor TMCPRequestCancellationToken.Create(ARequestId: TJSONData);
+begin
+  inherited Create;
+  if ARequestId <> nil then
+    FRequestId := ARequestId.Clone;
+end;
+
+destructor TMCPRequestCancellationToken.Destroy;
+begin
+  FRequestId.Free;
+  inherited Destroy;
+end;
+
+function IsIntegralJSONNumber(AValue: TJSONData): Boolean;
+begin
+  Result := (AValue <> nil) and (AValue.JSONType = jtNumber) and
+    not (AValue is TJSONFloatNumber);
+end;
+
+function TMCPRequestCancellationToken.Matches(
+  ARequestId: TJSONData): Boolean;
+begin
+  Result := False;
+  if (ARequestId = nil) or (FRequestId = nil) then
+    Exit;
+  if (ARequestId.JSONType = jtString) and
+     (FRequestId.JSONType = jtString) then
+    Exit(ARequestId.AsString = FRequestId.AsString);
+  if (ARequestId.JSONType <> jtNumber) or
+     (FRequestId.JSONType <> jtNumber) then
+    Exit;
+  if IsIntegralJSONNumber(ARequestId) and
+     IsIntegralJSONNumber(FRequestId) then
+    Result := ARequestId.AsInt64 = FRequestId.AsInt64
+  else
+    Result := ARequestId.AsFloat = FRequestId.AsFloat;
+end;
+
+function TMCPRequestCancellationToken.Cancel(
+  ARequestId: TJSONData): Boolean;
+begin
+  Result := not FCancelled and Matches(ARequestId);
+  if Result then
+    FCancelled := True;
+end;
+
+function TMCPRequestCancellationToken.IsCancelled: Boolean;
+begin
+  Result := FCancelled;
+end;
+
+constructor TMCPLegacyIdentity.Create(const AProtocolVersion,
+  AClientName, AClientVersion: string;
+  AClientCapabilities: TJSONObject);
+begin
+  inherited Create;
+  ProtocolVersion := AProtocolVersion;
+  ClientName := AClientName;
+  ClientVersion := AClientVersion;
+  ClientCapabilities := AClientCapabilities;
+end;
+
+destructor TMCPLegacyIdentity.Destroy;
+begin
+  ClientCapabilities.Free;
+  inherited Destroy;
+end;
+
+constructor TMCPRequestDispatch.Create(
+  ACancellationToken: TMCPRequestCancellationToken;
+  ASink: TMCPLineSink; ASinkData: Pointer);
+begin
+  inherited Create;
+  FCancellationToken := ACancellationToken;
+  FSink := ASink;
+  FSinkData := ASinkData;
+end;
+
+function TMCPRequestDispatch.IsCancelled: Boolean;
+begin
+  Result := (FCancellationToken <> nil) and
+    FCancellationToken.IsCancelled;
+end;
+
+procedure TMCPRequestDispatch.EmitNotification(const AMethod: string;
+  AParams: TJSONObject);
+var
+  Line: string;
+begin
+  if IsCancelled then
+  begin
+    AParams.Free;
+    Exit;
+  end;
+  Line := BuildNotification(AMethod, AParams);
+  if Assigned(FSink) then
+    FSink(Line, FSinkData);
+end;
 
 function NextErrorReference: string;
 begin
@@ -505,14 +695,36 @@ begin
   if FpSigAction(SIGPIPE, nil, @Current) <> 0 then
     Exit;
   // Delphi mode calls a proc-var mentioned in an expression, so the
-  // stored handler pointer is read through its address instead.
-  if PPointer(@Current.sa_handler)^ <> Pointer(SIG_DFL) then
+  // offset-zero stored handler is read through the record address.
+  if PPointer(@Current)^ <> Pointer(SIG_DFL) then
     Exit;
   FillChar(Ignored, SizeOf(Ignored), 0);
   Ignored.sa_handler := SigActionHandler(SIG_IGN);
   FpSigAction(SIGPIPE, @Ignored, nil);
 end;
 {$ENDIF}
+
+function SanitizeLogText(const AText: string): string;
+begin
+  Result := StringReplace(AText, #13#10, ' ', [rfReplaceAll]);
+  Result := StringReplace(Result, #13, ' ', [rfReplaceAll]);
+  Result := StringReplace(Result, #10, ' ', [rfReplaceAll]);
+end;
+
+procedure TryLogToStderr(const AMessage: string);
+begin
+  {$IFDEF UNIX}
+  EnsureSigPipeIgnored;
+  {$ENDIF}
+  try
+    Write(ErrOutput, AMessage, #10);
+    Flush(ErrOutput);
+  except
+    on EInOutError do
+    begin
+    end;
+  end;
+end;
 
 { ───────── prompt builders ───────── }
 
@@ -776,38 +988,61 @@ end;
 procedure MCPReportProgress(const ACtx: TMCPRequestContext;
   AProgress: Double; ATotal: Double; const AMessage: string);
 var
-  Params: TJSONObject;
+  NotificationParams, Params: TJSONObject;
+  ProgressToken: TJSONData;
 begin
-  if not (ACtx.HasProgressToken and Assigned(ACtx.Notifier)) then
+  if ACtx.IsCancelled or
+     not (ACtx.HasProgressToken and Assigned(ACtx.Notifier)) then
     Exit;
   Params := TJSONObject.Create;
-  if ACtx.ProgressTokenIsString then
-    Params.Add('progressToken', ACtx.ProgressToken)
-  else
-    Params.Add('progressToken', GetJSON(ACtx.ProgressToken));
-  Params.Add('progress', AProgress);
-  if ATotal >= 0 then
-    Params.Add('total', ATotal);
-  if AMessage <> '' then
-    Params.Add('message', AMessage);
-  ACtx.Notifier('notifications/progress', Params);
+  try
+    if ACtx.ProgressTokenIsString then
+      Params.Add('progressToken', ACtx.ProgressToken)
+    else
+    begin
+      ProgressToken := GetJSON(ACtx.ProgressToken);
+      try
+        Params.Add('progressToken', ProgressToken);
+        ProgressToken := nil;
+      finally
+        ProgressToken.Free;
+      end;
+    end;
+    Params.Add('progress', AProgress);
+    if ATotal >= 0 then
+      Params.Add('total', ATotal);
+    if AMessage <> '' then
+      Params.Add('message', AMessage);
+    NotificationParams := Params;
+    Params := nil;
+    ACtx.Notifier('notifications/progress', NotificationParams);
+  finally
+    Params.Free;
+  end;
 end;
 
 procedure MCPLogMessage(const ACtx: TMCPRequestContext;
   const ALevel, AData: string; const ALogger: string);
 var
-  Params: TJSONObject;
+  NotificationParams, Params: TJSONObject;
 begin
-  if (ACtx.LogLevel = '') or not Assigned(ACtx.Notifier) then
+  if ACtx.IsCancelled or (ACtx.LogLevel = '') or
+     not Assigned(ACtx.Notifier) then
     Exit;
   if LogSeverity(ALevel) < LogSeverity(ACtx.LogLevel) then
     Exit;
   Params := TJSONObject.Create;
-  Params.Add('level', ALevel);
-  if ALogger <> '' then
-    Params.Add('logger', ALogger);
-  Params.Add('data', AData);
-  ACtx.Notifier('notifications/message', Params);
+  try
+    Params.Add('level', ALevel);
+    if ALogger <> '' then
+      Params.Add('logger', ALogger);
+    Params.Add('data', AData);
+    NotificationParams := Params;
+    Params := nil;
+    ACtx.Notifier('notifications/message', NotificationParams);
+  finally
+    Params.Free;
+  end;
 end;
 
 { ───────── content builders ───────── }
@@ -873,6 +1108,100 @@ begin
   Result.Add(Item);
 end;
 
+{ ───────── TMCPSession: legacy lifecycle ───────── }
+
+constructor TMCPSession.Create(AOwner: TMCPServer);
+begin
+  inherited Create;
+  FOwner := AOwner;
+  FLegacyState := lsNew;
+end;
+
+destructor TMCPSession.Destroy;
+begin
+  FLegacyIdentity.Free;
+  inherited Destroy;
+end;
+
+function TMCPSession.BeginRequest(ARequestId: TJSONData): TObject;
+var
+  Token: TMCPRequestCancellationToken;
+begin
+  // Clone/conversion work may raise, so do it before arming the session.
+  Token := TMCPRequestCancellationToken.Create(ARequestId);
+  FCurrentRequestToken := Token;
+  Result := Token;
+end;
+
+procedure TMCPSession.EndRequest(AToken: TObject);
+begin
+  if FCurrentRequestToken = AToken then
+    FCurrentRequestToken := nil;
+end;
+
+function TMCPSession.TryCancelRequest(ARequestId: TJSONData): Boolean;
+begin
+  Result := (FCurrentRequestToken <> nil) and
+    TMCPRequestCancellationToken(FCurrentRequestToken).Cancel(ARequestId);
+end;
+
+procedure TMCPSession.CancelRequest(ARequestId: TJSONData);
+begin
+  TryCancelRequest(ARequestId);
+end;
+
+procedure TMCPSession.CompleteLegacyInitialize;
+begin
+  if FLegacyState = lsAwaitingInitialized then
+    FLegacyState := lsReady;
+end;
+
+procedure TMCPSession.CommitLegacyInitialize(const AProtocolVersion,
+  AClientName, AClientVersion: string;
+  AClientCapabilities: TJSONObject);
+var
+  NewIdentity, OldIdentity: TMCPLegacyIdentity;
+  OwnedCapabilities: TJSONObject;
+begin
+  OwnedCapabilities := AClientCapabilities;
+  NewIdentity := nil;
+  try
+    NewIdentity := TMCPLegacyIdentity.Create(AProtocolVersion,
+      AClientName, AClientVersion, OwnedCapabilities);
+    OwnedCapabilities := nil;
+    OldIdentity := TMCPLegacyIdentity(FLegacyIdentity);
+    FLegacyIdentity := NewIdentity;
+    NewIdentity := nil;
+    FLegacyState := lsAwaitingInitialized;
+    OldIdentity.Free;
+  finally
+    NewIdentity.Free;
+    OwnedCapabilities.Free;
+  end;
+end;
+
+function TMCPSession.LegacyContext(
+  AParams: TJSONObject): TMCPRequestContext;
+var
+  Identity: TMCPLegacyIdentity;
+  MetaData: TJSONData;
+begin
+  Result := Default(TMCPRequestContext);
+  Identity := TMCPLegacyIdentity(FLegacyIdentity);
+  Result.ProtocolVersion := Identity.ProtocolVersion;
+  Result.ClientName := Identity.ClientName;
+  Result.ClientVersion := Identity.ClientVersion;
+  // Borrowed from the session for this synchronous handler call.
+  Result.ClientCapabilities := Identity.ClientCapabilities;
+  // progressToken is per-request in every era.
+  if AParams <> nil then
+  begin
+    MetaData := AParams.Find('_meta');
+    if (MetaData <> nil) and (MetaData.JSONType = jtObject) then
+      ExtractProgressToken(TJSONObject(MetaData), Result);
+  end;
+end;
+
 { ───────── TMCPServer: lifecycle ───────── }
 
 constructor TMCPServer.Create(const AName, AVersion: string);
@@ -888,11 +1217,45 @@ begin
   FCacheScope := CACHE_SCOPE_PRIVATE;
   FRedactErrorDetails := False;
   FDualEra := True;
-  FLegacyState := lsNew;
+  FFrozen := False;
+end;
+
+procedure TMCPServer.EnsureMutable;
+begin
+  if FFrozen then
+    raise EMCPServer.Create(
+      'Server configuration is frozen after session creation');
+end;
+
+procedure TMCPServer.FreezeConfiguration;
+begin
+  if not FFrozen then
+    FFrozen := True;
+end;
+
+function TMCPServer.CreateSession: TMCPSession;
+var
+  Session: TMCPSession;
+begin
+  Session := TMCPSession.Create(Self);
+  try
+    FreezeConfiguration;
+    Result := Session;
+    Session := nil;
+  finally
+    Session.Free;
+  end;
+end;
+
+procedure TMCPServer.SetInstructions(const AValue: string);
+begin
+  EnsureMutable;
+  FInstructions := AValue;
 end;
 
 procedure TMCPServer.SetCacheTtlMs(AValue: Integer);
 begin
+  EnsureMutable;
   if AValue < 0 then
     raise EMCPServer.Create('CacheTtlMs must not be negative');
   FCacheTtlMs := AValue;
@@ -900,6 +1263,7 @@ end;
 
 procedure TMCPServer.SetCacheScope(const AValue: string);
 begin
+  EnsureMutable;
   if (AValue <> CACHE_SCOPE_PRIVATE) and
      (AValue <> CACHE_SCOPE_PUBLIC) then
     raise EMCPServer.CreateFmt(
@@ -908,32 +1272,28 @@ begin
   FCacheScope := AValue;
 end;
 
+procedure TMCPServer.SetRedactErrorDetails(AValue: Boolean);
+begin
+  EnsureMutable;
+  FRedactErrorDetails := AValue;
+end;
+
+procedure TMCPServer.SetDualEra(AValue: Boolean);
+begin
+  EnsureMutable;
+  FDualEra := AValue;
+end;
+
 function TMCPServer.ExceptionClientMessage(const ASite, AVerbosePrefix,
   ARedactedMessage: string; E: Exception): string;
 var
-  DiagnosticMessage: string;
   ErrorReference: string;
 begin
   if not FRedactErrorDetails then
     Exit(AVerbosePrefix + E.Message);
   ErrorReference := NextErrorReference;
-  DiagnosticMessage := StringReplace(E.Message, #13#10, ' ', [rfReplaceAll]);
-  DiagnosticMessage := StringReplace(DiagnosticMessage, #13, ' ',
-    [rfReplaceAll]);
-  DiagnosticMessage := StringReplace(DiagnosticMessage, #10, ' ',
-    [rfReplaceAll]);
-  {$IFDEF UNIX}
-  EnsureSigPipeIgnored;
-  {$ENDIF}
-  try
-    Write(ErrOutput, ErrorReference, ' ', ASite, ': ', E.ClassName, ': ',
-      DiagnosticMessage, #10);
-    Flush(ErrOutput);
-  except
-    on EInOutError do
-    begin
-    end;
-  end;
+  TryLogToStderr(ErrorReference + ' ' + ASite + ': ' + E.ClassName + ': ' +
+    SanitizeLogText(E.Message));
   Result := ARedactedMessage + ' (ref ' + ErrorReference + ')';
 end;
 
@@ -949,7 +1309,6 @@ begin
     FTemplates[I].Definition.Free;
   for I := 0 to High(FPrompts) do
     FPrompts[I].Definition.Free;
-  FLegacyClientCapabilities.Free;
   inherited Destroy;
 end;
 
@@ -1007,6 +1366,7 @@ function TMCPServer.BuildToolDefinition(const AName, ADescription,
 var
   InputSchema: TJSONObject; // owned until the definition takes it
 begin
+  EnsureMutable;
   // Parse before assembling the definition so a rejected schema
   // leaves nothing owned.
   InputSchema := ParseSchema(AInputSchemaJson, AName);
@@ -1072,6 +1432,7 @@ var
   ToolName: string;
 begin
   try
+    EnsureMutable;
     ValidateToolDefinition(ADefinition, ToolName);
     if Assigned(AHandler) = Assigned(AMethod) then
       raise EMCPServer.CreateFmt(
@@ -1085,6 +1446,7 @@ begin
     raise;
   end;
   Result.FDefinition := ADefinition;
+  Result.FServer := Self;
 end;
 
 { ───────── fluent tool decoration ───────── }
@@ -1106,6 +1468,7 @@ var
   Obj: TJSONObject;
   Index: Integer;
 begin
+  FServer.EnsureMutable;
   Obj := Annotations;
   Index := Obj.IndexOfName(AName);
   if Index >= 0 then
@@ -1118,6 +1481,7 @@ function TMCPToolOptions.Title(const ATitle: string): TMCPToolOptions;
 var
   Index: Integer;
 begin
+  FServer.EnsureMutable;
   Index := FDefinition.IndexOfName('title');
   if Index >= 0 then
     FDefinition.Delete(Index);
@@ -1152,6 +1516,7 @@ var
   ToolName: string;
 begin
   try
+    EnsureMutable;
     ValidateToolDefinition(ADefinition, ToolName);
     if AArgsClass = nil then
       raise EMCPServer.CreateFmt(
@@ -1169,6 +1534,7 @@ begin
     raise;
   end;
   Result.FDefinition := ADefinition;
+  Result.FServer := Self;
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription,
@@ -1224,6 +1590,7 @@ end;
 function TMCPServer.RegisterTool(const AName, ADescription: string;
   constref AInputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions;
 begin
+  EnsureMutable;
   Result := AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build, nil),
     AHandler, nil);
 end;
@@ -1231,6 +1598,7 @@ end;
 function TMCPServer.RegisterTool(const AName, ADescription: string;
   constref AInputSchema: TMCPSchema; AMethod: TMCPToolMethod): TMCPToolOptions;
 begin
+  EnsureMutable;
   Result := AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build, nil),
     nil, AMethod);
 end;
@@ -1240,6 +1608,7 @@ function TMCPServer.RegisterTool(const AName, ADescription: string;
 var
   InputSchema, OutputSchema: TJSONObject;
 begin
+  EnsureMutable;
   InputSchema := nil;
   OutputSchema := nil;
   try
@@ -1259,6 +1628,7 @@ function TMCPServer.RegisterTool(const AName, ADescription: string;
 var
   InputSchema, OutputSchema: TJSONObject;
 begin
+  EnsureMutable;
   InputSchema := nil;
   OutputSchema := nil;
   try
@@ -1276,6 +1646,7 @@ end;
 function TMCPServer.RegisterTool(const AName, ADescription: string;
   AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler): TMCPToolOptions;
 begin
+  EnsureMutable;
   Result := AddTypedTool(SchemaDefinition(AName, ADescription,
     SchemaFromArgumentClass(AName, 'input', AArgsClass), nil),
     AArgsClass, AHandler, nil);
@@ -1284,6 +1655,7 @@ end;
 function TMCPServer.RegisterTool(const AName, ADescription: string;
   AArgsClass: TMCPArgsClass; AMethod: TMCPArgsMethod): TMCPToolOptions;
 begin
+  EnsureMutable;
   Result := AddTypedTool(SchemaDefinition(AName, ADescription,
     SchemaFromArgumentClass(AName, 'input', AArgsClass), nil),
     AArgsClass, nil, AMethod);
@@ -1295,6 +1667,7 @@ function TMCPServer.RegisterTool(const AName, ADescription: string;
 var
   InputSchema, OutputSchema: TJSONObject;
 begin
+  EnsureMutable;
   InputSchema := nil;
   OutputSchema := nil;
   try
@@ -1316,6 +1689,7 @@ function TMCPServer.RegisterTool(const AName, ADescription: string;
 var
   InputSchema, OutputSchema: TJSONObject;
 begin
+  EnsureMutable;
   InputSchema := nil;
   OutputSchema := nil;
   try
@@ -1336,6 +1710,7 @@ function TMCPServer.RegisterTool(const AName, ADescription: string;
 var
   InputSchema, OutputSchema: TJSONObject;
 begin
+  EnsureMutable;
   InputSchema := nil;
   OutputSchema := nil;
   try
@@ -1356,6 +1731,7 @@ function TMCPServer.RegisterTool(const AName, ADescription: string;
 var
   InputSchema, OutputSchema: TJSONObject;
 begin
+  EnsureMutable;
   InputSchema := nil;
   OutputSchema := nil;
   try
@@ -1556,6 +1932,7 @@ procedure TMCPServer.AddResource(const AUri, AName, AMimeType,
 var
   Definition: TJSONObject;
 begin
+  EnsureMutable;
   if AUri = '' then
     raise EMCPServer.Create('Resource registration requires a non-empty uri');
   if AName = '' then
@@ -1634,6 +2011,7 @@ var
   Definition: TJSONObject;
   ValidationError: string;
 begin
+  EnsureMutable;
   if AName = '' then
     raise EMCPServer.CreateFmt(
       'Resource template "%s" requires a non-empty display name',
@@ -1692,6 +2070,12 @@ procedure TMCPServer.AddPrompt(const AName, ADescription: string;
 var
   Definition: TJSONObject;
 begin
+  try
+    EnsureMutable;
+  except
+    AArguments.Free;
+    raise;
+  end;
   if AName = '' then
   begin
     AArguments.Free;
@@ -1773,13 +2157,27 @@ begin
   Result := BuildResultResponse(AMessage.Id, AResult);
 end;
 
-function TMCPServer.HandleMessage(const ALine: string;
+function TMCPServer.HandleMessage(ASession: TMCPSession;
+  const ALine: string; out AResponse: string): Boolean;
+begin
+  Result := HandleMessage(ASession, ALine, nil, nil, AResponse);
+end;
+
+function TMCPServer.HandleMessage(ASession: TMCPSession;
+  const ALine: string; ASink: TMCPLineSink; ASinkData: Pointer;
   out AResponse: string): Boolean;
 var
   Msg: TJSONRPCMessage;
+  ReasonData: TJSONData;
+  RequestToken: TMCPRequestCancellationToken;
 begin
   AResponse := '';
   Result := False;
+  if ASession = nil then
+    raise EMCPServer.Create('Session must not be nil');
+  if ASession.FOwner <> Self then
+    raise EMCPServer.Create('Session belongs to another server');
+  FreezeConfiguration;
   Msg := ParseJSONRPCMessage(ALine);
   try
     case Msg.Kind of
@@ -1791,26 +2189,58 @@ begin
         end;
       jrkNotification:
         begin
-          if (Msg.Method = 'notifications/initialized') and
-             (FLegacyState = lsAwaitingInitialized) then
-            FLegacyState := lsReady;
-          // Other notifications (including notifications/cancelled) are
-          // deliberately ignored: requests are processed one at a time,
-          // so a cancellation can only arrive after its target finished.
+          if Msg.Method = 'notifications/initialized' then
+            ASession.CompleteLegacyInitialize;
+          if (Msg.Method = 'notifications/cancelled') and
+             (Msg.Params <> nil) then
+          begin
+            // A malformed reason invalidates the whole notification;
+            // accepted reasons are logged best-effort for debugging.
+            // Spec verified 2026-07-21:
+            // https://modelcontextprotocol.io/specification/draft/basic/patterns/cancellation
+            ReasonData := Msg.Params.Find('reason');
+            if ((ReasonData = nil) or
+                (ReasonData.JSONType = jtString)) and
+               ASession.TryCancelRequest(
+                 Msg.Params.Find('requestId')) and
+               (ReasonData <> nil) then
+              TryLogToStderr('MCP cancellation reason: ' +
+                SanitizeLogText(ReasonData.AsString));
+          end;
+          // All other notifications are deliberately ignored. Invalid
+          // cancellation params are fire-and-forget no-ops, never errors.
           Result := False;
         end;
       jrkRequest:
         begin
+          RequestToken := nil;
+          // Initialize commits the legacy lifecycle and its response is
+          // never cancellable, so it deliberately has no request token.
+          if Msg.Method <> 'initialize' then
+            RequestToken := TMCPRequestCancellationToken(
+              ASession.BeginRequest(Msg.Id));
           try
-            AResponse := DispatchRequest(Msg);
-          except
-            on E: Exception do
-              AResponse := BuildErrorResponse(Msg.Id,
-                JSONRPC_INTERNAL_ERROR,
-                ExceptionClientMessage('dispatch/' + Msg.Method,
-                  'Internal error: ', 'Internal error', E));
+            try
+              AResponse := DispatchRequest(ASession, ASink, ASinkData, Msg);
+            except
+              on E: Exception do
+                AResponse := BuildErrorResponse(Msg.Id,
+                  JSONRPC_INTERNAL_ERROR,
+                  ExceptionClientMessage('dispatch/' + Msg.Method,
+                    'Internal error: ', 'Internal error', E));
+            end;
+            // A server that accepted cancellation MUST NOT send the
+            // response, even when the cooperative handler returned one.
+            // Spec verified 2026-07-21:
+            // https://modelcontextprotocol.io/specification/draft/basic/patterns/cancellation
+            if (RequestToken <> nil) and RequestToken.IsCancelled then
+              AResponse := ''
+            else
+              Result := True;
+          finally
+            ASession.EndRequest(RequestToken);
+            RequestToken.Free;
           end;
-          Result := True;
         end;
     end;
   finally
@@ -1834,15 +2264,18 @@ begin
     (TJSONObject(MetaData).Find(META_KEY_PROTOCOL_VERSION) <> nil);
 end;
 
-function TMCPServer.DispatchRequest(const AMessage: TJSONRPCMessage): string;
+function TMCPServer.DispatchRequest(ASession: TMCPSession;
+  ASink: TMCPLineSink; ASinkData: Pointer;
+  const AMessage: TJSONRPCMessage): string;
 var
   Ctx: TMCPRequestContext;
+  Dispatch: TMCPRequestDispatch;
   MetaErr: TMCPMetaError;
 begin
   if AMessage.Method = 'initialize' then
   begin
     if FDualEra then
-      Exit(HandleInitialize(AMessage));
+      Exit(HandleInitialize(ASession, AMessage));
     // Modern-only servers SHOULD name their supported versions in the
     // reply — it is the only diagnostic a legacy client can surface.
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
@@ -1852,37 +2285,50 @@ begin
   end;
 
   if FDualEra and not IsModernRequest(AMessage.Params) then
-    Exit(DispatchLegacyRequest(AMessage));
+    Exit(DispatchLegacyRequest(ASession, ASink, ASinkData, AMessage));
 
-  if not ExtractRequestContext(AMessage.Params, [MCP_PROTOCOL_VERSION],
-    Ctx, MetaErr) then
-    Exit(BuildErrorResponse(AMessage.Id, MetaErr.Code, MetaErr.Message,
-      MetaErr.Data));
-  Ctx.Notifier := EmitNotification;
+  Dispatch := TMCPRequestDispatch.Create(
+    TMCPRequestCancellationToken(ASession.FCurrentRequestToken),
+    ASink, ASinkData);
+  try
+    if not ExtractRequestContext(AMessage.Params, [MCP_PROTOCOL_VERSION],
+      Ctx, MetaErr) then
+      Exit(BuildErrorResponse(AMessage.Id, MetaErr.Code, MetaErr.Message,
+        MetaErr.Data));
+    if Assigned(ASink) then
+      Ctx.Notifier := Dispatch.EmitNotification;
+    Ctx.CancellationProbe := Dispatch.IsCancelled;
 
-  if AMessage.Method = 'server/discover' then
-    Exit(HandleDiscover(AMessage));
-  if AMessage.Method = 'tools/list' then
-    Exit(HandleToolsList(AMessage, False));
-  if AMessage.Method = 'tools/call' then
-    Exit(HandleToolsCall(AMessage, Ctx, False));
-  if AMessage.Method = 'resources/list' then
-    Exit(HandleResourcesList(AMessage, False));
-  if AMessage.Method = 'resources/read' then
-    Exit(HandleResourcesRead(AMessage, Ctx, False));
-  if AMessage.Method = 'resources/templates/list' then
-    Exit(HandleTemplatesList(AMessage, False));
-  if AMessage.Method = 'prompts/list' then
-    Exit(HandlePromptsList(AMessage, False));
-  if AMessage.Method = 'prompts/get' then
-    Exit(HandlePromptsGet(AMessage, Ctx, False));
+    if AMessage.Method = 'server/discover' then
+      Exit(HandleDiscover(AMessage));
+    if AMessage.Method = 'tools/list' then
+      Exit(HandleToolsList(AMessage, False));
+    if AMessage.Method = 'tools/call' then
+      Exit(HandleToolsCall(AMessage, Ctx, False));
+    if AMessage.Method = 'resources/list' then
+      Exit(HandleResourcesList(AMessage, False));
+    if AMessage.Method = 'resources/read' then
+      Exit(HandleResourcesRead(AMessage, Ctx, False));
+    if AMessage.Method = 'resources/templates/list' then
+      Exit(HandleTemplatesList(AMessage, False));
+    if AMessage.Method = 'prompts/list' then
+      Exit(HandlePromptsList(AMessage, False));
+    if AMessage.Method = 'prompts/get' then
+      Exit(HandlePromptsGet(AMessage, Ctx, False));
 
-  Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
-    'Method not found: ' + AMessage.Method);
+    Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
+      'Method not found: ' + AMessage.Method);
+  finally
+    Dispatch.Free;
+  end;
 end;
 
-function TMCPServer.DispatchLegacyRequest(
+function TMCPServer.DispatchLegacyRequest(ASession: TMCPSession;
+  ASink: TMCPLineSink; ASinkData: Pointer;
   const AMessage: TJSONRPCMessage): string;
+var
+  Ctx: TMCPRequestContext;
+  Dispatch: TMCPRequestDispatch;
 begin
   // ping is a legacy utility a client may send at any time, including
   // before initialize (the modern revision removed it — a modern
@@ -1890,7 +2336,7 @@ begin
   if AMessage.Method = 'ping' then
     Exit(BuildResultResponse(AMessage.Id, TJSONObject.Create));
 
-  if FLegacyState = lsNew then
+  if ASession.FLegacyState = lsNew then
     // Legacy lifecycle: non-ping requests are invalid before the
     // handshake completes. The hint about _meta helps a misbehaving
     // modern client that dropped its required envelope.
@@ -1899,38 +2345,51 @@ begin
       '(legacy clients), or carry the required per-request _meta ' +
       '(protocol 2026-07-28)'));
 
-  if FLegacyState = lsAwaitingInitialized then
+  if ASession.FLegacyState = lsAwaitingInitialized then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_REQUEST,
       'Received request before initialization is complete: send ' +
       'notifications/initialized first'));
 
-  if AMessage.Method = 'tools/list' then
-    Exit(HandleToolsList(AMessage, True));
-  if AMessage.Method = 'tools/call' then
-    Exit(HandleToolsCall(AMessage, LegacyContext(AMessage.Params), True));
-  if AMessage.Method = 'resources/list' then
-    Exit(HandleResourcesList(AMessage, True));
-  if AMessage.Method = 'resources/read' then
-    Exit(HandleResourcesRead(AMessage, LegacyContext(AMessage.Params), True));
-  if AMessage.Method = 'resources/templates/list' then
-    Exit(HandleTemplatesList(AMessage, True));
-  if AMessage.Method = 'prompts/list' then
-    Exit(HandlePromptsList(AMessage, True));
-  if AMessage.Method = 'prompts/get' then
-    Exit(HandlePromptsGet(AMessage, LegacyContext(AMessage.Params), True));
+  Dispatch := TMCPRequestDispatch.Create(
+    TMCPRequestCancellationToken(ASession.FCurrentRequestToken),
+    ASink, ASinkData);
+  try
+    Ctx := ASession.LegacyContext(AMessage.Params);
+    if Assigned(ASink) then
+      Ctx.Notifier := Dispatch.EmitNotification;
+    Ctx.CancellationProbe := Dispatch.IsCancelled;
 
-  Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
-    'Method not found: ' + AMessage.Method);
+    if AMessage.Method = 'tools/list' then
+      Exit(HandleToolsList(AMessage, True));
+    if AMessage.Method = 'tools/call' then
+      Exit(HandleToolsCall(AMessage, Ctx, True));
+    if AMessage.Method = 'resources/list' then
+      Exit(HandleResourcesList(AMessage, True));
+    if AMessage.Method = 'resources/read' then
+      Exit(HandleResourcesRead(AMessage, Ctx, True));
+    if AMessage.Method = 'resources/templates/list' then
+      Exit(HandleTemplatesList(AMessage, True));
+    if AMessage.Method = 'prompts/list' then
+      Exit(HandlePromptsList(AMessage, True));
+    if AMessage.Method = 'prompts/get' then
+      Exit(HandlePromptsGet(AMessage, Ctx, True));
+
+    Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
+      'Method not found: ' + AMessage.Method);
+  finally
+    Dispatch.Free;
+  end;
 end;
 
-function TMCPServer.HandleInitialize(const AMessage: TJSONRPCMessage): string;
+function TMCPServer.HandleInitialize(ASession: TMCPSession;
+  const AMessage: TJSONRPCMessage): string;
 var
   VersionData, InfoData, CapsData, NameData, ClientVersionData: TJSONData;
   Requested, NegotiatedVersion, ClientName, ClientVersion: string;
   InitResult, Capabilities, ServerInfo, ClientCapabilities,
     ResponsePayload: TJSONObject;
 begin
-  if FLegacyState <> lsNew then
+  if ASession.FLegacyState <> lsNew then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_REQUEST,
       'Server is already initialized: initialize may only be sent once'));
 
@@ -2014,46 +2473,11 @@ begin
     raise;
   end;
 
-  FLegacyProtocolVersion := NegotiatedVersion;
-  FLegacyClientName := ClientName;
-  FLegacyClientVersion := ClientVersion;
-  FLegacyClientCapabilities := ClientCapabilities;
-  FLegacyState := lsAwaitingInitialized;
-end;
-
-function TMCPServer.LegacyContext(AParams: TJSONObject): TMCPRequestContext;
-var
-  MetaData: TJSONData;
-begin
-  Result := Default(TMCPRequestContext);
-  Result.ProtocolVersion := FLegacyProtocolVersion;
-  Result.ClientName := FLegacyClientName;
-  Result.ClientVersion := FLegacyClientVersion;
-  Result.ClientCapabilities := FLegacyClientCapabilities;
-  Result.Notifier := EmitNotification;
-  // progressToken is per-request in every era.
-  if AParams <> nil then
-  begin
-    MetaData := AParams.Find('_meta');
-    if (MetaData <> nil) and (MetaData.JSONType = jtObject) then
-      ExtractProgressToken(TJSONObject(MetaData), Result);
-  end;
-end;
-
-procedure TMCPServer.SetLineSink(ASink: TMCPLineSink; AUserData: Pointer);
-begin
-  FSink := ASink;
-  FSinkData := AUserData;
-end;
-
-procedure TMCPServer.EmitNotification(const AMethod: string;
-  AParams: TJSONObject);
-var
-  Line: string;
-begin
-  Line := BuildNotification(AMethod, AParams);
-  if Assigned(FSink) then
-    FSink(Line, FSinkData);
+  // Commit all negotiated state only after response serialization;
+  // a failed response leaves the session in lsNew.
+  ASession.CommitLegacyInitialize(NegotiatedVersion, ClientName,
+    ClientVersion, ClientCapabilities);
+  ClientCapabilities := nil; // ownership transferred to the session
 end;
 
 function TMCPServer.OversizedLineResponse(AMaxLineLength: Integer): string;
