@@ -3,7 +3,9 @@ unit MCP.Transport.Stdio;
 // stdio transport binding (spec revision 2026-07-28): newline-delimited
 // JSON-RPC over the standard streams of a client-launched subprocess.
 // This unit is a deliberately thin shell — every protocol decision
-// lives in MCP.Server.HandleMessage; here we only move lines.
+// lives in MCP.Server.HandleMessage; here we create one session for
+// the connection and move lines. Each call supplies its output sink,
+// so transport state never resides on the shared server or session.
 //
 // Binding rules implemented (spec .../draft/basic/transports/stdio,
 // verified 2026-07-20):
@@ -18,8 +20,9 @@ unit MCP.Transport.Stdio;
 //   - EOF on stdin is the graceful-shutdown signal: the loop returns
 //     and the server process is expected to exit promptly.
 //
-// The loop is synchronous and single-threaded: read a line, handle it,
-// write the response, flush. That serial model is what makes ignoring
+// The loop is synchronous and single-threaded: create one connection
+// session, read a line, handle it with this request's output sink, write
+// the response, flush. That serial model is what makes ignoring
 // notifications/cancelled correct (see MCP.Server).
 //
 // Inbound lines are length-capped (default 4 MiB, the same order as
@@ -116,8 +119,9 @@ procedure RunMCPStdioLoop(var AInput, AOutput: Text; AServer: TMCPServer;
 var
   Line, Response: string;
   Overflow: Boolean;
+  Session: TMCPSession;
 begin
-  AServer.SetLineSink(StdioNotificationSink, @AOutput);
+  Session := AServer.CreateSession;
   try
     while ReadBoundedLine(AInput, AMaxLineLength, Line, Overflow) do
     begin
@@ -133,14 +137,15 @@ begin
         SetLength(Line, Length(Line) - 1);
       if Line = '' then
         Continue;
-      if AServer.HandleMessage(Line, Response) then
+      if AServer.HandleMessage(Session, Line, StdioNotificationSink,
+        @AOutput, Response) then
       begin
         Write(AOutput, Response, #10);
         Flush(AOutput);
       end;
     end;
   finally
-    AServer.SetLineSink(nil, nil);
+    Session.Free;
   end;
 end;
 

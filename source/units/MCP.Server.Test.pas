@@ -34,8 +34,12 @@ type
   TDispatchSuite = class(TTestSuite)
   protected
     FServer: TMCPServer;
+    FSession: TMCPSession;
+    FLineSink: TMCPLineSink;
+    FLineSinkData: Pointer;
     procedure BeforeEach; override;
     procedure AfterEach; override;
+    function Dispatch(const ALine: string; out AResponse: string): Boolean;
     // One request through the server; parsed response (caller frees).
     function Call(const ALine: string): TJSONObject;
     procedure SendNotification(const ALine: string);
@@ -126,6 +130,7 @@ type
     procedure TestPromptArgumentsBuildReuse;
     procedure TestPromptArgumentsAddReuse;
     procedure TestPromptArgumentsConsumedByRegistration;
+    procedure TestRegistryFrozenAfterSessionCreation;
     procedure TestEmptyResourceTemplate;
     procedure TestEmptyTemplateVariable;
     procedure TestUnclosedTemplateVariable;
@@ -217,6 +222,27 @@ type
     procedure TestLegacyContextVisibleToHandlers;
     procedure TestLegacyResourceNotFound;
     procedure TestErasServedConcurrently;
+  end;
+
+  TSessionIsolation = class(TTestSuite)
+  private
+    FServer: TMCPServer;
+    FSessionA: TMCPSession;
+    FSessionB: TMCPSession;
+    FLinesA: TStringList;
+    FLinesB: TStringList;
+    function Call(ASession: TMCPSession; const ALine: string;
+      ASink: TMCPLineSink = nil; ASinkData: Pointer = nil): TJSONObject;
+    procedure SendNotification(ASession: TMCPSession;
+      const ALine: string);
+  protected
+    procedure BeforeEach; override;
+    procedure AfterEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestIndependentLegacyNegotiation;
+    procedure TestIndependentNotificationSinks;
+    procedure TestLifecycleIsolation;
   end;
 
 { ───────── handlers under test ───────── }
@@ -441,18 +467,24 @@ function ResourceTemplateCount(AServer: TMCPServer): Integer;
 var
   ResponseLine: string;
   Response: TJSONObject;
+  Session: TMCPSession;
 begin
-  if not AServer.HandleMessage(
-    '{"jsonrpc":"2.0","id":1,"method":"resources/templates/list",' +
-    '"params":{' + META_MODERN + '}}', ResponseLine) then
-    raise Exception.Create(
-      'Expected a resource template list response, got none');
-  Response := TJSONObject(GetJSON(ResponseLine));
+  Session := AServer.CreateSession;
   try
-    Result := TJSONArray(
-      TJSONObject(Response.Find('result')).Find('resourceTemplates')).Count;
+    if not AServer.HandleMessage(Session,
+      '{"jsonrpc":"2.0","id":1,"method":"resources/templates/list",' +
+      '"params":{' + META_MODERN + '}}', ResponseLine) then
+      raise Exception.Create(
+        'Expected a resource template list response, got none');
+    Response := TJSONObject(GetJSON(ResponseLine));
+    try
+      Result := TJSONArray(
+        TJSONObject(Response.Find('result')).Find('resourceTemplates')).Count;
+    finally
+      Response.Free;
+    end;
   finally
-    Response.Free;
+    Session.Free;
   end;
 end;
 
@@ -483,6 +515,9 @@ end;
 
 procedure TDispatchSuite.BeforeEach;
 begin
+  FSession := nil;
+  FLineSink := nil;
+  FLineSinkData := nil;
   FServer := TMCPServer.Create('test-server', '9.9.9');
   FServer.Instructions := 'test instructions';
   FServer.RegisterTool('echo', 'Echo a message',
@@ -521,14 +556,24 @@ end;
 
 procedure TDispatchSuite.AfterEach;
 begin
+  FreeAndNil(FSession);
   FreeAndNil(FServer);
+end;
+
+function TDispatchSuite.Dispatch(const ALine: string;
+  out AResponse: string): Boolean;
+begin
+  if FSession = nil then
+    FSession := FServer.CreateSession;
+  Result := FServer.HandleMessage(FSession, ALine, FLineSink,
+    FLineSinkData, AResponse);
 end;
 
 function TDispatchSuite.Call(const ALine: string): TJSONObject;
 var
   Response: string;
 begin
-  if not FServer.HandleMessage(ALine, Response) then
+  if not Dispatch(ALine, Response) then
     Fail('expected a response, got none');
   Result := TJSONObject(GetJSON(Response));
 end;
@@ -537,7 +582,7 @@ procedure TDispatchSuite.SendNotification(const ALine: string);
 var
   Response: string;
 begin
-  Expect<Boolean>(FServer.HandleMessage(ALine, Response)).ToBe(False);
+  Expect<Boolean>(Dispatch(ALine, Response)).ToBe(False);
   Expect<string>(Response).ToBe('');
 end;
 
@@ -608,7 +653,7 @@ procedure TDiscoverAndErrors.TestNotificationSilent;
 var
   Response: string;
 begin
-  Expect<Boolean>(FServer.HandleMessage(
+  Expect<Boolean>(Dispatch(
     '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
     '"params":{"requestId":1}}', Response)).ToBe(False);
   Expect<string>(Response).ToBe('');
@@ -1169,7 +1214,7 @@ var
 begin
   FServer.RegisterResource('mem://secret', 'secret', 'text/plain',
     SecretReader);
-  Expect<Boolean>(FServer.HandleMessage(
+  Expect<Boolean>(Dispatch(
     '{"jsonrpc":"2.0","id":1,"method":"resources/read",' +
     '"params":{"uri":"mem://secret",' + META_MODERN + '}}',
     ResponseLine)).ToBe(True);
@@ -1195,7 +1240,7 @@ begin
   FServer.RegisterResource('mem://secret', 'secret', 'text/plain',
     SecretReader);
   FServer.RedactErrorDetails := True;
-  Expect<Boolean>(FServer.HandleMessage(
+  Expect<Boolean>(Dispatch(
     '{"jsonrpc":"2.0","id":1,"method":"resources/read",' +
     '"params":{"uri":"mem://secret",' + META_MODERN + '}}',
     ResponseLine)).ToBe(True);
@@ -2019,6 +2064,86 @@ begin
   end;
 end;
 
+procedure TRegistrationGuards.TestRegistryFrozenAfterSessionCreation;
+const
+  FROZEN_MESSAGE = 'Server registries are frozen after serving starts';
+var
+  ErrorMessage: string;
+  Options: TMCPToolOptions;
+  Server: TMCPServer;
+  Session: TMCPSession;
+
+  procedure ExpectFrozen;
+  begin
+    Expect<string>(ErrorMessage).ToBe(FROZEN_MESSAGE);
+  end;
+
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Options := Server.RegisterTool('first', 'desc', '{"type":"object"}',
+      EchoHandler);
+    Session := Server.CreateSession;
+    try
+      ErrorMessage := '';
+      try
+        Server.RegisterTool('late', 'desc', '{"type":"object"}',
+          EchoHandler);
+      except
+        on E: EMCPServer do
+          ErrorMessage := E.Message;
+      end;
+      ExpectFrozen;
+
+      ErrorMessage := '';
+      try
+        Server.RegisterTextResource('mem://late', 'late', 'text/plain',
+          'late');
+      except
+        on E: EMCPServer do
+          ErrorMessage := E.Message;
+      end;
+      ExpectFrozen;
+
+      ErrorMessage := '';
+      try
+        Server.RegisterResourceTemplate('mem://late/{value}', 'late',
+          'text/plain', PairReader);
+      except
+        on E: EMCPServer do
+          ErrorMessage := E.Message;
+      end;
+      ExpectFrozen;
+
+      ErrorMessage := '';
+      try
+        Server.RegisterPrompt('late', 'desc', HelloPromptHandler);
+      except
+        on E: EMCPServer do
+          ErrorMessage := E.Message;
+      end;
+      ExpectFrozen;
+
+      ErrorMessage := '';
+      try
+        Options.Title('too late');
+      except
+        on E: EMCPServer do
+          ErrorMessage := E.Message;
+      end;
+      ExpectFrozen;
+
+      Expect<Integer>(Server.ToolCount).ToBe(1);
+      Expect<Integer>(Server.ResourceCount).ToBe(0);
+      Expect<Integer>(Server.PromptCount).ToBe(0);
+    finally
+      Session.Free;
+    end;
+  finally
+    Server.Free;
+  end;
+end;
+
 procedure TRegistrationGuards.TestEmptyResourceTemplate;
 begin
   ExpectTemplateRegistrationError('',
@@ -2099,6 +2224,8 @@ begin
   Test('prompt argument Add rejects reuse', TestPromptArgumentsAddReuse);
   Test('prompt registration consumes argument builder',
     TestPromptArgumentsConsumedByRegistration);
+  Test('session creation freezes every registry mutation path',
+    TestRegistryFrozenAfterSessionCreation);
   Test('empty resource template rejected', TestEmptyResourceTemplate);
   Test('empty template variable rejected', TestEmptyTemplateVariable);
   Test('unclosed template variable rejected', TestUnclosedTemplateVariable);
@@ -2338,7 +2465,8 @@ procedure TNotificationEmission.BeforeEach;
 begin
   inherited BeforeEach;
   FLines := TStringList.Create;
-  FServer.SetLineSink(CaptureSink, FLines);
+  FLineSink := CaptureSink;
+  FLineSinkData := FLines;
 end;
 
 procedure TNotificationEmission.AfterEach;
@@ -2507,7 +2635,8 @@ procedure TNotificationEmission.TestNoSinkStillServes;
 var
   Response: TJSONObject;
 begin
-  FServer.SetLineSink(nil, nil);
+  FLineSink := nil;
+  FLineSinkData := nil;
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
     '"params":{"name":"noisy","_meta":{' +
     '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
@@ -2845,7 +2974,7 @@ begin
   Expect<Boolean>(PingResponse.Find('result') <> nil).ToBe(True);
   PingResponse.Free;
 
-  Expect<Boolean>(FServer.HandleMessage(
+  Expect<Boolean>(Dispatch(
     '{"jsonrpc":"2.0","id":"réq-1","method":"tools/list",' +
     '"params":{}}', ResponseLine)).ToBe(True);
   ExpectedLine := '{ "jsonrpc" : "2.0", "id" : "réq-1", "error" : { ' +
@@ -3088,6 +3217,196 @@ begin
   Test('modern and legacy served concurrently', TestErasServedConcurrently);
 end;
 
+{ ───────── shared-core session isolation ───────── }
+
+procedure TSessionIsolation.BeforeEach;
+begin
+  FServer := TMCPServer.Create('shared-server', '1.2.0');
+  FServer.RegisterTool('whoami', 'Mirror the request context',
+    '{"type":"object"}', WhoAmIHandler);
+  FServer.RegisterTool('noisy', 'Emits notifications',
+    '{"type":"object"}', NoisyHandler);
+  FSessionA := FServer.CreateSession;
+  FSessionB := FServer.CreateSession;
+  FLinesA := TStringList.Create;
+  FLinesB := TStringList.Create;
+end;
+
+procedure TSessionIsolation.AfterEach;
+begin
+  FreeAndNil(FLinesB);
+  FreeAndNil(FLinesA);
+  FreeAndNil(FSessionB);
+  FreeAndNil(FSessionA);
+  FreeAndNil(FServer);
+end;
+
+function TSessionIsolation.Call(ASession: TMCPSession;
+  const ALine: string; ASink: TMCPLineSink;
+  ASinkData: Pointer): TJSONObject;
+var
+  Response: string;
+begin
+  if not FServer.HandleMessage(ASession, ALine, ASink, ASinkData,
+    Response) then
+    Fail('expected a response, got none');
+  Result := TJSONObject(GetJSON(Response));
+end;
+
+procedure TSessionIsolation.SendNotification(ASession: TMCPSession;
+  const ALine: string);
+var
+  Response: string;
+begin
+  Expect<Boolean>(FServer.HandleMessage(ASession, ALine, Response))
+    .ToBe(False);
+  Expect<string>(Response).ToBe('');
+end;
+
+procedure TSessionIsolation.TestIndependentLegacyNegotiation;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(FSessionA,
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{' +
+    '"protocolVersion":"2025-06-18","capabilities":{"roots":{}},' +
+    '"clientInfo":{"name":"client-a","version":"1.0.0"}}}');
+  Response.Free;
+  Response := Call(FSessionB,
+    '{"jsonrpc":"2.0","id":2,"method":"initialize","params":{' +
+    '"protocolVersion":"2025-11-25","capabilities":{"sampling":{}},' +
+    '"clientInfo":{"name":"client-b","version":"2.0.0"}}}');
+  Response.Free;
+  SendNotification(FSessionA,
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  SendNotification(FSessionB,
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+
+  Response := Call(FSessionA,
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+    '"params":{"name":"whoami"}}');
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+    .AsString).ToBe('2025-06-18|client-a|1.0.0|roots');
+  Response.Free;
+  Response := Call(FSessionB,
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call",' +
+    '"params":{"name":"whoami"}}');
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+    .AsString).ToBe('2025-11-25|client-b|2.0.0|no-roots');
+  Response.Free;
+
+  Response := Call(FSessionA,
+    '{"jsonrpc":"2.0","id":5,"method":"initialize","params":{' +
+    '"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"replacement","version":"9.0.0"}}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INVALID_REQUEST);
+  Response.Free;
+
+  Response := Call(FSessionA,
+    '{"jsonrpc":"2.0","id":6,"method":"tools/call",' +
+    '"params":{"name":"whoami"}}');
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+    .AsString).ToBe('2025-06-18|client-a|1.0.0|roots');
+  Response.Free;
+  Response := Call(FSessionB,
+    '{"jsonrpc":"2.0","id":7,"method":"tools/call",' +
+    '"params":{"name":"whoami"}}');
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+    .AsString).ToBe('2025-11-25|client-b|2.0.0|no-roots');
+  Response.Free;
+end;
+
+procedure TSessionIsolation.TestIndependentNotificationSinks;
+var
+  Note, Response: TJSONObject;
+begin
+  Response := Call(FSessionA,
+    '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{' +
+    '"name":"noisy","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"progressToken":"a-1"}}}', CaptureSink, FLinesA);
+  Response.Free;
+  Response := Call(FSessionB,
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{' +
+    '"name":"noisy","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"progressToken":"b-1"}}}', CaptureSink, FLinesB);
+  Response.Free;
+  Response := Call(FSessionA,
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{' +
+    '"name":"noisy","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"progressToken":"a-2"}}}', CaptureSink, FLinesA);
+  Response.Free;
+  Response := Call(FSessionB,
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{' +
+    '"name":"noisy","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"progressToken":"b-2"}}}', CaptureSink, FLinesB);
+  Response.Free;
+
+  Expect<Integer>(FLinesA.Count).ToBe(2);
+  Expect<Integer>(FLinesB.Count).ToBe(2);
+  Note := TJSONObject(GetJSON(FLinesA[0]));
+  Expect<string>(TJSONData(Note.FindPath('params.progressToken')).AsString)
+    .ToBe('a-1');
+  Note.Free;
+  Note := TJSONObject(GetJSON(FLinesA[1]));
+  Expect<string>(TJSONData(Note.FindPath('params.progressToken')).AsString)
+    .ToBe('a-2');
+  Note.Free;
+  Note := TJSONObject(GetJSON(FLinesB[0]));
+  Expect<string>(TJSONData(Note.FindPath('params.progressToken')).AsString)
+    .ToBe('b-1');
+  Note.Free;
+  Note := TJSONObject(GetJSON(FLinesB[1]));
+  Expect<string>(TJSONData(Note.FindPath('params.progressToken')).AsString)
+    .ToBe('b-2');
+  Note.Free;
+end;
+
+procedure TSessionIsolation.TestLifecycleIsolation;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(FSessionA,
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{' +
+    '"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"client-a","version":"1.0.0"}}}');
+  Response.Free;
+  SendNotification(FSessionA,
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+
+  Response := Call(FSessionA,
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}');
+  Expect<Boolean>(Response.FindPath('result.tools') <> nil).ToBe(True);
+  Response.Free;
+  Response := Call(FSessionB,
+    '{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INVALID_REQUEST);
+  Expect<string>(TJSONData(Response.FindPath('error.message')).AsString)
+    .ToBe('Received request before initialization: send initialize first ' +
+      '(legacy clients), or carry the required per-request _meta ' +
+      '(protocol 2026-07-28)');
+  Response.Free;
+end;
+
+procedure TSessionIsolation.SetupTests;
+begin
+  Test('legacy negotiation and re-initialize are session-local',
+    TestIndependentLegacyNegotiation);
+  Test('alternating requests retain their own notification sinks',
+    TestIndependentNotificationSinks);
+  Test('legacy lifecycle transitions are session-local',
+    TestLifecycleIsolation);
+end;
+
 begin
   TestRunnerProgram.AddSuite(
     TDiscoverAndErrors.Create('Server: discover + protocol errors'));
@@ -3101,5 +3420,7 @@ begin
   TestRunnerProgram.AddSuite(
     TRegistrationGuards.Create('Server: registration guards'));
   TestRunnerProgram.AddSuite(TLegacyEra.Create('Server: legacy era'));
+  TestRunnerProgram.AddSuite(
+    TSessionIsolation.Create('Server: shared-core session isolation'));
   TestRunnerProgram.Run;
 end.
