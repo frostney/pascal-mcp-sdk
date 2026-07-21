@@ -426,6 +426,15 @@ begin
       'legacy: initialize result unstamped');
     Response.Free;
 
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":120,"method":"tools/list","params":{}}');
+    Check((PathInt(Response, 'error.code') = -32600) and
+      (PathString(Response, 'error.message') =
+      'Received request before initialization is complete: send ' +
+      'notifications/initialized first'),
+      'legacy: request before initialized notification → -32600');
+    Response.Free;
+
     SendLine(Demo,
       '{"jsonrpc":"2.0","method":"notifications/initialized"}');
 
@@ -438,6 +447,16 @@ begin
       'legacy: tools/call echo works');
     Check(FindPath(Response, 'result.resultType') = nil,
       'legacy: tools/call result unstamped');
+    Response.Free;
+
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":121,"method":"initialize","params":{' +
+      '"protocolVersion":"2025-11-25","capabilities":{},' +
+      '"clientInfo":{"name":"legacy-again","version":"1"}}}');
+    Check((PathInt(Response, 'error.code') = -32600) and
+      (PathString(Response, 'error.message') =
+      'Server is already initialized: initialize may only be sent once'),
+      'legacy: second initialize → -32600 already initialized');
     Response.Free;
 
     // Legacy resource-not-found uses the era-correct -32002.

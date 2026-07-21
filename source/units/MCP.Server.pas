@@ -25,7 +25,7 @@ unit MCP.Server;
 //     tools/list, tools/call
 //     resources/list, resources/read
 //     prompts/list, prompts/get
-//   legacy era (dual-era mode, after initialize):
+//   legacy era (dual-era mode, after initialize + initialized):
 //     initialize, ping
 //     tools/list, tools/call
 //     resources/list, resources/read
@@ -33,13 +33,14 @@ unit MCP.Server;
 //     — responses omit the modern-only stamps (resultType, serverInfo
 //       _meta, ttlMs/cacheScope) and resource-not-found is the legacy
 //       -32002, so each era sees its own wire dialect
-//   notifications/*                    accepted and ignored; requests
+//   notifications/initialized          completes the legacy handshake
+//   other notifications/*              accepted and ignored; requests
 //                                      are handled strictly one at a
 //                                      time, so by the time a
 //                                      notifications/cancelled arrives
 //                                      the request it names has already
 //                                      completed. Era selection state
-//                                      (legacy initialized + negotiated
+//                                      (legacy lifecycle + negotiated
 //                                      version) is the one deliberate
 //                                      piece of per-process state the
 //                                      compatibility model prescribes.
@@ -80,6 +81,8 @@ uses
   MCP.Schema;
 
 type
+  TMCPLegacyState = (lsNew, lsAwaitingInitialized, lsReady);
+
   // Result of one tool invocation. Content is a JSON array of content
   // blocks (owned; use the MCP*Result builders), StructuredContent is
   // the optional machine-readable payload (owned; nil when absent).
@@ -216,10 +219,11 @@ type
     FDualEra: Boolean;
     FSink: TMCPLineSink;
     FSinkData: Pointer;
-    // Legacy-era session state (dual-era mode only): the compatibility
-    // model scopes initialize-negotiated semantics to the process, so
-    // this is the one deliberate piece of cross-request state.
-    FLegacyInitialized: Boolean;
+    // Legacy initialize MUST be first, and normal operations start only
+    // after notifications/initialized (ping remains valid throughout):
+    // https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle
+    // (verified 2026-07-21).
+    FLegacyState: TMCPLegacyState;
     FLegacyProtocolVersion: string;
     FLegacyClientName: string;
     FLegacyClientVersion: string;
@@ -845,6 +849,7 @@ begin
   FCacheScope := CACHE_SCOPE_PRIVATE;
   FRedactErrorDetails := False;
   FDualEra := True;
+  FLegacyState := lsNew;
 end;
 
 procedure TMCPServer.SetCacheTtlMs(AValue: Integer);
@@ -1613,10 +1618,15 @@ begin
           Result := True;
         end;
       jrkNotification:
-        // All notifications (including notifications/cancelled) are
-        // deliberately ignored: requests are processed one at a time,
-        // so a cancellation can only arrive after its target finished.
-        Result := False;
+        begin
+          if (Msg.Method = 'notifications/initialized') and
+             (FLegacyState = lsAwaitingInitialized) then
+            FLegacyState := lsReady;
+          // Other notifications (including notifications/cancelled) are
+          // deliberately ignored: requests are processed one at a time,
+          // so a cancellation can only arrive after its target finished.
+          Result := False;
+        end;
       jrkRequest:
         begin
           try
@@ -1708,7 +1718,7 @@ begin
   if AMessage.Method = 'ping' then
     Exit(BuildResultResponse(AMessage.Id, TJSONObject.Create));
 
-  if not FLegacyInitialized then
+  if FLegacyState = lsNew then
     // Legacy lifecycle: non-ping requests are invalid before the
     // handshake completes. The hint about _meta helps a misbehaving
     // modern client that dropped its required envelope.
@@ -1716,6 +1726,11 @@ begin
       'Received request before initialization: send initialize first ' +
       '(legacy clients), or carry the required per-request _meta ' +
       '(protocol 2026-07-28)'));
+
+  if FLegacyState = lsAwaitingInitialized then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_REQUEST,
+      'Received request before initialization is complete: send ' +
+      'notifications/initialized first'));
 
   if AMessage.Method = 'tools/list' then
     Exit(HandleToolsList(AMessage, True));
@@ -1742,6 +1757,10 @@ var
   Requested: string;
   InitResult, Capabilities, ServerInfo: TJSONObject;
 begin
+  if FLegacyState <> lsNew then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_REQUEST,
+      'Server is already initialized: initialize may only be sent once'));
+
   if AMessage.Params = nil then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
       'Invalid params: initialize requires protocolVersion'));
@@ -1788,12 +1807,10 @@ begin
   else
     FLegacyProtocolVersion := LATEST_LEGACY_PROTOCOL_VERSION;
 
-  // A re-initialize renegotiates: replace any earlier session state.
   FLegacyClientName := NameData.AsString;
   FLegacyClientVersion := ClientVersionData.AsString;
-  FreeAndNil(FLegacyClientCapabilities);
   FLegacyClientCapabilities := TJSONObject(CapsData.Clone);
-  FLegacyInitialized := True;
+  FLegacyState := lsAwaitingInitialized;
 
   Capabilities := ServerCapabilities;
   ServerInfo := TJSONObject.Create;

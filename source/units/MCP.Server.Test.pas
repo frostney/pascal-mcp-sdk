@@ -38,6 +38,7 @@ type
     procedure AfterEach; override;
     // One request through the server; parsed response (caller frees).
     function Call(const ALine: string): TJSONObject;
+    procedure SendNotification(const ALine: string);
   end;
 
   TDiscoverAndErrors = class(TDispatchSuite)
@@ -196,6 +197,11 @@ type
     procedure TestInitializeIncompleteClientInfo;
     procedure TestRequestBeforeInitialize;
     procedure TestPingBeforeInitialize;
+    procedure TestRequestAwaitingInitialized;
+    procedure TestInitializedMakesReady;
+    procedure TestDoubleInitializeRejected;
+    procedure TestInitializedBeforeInitializeIgnored;
+    procedure TestFailedInitializeDoesNotAdvance;
     procedure TestLegacyToolCall;
     procedure TestParamslessToolCall;
     procedure TestParamslessResourceRead;
@@ -239,8 +245,15 @@ end;
 // Mirrors the request context so era plumbing is handler-observable.
 function WhoAmIHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  CapabilityMarker: string;
 begin
-  Result := MCPTextResult(ACtx.ProtocolVersion + '|' + ACtx.ClientName);
+  CapabilityMarker := 'no-roots';
+  if (ACtx.ClientCapabilities <> nil) and
+     (ACtx.ClientCapabilities.Find('roots') <> nil) then
+    CapabilityMarker := 'roots';
+  Result := MCPTextResult(ACtx.ProtocolVersion + '|' + ACtx.ClientName +
+    '|' + ACtx.ClientVersion + '|' + CapabilityMarker);
 end;
 
 type
@@ -511,6 +524,14 @@ begin
   if not FServer.HandleMessage(ALine, Response) then
     Fail('expected a response, got none');
   Result := TJSONObject(GetJSON(Response));
+end;
+
+procedure TDispatchSuite.SendNotification(const ALine: string);
+var
+  Response: string;
+begin
+  Expect<Boolean>(FServer.HandleMessage(ALine, Response)).ToBe(False);
+  Expect<string>(Response).ToBe('');
 end;
 
 { ───────── discover + protocol errors ───────── }
@@ -2054,6 +2075,8 @@ begin
     '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
     '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
   Response := Call(
     '{"jsonrpc":"2.0","id":2,"method":"resources/templates/list",' +
     '"params":{}}');
@@ -2253,6 +2276,8 @@ begin
     '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
     '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
   // progressToken is per-request in every era; no logLevel opt-in
   // exists in the legacy path, so only progress is emitted.
   Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
@@ -2428,6 +2453,8 @@ begin
   Expect<Boolean>(
     Response.FindPath('result.capabilities.prompts') <> nil).ToBe(True);
   Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
   Response := Call('{"jsonrpc":"2.0","id":2,"method":"prompts/list",' +
     '"params":{}}');
   ResultObj := TJSONObject(Response.Find('result'));
@@ -2462,6 +2489,8 @@ begin
     '"capabilities":{"roots":{}},' +
     '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
   Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
 end;
 
 procedure TLegacyEra.ExpectInvalidParams(const ALine: string);
@@ -2589,6 +2618,120 @@ begin
   Response.Free;
 end;
 
+procedure TLegacyEra.TestRequestAwaitingInitialized;
+var
+  ExpectedLine, ResponseLine: string;
+  PingResponse: TJSONObject;
+begin
+  PingResponse := Call(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{' +
+    '"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  PingResponse.Free;
+
+  PingResponse := Call('{"jsonrpc":"2.0","id":2,"method":"ping"}');
+  Expect<Boolean>(PingResponse.Find('result') <> nil).ToBe(True);
+  PingResponse.Free;
+
+  Expect<Boolean>(FServer.HandleMessage(
+    '{"jsonrpc":"2.0","id":"réq-1","method":"tools/list",' +
+    '"params":{}}', ResponseLine)).ToBe(True);
+  ExpectedLine := '{ "jsonrpc" : "2.0", "id" : "réq-1", "error" : { ' +
+    '"code" : -32600, "message" : "Received request before ' +
+    'initialization is complete: send notifications/initialized first" } }';
+  Expect<string>(ResponseLine).ToBe(ExpectedLine);
+end;
+
+procedure TLegacyEra.TestInitializedMakesReady;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{' +
+    '"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/list",' +
+    '"params":{}}');
+  Expect<Boolean>(Response.FindPath('result.tools') <> nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TLegacyEra.TestDoubleInitializeRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{' +
+    '"protocolVersion":"2025-06-18","capabilities":{"roots":{}},' +
+    '"clientInfo":{"name":"original-client","version":"1.0.0"}}}');
+  Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+
+  Response := Call(
+    '{"jsonrpc":"2.0","id":2,"method":"initialize","params":{' +
+    '"protocolVersion":"2025-11-25","capabilities":{"sampling":{}},' +
+    '"clientInfo":{"name":"replacement-client","version":"2.0.0"}}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INVALID_REQUEST);
+  Expect<string>(TJSONData(Response.FindPath('error.message')).AsString)
+    .ToBe('Server is already initialized: initialize may only be sent once');
+  Response.Free;
+
+  Response := Call('{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+    '"params":{"name":"whoami"}}');
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+    .AsString).ToBe('2025-06-18|original-client|1.0.0|roots');
+  Response.Free;
+end;
+
+procedure TLegacyEra.TestInitializedBeforeInitializeIgnored;
+var
+  Response: TJSONObject;
+begin
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"ping"}');
+  Expect<Boolean>(Response.Find('result') <> nil).ToBe(True);
+  Response.Free;
+
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/list",' +
+    '"params":{}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INVALID_REQUEST);
+  Expect<string>(TJSONData(Response.FindPath('error.message')).AsString)
+    .ToBe('Received request before initialization: send initialize first ' +
+      '(legacy clients), or carry the required per-request _meta ' +
+      '(protocol 2026-07-28)');
+  Response.Free;
+end;
+
+procedure TLegacyEra.TestFailedInitializeDoesNotAdvance;
+var
+  Response: TJSONObject;
+begin
+  ExpectInvalidParams(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{' +
+    '"protocolVersion":"2025-11-25",' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response := Call(
+    '{"jsonrpc":"2.0","id":2,"method":"initialize","params":{' +
+    '"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Expect<string>(TJSONObject(Response.Find('result'))
+    .Get('protocolVersion', '')).ToBe('2025-11-25');
+  Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Response := Call('{"jsonrpc":"2.0","id":3,"method":"tools/list",' +
+    '"params":{}}');
+  Expect<Boolean>(Response.FindPath('result.tools') <> nil).ToBe(True);
+  Response.Free;
+end;
+
 procedure TLegacyEra.TestLegacyToolCall;
 var
   Response: TJSONObject;
@@ -2652,7 +2795,7 @@ begin
     '"params":{"name":"whoami"}}');
   Expect<string>(
     TJSONData(Response.FindPath('result.content[0].text')).AsString)
-    .ToBe('2025-06-18|legacy-client');
+    .ToBe('2025-06-18|legacy-client|1.2.3|roots');
   Response.Free;
 end;
 
@@ -2711,6 +2854,16 @@ begin
     TestInitializeIncompleteClientInfo);
   Test('request before initialize → -32600', TestRequestBeforeInitialize);
   Test('ping answered before initialize', TestPingBeforeInitialize);
+  Test('request before initialized notification → -32600',
+    TestRequestAwaitingInitialized);
+  Test('initialized notification transitions legacy session to ready',
+    TestInitializedMakesReady);
+  Test('second initialize rejected without renegotiation',
+    TestDoubleInitializeRejected);
+  Test('initialized notification before initialize is ignored',
+    TestInitializedBeforeInitializeIgnored);
+  Test('failed initialize leaves legacy session new',
+    TestFailedInitializeDoesNotAdvance);
   Test('legacy tools/call after handshake', TestLegacyToolCall);
   Test('legacy tools/call without params → -32602', TestParamslessToolCall);
   Test('legacy resources/read without params → -32602',
