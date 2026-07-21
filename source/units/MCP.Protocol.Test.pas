@@ -53,6 +53,16 @@ type
     procedure TestBatchRevisionExcluded;
   end;
 
+  TCancellationContext = class(TTestSuite)
+  private
+    FCancelled: Boolean;
+    function ProbeCancellation: Boolean;
+  public
+    procedure SetupTests; override;
+    procedure TestMissingProbeIsNotCancelled;
+    procedure TestProbeIsPolled;
+  end;
+
 const
   VALID_META =
     '{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
@@ -358,11 +368,47 @@ begin
   Test('2025-03-26 batch revision excluded', TestBatchRevisionExcluded);
 end;
 
+{ ───────── cooperative cancellation context ───────── }
+
+function TCancellationContext.ProbeCancellation: Boolean;
+begin
+  Result := FCancelled;
+end;
+
+procedure TCancellationContext.TestMissingProbeIsNotCancelled;
+var
+  Ctx: TMCPRequestContext;
+begin
+  Ctx := Default(TMCPRequestContext);
+  Expect<Boolean>(Ctx.IsCancelled).ToBe(False);
+end;
+
+procedure TCancellationContext.TestProbeIsPolled;
+var
+  Ctx: TMCPRequestContext;
+begin
+  Ctx := Default(TMCPRequestContext);
+  Ctx.CancellationProbe := ProbeCancellation;
+  FCancelled := False;
+  Expect<Boolean>(Ctx.IsCancelled).ToBe(False);
+  FCancelled := True;
+  Expect<Boolean>(Ctx.IsCancelled).ToBe(True);
+end;
+
+procedure TCancellationContext.SetupTests;
+begin
+  Test('missing cancellation probe reports false',
+    TestMissingProbeIsNotCancelled);
+  Test('cancellation probe is polled cooperatively', TestProbeIsPolled);
+end;
+
 begin
   TestRunnerProgram.AddSuite(
     TMetaValidation.Create('Protocol: _meta validation'));
   TestRunnerProgram.AddSuite(TStamping.Create('Protocol: result stamping'));
   TestRunnerProgram.AddSuite(
     TLegacyVersions.Create('Protocol: legacy versions'));
+  TestRunnerProgram.AddSuite(
+    TCancellationContext.Create('Protocol: cancellation context'));
   TestRunnerProgram.Run;
 end.

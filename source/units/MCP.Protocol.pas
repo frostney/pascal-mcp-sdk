@@ -17,6 +17,9 @@ unit MCP.Protocol;
 //       modelcontextprotocol.io/specification/draft/basic/versioning
 //   - exact lowercase RFC 5424-derived logging levels:
 //       modelcontextprotocol.io/specification/draft/server/utilities/logging
+//   - cooperative request cancellation:
+//       https://modelcontextprotocol.io/specification/draft/basic/patterns/cancellation
+//     (verified 2026-07-21)
 
 {$I Shared.inc}
 
@@ -82,6 +85,12 @@ type
   TMCPNotifier = procedure(const AMethod: string;
     AParams: TJSONObject) of object;
 
+  // Cooperative cancellation probe supplied by the dispatch layer.
+  // A handler polls TMCPRequestContext.IsCancelled and abandons work
+  // when it becomes true; there is no interruption or exception
+  // injection. Nil means the request cannot currently be cancelled.
+  TMCPCancellationProbe = function: Boolean of object;
+
   TMCPRequestContext = record
     ProtocolVersion: string;
     ClientName: string;          // '' when clientInfo absent
@@ -96,7 +105,13 @@ type
     ProgressTokenIsString: Boolean;
     // Set by the dispatching server, not by ExtractRequestContext.
     Notifier: TMCPNotifier;
+    // Set by the dispatching server. The serial stdio transport cannot
+    // receive a cancellation while a handler occupies its read-handle-
+    // write loop, so this remains false there during handler execution;
+    // transports with mid-request delivery points can flip it.
+    CancellationProbe: TMCPCancellationProbe;
     function HasCapability(const AName: string): Boolean;
+    function IsCancelled: Boolean;
   end;
 
   TMCPMetaError = record
@@ -150,6 +165,11 @@ function TMCPRequestContext.HasCapability(const AName: string): Boolean;
 begin
   Result := (ClientCapabilities <> nil) and
     (ClientCapabilities.Find(AName) <> nil);
+end;
+
+function TMCPRequestContext.IsCancelled: Boolean;
+begin
+  Result := Assigned(CancellationProbe) and CancellationProbe;
 end;
 
 function MetaError(out AError: TMCPMetaError; ACode: Integer;

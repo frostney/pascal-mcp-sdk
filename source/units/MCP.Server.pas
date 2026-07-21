@@ -35,12 +35,12 @@ unit MCP.Server;
 //       _meta, ttlMs/cacheScope) and resource-not-found is the legacy
 //       -32002, so each era sees its own wire dialect
 //   notifications/initialized          completes the legacy handshake
-//   other notifications/*              accepted and ignored;
-//                                      cancellation-token coordination
-//                                      belongs to #22, not this lifetime
-//                                      split. Legacy lifecycle and
-//                                      negotiated identity belong to
-//                                      the connection's TMCPSession.
+//   notifications/cancelled            cooperatively cancels the active
+//                                      request when its id matches
+//   other notifications/*              accepted and ignored. Legacy
+//                                      lifecycle, negotiated identity,
+//                                      and active-request cancellation
+//                                      belong to TMCPSession.
 // Not in v1 (deliberate): subscriptions/listen and the listChanged
 // capability flags (registries are fixed after startup, so there is
 // nothing to notify), pagination cursors (lists are returned whole),
@@ -61,6 +61,10 @@ unit MCP.Server;
 // remain verbatim. The stderr/stdout split follows the transport spec
 // (verified 2026-07-21):
 // https://modelcontextprotocol.io/specification/draft/basic/transports/stdio
+// Cancellation behavior (stop work, free resources, and send no response;
+// unknown, completed, and malformed targets are ignored) is verified
+// 2026-07-21 against:
+// https://modelcontextprotocol.io/specification/draft/basic/patterns/cancellation
 
 {$I Shared.inc}
 
@@ -226,6 +230,13 @@ type
     FLegacyClientName: string;
     FLegacyClientVersion: string;
     FLegacyClientCapabilities: TJSONObject;
+    FRequestActive: Boolean;
+    FActiveRequestIdType: TJSONType;
+    FActiveRequestId: string;
+    FRequestCancelled: Boolean;
+    procedure BeginRequest(ARequestId: TJSONData);
+    procedure EndRequest;
+    function IsCurrentRequestCancelled: Boolean;
     procedure CompleteLegacyInitialize;
     // Takes ownership of AClientCapabilities.
     procedure CommitLegacyInitialize(const AProtocolVersion,
@@ -235,6 +246,10 @@ type
   public
     constructor Create;
     destructor Destroy; override;
+    // Signal cooperative cancellation for ARequestId (borrowed). Only
+    // the currently active matching string/number id is accepted;
+    // unknown, finished, malformed, and repeated signals are no-ops.
+    procedure CancelRequest(ARequestId: TJSONData);
   end;
 
   TMCPServer = class
@@ -509,21 +524,30 @@ type
   // its bound notifier only while dispatch remains on the stack.
   TMCPRequestDispatch = class
   private
+    FSession: TMCPSession;
     FSink: TMCPLineSink;
     FSinkData: Pointer;
   public
-    constructor Create(ASink: TMCPLineSink; ASinkData: Pointer);
+    constructor Create(ASession: TMCPSession; ASink: TMCPLineSink;
+      ASinkData: Pointer);
+    function IsCancelled: Boolean;
     // Takes ownership of AParams.
     procedure EmitNotification(const AMethod: string;
       AParams: TJSONObject);
   end;
 
-constructor TMCPRequestDispatch.Create(ASink: TMCPLineSink;
-  ASinkData: Pointer);
+constructor TMCPRequestDispatch.Create(ASession: TMCPSession;
+  ASink: TMCPLineSink; ASinkData: Pointer);
 begin
   inherited Create;
+  FSession := ASession;
   FSink := ASink;
   FSinkData := ASinkData;
+end;
+
+function TMCPRequestDispatch.IsCancelled: Boolean;
+begin
+  Result := FSession.IsCurrentRequestCancelled;
 end;
 
 procedure TMCPRequestDispatch.EmitNotification(const AMethod: string;
@@ -531,6 +555,11 @@ procedure TMCPRequestDispatch.EmitNotification(const AMethod: string;
 var
   Line: string;
 begin
+  if IsCancelled then
+  begin
+    AParams.Free;
+    Exit;
+  end;
   Line := BuildNotification(AMethod, AParams);
   if Assigned(FSink) then
     FSink(Line, FSinkData);
@@ -837,7 +866,8 @@ procedure MCPReportProgress(const ACtx: TMCPRequestContext;
 var
   Params: TJSONObject;
 begin
-  if not (ACtx.HasProgressToken and Assigned(ACtx.Notifier)) then
+  if ACtx.IsCancelled or
+     not (ACtx.HasProgressToken and Assigned(ACtx.Notifier)) then
     Exit;
   Params := TJSONObject.Create;
   if ACtx.ProgressTokenIsString then
@@ -857,7 +887,8 @@ procedure MCPLogMessage(const ACtx: TMCPRequestContext;
 var
   Params: TJSONObject;
 begin
-  if (ACtx.LogLevel = '') or not Assigned(ACtx.Notifier) then
+  if ACtx.IsCancelled or (ACtx.LogLevel = '') or
+     not Assigned(ACtx.Notifier) then
     Exit;
   if LogSeverity(ALevel) < LogSeverity(ACtx.LogLevel) then
     Exit;
@@ -944,6 +975,47 @@ destructor TMCPSession.Destroy;
 begin
   FLegacyClientCapabilities.Free;
   inherited Destroy;
+end;
+
+procedure TMCPSession.BeginRequest(ARequestId: TJSONData);
+begin
+  FRequestActive := True;
+  FActiveRequestIdType := ARequestId.JSONType;
+  if FActiveRequestIdType = jtString then
+    FActiveRequestId := ARequestId.AsString
+  else
+    FActiveRequestId := ARequestId.AsJSON;
+  FRequestCancelled := False;
+end;
+
+procedure TMCPSession.EndRequest;
+begin
+  FRequestActive := False;
+  FActiveRequestIdType := jtNull;
+  FActiveRequestId := '';
+  FRequestCancelled := False;
+end;
+
+function TMCPSession.IsCurrentRequestCancelled: Boolean;
+begin
+  Result := FRequestActive and FRequestCancelled;
+end;
+
+procedure TMCPSession.CancelRequest(ARequestId: TJSONData);
+begin
+  if (ARequestId = nil) or
+     not (ARequestId.JSONType in [jtString, jtNumber]) then
+    Exit;
+  if not FRequestActive or
+     (ARequestId.JSONType <> FActiveRequestIdType) then
+    Exit;
+  if ARequestId.JSONType = jtString then
+  begin
+    if ARequestId.AsString = FActiveRequestId then
+      FRequestCancelled := True;
+  end
+  else if ARequestId.AsJSON = FActiveRequestId then
+    FRequestCancelled := True;
 end;
 
 procedure TMCPSession.CompleteLegacyInitialize;
@@ -1955,22 +2027,37 @@ begin
         begin
           if Msg.Method = 'notifications/initialized' then
             ASession.CompleteLegacyInitialize;
-          // Other notifications (including notifications/cancelled) are
-          // deliberately ignored; cancellation-token coordination is #22.
+          if (Msg.Method = 'notifications/cancelled') and
+             (Msg.Params <> nil) then
+            ASession.CancelRequest(Msg.Params.Find('requestId'));
+          // All other notifications are deliberately ignored. Invalid
+          // cancellation params are fire-and-forget no-ops, never errors.
           Result := False;
         end;
       jrkRequest:
         begin
+          ASession.BeginRequest(Msg.Id);
           try
-            AResponse := DispatchRequest(ASession, ASink, ASinkData, Msg);
-          except
-            on E: Exception do
-              AResponse := BuildErrorResponse(Msg.Id,
-                JSONRPC_INTERNAL_ERROR,
-                ExceptionClientMessage('dispatch/' + Msg.Method,
-                  'Internal error: ', 'Internal error', E));
+            try
+              AResponse := DispatchRequest(ASession, ASink, ASinkData, Msg);
+            except
+              on E: Exception do
+                AResponse := BuildErrorResponse(Msg.Id,
+                  JSONRPC_INTERNAL_ERROR,
+                  ExceptionClientMessage('dispatch/' + Msg.Method,
+                    'Internal error: ', 'Internal error', E));
+            end;
+            // A server that accepted cancellation MUST NOT send the
+            // response, even when the cooperative handler returned one.
+            // Spec verified 2026-07-21:
+            // https://modelcontextprotocol.io/specification/draft/basic/patterns/cancellation
+            if ASession.IsCurrentRequestCancelled then
+              AResponse := ''
+            else
+              Result := True;
+          finally
+            ASession.EndRequest;
           end;
-          Result := True;
         end;
     end;
   finally
@@ -2017,7 +2104,7 @@ begin
   if FDualEra and not IsModernRequest(AMessage.Params) then
     Exit(DispatchLegacyRequest(ASession, ASink, ASinkData, AMessage));
 
-  Dispatch := TMCPRequestDispatch.Create(ASink, ASinkData);
+  Dispatch := TMCPRequestDispatch.Create(ASession, ASink, ASinkData);
   try
     if not ExtractRequestContext(AMessage.Params, [MCP_PROTOCOL_VERSION],
       Ctx, MetaErr) then
@@ -2025,6 +2112,7 @@ begin
         MetaErr.Data));
     if Assigned(ASink) then
       Ctx.Notifier := Dispatch.EmitNotification;
+    Ctx.CancellationProbe := Dispatch.IsCancelled;
 
     if AMessage.Method = 'server/discover' then
       Exit(HandleDiscover(AMessage));
@@ -2077,11 +2165,12 @@ begin
       'Received request before initialization is complete: send ' +
       'notifications/initialized first'));
 
-  Dispatch := TMCPRequestDispatch.Create(ASink, ASinkData);
+  Dispatch := TMCPRequestDispatch.Create(ASession, ASink, ASinkData);
   try
     Ctx := ASession.LegacyContext(AMessage.Params);
     if Assigned(ASink) then
       Ctx.Notifier := Dispatch.EmitNotification;
+    Ctx.CancellationProbe := Dispatch.IsCancelled;
 
     if AMessage.Method = 'tools/list' then
       Exit(HandleToolsList(AMessage, True));

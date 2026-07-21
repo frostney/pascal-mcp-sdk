@@ -8,7 +8,7 @@ unit MCP.Transport.Stdio;
 // so transport state never resides on the shared server or session.
 //
 // Binding rules implemented (spec .../draft/basic/transports/stdio,
-// verified 2026-07-20):
+// verified 2026-07-21):
 //   - one UTF-8 JSON-RPC message per line, no embedded newlines
 //     (fpjson escapes newlines inside strings, so serialized responses
 //     are single-line by construction); UTF-8 setup lives in MCP.JSONRPC;
@@ -22,8 +22,17 @@ unit MCP.Transport.Stdio;
 //
 // The loop is synchronous and single-threaded: create one connection
 // session, read a line, handle it with this request's output sink, write
-// the response, flush. That serial model is what makes ignoring
-// notifications/cancelled correct (see MCP.Server).
+// the response, flush. It cannot read notifications/cancelled while a
+// handler runs; by the time it reads one, the named request is finished
+// and the session safely ignores it. Handlers on stdio should therefore
+// stay short. A transport with mid-request delivery points can call the
+// session cancellation entry point while its handler is active.
+//
+// The stdio binding says clients MUST send notifications/cancelled and
+// servers SHOULD stop work as soon as practical and MUST NOT send any
+// further messages for that request (verified 2026-07-21):
+// https://modelcontextprotocol.io/specification/draft/basic/transports/stdio
+// https://modelcontextprotocol.io/specification/draft/basic/patterns/cancellation
 //
 // Inbound lines are length-capped (default 4 MiB, the same order as
 // the official SDKs' stdio buffer limit): an oversized line is

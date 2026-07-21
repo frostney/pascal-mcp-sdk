@@ -29,6 +29,7 @@ const
     '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
     '"io.modelcontextprotocol/clientCapabilities":{}}';
   SECRET_ERROR_DETAIL = 'käputt — Pfad /tmp/geheim';
+  CANCELLED_REQUEST_ID = 'réq-42';
 
 type
   TDispatchSuite = class(TTestSuite)
@@ -180,6 +181,22 @@ type
     procedure TestNoSinkStillServes;
   end;
 
+  TCancellationDispatch = class(TDispatchSuite)
+  private
+    FLines: TStringList;
+    procedure InitializeLegacy;
+  protected
+    procedure BeforeEach; override;
+    procedure AfterEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestNormalRequestProbeFalse;
+    procedure TestCancelledResponseSuppressed;
+    procedure TestCancelledNotificationsSuppressed;
+    procedure TestModernUnknownAndMalformedIgnored;
+    procedure TestLegacyFinishedAndRepeatedIgnored;
+  end;
+
   TPromptDispatch = class(TDispatchSuite)
   public
     procedure SetupTests; override;
@@ -246,6 +263,11 @@ type
   end;
 
 { ───────── handlers under test ───────── }
+
+var
+  CancellationSession: TMCPSession;
+  CancellationObserved: Boolean;
+  CancellationProbePresent: Boolean;
 
 function EchoHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
@@ -439,6 +461,42 @@ begin
   MCPLogMessage(ACtx, 'warning', 'careful');
   MCPLogMessage(ACtx, 'debug', 'details');
   Result := MCPTextResult('noise done');
+end;
+
+function CancellationAwareHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  CancellationProbePresent := Assigned(ACtx.CancellationProbe);
+  CancellationObserved := ACtx.IsCancelled;
+  Result := MCPTextResult('not cancelled');
+end;
+
+function SelfCancellingHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  RequestId: TJSONData;
+begin
+  // Parse the cancellation id from its escaped wire form while the
+  // active request uses raw UTF-8, pinning semantic string matching.
+  RequestId := GetJSON('"r\u00e9q-42"');
+  try
+    CancellationSession.CancelRequest(RequestId);
+    // Repeated signals are idempotent while the request is active.
+    CancellationSession.CancelRequest(RequestId);
+  finally
+    RequestId.Free;
+  end;
+  RequestId := GetJSON('"another-request"');
+  try
+    // An unknown id cannot undo an already accepted cancellation.
+    CancellationSession.CancelRequest(RequestId);
+  finally
+    RequestId.Free;
+  end;
+  CancellationObserved := ACtx.IsCancelled;
+  MCPReportProgress(ACtx, 0.5, 1.0, 'must be suppressed');
+  MCPLogMessage(ACtx, 'info', 'must also be suppressed');
+  Result := MCPTextResult('must not be emitted');
 end;
 
 procedure CaptureSink(const ALine: string; AUserData: Pointer);
@@ -2666,6 +2724,154 @@ begin
   Test('no sink: handlers still serve', TestNoSinkStillServes);
 end;
 
+{ ───────── cooperative cancellation ───────── }
+
+procedure TCancellationDispatch.BeforeEach;
+begin
+  inherited BeforeEach;
+  FServer.RegisterTool('cancellation-aware', 'Polls cancellation',
+    '{"type":"object"}', CancellationAwareHandler);
+  FServer.RegisterTool('self-cancel', 'Cancels its own request',
+    '{"type":"object"}', SelfCancellingHandler);
+  FLines := TStringList.Create;
+  FLineSink := CaptureSink;
+  FLineSinkData := FLines;
+  FSession := FServer.CreateSession;
+  CancellationSession := FSession;
+  CancellationObserved := False;
+  CancellationProbePresent := False;
+end;
+
+procedure TCancellationDispatch.AfterEach;
+begin
+  CancellationSession := nil;
+  FreeAndNil(FLines);
+  inherited AfterEach;
+end;
+
+procedure TCancellationDispatch.InitializeLegacy;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":100,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"cancel-test","version":"1"}}}');
+  Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+end;
+
+procedure TCancellationDispatch.TestNormalRequestProbeFalse;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"cancellation-aware",' + META_MODERN + '}}');
+  Expect<Boolean>(CancellationObserved).ToBe(False);
+  Expect<Boolean>(CancellationProbePresent).ToBe(True);
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+    .AsString).ToBe('not cancelled');
+  Response.Free;
+end;
+
+procedure TCancellationDispatch.TestCancelledResponseSuppressed;
+var
+  ResponseLine: string;
+  Response: TJSONObject;
+begin
+  Expect<Boolean>(Dispatch(
+    '{"jsonrpc":"2.0","id":"' + CANCELLED_REQUEST_ID + '",' +
+    '"method":"tools/call","params":{"name":"self-cancel",' +
+    META_MODERN + '}}', ResponseLine)).ToBe(False);
+  Expect<string>(ResponseLine).ToBe('');
+  Expect<Boolean>(CancellationObserved).ToBe(True);
+
+  Response := Call('{"jsonrpc":"2.0","id":43,"method":"tools/call",' +
+    '"params":{"name":"cancellation-aware",' + META_MODERN + '}}');
+  Expect<Boolean>(CancellationObserved).ToBe(False);
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+    .AsString).ToBe('not cancelled');
+  Response.Free;
+end;
+
+procedure TCancellationDispatch.TestCancelledNotificationsSuppressed;
+var
+  ResponseLine: string;
+begin
+  Expect<Boolean>(Dispatch(
+    '{"jsonrpc":"2.0","id":"' + CANCELLED_REQUEST_ID + '",' +
+    '"method":"tools/call","params":{"name":"self-cancel",' +
+    '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"io.modelcontextprotocol/logLevel":"debug",' +
+    '"progressToken":"cancel-progress"}}}', ResponseLine)).ToBe(False);
+  Expect<string>(ResponseLine).ToBe('');
+  Expect<Integer>(FLines.Count).ToBe(0);
+end;
+
+procedure TCancellationDispatch.TestModernUnknownAndMalformedIgnored;
+var
+  Response: TJSONObject;
+begin
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+    '"params":{"requestId":"future"}}');
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+    '"params":{}}');
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+    '"params":{"requestId":false}}');
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+    '"params":{"requestId":{}}}');
+
+  // An unknown cancellation must not poison a later request reusing
+  // that id; this is the modern per-request-metadata path.
+  Response := Call('{"jsonrpc":"2.0","id":"future",' +
+    '"method":"tools/call","params":{"name":"cancellation-aware",' +
+    META_MODERN + '}}');
+  Expect<Boolean>(CancellationObserved).ToBe(False);
+  Expect<Boolean>(Response.Find('result') <> nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TCancellationDispatch.TestLegacyFinishedAndRepeatedIgnored;
+var
+  Response: TJSONObject;
+begin
+  InitializeLegacy;
+  Response := Call('{"jsonrpc":"2.0","id":7,"method":"tools/call",' +
+    '"params":{"name":"cancellation-aware"}}');
+  Response.Free;
+
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+    '"params":{"requestId":7,"reason":"already finished"}}');
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+    '"params":{"requestId":7}}');
+  Response := Call('{"jsonrpc":"2.0","id":8,"method":"tools/call",' +
+    '"params":{"name":"cancellation-aware"}}');
+  Expect<Boolean>(CancellationObserved).ToBe(False);
+  Expect<Boolean>(Response.Find('result') <> nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TCancellationDispatch.SetupTests;
+begin
+  Test('normal handler probe is present and false',
+    TestNormalRequestProbeFalse);
+  Test('mid-handler cancellation suppresses non-ASCII-id response',
+    TestCancelledResponseSuppressed);
+  Test('accepted cancellation suppresses progress and log notifications',
+    TestCancelledNotificationsSuppressed);
+  Test('modern unknown and malformed cancellations are ignored',
+    TestModernUnknownAndMalformedIgnored);
+  Test('legacy finished and repeated cancellations are ignored',
+    TestLegacyFinishedAndRepeatedIgnored);
+end;
+
 { ───────── prompts ───────── }
 
 procedure TPromptDispatch.TestList;
@@ -3417,6 +3623,8 @@ begin
   TestRunnerProgram.AddSuite(TPromptDispatch.Create('Server: prompts'));
   TestRunnerProgram.AddSuite(
     TNotificationEmission.Create('Server: in-request notifications'));
+  TestRunnerProgram.AddSuite(
+    TCancellationDispatch.Create('Server: cooperative cancellation'));
   TestRunnerProgram.AddSuite(
     TRegistrationGuards.Create('Server: registration guards'));
   TestRunnerProgram.AddSuite(TLegacyEra.Create('Server: legacy era'));
