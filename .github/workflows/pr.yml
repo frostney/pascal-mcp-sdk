@@ -182,13 +182,17 @@ jobs:
           test -x build-nolwpt/mcpdemo
 
   # Official TS clients (v2 RC beta + v1 SDK) driven against mcpdemo
-  # over real stdio pipes. Advisory while @modelcontextprotocol/client
-  # is in beta: continue-on-error keeps upstream API churn from
-  # reddening unrelated PRs. Making the job required is bundled with
+  # over real stdio pipes. Advisory while the RC client is in beta:
+  # the pins + lockfile keep unrelated PRs stable, but every deliberate
+  # SDK bump can shift the beta contract, so failures here must not
+  # gate merges. continue-on-error lets the workflow pass while the
+  # job shows red; that holds only while branch protection does not
+  # list `interop` as a required check. Required-ness is bundled with
   # the post-final-spec pass (#3).
   interop:
     runs-on: ubuntu-latest
     continue-on-error: true
+    timeout-minutes: 10
     defaults:
       run:
         shell: bash

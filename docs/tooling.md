@@ -83,9 +83,10 @@ Two workflows, mirroring duetto's split (see
 The official MCP TypeScript client beta run against `build/mcpdemo`
 over stdio, in both pinned-`2026-07-28` and `auto`-probe modes (see
 [tools/interop-ts/README.md](../tools/interop-ts/README.md)). Runs in
-CI as a non-blocking `interop` job on every PR (advisory while the SDK
-is beta; `continue-on-error` keeps upstream churn from reddening
-unrelated PRs). The exact SDK package versions and committed lockfile
-make `npm ci` reproducible, and each battery prints the resolved
-versions at startup. Still worth running locally whenever the protocol
-surface changes.
+CI as the advisory `interop` job on every PR: the pinned SDK versions
+and committed lockfile keep unrelated PRs stable, but the beta
+contract can shift on every deliberate SDK bump, so the job is
+`continue-on-error` and stays non-blocking as long as branch
+protection does not require it. Each battery prints the resolved
+versions at startup. Still worth running locally whenever the
+protocol surface changes.

@@ -31,9 +31,10 @@ committed `package-lock.json` makes `npm ci` reproduce those resolutions. Each
 battery prints both resolved package versions at startup so its output records
 the implementation versions under test.
 
-Requires Node ≥ 20. Not wired into CI while the SDK is in beta (its
-API may still shift); run it manually when touching the protocol
-surface, and revisit wiring it into ci.yml once the SDK is stable.
+Requires Node ≥ 20. Runs in CI as the advisory `interop` job in
+pr.yml (non-blocking as long as branch protection does not require
+it; making it required is bundled with the post-final-spec pass).
+Still worth running locally when touching the protocol surface.
 
 Findings this harness already produced (2026-07-20, beta.4): the RC
 wire schema requires a **top-level `serverInfo`** on `DiscoverResult`
