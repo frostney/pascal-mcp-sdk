@@ -15,6 +15,25 @@ Every unit and program starts with `{$I Shared.inc}` — Delphi mode,
 (checks on in dev, off with `-dPRODUCTION`). No per-unit compiler
 directives; if a flag is worth setting, it is worth centralising.
 
+## FPC pitfalls
+
+Two traps this codebase has already hit — both carry in-repo precedent,
+so follow the existing pattern rather than rediscovering it:
+
+- **`const` record parameters may pass by value.** FPC is free to pass
+  small records in registers, so `const` gives no aliasing guarantee: a
+  method that mutates `Self` (like `TMCPSchema.Build` nilling its
+  fields) would invalidate a copy, not the caller's record. Builder
+  records whose consumption must reach the caller are taken `constref`
+  — see the `RegisterTool`/`RegisterPrompt` overloads in `MCP.Server`
+  and the "consumes schema builder" registration guards in
+  `MCP.Server.Test` (v1.1.0 hardening, PR #30).
+- **Mentioning a procedure variable calls it.** In Delphi mode a
+  proc-var named in an expression is invoked, not read, so comparing a
+  stored handler against a sentinel needs the raw pointer: read it
+  through the field's address as `PPointer(@Field)^` — see the
+  `SIG_DFL` comparison in `EnsureSigPipeIgnored` (`MCP.Server`).
+
 ## Naming and layout
 
 - Units are namespaced `MCP.<Area>.pas`; tests co-located as
