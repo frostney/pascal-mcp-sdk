@@ -330,6 +330,11 @@ function TMCPSchema.AddProperty(const AName, AJsonType, ADescription: string;
 var
   Prop: TJSONObject;
 begin
+  if FRoot = nil then
+    raise EMCPSchema.Create('Schema was already built');
+  if FProperties.IndexOfName(AName) >= 0 then
+    raise EMCPSchema.CreateFmt(
+      'Schema property "%s" is already defined', [AName]);
   Prop := TJSONObject.Create;
   Prop.Add('type', AJsonType);
   if ADescription <> '' then
@@ -366,11 +371,16 @@ end;
 
 function TMCPSchema.Build: TJSONObject;
 begin
+  if FRoot = nil then
+    raise EMCPSchema.Create('Schema was already built');
   if FRequired.Count > 0 then
     FRoot.Add('required', FRequired)
   else
     FRequired.Free;
   Result := FRoot;
+  FRoot := nil;
+  FProperties := nil;
+  FRequired := nil;
 end;
 
 end.

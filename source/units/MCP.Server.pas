@@ -13,10 +13,11 @@ unit MCP.Server;
 //
 // One instance holds the tool/resource registries and turns one
 // decoded JSON-RPC line into at most one response line via
-// HandleMessage — the whole protocol surface is testable without any
-// I/O, mirroring duetto's sans-I/O discipline. MCP.Transport.Stdio
-// (and a future MCP.Transport.HTTP) are thin byte-moving shells
-// around this.
+// HandleMessage — the whole protocol surface is testable without a
+// transport, mirroring duetto's sans-I/O discipline. Redacted escaped
+// exceptions add only the stderr diagnostic described below.
+// MCP.Transport.Stdio (and a future MCP.Transport.HTTP) are thin
+// byte-moving shells around this.
 //
 // v1 protocol surface:
 //   modern era (per-request _meta):
@@ -24,7 +25,7 @@ unit MCP.Server;
 //     tools/list, tools/call
 //     resources/list, resources/read
 //     prompts/list, prompts/get
-//   legacy era (dual-era mode, after initialize):
+//   legacy era (dual-era mode, after initialize + initialized):
 //     initialize, ping
 //     tools/list, tools/call
 //     resources/list, resources/read
@@ -32,13 +33,14 @@ unit MCP.Server;
 //     — responses omit the modern-only stamps (resultType, serverInfo
 //       _meta, ttlMs/cacheScope) and resource-not-found is the legacy
 //       -32002, so each era sees its own wire dialect
-//   notifications/*                    accepted and ignored; requests
+//   notifications/initialized          completes the legacy handshake
+//   other notifications/*              accepted and ignored; requests
 //                                      are handled strictly one at a
 //                                      time, so by the time a
 //                                      notifications/cancelled arrives
 //                                      the request it names has already
 //                                      completed. Era selection state
-//                                      (legacy initialized + negotiated
+//                                      (legacy lifecycle + negotiated
 //                                      version) is the one deliberate
 //                                      piece of per-process state the
 //                                      compatibility model prescribes.
@@ -55,7 +57,13 @@ unit MCP.Server;
 // overloads are provided). A handler that raises becomes an isError
 // tool result carrying the exception message — execution errors belong
 // in-band where the model can read them; protocol errors stay JSON-RPC
-// errors.
+// errors. RedactErrorDetails preserves that verbose behavior by default;
+// when enabled, escaped exceptions carry only a stable generic message
+// and correlation reference on the wire, while the full detail is logged
+// to stderr under the same reference. Deliberate MCPErrorResult values
+// remain verbatim. The stderr/stdout split follows the transport spec
+// (verified 2026-07-21):
+// https://modelcontextprotocol.io/specification/draft/basic/transports/stdio
 
 {$I Shared.inc}
 
@@ -64,6 +72,9 @@ interface
 uses
   SysUtils,
   typinfo,
+  {$IFDEF UNIX}
+  BaseUnix,
+  {$ENDIF}
 
   fpjson,
   jsonparser,
@@ -73,6 +84,8 @@ uses
   MCP.Schema;
 
 type
+  TMCPLegacyState = (lsNew, lsAwaitingInitialized, lsReady);
+
   // Result of one tool invocation. Content is a JSON array of content
   // blocks (owned; use the MCP*Result builders), StructuredContent is
   // the optional machine-readable payload (owned; nil when absent).
@@ -116,7 +129,7 @@ type
   TMCPResourceRegistration = record
     Definition: TJSONObject; // owned: uri/name/mimeType/...
     Uri: string;
-    StaticText: string;      // used when no reader is registered
+    StaticText: string;      // used only when HasStaticText is true
     HasStaticText: Boolean;
     Reader: TMCPResourceReader;
     Method: TMCPResourceMethod;
@@ -159,13 +172,15 @@ type
 
   // Fluent declaration of a prompt's flat argument list (name /
   // description / required — prompts do not use JSON Schema). Same
-  // value semantics as TMCPSchema: registration calls Build.
+  // value semantics as TMCPSchema: registration calls Build through
+  // constref so invalidation reaches the caller's record.
   TMCPPromptArguments = record
   private
     FList: TJSONArray;
   public
     function Add(const AName: string; const ADescription: string = '';
       ARequired: Boolean = True): TMCPPromptArguments;
+    // Returns an owned array; registration takes ownership.
     function Build: TJSONArray;
   end;
 
@@ -204,13 +219,15 @@ type
     FInstructions: string;
     FCacheTtlMs: Integer;
     FCacheScope: string;
+    FRedactErrorDetails: Boolean;
     FDualEra: Boolean;
     FSink: TMCPLineSink;
     FSinkData: Pointer;
-    // Legacy-era session state (dual-era mode only): the compatibility
-    // model scopes initialize-negotiated semantics to the process, so
-    // this is the one deliberate piece of cross-request state.
-    FLegacyInitialized: Boolean;
+    // Legacy initialize MUST be first, and normal operations start only
+    // after notifications/initialized (ping remains valid throughout):
+    // https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle
+    // (verified 2026-07-21).
+    FLegacyState: TMCPLegacyState;
     FLegacyProtocolVersion: string;
     FLegacyClientName: string;
     FLegacyClientVersion: string;
@@ -220,9 +237,16 @@ type
     FTemplates: array of TMCPTemplateRegistration;
     FPrompts: array of TMCPPromptRegistration;
 
+    procedure SetCacheTtlMs(AValue: Integer);
+    procedure SetCacheScope(const AValue: string);
+    function ExceptionClientMessage(const ASite, AVerbosePrefix,
+      ARedactedMessage: string; E: Exception): string;
     function ParseSchema(const ASchemaJson, AToolName: string): TJSONObject;
     function BuildToolDefinition(const AName, ADescription,
       AInputSchemaJson: string): TJSONObject;
+    // ADefinition is borrowed; validation frees nothing.
+    procedure ValidateToolDefinition(ADefinition: TJSONObject;
+      out AToolName: string);
     function AddTool(ADefinition: TJSONObject; AHandler: TMCPToolHandler;
       AMethod: TMCPToolMethod): TMCPToolOptions;
     function AddTypedTool(ADefinition: TJSONObject;
@@ -280,8 +304,18 @@ type
     // tools/list example) with "private" scope. Reads served by a
     // dynamic reader always advertise ttl 0 (revalidate) — the library
     // cannot know how fresh a callback's data stays.
-    property CacheTtlMs: Integer read FCacheTtlMs write FCacheTtlMs;
-    property CacheScope: string read FCacheScope write FCacheScope;
+    property CacheTtlMs: Integer read FCacheTtlMs write SetCacheTtlMs;
+    property CacheScope: string read FCacheScope write SetCacheScope;
+
+    // False by default: escaped handler/dispatch exceptions retain the
+    // v1 in-band detail used by trusted local clients. True replaces
+    // exception details with a correlation reference and logs the full
+    // exception to stderr under that reference (best-effort: on UNIX
+    // the first emission upgrades a default SIGPIPE disposition to
+    // ignore so a closed stderr cannot kill the process; a host's own
+    // SIGPIPE handling is left untouched).
+    property RedactErrorDetails: Boolean read FRedactErrorDetails
+      write FRedactErrorDetails;
 
     // Dual-era mode (default True): answer the legacy initialize
     // handshake (2025-11-25 and earlier) alongside stateless
@@ -297,8 +331,9 @@ type
     function OversizedLineResponse(AMaxLineLength: Integer): string;
 
     // Transport registration for server-to-client notification lines.
-    // Without a sink, MCPReportProgress/MCPLogMessage are no-ops —
-    // HandleMessage stays a pure line-in/line-out function.
+    // Without a sink, MCPReportProgress/MCPLogMessage are no-ops.
+    // HandleMessage otherwise stays line-in/line-out; redacted escaped
+    // exceptions additionally write their correlated detail to stderr.
     procedure SetLineSink(ASink: TMCPLineSink; AUserData: Pointer);
 
     // AInputSchemaJson is parsed at registration and raises EMCPServer
@@ -319,14 +354,14 @@ type
     // path for flat object schemas — no JSON strings. The overloads
     // call Build and take ownership of the finished schemas.
     function RegisterTool(const AName, ADescription: string;
-      const AInputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions; overload;
+      constref AInputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions; overload;
     function RegisterTool(const AName, ADescription: string;
-      const AInputSchema: TMCPSchema; AMethod: TMCPToolMethod): TMCPToolOptions; overload;
+      constref AInputSchema: TMCPSchema; AMethod: TMCPToolMethod): TMCPToolOptions; overload;
     function RegisterTool(const AName, ADescription: string;
-      const AInputSchema, AOutputSchema: TMCPSchema;
+      constref AInputSchema, AOutputSchema: TMCPSchema;
       AHandler: TMCPToolHandler): TMCPToolOptions; overload;
     function RegisterTool(const AName, ADescription: string;
-      const AInputSchema, AOutputSchema: TMCPSchema;
+      constref AInputSchema, AOutputSchema: TMCPSchema;
       AMethod: TMCPToolMethod): TMCPToolOptions; overload;
 
     // Typed-argument overloads: the argument class IS the schema
@@ -339,10 +374,10 @@ type
     function RegisterTool(const AName, ADescription: string;
       AArgsClass: TMCPArgsClass; AMethod: TMCPArgsMethod): TMCPToolOptions; overload;
     function RegisterTool(const AName, ADescription: string;
-      AArgsClass: TMCPArgsClass; const AOutputSchema: TMCPSchema;
+      AArgsClass: TMCPArgsClass; constref AOutputSchema: TMCPSchema;
       AHandler: TMCPArgsHandler): TMCPToolOptions; overload;
     function RegisterTool(const AName, ADescription: string;
-      AArgsClass: TMCPArgsClass; const AOutputSchema: TMCPSchema;
+      AArgsClass: TMCPArgsClass; constref AOutputSchema: TMCPSchema;
       AMethod: TMCPArgsMethod): TMCPToolOptions; overload;
     function RegisterTool(const AName, ADescription: string;
       AArgsClass, AOutputClass: TMCPArgsClass;
@@ -375,10 +410,10 @@ type
     procedure RegisterPrompt(const AName, ADescription: string;
       AMethod: TMCPPromptMethod); overload;
     procedure RegisterPrompt(const AName, ADescription: string;
-      const AArguments: TMCPPromptArguments;
+      constref AArguments: TMCPPromptArguments;
       AHandler: TMCPPromptHandler); overload;
     procedure RegisterPrompt(const AName, ADescription: string;
-      const AArguments: TMCPPromptArguments;
+      constref AArguments: TMCPPromptArguments;
       AMethod: TMCPPromptMethod); overload;
 
     // The core entry point: one inbound line in, at most one response
@@ -439,6 +474,46 @@ procedure MCPLogMessage(const ACtx: TMCPRequestContext;
 
 implementation
 
+var
+  ErrorSequence: QWord = 0;
+
+function NextErrorReference: string;
+begin
+  Inc(ErrorSequence);
+  Result := 'mcp-err-' + UIntToStr(ErrorSequence);
+end;
+
+{$IFDEF UNIX}
+var
+  SigPipePolicyApplied: Boolean = False;
+
+// Redacted diagnostics write to stderr, and a closed pipe would kill
+// the process with SIGPIPE before the RTL can raise EInOutError. On
+// first use, upgrade only a DEFAULT disposition to ignore — one-way
+// and idempotent, so there is no restore hazard and no race. A host
+// that installed its own SIGPIPE handling keeps it; if its handler
+// lets the write fail, the failure still lands in the caller's
+// except block.
+procedure EnsureSigPipeIgnored;
+var
+  Current, Ignored: SigActionRec;
+begin
+  if SigPipePolicyApplied then
+    Exit;
+  SigPipePolicyApplied := True;
+  FillChar(Current, SizeOf(Current), 0);
+  if FpSigAction(SIGPIPE, nil, @Current) <> 0 then
+    Exit;
+  // Delphi mode calls a proc-var mentioned in an expression, so the
+  // stored handler pointer is read through its address instead.
+  if PPointer(@Current.sa_handler)^ <> Pointer(SIG_DFL) then
+    Exit;
+  FillChar(Ignored, SizeOf(Ignored), 0);
+  Ignored.sa_handler := SigActionHandler(SIG_IGN);
+  FpSigAction(SIGPIPE, @Ignored, nil);
+end;
+{$ENDIF}
+
 { ───────── prompt builders ───────── }
 
 function PromptArguments: TMCPPromptArguments;
@@ -451,6 +526,8 @@ function TMCPPromptArguments.Add(const AName: string;
 var
   Arg: TJSONObject;
 begin
+  if FList = nil then
+    raise EMCPServer.Create('Prompt arguments were already built');
   Arg := TJSONObject.Create;
   Arg.Add('name', AName);
   if ADescription <> '' then
@@ -463,7 +540,10 @@ end;
 
 function TMCPPromptArguments.Build: TJSONArray;
 begin
+  if FList = nil then
+    raise EMCPServer.Create('Prompt arguments were already built');
   Result := FList;
+  FList := nil;
 end;
 
 function MCPPromptMessage(const ARole, AText: string): TJSONObject;
@@ -798,11 +878,63 @@ end;
 constructor TMCPServer.Create(const AName, AVersion: string);
 begin
   inherited Create;
+  if AName = '' then
+    raise EMCPServer.Create('Server name must not be empty');
+  if AVersion = '' then
+    raise EMCPServer.Create('Server version must not be empty');
   FName := AName;
   FVersion := AVersion;
   FCacheTtlMs := 300000;
   FCacheScope := CACHE_SCOPE_PRIVATE;
+  FRedactErrorDetails := False;
   FDualEra := True;
+  FLegacyState := lsNew;
+end;
+
+procedure TMCPServer.SetCacheTtlMs(AValue: Integer);
+begin
+  if AValue < 0 then
+    raise EMCPServer.Create('CacheTtlMs must not be negative');
+  FCacheTtlMs := AValue;
+end;
+
+procedure TMCPServer.SetCacheScope(const AValue: string);
+begin
+  if (AValue <> CACHE_SCOPE_PRIVATE) and
+     (AValue <> CACHE_SCOPE_PUBLIC) then
+    raise EMCPServer.CreateFmt(
+      'CacheScope must be "%s" or "%s"',
+      [CACHE_SCOPE_PRIVATE, CACHE_SCOPE_PUBLIC]);
+  FCacheScope := AValue;
+end;
+
+function TMCPServer.ExceptionClientMessage(const ASite, AVerbosePrefix,
+  ARedactedMessage: string; E: Exception): string;
+var
+  DiagnosticMessage: string;
+  ErrorReference: string;
+begin
+  if not FRedactErrorDetails then
+    Exit(AVerbosePrefix + E.Message);
+  ErrorReference := NextErrorReference;
+  DiagnosticMessage := StringReplace(E.Message, #13#10, ' ', [rfReplaceAll]);
+  DiagnosticMessage := StringReplace(DiagnosticMessage, #13, ' ',
+    [rfReplaceAll]);
+  DiagnosticMessage := StringReplace(DiagnosticMessage, #10, ' ',
+    [rfReplaceAll]);
+  {$IFDEF UNIX}
+  EnsureSigPipeIgnored;
+  {$ENDIF}
+  try
+    Write(ErrOutput, ErrorReference, ' ', ASite, ': ', E.ClassName, ': ',
+      DiagnosticMessage, #10);
+    Flush(ErrOutput);
+  except
+    on EInOutError do
+    begin
+    end;
+  end;
+  Result := ARedactedMessage + ' (ref ' + ErrorReference + ')';
 end;
 
 destructor TMCPServer.Destroy;
@@ -838,6 +970,7 @@ function TMCPServer.ParseSchema(const ASchemaJson, AToolName: string): TJSONObje
 var
   Parser: TJSONParser;
   Data: TJSONData;
+  SchemaType: TJSONData;
 begin
   Parser := TJSONParser.Create(ASchemaJson, [joUTF8, joStrict]);
   try
@@ -857,16 +990,80 @@ begin
     raise EMCPServer.CreateFmt(
       'Invalid input schema for tool "%s": must be a JSON object', [AToolName]);
   end;
+  SchemaType := TJSONObject(Data).Find('type');
+  if (SchemaType = nil) or (SchemaType.JSONType <> jtString) or
+    (SchemaType.AsString <> 'object') then
+  begin
+    Data.Free;
+    raise EMCPServer.CreateFmt(
+      'Invalid input schema for tool "%s": root type must be "object"',
+      [AToolName]);
+  end;
   Result := TJSONObject(Data);
 end;
 
 function TMCPServer.BuildToolDefinition(const AName, ADescription,
   AInputSchemaJson: string): TJSONObject;
+var
+  InputSchema: TJSONObject; // owned until the definition takes it
 begin
-  Result := TJSONObject.Create;
-  Result.Add('name', AName);
-  Result.Add('description', ADescription);
-  Result.Add('inputSchema', ParseSchema(AInputSchemaJson, AName));
+  // Parse before assembling the definition so a rejected schema
+  // leaves nothing owned.
+  InputSchema := ParseSchema(AInputSchemaJson, AName);
+  Result := nil;
+  try
+    Result := TJSONObject.Create;
+    Result.Add('name', AName);
+    Result.Add('description', ADescription);
+    Result.Add('inputSchema', InputSchema);
+    InputSchema := nil; // ownership transferred to the definition
+  except
+    Result.Free;
+    InputSchema.Free;
+    raise;
+  end;
+end;
+
+procedure TMCPServer.ValidateToolDefinition(ADefinition: TJSONObject;
+  out AToolName: string);
+var
+  InputSchema, OutputSchema, SchemaType: TJSONData;
+begin
+  if ADefinition = nil then
+    raise EMCPServer.Create('Tool definition must not be nil');
+  AToolName := ADefinition.Get('name', '');
+  if AToolName = '' then
+    raise EMCPServer.Create('Tool definition must carry a non-empty name');
+  // Tool.inputSchema is a required JSON Schema object:
+  // https://modelcontextprotocol.io/specification/draft/server/tools
+  // https://modelcontextprotocol.io/specification/draft/schema
+  // (verified 2026-07-21).
+  InputSchema := ADefinition.Find('inputSchema');
+  if (InputSchema = nil) or (InputSchema.JSONType <> jtObject) then
+    raise EMCPServer.CreateFmt(
+      'Tool "%s" definition must carry an object-valued inputSchema',
+      [AToolName]);
+  SchemaType := TJSONObject(InputSchema).Find('type');
+  if (SchemaType = nil) or (SchemaType.JSONType <> jtString) or
+    (SchemaType.AsString <> 'object') then
+    raise EMCPServer.CreateFmt(
+      'Tool "%s" inputSchema must have root type "object"', [AToolName]);
+  OutputSchema := ADefinition.Find('outputSchema');
+  if OutputSchema <> nil then
+  begin
+    if OutputSchema.JSONType <> jtObject then
+      raise EMCPServer.CreateFmt(
+        'Tool "%s" definition must carry an object-valued outputSchema',
+        [AToolName]);
+    SchemaType := TJSONObject(OutputSchema).Find('type');
+    if (SchemaType = nil) or (SchemaType.JSONType <> jtString) or
+      (SchemaType.AsString <> 'object') then
+      raise EMCPServer.CreateFmt(
+        'Tool "%s" outputSchema must have root type "object"', [AToolName]);
+  end;
+  if FindTool(AToolName) >= 0 then
+    raise EMCPServer.CreateFmt(
+      'Tool "%s" is already registered', [AToolName]);
 end;
 
 function TMCPServer.AddTool(ADefinition: TJSONObject;
@@ -874,21 +1071,19 @@ function TMCPServer.AddTool(ADefinition: TJSONObject;
 var
   ToolName: string;
 begin
-  ToolName := ADefinition.Get('name', '');
-  if ToolName = '' then
-  begin
+  try
+    ValidateToolDefinition(ADefinition, ToolName);
+    if Assigned(AHandler) = Assigned(AMethod) then
+      raise EMCPServer.CreateFmt(
+        'Tool "%s" must have exactly one callable', [ToolName]);
+    SetLength(FTools, Length(FTools) + 1);
+    FTools[High(FTools)].Definition := ADefinition;
+    FTools[High(FTools)].Handler := AHandler;
+    FTools[High(FTools)].Method := AMethod;
+  except
     ADefinition.Free;
-    raise EMCPServer.Create('Tool definition must carry a non-empty name');
+    raise;
   end;
-  if FindTool(ToolName) >= 0 then
-  begin
-    ADefinition.Free;
-    raise EMCPServer.CreateFmt('Tool "%s" is already registered', [ToolName]);
-  end;
-  SetLength(FTools, Length(FTools) + 1);
-  FTools[High(FTools)].Definition := ADefinition;
-  FTools[High(FTools)].Handler := AHandler;
-  FTools[High(FTools)].Method := AMethod;
   Result.FDefinition := ADefinition;
 end;
 
@@ -953,11 +1148,27 @@ end;
 function TMCPServer.AddTypedTool(ADefinition: TJSONObject;
   AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler;
   AMethod: TMCPArgsMethod): TMCPToolOptions;
+var
+  ToolName: string;
 begin
-  Result := AddTool(ADefinition, nil, nil);
-  FTools[High(FTools)].ArgsClass := AArgsClass;
-  FTools[High(FTools)].ArgsHandler := AHandler;
-  FTools[High(FTools)].ArgsMethod := AMethod;
+  try
+    ValidateToolDefinition(ADefinition, ToolName);
+    if AArgsClass = nil then
+      raise EMCPServer.CreateFmt(
+        'Typed tool "%s" requires a non-nil argument class', [ToolName]);
+    if Assigned(AHandler) = Assigned(AMethod) then
+      raise EMCPServer.CreateFmt(
+        'Typed tool "%s" must have exactly one callable', [ToolName]);
+    SetLength(FTools, Length(FTools) + 1);
+    FTools[High(FTools)].Definition := ADefinition;
+    FTools[High(FTools)].ArgsClass := AArgsClass;
+    FTools[High(FTools)].ArgsHandler := AHandler;
+    FTools[High(FTools)].ArgsMethod := AMethod;
+  except
+    ADefinition.Free;
+    raise;
+  end;
+  Result.FDefinition := ADefinition;
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription,
@@ -999,79 +1210,164 @@ begin
     Result.Add('outputSchema', AOutputSchema);
 end;
 
+// Returns an owned schema tree; the caller transfers or frees it.
+function SchemaFromArgumentClass(const AToolName, ARole: string;
+  AArgsClass: TMCPArgsClass): TJSONObject;
+begin
+  if AArgsClass = nil then
+    raise EMCPServer.CreateFmt(
+      'Typed tool "%s" requires a non-nil %s argument class',
+      [AToolName, ARole]);
+  Result := SchemaFrom(AArgsClass).Build;
+end;
+
 function TMCPServer.RegisterTool(const AName, ADescription: string;
-  const AInputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions;
+  constref AInputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions;
 begin
   Result := AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build, nil),
     AHandler, nil);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
-  const AInputSchema: TMCPSchema; AMethod: TMCPToolMethod): TMCPToolOptions;
+  constref AInputSchema: TMCPSchema; AMethod: TMCPToolMethod): TMCPToolOptions;
 begin
   Result := AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build, nil),
     nil, AMethod);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
-  const AInputSchema, AOutputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions;
+  constref AInputSchema, AOutputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions;
+var
+  InputSchema, OutputSchema: TJSONObject;
 begin
-  Result := AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build,
-    AOutputSchema.Build), AHandler, nil);
+  InputSchema := nil;
+  OutputSchema := nil;
+  try
+    InputSchema := AInputSchema.Build;
+    OutputSchema := AOutputSchema.Build;
+  except
+    InputSchema.Free;
+    OutputSchema.Free;
+    raise;
+  end;
+  Result := AddTool(SchemaDefinition(AName, ADescription, InputSchema,
+    OutputSchema), AHandler, nil);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
-  const AInputSchema, AOutputSchema: TMCPSchema; AMethod: TMCPToolMethod): TMCPToolOptions;
+  constref AInputSchema, AOutputSchema: TMCPSchema; AMethod: TMCPToolMethod): TMCPToolOptions;
+var
+  InputSchema, OutputSchema: TJSONObject;
 begin
-  Result := AddTool(SchemaDefinition(AName, ADescription, AInputSchema.Build,
-    AOutputSchema.Build), nil, AMethod);
+  InputSchema := nil;
+  OutputSchema := nil;
+  try
+    InputSchema := AInputSchema.Build;
+    OutputSchema := AOutputSchema.Build;
+  except
+    InputSchema.Free;
+    OutputSchema.Free;
+    raise;
+  end;
+  Result := AddTool(SchemaDefinition(AName, ADescription, InputSchema,
+    OutputSchema), nil, AMethod);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
   AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler): TMCPToolOptions;
 begin
   Result := AddTypedTool(SchemaDefinition(AName, ADescription,
-    SchemaFrom(AArgsClass).Build, nil), AArgsClass, AHandler, nil);
+    SchemaFromArgumentClass(AName, 'input', AArgsClass), nil),
+    AArgsClass, AHandler, nil);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
   AArgsClass: TMCPArgsClass; AMethod: TMCPArgsMethod): TMCPToolOptions;
 begin
   Result := AddTypedTool(SchemaDefinition(AName, ADescription,
-    SchemaFrom(AArgsClass).Build, nil), AArgsClass, nil, AMethod);
+    SchemaFromArgumentClass(AName, 'input', AArgsClass), nil),
+    AArgsClass, nil, AMethod);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
-  AArgsClass: TMCPArgsClass; const AOutputSchema: TMCPSchema;
+  AArgsClass: TMCPArgsClass; constref AOutputSchema: TMCPSchema;
   AHandler: TMCPArgsHandler): TMCPToolOptions;
+var
+  InputSchema, OutputSchema: TJSONObject;
 begin
-  Result := AddTypedTool(SchemaDefinition(AName, ADescription,
-    SchemaFrom(AArgsClass).Build, AOutputSchema.Build),
+  InputSchema := nil;
+  OutputSchema := nil;
+  try
+    InputSchema := SchemaFromArgumentClass(AName, 'input', AArgsClass);
+    OutputSchema := AOutputSchema.Build;
+  except
+    InputSchema.Free;
+    OutputSchema.Free;
+    raise;
+  end;
+  Result := AddTypedTool(SchemaDefinition(AName, ADescription, InputSchema,
+    OutputSchema),
     AArgsClass, AHandler, nil);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
-  AArgsClass: TMCPArgsClass; const AOutputSchema: TMCPSchema;
+  AArgsClass: TMCPArgsClass; constref AOutputSchema: TMCPSchema;
   AMethod: TMCPArgsMethod): TMCPToolOptions;
+var
+  InputSchema, OutputSchema: TJSONObject;
 begin
-  Result := AddTypedTool(SchemaDefinition(AName, ADescription,
-    SchemaFrom(AArgsClass).Build, AOutputSchema.Build),
+  InputSchema := nil;
+  OutputSchema := nil;
+  try
+    InputSchema := SchemaFromArgumentClass(AName, 'input', AArgsClass);
+    OutputSchema := AOutputSchema.Build;
+  except
+    InputSchema.Free;
+    OutputSchema.Free;
+    raise;
+  end;
+  Result := AddTypedTool(SchemaDefinition(AName, ADescription, InputSchema,
+    OutputSchema),
     AArgsClass, nil, AMethod);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
   AArgsClass, AOutputClass: TMCPArgsClass; AHandler: TMCPArgsHandler): TMCPToolOptions;
+var
+  InputSchema, OutputSchema: TJSONObject;
 begin
-  Result := AddTypedTool(SchemaDefinition(AName, ADescription,
-    SchemaFrom(AArgsClass).Build, SchemaFrom(AOutputClass).Build),
+  InputSchema := nil;
+  OutputSchema := nil;
+  try
+    InputSchema := SchemaFromArgumentClass(AName, 'input', AArgsClass);
+    OutputSchema := SchemaFromArgumentClass(AName, 'output', AOutputClass);
+  except
+    InputSchema.Free;
+    OutputSchema.Free;
+    raise;
+  end;
+  Result := AddTypedTool(SchemaDefinition(AName, ADescription, InputSchema,
+    OutputSchema),
     AArgsClass, AHandler, nil);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
   AArgsClass, AOutputClass: TMCPArgsClass; AMethod: TMCPArgsMethod): TMCPToolOptions;
+var
+  InputSchema, OutputSchema: TJSONObject;
 begin
-  Result := AddTypedTool(SchemaDefinition(AName, ADescription,
-    SchemaFrom(AArgsClass).Build, SchemaFrom(AOutputClass).Build),
+  InputSchema := nil;
+  OutputSchema := nil;
+  try
+    InputSchema := SchemaFromArgumentClass(AName, 'input', AArgsClass);
+    OutputSchema := SchemaFromArgumentClass(AName, 'output', AOutputClass);
+  except
+    InputSchema.Free;
+    OutputSchema.Free;
+    raise;
+  end;
+  Result := AddTypedTool(SchemaDefinition(AName, ADescription, InputSchema,
+    OutputSchema),
     AArgsClass, nil, AMethod);
 end;
 
@@ -1262,6 +1558,18 @@ var
 begin
   if AUri = '' then
     raise EMCPServer.Create('Resource registration requires a non-empty uri');
+  if AName = '' then
+    raise EMCPServer.CreateFmt(
+      'Resource "%s" requires a non-empty display name', [AUri]);
+  if AHasStaticText then
+  begin
+    if Assigned(AReader) or Assigned(AMethod) then
+      raise EMCPServer.CreateFmt(
+        'Static resource "%s" must not have a callable', [AUri]);
+  end
+  else if Assigned(AReader) = Assigned(AMethod) then
+    raise EMCPServer.CreateFmt(
+      'Dynamic resource "%s" must have exactly one callable', [AUri]);
   if FindResource(AUri) >= 0 then
     raise EMCPServer.CreateFmt('Resource "%s" is already registered', [AUri]);
   Definition := TJSONObject.Create;
@@ -1326,6 +1634,14 @@ var
   Definition: TJSONObject;
   ValidationError: string;
 begin
+  if AName = '' then
+    raise EMCPServer.CreateFmt(
+      'Resource template "%s" requires a non-empty display name',
+      [AUriTemplate]);
+  if Assigned(AReader) = Assigned(AMethod) then
+    raise EMCPServer.CreateFmt(
+      'Resource template "%s" must have exactly one callable',
+      [AUriTemplate]);
   if not TryValidateUriTemplate(AUriTemplate, ValidationError) then
     raise EMCPServer.Create(ValidationError);
   for I := 0 to High(FTemplates) do
@@ -1335,7 +1651,8 @@ begin
   Definition := TJSONObject.Create;
   Definition.Add('uriTemplate', AUriTemplate);
   Definition.Add('name', AName);
-  Definition.Add('mimeType', AMimeType);
+  if AMimeType <> '' then
+    Definition.Add('mimeType', AMimeType);
   if ADescription <> '' then
     Definition.Add('description', ADescription);
   SetLength(FTemplates, Length(FTemplates) + 1);
@@ -1375,6 +1692,17 @@ procedure TMCPServer.AddPrompt(const AName, ADescription: string;
 var
   Definition: TJSONObject;
 begin
+  if AName = '' then
+  begin
+    AArguments.Free;
+    raise EMCPServer.Create('Prompt registration requires a non-empty name');
+  end;
+  if Assigned(AHandler) = Assigned(AMethod) then
+  begin
+    AArguments.Free;
+    raise EMCPServer.CreateFmt(
+      'Prompt "%s" must have exactly one callable', [AName]);
+  end;
   if FindPrompt(AName) >= 0 then
   begin
     AArguments.Free;
@@ -1406,13 +1734,13 @@ begin
 end;
 
 procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
-  const AArguments: TMCPPromptArguments; AHandler: TMCPPromptHandler);
+  constref AArguments: TMCPPromptArguments; AHandler: TMCPPromptHandler);
 begin
   AddPrompt(AName, ADescription, AArguments.Build, AHandler, nil);
 end;
 
 procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
-  const AArguments: TMCPPromptArguments; AMethod: TMCPPromptMethod);
+  constref AArguments: TMCPPromptArguments; AMethod: TMCPPromptMethod);
 begin
   AddPrompt(AName, ADescription, AArguments.Build, nil, AMethod);
 end;
@@ -1462,10 +1790,15 @@ begin
           Result := True;
         end;
       jrkNotification:
-        // All notifications (including notifications/cancelled) are
-        // deliberately ignored: requests are processed one at a time,
-        // so a cancellation can only arrive after its target finished.
-        Result := False;
+        begin
+          if (Msg.Method = 'notifications/initialized') and
+             (FLegacyState = lsAwaitingInitialized) then
+            FLegacyState := lsReady;
+          // Other notifications (including notifications/cancelled) are
+          // deliberately ignored: requests are processed one at a time,
+          // so a cancellation can only arrive after its target finished.
+          Result := False;
+        end;
       jrkRequest:
         begin
           try
@@ -1473,7 +1806,9 @@ begin
           except
             on E: Exception do
               AResponse := BuildErrorResponse(Msg.Id,
-                JSONRPC_INTERNAL_ERROR, 'Internal error: ' + E.Message);
+                JSONRPC_INTERNAL_ERROR,
+                ExceptionClientMessage('dispatch/' + Msg.Method,
+                  'Internal error: ', 'Internal error', E));
           end;
           Result := True;
         end;
@@ -1555,7 +1890,7 @@ begin
   if AMessage.Method = 'ping' then
     Exit(BuildResultResponse(AMessage.Id, TJSONObject.Create));
 
-  if not FLegacyInitialized then
+  if FLegacyState = lsNew then
     // Legacy lifecycle: non-ping requests are invalid before the
     // handshake completes. The hint about _meta helps a misbehaving
     // modern client that dropped its required envelope.
@@ -1563,6 +1898,11 @@ begin
       'Received request before initialization: send initialize first ' +
       '(legacy clients), or carry the required per-request _meta ' +
       '(protocol 2026-07-28)'));
+
+  if FLegacyState = lsAwaitingInitialized then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_REQUEST,
+      'Received request before initialization is complete: send ' +
+      'notifications/initialized first'));
 
   if AMessage.Method = 'tools/list' then
     Exit(HandleToolsList(AMessage, True));
@@ -1586,9 +1926,14 @@ end;
 function TMCPServer.HandleInitialize(const AMessage: TJSONRPCMessage): string;
 var
   VersionData, InfoData, CapsData, NameData, ClientVersionData: TJSONData;
-  Requested: string;
-  InitResult, Capabilities, ServerInfo: TJSONObject;
+  Requested, NegotiatedVersion, ClientName, ClientVersion: string;
+  InitResult, Capabilities, ServerInfo, ClientCapabilities,
+    ResponsePayload: TJSONObject;
 begin
+  if FLegacyState <> lsNew then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_REQUEST,
+      'Server is already initialized: initialize may only be sent once'));
+
   if AMessage.Params = nil then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
       'Invalid params: initialize requires protocolVersion'));
@@ -1631,31 +1976,49 @@ begin
   // with the latest legacy revision we speak (the client decides
   // whether to proceed or disconnect).
   if IsLegacyProtocolVersion(Requested) then
-    FLegacyProtocolVersion := Requested
+    NegotiatedVersion := Requested
   else
-    FLegacyProtocolVersion := LATEST_LEGACY_PROTOCOL_VERSION;
+    NegotiatedVersion := LATEST_LEGACY_PROTOCOL_VERSION;
+  ClientName := NameData.AsString;
+  ClientVersion := ClientVersionData.AsString;
 
-  // A re-initialize renegotiates: replace any earlier session state.
-  FLegacyClientName := NameData.AsString;
-  FLegacyClientVersion := ClientVersionData.AsString;
-  FreeAndNil(FLegacyClientCapabilities);
-  FLegacyClientCapabilities := TJSONObject(CapsData.Clone);
-  FLegacyInitialized := True;
+  InitResult := nil;
+  Capabilities := nil;
+  ServerInfo := nil;
+  ClientCapabilities := nil;
+  try
+    ClientCapabilities := TJSONObject(CapsData.Clone);
+    Capabilities := ServerCapabilities;
+    ServerInfo := TJSONObject.Create;
+    ServerInfo.Add('name', FName);
+    ServerInfo.Add('version', FVersion);
 
-  Capabilities := ServerCapabilities;
-  ServerInfo := TJSONObject.Create;
-  ServerInfo.Add('name', FName);
-  ServerInfo.Add('version', FVersion);
+    InitResult := TJSONObject.Create;
+    InitResult.Add('protocolVersion', NegotiatedVersion);
+    InitResult.Add('capabilities', Capabilities);
+    Capabilities := nil;
+    InitResult.Add('serverInfo', ServerInfo);
+    ServerInfo := nil;
+    if FInstructions <> '' then
+      InitResult.Add('instructions', FInstructions);
 
-  InitResult := TJSONObject.Create;
-  InitResult.Add('protocolVersion', FLegacyProtocolVersion);
-  InitResult.Add('capabilities', Capabilities);
-  InitResult.Add('serverInfo', ServerInfo);
-  if FInstructions <> '' then
-    InitResult.Add('instructions', FInstructions);
+    // Legacy wire dialect: no resultType / serverInfo _meta stamping.
+    ResponsePayload := InitResult;
+    InitResult := nil;
+    Result := BuildResultResponse(AMessage.Id, ResponsePayload);
+  except
+    InitResult.Free;
+    Capabilities.Free;
+    ServerInfo.Free;
+    ClientCapabilities.Free;
+    raise;
+  end;
 
-  // Legacy wire dialect: no resultType / serverInfo _meta stamping.
-  Result := BuildResultResponse(AMessage.Id, InitResult);
+  FLegacyProtocolVersion := NegotiatedVersion;
+  FLegacyClientName := ClientName;
+  FLegacyClientVersion := ClientVersion;
+  FLegacyClientCapabilities := ClientCapabilities;
+  FLegacyState := lsAwaitingInitialized;
 end;
 
 function TMCPServer.LegacyContext(AParams: TJSONObject): TMCPRequestContext;
@@ -1828,7 +2191,9 @@ begin
       // can read them and self-correct; only dispatch-level faults are
       // JSON-RPC errors.
       on E: Exception do
-        ToolResult := MCPErrorResult('Tool execution failed: ' + E.Message);
+        ToolResult := MCPErrorResult(ExceptionClientMessage(
+          'tools/call handler', 'Tool execution failed: ',
+          'Tool execution failed', E));
     end;
   finally
     OwnedEmpty.Free;
@@ -1896,7 +2261,7 @@ begin
       Contents := FResources[Index].Method(Uri, ACtx)
     else if Assigned(FResources[Index].Reader) then
       Contents := FResources[Index].Reader(Uri, ACtx)
-    else
+    else if FResources[Index].HasStaticText then
     begin
       MimeType := FResources[Index].Definition.Get('mimeType', 'text/plain');
       Contents := MCPTextContents(Uri, MimeType,
@@ -2041,7 +2406,8 @@ begin
     except
       on E: Exception do
         Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
-          'Prompt handler failed: ' + E.Message));
+          ExceptionClientMessage('prompts/get handler',
+            'Prompt handler failed: ', 'Prompt handler failed', E)));
     end;
     if Messages = nil then
       Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
