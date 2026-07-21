@@ -98,9 +98,15 @@ type
     procedure TestNilTypedToolHandler;
     procedure TestNilTypedToolMethod;
     procedure TestNilTypedToolClass;
+    procedure TestNilTypedToolOutputClass;
     procedure TestNilToolDefinition;
     procedure TestMissingDefinitionInputSchema;
     procedure TestNonObjectDefinitionInputSchema;
+    procedure TestMissingInputSchemaRoot;
+    procedure TestWrongInputSchemaRoot;
+    procedure TestNonObjectOutputSchema;
+    procedure TestWrongOutputSchemaRoot;
+    procedure TestValidInputAndOutputSchemaRoots;
     procedure TestDuplicateResource;
     procedure TestNilResourceReader;
     procedure TestNilResourceMethod;
@@ -116,6 +122,7 @@ type
     procedure TestNegativeCacheTtl;
     procedure TestInvalidCacheScope;
     procedure TestSchemaConsumedByRegistration;
+    procedure TestSameSchemaRejectedWithoutLeak;
     procedure TestPromptArgumentsBuildReuse;
     procedure TestPromptArgumentsAddReuse;
     procedure TestPromptArgumentsConsumedByRegistration;
@@ -1157,17 +1164,27 @@ end;
 
 procedure TResourceDispatch.TestReadHandlerRaises;
 var
+  ResponseLine: string;
   Response: TJSONObject;
 begin
   FServer.RegisterResource('mem://secret', 'secret', 'text/plain',
     SecretReader);
-  Response := Call('{"jsonrpc":"2.0","id":1,"method":"resources/read",' +
-    '"params":{"uri":"mem://secret",' + META_MODERN + '}}');
-  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
-    .ToBe(JSONRPC_INTERNAL_ERROR);
-  Expect<string>(TJSONData(Response.FindPath('error.message')).AsString)
-    .ToBe('Internal error: ' + SECRET_ERROR_DETAIL);
-  Response.Free;
+  Expect<Boolean>(FServer.HandleMessage(
+    '{"jsonrpc":"2.0","id":1,"method":"resources/read",' +
+    '"params":{"uri":"mem://secret",' + META_MODERN + '}}',
+    ResponseLine)).ToBe(True);
+  Expect<string>(ResponseLine).ToBe(
+    '{ "jsonrpc" : "2.0", "id" : 1, "error" : { "code" : -32603, ' +
+    '"message" : "Internal error: ' + SECRET_ERROR_DETAIL + '" } }');
+  Response := TJSONObject(GetJSON(ResponseLine));
+  try
+    Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+      .ToBe(JSONRPC_INTERNAL_ERROR);
+    Expect<string>(TJSONData(Response.FindPath('error.message')).AsString)
+      .ToBe('Internal error: ' + SECRET_ERROR_DETAIL);
+  finally
+    Response.Free;
+  end;
 end;
 
 procedure TResourceDispatch.TestReadHandlerRaisesRedacted;
@@ -1360,7 +1377,30 @@ begin
         ErrorMessage := E.Message;
     end;
     Expect<string>(ErrorMessage)
-      .ToBe('Typed tool "typed" requires a non-nil argument class');
+      .ToBe('Typed tool "typed" requires a non-nil input argument class');
+    Expect<Integer>(Server.ToolCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestNilTypedToolOutputClass;
+var
+  ErrorMessage: string;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    ErrorMessage := '';
+    try
+      Server.RegisterTool('typed-output', 'desc', TScaleArgs,
+        TMCPArgsClass(nil), ScaleHandler);
+    except
+      on E: EMCPServer do
+        ErrorMessage := E.Message;
+    end;
+    Expect<string>(ErrorMessage)
+      .ToBe('Typed tool "typed-output" requires a non-nil output argument class');
     Expect<Integer>(Server.ToolCount).ToBe(0);
   finally
     Server.Free;
@@ -1433,6 +1473,145 @@ begin
     end;
     Expect<Boolean>(Raised).ToBe(True);
     Expect<Integer>(Server.ToolCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestMissingInputSchemaRoot;
+var
+  Definition: TJSONObject;
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := False;
+    try
+      Server.RegisterTool('empty-root', 'desc', '{}', EchoHandler);
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+
+    Definition := TJSONObject.Create;
+    Definition.Add('name', 'empty-definition-root');
+    Definition.Add('inputSchema', GetJSON('{}'));
+    Raised := False;
+    try
+      Server.RegisterTool(Definition, EchoHandler);
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(Server.ToolCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestWrongInputSchemaRoot;
+var
+  Definition: TJSONObject;
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := False;
+    try
+      Server.RegisterTool('array-root', 'desc', '{"type":"array"}',
+        EchoHandler);
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+
+    Definition := TJSONObject.Create;
+    Definition.Add('name', 'array-definition-root');
+    Definition.Add('inputSchema', GetJSON('{"type":"array"}'));
+    Raised := False;
+    try
+      Server.RegisterTool(Definition, EchoHandler);
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(Server.ToolCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestNonObjectOutputSchema;
+var
+  Definition: TJSONObject;
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Definition := TJSONObject.Create;
+    Definition.Add('name', 'bad-output');
+    Definition.Add('inputSchema', GetJSON('{"type":"object"}'));
+    Definition.Add('outputSchema', 'not-an-object');
+    Raised := False;
+    try
+      Server.RegisterTool(Definition, EchoHandler);
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(Server.ToolCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestWrongOutputSchemaRoot;
+var
+  Definition: TJSONObject;
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Definition := TJSONObject.Create;
+    Definition.Add('name', 'array-output');
+    Definition.Add('inputSchema', GetJSON('{"type":"object"}'));
+    Definition.Add('outputSchema', GetJSON('{"type":"array"}'));
+    Raised := False;
+    try
+      Server.RegisterTool(Definition, EchoHandler);
+    except
+      on EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+    Expect<Integer>(Server.ToolCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestValidInputAndOutputSchemaRoots;
+var
+  Definition: TJSONObject;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Definition := TJSONObject.Create;
+    Definition.Add('name', 'valid-roots');
+    Definition.Add('inputSchema', GetJSON('{"type":"object"}'));
+    Definition.Add('outputSchema', GetJSON('{"type":"object"}'));
+    Server.RegisterTool(Definition, EchoHandler);
+    Expect<Integer>(Server.ToolCount).ToBe(1);
   finally
     Server.Free;
   end;
@@ -1754,6 +1933,30 @@ begin
   end;
 end;
 
+procedure TRegistrationGuards.TestSameSchemaRejectedWithoutLeak;
+var
+  Builder: TMCPSchema;
+  ErrorMessage: string;
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Builder := ObjectSchema.AddString('value');
+    ErrorMessage := '';
+    try
+      Server.RegisterTool('same-schema', 'desc', Builder, Builder,
+        EchoHandler);
+    except
+      on E: EMCPSchema do
+        ErrorMessage := E.Message;
+    end;
+    Expect<string>(ErrorMessage).ToBe('Schema was already built');
+    Expect<Integer>(Server.ToolCount).ToBe(0);
+  finally
+    Server.Free;
+  end;
+end;
+
 procedure TRegistrationGuards.TestPromptArgumentsBuildReuse;
 var
   Arguments: TMCPPromptArguments;
@@ -1861,11 +2064,18 @@ begin
   Test('nil typed-tool handler rejected', TestNilTypedToolHandler);
   Test('nil typed-tool method rejected', TestNilTypedToolMethod);
   Test('nil typed-tool argument class rejected', TestNilTypedToolClass);
+  Test('nil typed-tool output class rejected', TestNilTypedToolOutputClass);
   Test('nil tool definition rejected', TestNilToolDefinition);
   Test('missing definition inputSchema rejected',
     TestMissingDefinitionInputSchema);
   Test('non-object definition inputSchema rejected',
     TestNonObjectDefinitionInputSchema);
+  Test('inputSchema without root type rejected', TestMissingInputSchemaRoot);
+  Test('inputSchema array root rejected', TestWrongInputSchemaRoot);
+  Test('non-object outputSchema rejected', TestNonObjectOutputSchema);
+  Test('outputSchema array root rejected', TestWrongOutputSchemaRoot);
+  Test('object inputSchema and outputSchema accepted',
+    TestValidInputAndOutputSchemaRoots);
   Test('duplicate resource uri rejected', TestDuplicateResource);
   Test('nil resource reader rejected', TestNilResourceReader);
   Test('nil resource method rejected', TestNilResourceMethod);
@@ -1883,6 +2093,8 @@ begin
   Test('invalid cache scope rejected', TestInvalidCacheScope);
   Test('tool registration consumes schema builder',
     TestSchemaConsumedByRegistration);
+  Test('same input/output schema rejects reuse without leaking',
+    TestSameSchemaRejectedWithoutLeak);
   Test('prompt argument Build rejects reuse', TestPromptArgumentsBuildReuse);
   Test('prompt argument Add rejects reuse', TestPromptArgumentsAddReuse);
   Test('prompt registration consumes argument builder',
