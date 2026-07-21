@@ -13,10 +13,11 @@ unit MCP.Server;
 //
 // One instance holds the tool/resource registries and turns one
 // decoded JSON-RPC line into at most one response line via
-// HandleMessage — the whole protocol surface is testable without any
-// I/O, mirroring duetto's sans-I/O discipline. MCP.Transport.Stdio
-// (and a future MCP.Transport.HTTP) are thin byte-moving shells
-// around this.
+// HandleMessage — the whole protocol surface is testable without a
+// transport, mirroring duetto's sans-I/O discipline. Redacted escaped
+// exceptions add only the stderr diagnostic described below.
+// MCP.Transport.Stdio (and a future MCP.Transport.HTTP) are thin
+// byte-moving shells around this.
 //
 // v1 protocol surface:
 //   modern era (per-request _meta):
@@ -55,7 +56,13 @@ unit MCP.Server;
 // overloads are provided). A handler that raises becomes an isError
 // tool result carrying the exception message — execution errors belong
 // in-band where the model can read them; protocol errors stay JSON-RPC
-// errors.
+// errors. RedactErrorDetails preserves that verbose behavior by default;
+// when enabled, escaped exceptions carry only a stable generic message
+// and correlation reference on the wire, while the full detail is logged
+// to stderr under the same reference. Deliberate MCPErrorResult values
+// remain verbatim. The stderr/stdout split follows the transport spec
+// (verified 2026-07-21):
+// https://modelcontextprotocol.io/specification/draft/basic/transports/stdio
 
 {$I Shared.inc}
 
@@ -205,6 +212,7 @@ type
     FInstructions: string;
     FCacheTtlMs: Integer;
     FCacheScope: string;
+    FRedactErrorDetails: Boolean;
     FDualEra: Boolean;
     FSink: TMCPLineSink;
     FSinkData: Pointer;
@@ -223,6 +231,8 @@ type
 
     procedure SetCacheTtlMs(AValue: Integer);
     procedure SetCacheScope(const AValue: string);
+    function ExceptionClientMessage(const ASite, AVerbosePrefix,
+      ARedactedMessage: string; E: Exception): string;
     function ParseSchema(const ASchemaJson, AToolName: string): TJSONObject;
     function BuildToolDefinition(const AName, ADescription,
       AInputSchemaJson: string): TJSONObject;
@@ -288,6 +298,13 @@ type
     property CacheTtlMs: Integer read FCacheTtlMs write SetCacheTtlMs;
     property CacheScope: string read FCacheScope write SetCacheScope;
 
+    // False by default: escaped handler/dispatch exceptions retain the
+    // v1 in-band detail used by trusted local clients. True replaces
+    // exception details with a correlation reference and logs the full
+    // exception to stderr under that reference.
+    property RedactErrorDetails: Boolean read FRedactErrorDetails
+      write FRedactErrorDetails;
+
     // Dual-era mode (default True): answer the legacy initialize
     // handshake (2025-11-25 and earlier) alongside stateless
     // 2026-07-28 requests — today's clients (Claude Code, Claude
@@ -302,8 +319,9 @@ type
     function OversizedLineResponse(AMaxLineLength: Integer): string;
 
     // Transport registration for server-to-client notification lines.
-    // Without a sink, MCPReportProgress/MCPLogMessage are no-ops —
-    // HandleMessage stays a pure line-in/line-out function.
+    // Without a sink, MCPReportProgress/MCPLogMessage are no-ops.
+    // HandleMessage otherwise stays line-in/line-out; redacted escaped
+    // exceptions additionally write their correlated detail to stderr.
     procedure SetLineSink(ASink: TMCPLineSink; AUserData: Pointer);
 
     // AInputSchemaJson is parsed at registration and raises EMCPServer
@@ -443,6 +461,15 @@ procedure MCPLogMessage(const ACtx: TMCPRequestContext;
   const ALevel, AData: string; const ALogger: string = '');
 
 implementation
+
+var
+  ErrorSequence: QWord = 0;
+
+function NextErrorReference: string;
+begin
+  Inc(ErrorSequence);
+  Result := 'mcp-err-' + UIntToStr(ErrorSequence);
+end;
 
 { ───────── prompt builders ───────── }
 
@@ -816,6 +843,7 @@ begin
   FVersion := AVersion;
   FCacheTtlMs := 300000;
   FCacheScope := CACHE_SCOPE_PRIVATE;
+  FRedactErrorDetails := False;
   FDualEra := True;
 end;
 
@@ -834,6 +862,20 @@ begin
       'CacheScope must be "%s" or "%s"',
       [CACHE_SCOPE_PRIVATE, CACHE_SCOPE_PUBLIC]);
   FCacheScope := AValue;
+end;
+
+function TMCPServer.ExceptionClientMessage(const ASite, AVerbosePrefix,
+  ARedactedMessage: string; E: Exception): string;
+var
+  ErrorReference: string;
+begin
+  if not FRedactErrorDetails then
+    Exit(AVerbosePrefix + E.Message);
+  ErrorReference := NextErrorReference;
+  Write(ErrOutput, ErrorReference, ' ', ASite, ': ', E.ClassName, ': ',
+    E.Message, #10);
+  Flush(ErrOutput);
+  Result := ARedactedMessage + ' (ref ' + ErrorReference + ')';
 end;
 
 destructor TMCPServer.Destroy;
@@ -1582,7 +1624,9 @@ begin
           except
             on E: Exception do
               AResponse := BuildErrorResponse(Msg.Id,
-                JSONRPC_INTERNAL_ERROR, 'Internal error: ' + E.Message);
+                JSONRPC_INTERNAL_ERROR,
+                ExceptionClientMessage('dispatch/' + Msg.Method,
+                  'Internal error: ', 'Internal error', E));
           end;
           Result := True;
         end;
@@ -1937,7 +1981,9 @@ begin
       // can read them and self-correct; only dispatch-level faults are
       // JSON-RPC errors.
       on E: Exception do
-        ToolResult := MCPErrorResult('Tool execution failed: ' + E.Message);
+        ToolResult := MCPErrorResult(ExceptionClientMessage(
+          'tools/call handler', 'Tool execution failed: ',
+          'Tool execution failed', E));
     end;
   finally
     OwnedEmpty.Free;
@@ -2150,7 +2196,8 @@ begin
     except
       on E: Exception do
         Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
-          'Prompt handler failed: ' + E.Message));
+          ExceptionClientMessage('prompts/get handler',
+            'Prompt handler failed: ', 'Prompt handler failed', E)));
     end;
     if Messages = nil then
       Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,

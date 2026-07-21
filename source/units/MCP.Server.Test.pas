@@ -28,6 +28,7 @@ const
   META_MODERN =
     '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
     '"io.modelcontextprotocol/clientCapabilities":{}}';
+  SECRET_ERROR_DETAIL = 'käputt — Pfad /tmp/geheim';
 
 type
   TDispatchSuite = class(TTestSuite)
@@ -58,11 +59,14 @@ type
     procedure TestCallStructured;
     procedure TestCallDefaultArguments;
     procedure TestCallHandlerRaises;
+    procedure TestCallHandlerRaisesRedacted;
+    procedure TestDeliberateErrorNotRedacted;
     procedure TestCallUnknown;
     procedure TestCallBadName;
     procedure TestTypedArgsBound;
     procedure TestTypedArgsMissing;
     procedure TestTypedArgsMistyped;
+    procedure TestTypedArgsMistypedNotRedacted;
     procedure TestTypedArgsSchemaDerived;
     procedure TestTypedArgsDefaultSeeded;
     procedure TestTypedArgsDefaultOverridden;
@@ -79,6 +83,8 @@ type
     procedure TestReadStatic;
     procedure TestReadDynamic;
     procedure TestReadNotFound;
+    procedure TestReadHandlerRaises;
+    procedure TestReadHandlerRaisesRedacted;
   end;
 
   TRegistrationGuards = class(TTestSuite)
@@ -170,6 +176,7 @@ type
     procedure TestGetUnknown;
     procedure TestGetMissingRequired;
     procedure TestGetHandlerRaises;
+    procedure TestGetHandlerRaisesRedacted;
     procedure TestLegacyDialect;
   end;
 
@@ -221,6 +228,12 @@ function BoomHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
   raise Exception.Create('boom');
+end;
+
+function DeliberateErrorHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPErrorResult('correctable detail');
 end;
 
 // Mirrors the request context so era plumbing is handler-observable.
@@ -345,6 +358,12 @@ begin
   Result := MCPTextContents(AUri, 'text/plain', 'tick');
 end;
 
+function SecretReader(const AUri: string;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  raise Exception.Create(SECRET_ERROR_DETAIL);
+end;
+
 function ReviewPromptHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TJSONArray;
 begin
@@ -379,6 +398,16 @@ end;
 procedure CaptureSink(const ALine: string; AUserData: Pointer);
 begin
   TStringList(AUserData).Add(ALine);
+end;
+
+procedure ExpectRedactedExceptionMessage(const AMessage, AGenericMessage,
+  ASecret: string);
+begin
+  Expect<Boolean>(Pos(AGenericMessage + ' (ref mcp-err-', AMessage) = 1)
+    .ToBe(True);
+  Expect<Boolean>((AMessage <> '') and
+    (AMessage[Length(AMessage)] = ')')).ToBe(True);
+  Expect<Boolean>(Pos(ASecret, AMessage) = 0).ToBe(True);
 end;
 
 function PairReader(const AUri: string; AVars: TJSONObject;
@@ -673,6 +702,47 @@ begin
   Response.Free;
 end;
 
+procedure TToolDispatch.TestCallHandlerRaisesRedacted;
+var
+  FirstMessage, SecondMessage: string;
+  Response: TJSONObject;
+begin
+  FServer.RedactErrorDetails := True;
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"boom",' + META_MODERN + '}}');
+  FirstMessage := TJSONData(
+    Response.FindPath('result.content[0].text')).AsString;
+  ExpectRedactedExceptionMessage(FirstMessage, 'Tool execution failed',
+    'boom');
+  Response.Free;
+
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"boom",' + META_MODERN + '}}');
+  SecondMessage := TJSONData(
+    Response.FindPath('result.content[0].text')).AsString;
+  ExpectRedactedExceptionMessage(SecondMessage, 'Tool execution failed',
+    'boom');
+  Expect<Boolean>(FirstMessage <> SecondMessage).ToBe(True);
+  Response.Free;
+end;
+
+procedure TToolDispatch.TestDeliberateErrorNotRedacted;
+var
+  Response: TJSONObject;
+begin
+  FServer.RegisterTool('expected-error', 'Returns an expected error',
+    '{"type":"object"}', DeliberateErrorHandler);
+  FServer.RedactErrorDetails := True;
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"expected-error",' + META_MODERN + '}}');
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('correctable detail');
+  Response.Free;
+end;
+
 procedure TToolDispatch.TestCallUnknown;
 var
   Response: TJSONObject;
@@ -739,6 +809,22 @@ begin
   Response.Free;
 end;
 
+procedure TToolDispatch.TestTypedArgsMistypedNotRedacted;
+var
+  Response: TJSONObject;
+begin
+  FServer.RedactErrorDetails := True;
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"scale","arguments":{"value":2.5,' +
+    '"times":"four"},' + META_MODERN + '}}');
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Argument "times" must be an integer');
+  Response.Free;
+end;
+
 procedure TToolDispatch.TestTypedArgsSchemaDerived;
 var
   Response: TJSONObject;
@@ -766,11 +852,17 @@ begin
   Test('tools/call: structured content', TestCallStructured);
   Test('tools/call: absent arguments become {}', TestCallDefaultArguments);
   Test('tools/call: handler exception → isError', TestCallHandlerRaises);
+  Test('tools/call: handler exception redacted with unique reference',
+    TestCallHandlerRaisesRedacted);
+  Test('tools/call: deliberate isError survives redaction',
+    TestDeliberateErrorNotRedacted);
   Test('tools/call: unknown tool → -32602', TestCallUnknown);
   Test('tools/call: non-string name → -32602', TestCallBadName);
   Test('typed args: bound and populated', TestTypedArgsBound);
   Test('typed args: missing argument → isError', TestTypedArgsMissing);
   Test('typed args: mistyped argument → isError', TestTypedArgsMistyped);
+  Test('typed args: binding error survives redaction',
+    TestTypedArgsMistypedNotRedacted);
   Test('typed args: schema derived from the class',
     TestTypedArgsSchemaDerived);
   Test('typed args: default directive seeds missing argument',
@@ -1042,12 +1134,60 @@ begin
   Response.Free;
 end;
 
+procedure TResourceDispatch.TestReadHandlerRaises;
+var
+  Response: TJSONObject;
+begin
+  FServer.RegisterResource('mem://secret', 'secret', 'text/plain',
+    SecretReader);
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"resources/read",' +
+    '"params":{"uri":"mem://secret",' + META_MODERN + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INTERNAL_ERROR);
+  Expect<string>(TJSONData(Response.FindPath('error.message')).AsString)
+    .ToBe('Internal error: ' + SECRET_ERROR_DETAIL);
+  Response.Free;
+end;
+
+procedure TResourceDispatch.TestReadHandlerRaisesRedacted;
+var
+  ClientMessage, ResponseLine: string;
+  Response: TJSONObject;
+begin
+  FServer.RegisterResource('mem://secret', 'secret', 'text/plain',
+    SecretReader);
+  FServer.RedactErrorDetails := True;
+  Expect<Boolean>(FServer.HandleMessage(
+    '{"jsonrpc":"2.0","id":1,"method":"resources/read",' +
+    '"params":{"uri":"mem://secret",' + META_MODERN + '}}',
+    ResponseLine)).ToBe(True);
+  Response := TJSONObject(GetJSON(ResponseLine));
+  try
+    Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+      .ToBe(JSONRPC_INTERNAL_ERROR);
+    ClientMessage := TJSONData(Response.FindPath('error.message')).AsString;
+    ExpectRedactedExceptionMessage(ClientMessage, 'Internal error',
+      SECRET_ERROR_DETAIL);
+    Expect<string>(ResponseLine).ToBe(
+      '{ "jsonrpc" : "2.0", "id" : 1, "error" : { "code" : -32603, ' +
+      '"message" : "' + ClientMessage + '" } }');
+    Expect<Boolean>(Pos(SECRET_ERROR_DETAIL, ResponseLine) = 0).ToBe(True);
+    Expect<Boolean>(Pos('/tmp/geheim', ResponseLine) = 0).ToBe(True);
+  finally
+    Response.Free;
+  end;
+end;
+
 procedure TResourceDispatch.SetupTests;
 begin
   Test('resources/list: all resources', TestList);
   Test('resources/read: static text', TestReadStatic);
   Test('resources/read: dynamic reader', TestReadDynamic);
   Test('resources/read: not found → -32602 + data.uri', TestReadNotFound);
+  Test('resources/read: reader exception verbose by default',
+    TestReadHandlerRaises);
+  Test('resources/read: reader exception redacted on encoded wire',
+    TestReadHandlerRaisesRedacted);
 end;
 
 { ───────── registration guards ───────── }
@@ -2256,6 +2396,24 @@ begin
     '"params":{"name":"promptboom",' + META_MODERN + '}}');
   Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
     .ToBe(JSONRPC_INTERNAL_ERROR);
+  Expect<string>(TJSONData(Response.FindPath('error.message')).AsString)
+    .ToBe('Prompt handler failed: prompt boom');
+  Response.Free;
+end;
+
+procedure TPromptDispatch.TestGetHandlerRaisesRedacted;
+var
+  ClientMessage: string;
+  Response: TJSONObject;
+begin
+  FServer.RedactErrorDetails := True;
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"prompts/get",' +
+    '"params":{"name":"promptboom",' + META_MODERN + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INTERNAL_ERROR);
+  ClientMessage := TJSONData(Response.FindPath('error.message')).AsString;
+  ExpectRedactedExceptionMessage(ClientMessage, 'Prompt handler failed',
+    'prompt boom');
   Response.Free;
 end;
 
@@ -2288,6 +2446,8 @@ begin
   Test('prompts/get: missing required argument → -32602',
     TestGetMissingRequired);
   Test('prompts/get: handler exception → -32603', TestGetHandlerRaises);
+  Test('prompts/get: handler exception redacted',
+    TestGetHandlerRaisesRedacted);
   Test('prompts served in the legacy dialect', TestLegacyDialect);
 end;
 
