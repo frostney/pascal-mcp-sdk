@@ -181,6 +181,62 @@ jobs:
           fpc @lwpt.cfg -FEbuild-nolwpt source/apps/mcpdemo.pas
           test -x build-nolwpt/mcpdemo
 
+  # Official TS clients (v2 RC beta + v1 SDK) driven against mcpdemo
+  # over real stdio pipes. Advisory while the RC client is in beta:
+  # the pins + lockfile keep unrelated PRs stable, but every deliberate
+  # SDK bump can shift the beta contract, so failures here must not
+  # gate merges. continue-on-error lets the workflow pass while the
+  # job shows red; that holds only while branch protection does not
+  # list `interop` as a required check. Required-ness is bundled with
+  # the post-final-spec pass (#3).
+  interop:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install FPC (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fpc
+          fpc -iV
+
+      - name: Install lwpt (release binary, checksum-verified)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          ASSET="lwpt-${LWPT_VERSION}-linux-x64"
+          BASE="https://github.com/frostney/lwpt/releases/download/${LWPT_VERSION}"
+          curl -fsSLO "${BASE}/${ASSET}.tar.gz"
+          curl -fsSLO "${BASE}/lwpt-${LWPT_VERSION}-checksums.txt"
+          sha256sum -c <(grep "${ASSET}.tar.gz" "lwpt-${LWPT_VERSION}-checksums.txt")
+          tar xzf "${ASSET}.tar.gz"
+          echo "$RUNNER_TEMP/${ASSET}" >> "$GITHUB_PATH"
+
+      - name: lwpt install --frozen (verify lockfile + committed modules)
+        run: lwpt install --frozen
+
+      - name: lwpt build (mcpdemo)
+        run: lwpt build
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: tools/interop-ts/package-lock.json
+
+      - name: interop batteries (pinned SDKs vs mcpdemo)
+        working-directory: tools/interop-ts
+        run: |
+          npm ci
+          npm run interop
+
   docs:
     runs-on: ubuntu-latest
     steps:
