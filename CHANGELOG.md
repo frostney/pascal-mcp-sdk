@@ -1,6 +1,16 @@
 # Changelog
 
 All notable changes to pascal-mcp-sdk are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); entries are generated from Conventional Commits by git-cliff.
+## [1.2.0] - 2026-07-21
+
+### Internal
+
+- run the tools/interop-ts batteries as a non-blocking PR job (#32)
+
+### New Features
+
+- v1.2.0 concurrent core — state split into three lifetimes, cooperative cancellation (#34)
+
 ## [1.1.0] - 2026-07-21
 
 ### New Features
