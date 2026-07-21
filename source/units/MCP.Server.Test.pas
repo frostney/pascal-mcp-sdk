@@ -185,6 +185,8 @@ type
   private
     FLines: TStringList;
     procedure InitializeLegacy;
+    procedure ExpectCancellationSuppressed(const ARequestId,
+      ACancellationId: string);
   protected
     procedure BeforeEach; override;
     procedure AfterEach; override;
@@ -193,6 +195,11 @@ type
     procedure TestNormalRequestProbeFalse;
     procedure TestCancelledResponseSuppressed;
     procedure TestCancelledNotificationsSuppressed;
+    procedure TestFloatRequestCancelledByInteger;
+    procedure TestIntegerRequestCancelledByFloat;
+    procedure TestLargeIntegerMatchingPreservesPrecision;
+    procedure TestMalformedReasonIgnored;
+    procedure TestStringReasonAccepted;
     procedure TestModernUnknownAndMalformedIgnored;
     procedure TestLegacyFinishedAndRepeatedIgnored;
   end;
@@ -231,6 +238,7 @@ type
     procedure TestDoubleInitializeRejected;
     procedure TestInitializedBeforeInitializeIgnored;
     procedure TestFailedInitializeDoesNotAdvance;
+    procedure TestInitializeCancellationIgnored;
     procedure TestLegacyToolCall;
     procedure TestParamslessToolCall;
     procedure TestParamslessResourceRead;
@@ -260,12 +268,25 @@ type
     procedure TestIndependentLegacyNegotiation;
     procedure TestIndependentNotificationSinks;
     procedure TestLifecycleIsolation;
+    procedure TestForeignSessionRejected;
+    procedure TestNilSessionRejected;
+  end;
+
+  TWireEncoding = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestModernToolsListLine;
+    procedure TestLegacyInitializeLine;
+    procedure TestProgressNotificationLine;
   end;
 
 { ───────── handlers under test ───────── }
 
 var
+  CancellationServer: TMCPServer;
   CancellationSession: TMCPSession;
+  CancellationTargetJson: string;
+  CancellationNotificationLine: string;
   CancellationObserved: Boolean;
   CancellationProbePresent: Boolean;
 
@@ -476,9 +497,7 @@ function SelfCancellingHandler(AArguments: TJSONObject;
 var
   RequestId: TJSONData;
 begin
-  // Parse the cancellation id from its escaped wire form while the
-  // active request uses raw UTF-8, pinning semantic string matching.
-  RequestId := GetJSON('"r\u00e9q-42"');
+  RequestId := GetJSON(CancellationTargetJson);
   try
     CancellationSession.CancelRequest(RequestId);
     // Repeated signals are idempotent while the request is active.
@@ -497,6 +516,17 @@ begin
   MCPReportProgress(ACtx, 0.5, 1.0, 'must be suppressed');
   MCPLogMessage(ACtx, 'info', 'must also be suppressed');
   Result := MCPTextResult('must not be emitted');
+end;
+
+function NotificationCancellingHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Response: string;
+begin
+  CancellationServer.HandleMessage(CancellationSession,
+    CancellationNotificationLine, Response);
+  CancellationObserved := ACtx.IsCancelled;
+  Result := MCPTextResult('notification processed');
 end;
 
 procedure CaptureSink(const ALine: string; AUserData: Pointer);
@@ -2124,7 +2154,7 @@ end;
 
 procedure TRegistrationGuards.TestRegistryFrozenAfterSessionCreation;
 const
-  FROZEN_MESSAGE = 'Server registries are frozen after serving starts';
+  FROZEN_MESSAGE = 'Server configuration is frozen after session creation';
 var
   ErrorMessage: string;
   Options: TMCPToolOptions;
@@ -2139,6 +2169,11 @@ var
 begin
   Server := TMCPServer.Create('t', '1');
   try
+    Server.Instructions := 'frozen instructions';
+    Server.CacheTtlMs := 1234;
+    Server.CacheScope := CACHE_SCOPE_PUBLIC;
+    Server.RedactErrorDetails := True;
+    Server.DualEra := False;
     Options := Server.RegisterTool('first', 'desc', '{"type":"object"}',
       EchoHandler);
     Session := Server.CreateSession;
@@ -2191,9 +2226,59 @@ begin
       end;
       ExpectFrozen;
 
+      ErrorMessage := '';
+      try
+        Server.Instructions := 'too late';
+      except
+        on E: EMCPServer do
+          ErrorMessage := E.Message;
+      end;
+      ExpectFrozen;
+
+      ErrorMessage := '';
+      try
+        Server.CacheTtlMs := 9;
+      except
+        on E: EMCPServer do
+          ErrorMessage := E.Message;
+      end;
+      ExpectFrozen;
+
+      ErrorMessage := '';
+      try
+        Server.CacheScope := CACHE_SCOPE_PRIVATE;
+      except
+        on E: EMCPServer do
+          ErrorMessage := E.Message;
+      end;
+      ExpectFrozen;
+
+      ErrorMessage := '';
+      try
+        Server.RedactErrorDetails := False;
+      except
+        on E: EMCPServer do
+          ErrorMessage := E.Message;
+      end;
+      ExpectFrozen;
+
+      ErrorMessage := '';
+      try
+        Server.DualEra := True;
+      except
+        on E: EMCPServer do
+          ErrorMessage := E.Message;
+      end;
+      ExpectFrozen;
+
       Expect<Integer>(Server.ToolCount).ToBe(1);
       Expect<Integer>(Server.ResourceCount).ToBe(0);
       Expect<Integer>(Server.PromptCount).ToBe(0);
+      Expect<string>(Server.Instructions).ToBe('frozen instructions');
+      Expect<Integer>(Server.CacheTtlMs).ToBe(1234);
+      Expect<string>(Server.CacheScope).ToBe(CACHE_SCOPE_PUBLIC);
+      Expect<Boolean>(Server.RedactErrorDetails).ToBe(True);
+      Expect<Boolean>(Server.DualEra).ToBe(False);
     finally
       Session.Free;
     end;
@@ -2282,7 +2367,7 @@ begin
   Test('prompt argument Add rejects reuse', TestPromptArgumentsAddReuse);
   Test('prompt registration consumes argument builder',
     TestPromptArgumentsConsumedByRegistration);
-  Test('session creation freezes every registry mutation path',
+  Test('session creation freezes registries and request configuration',
     TestRegistryFrozenAfterSessionCreation);
   Test('empty resource template rejected', TestEmptyResourceTemplate);
   Test('empty template variable rejected', TestEmptyTemplateVariable);
@@ -2733,20 +2818,40 @@ begin
     '{"type":"object"}', CancellationAwareHandler);
   FServer.RegisterTool('self-cancel', 'Cancels its own request',
     '{"type":"object"}', SelfCancellingHandler);
+  FServer.RegisterTool('notification-cancel', 'Receives cancellation',
+    '{"type":"object"}', NotificationCancellingHandler);
   FLines := TStringList.Create;
   FLineSink := CaptureSink;
   FLineSinkData := FLines;
   FSession := FServer.CreateSession;
+  CancellationServer := FServer;
   CancellationSession := FSession;
+  CancellationTargetJson := '"r\u00e9q-42"';
+  CancellationNotificationLine := '';
   CancellationObserved := False;
   CancellationProbePresent := False;
 end;
 
 procedure TCancellationDispatch.AfterEach;
 begin
+  CancellationServer := nil;
   CancellationSession := nil;
   FreeAndNil(FLines);
   inherited AfterEach;
+end;
+
+procedure TCancellationDispatch.ExpectCancellationSuppressed(
+  const ARequestId, ACancellationId: string);
+var
+  ResponseLine: string;
+begin
+  CancellationTargetJson := ACancellationId;
+  Expect<Boolean>(Dispatch(
+    '{"jsonrpc":"2.0","id":' + ARequestId + ',' +
+    '"method":"tools/call","params":{"name":"self-cancel",' +
+    META_MODERN + '}}', ResponseLine)).ToBe(False);
+  Expect<string>(ResponseLine).ToBe('');
+  Expect<Boolean>(CancellationObserved).ToBe(True);
 end;
 
 procedure TCancellationDispatch.InitializeLegacy;
@@ -2809,6 +2914,62 @@ begin
   Expect<Integer>(FLines.Count).ToBe(0);
 end;
 
+procedure TCancellationDispatch.TestFloatRequestCancelledByInteger;
+begin
+  ExpectCancellationSuppressed('1.0', '1');
+end;
+
+procedure TCancellationDispatch.TestIntegerRequestCancelledByFloat;
+begin
+  ExpectCancellationSuppressed('1', '1.0');
+end;
+
+procedure TCancellationDispatch.TestLargeIntegerMatchingPreservesPrecision;
+var
+  ResponseLine: string;
+begin
+  CancellationTargetJson := '9007199254740992';
+  Expect<Boolean>(Dispatch(
+    '{"jsonrpc":"2.0","id":9007199254740993,' +
+    '"method":"tools/call","params":{"name":"self-cancel",' +
+    META_MODERN + '}}', ResponseLine)).ToBe(True);
+  Expect<Boolean>(ResponseLine <> '').ToBe(True);
+  Expect<Boolean>(CancellationObserved).ToBe(False);
+
+  ExpectCancellationSuppressed('9007199254740993',
+    '9007199254740993');
+end;
+
+procedure TCancellationDispatch.TestMalformedReasonIgnored;
+var
+  ResponseLine: string;
+begin
+  CancellationNotificationLine :=
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+    '"params":{"requestId":77,"reason":false}}';
+  Expect<Boolean>(Dispatch(
+    '{"jsonrpc":"2.0","id":77,"method":"tools/call",' +
+    '"params":{"name":"notification-cancel",' + META_MODERN + '}}',
+    ResponseLine)).ToBe(True);
+  Expect<Boolean>(ResponseLine <> '').ToBe(True);
+  Expect<Boolean>(CancellationObserved).ToBe(False);
+end;
+
+procedure TCancellationDispatch.TestStringReasonAccepted;
+var
+  ResponseLine: string;
+begin
+  CancellationNotificationLine :=
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+    '"params":{"requestId":78,"reason":"stop\r\nnow"}}';
+  Expect<Boolean>(Dispatch(
+    '{"jsonrpc":"2.0","id":78,"method":"tools/call",' +
+    '"params":{"name":"notification-cancel",' + META_MODERN + '}}',
+    ResponseLine)).ToBe(False);
+  Expect<string>(ResponseLine).ToBe('');
+  Expect<Boolean>(CancellationObserved).ToBe(True);
+end;
+
 procedure TCancellationDispatch.TestModernUnknownAndMalformedIgnored;
 var
   Response: TJSONObject;
@@ -2866,6 +3027,16 @@ begin
     TestCancelledResponseSuppressed);
   Test('accepted cancellation suppresses progress and log notifications',
     TestCancelledNotificationsSuppressed);
+  Test('numeric id 1.0 is cancelled by id 1',
+    TestFloatRequestCancelledByInteger);
+  Test('numeric id 1 is cancelled by id 1.0',
+    TestIntegerRequestCancelledByFloat);
+  Test('large integer ids retain Int64 matching precision',
+    TestLargeIntegerMatchingPreservesPrecision);
+  Test('non-string cancellation reason ignores the whole notification',
+    TestMalformedReasonIgnored);
+  Test('string cancellation reason is accepted',
+    TestStringReasonAccepted);
   Test('modern unknown and malformed cancellations are ignored',
     TestModernUnknownAndMalformedIgnored);
   Test('legacy finished and repeated cancellations are ignored',
@@ -3279,6 +3450,36 @@ begin
   Response.Free;
 end;
 
+procedure TLegacyEra.TestInitializeCancellationIgnored;
+var
+  RequestId: TJSONData;
+  Response: TJSONObject;
+begin
+  RequestId := GetJSON('55');
+  try
+    // The session cancellation entry point cannot arm a future initialize.
+    FSession := FServer.CreateSession;
+    FSession.CancelRequest(RequestId);
+    Response := Call(
+      '{"jsonrpc":"2.0","id":55,"method":"initialize",' +
+      '"params":{"protocolVersion":"2025-11-25",' +
+      '"capabilities":{},"clientInfo":{' +
+      '"name":"legacy-client","version":"1.2.3"}}}');
+    Expect<Boolean>(Response.Find('result') <> nil).ToBe(True);
+    Response.Free;
+    FSession.CancelRequest(RequestId);
+    SendNotification(
+      '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+    Response := Call(
+      '{"jsonrpc":"2.0","id":56,"method":"tools/list",' +
+      '"params":{}}');
+    Expect<Boolean>(Response.FindPath('result.tools') <> nil).ToBe(True);
+    Response.Free;
+  finally
+    RequestId.Free;
+  end;
+end;
+
 procedure TLegacyEra.TestLegacyToolCall;
 var
   Response: TJSONObject;
@@ -3411,6 +3612,8 @@ begin
     TestInitializedBeforeInitializeIgnored);
   Test('failed initialize leaves legacy session new',
     TestFailedInitializeDoesNotAdvance);
+  Test('initialize ignores cancellation and lifecycle reaches ready',
+    TestInitializeCancellationIgnored);
   Test('legacy tools/call after handshake', TestLegacyToolCall);
   Test('legacy tools/call without params → -32602', TestParamslessToolCall);
   Test('legacy resources/read without params → -32602',
@@ -3456,6 +3659,7 @@ begin
   if not FServer.HandleMessage(ASession, ALine, ASink, ASinkData,
     Response) then
     Fail('expected a response, got none');
+  // The returned object is owned by the caller.
   Result := TJSONObject(GetJSON(Response));
 end;
 
@@ -3603,6 +3807,50 @@ begin
   Response.Free;
 end;
 
+procedure TSessionIsolation.TestForeignSessionRejected;
+var
+  ErrorMessage, Response: string;
+  ForeignServer: TMCPServer;
+  ForeignSession: TMCPSession;
+begin
+  ForeignServer := TMCPServer.Create('foreign', '1');
+  try
+    ForeignSession := ForeignServer.CreateSession;
+    try
+      ErrorMessage := '';
+      try
+        FServer.HandleMessage(ForeignSession,
+          '{"jsonrpc":"2.0","id":1,"method":"tools/list",' +
+          '"params":{' + META_MODERN + '}}', Response);
+      except
+        on E: EMCPServer do
+          ErrorMessage := E.Message;
+      end;
+      Expect<string>(ErrorMessage).ToBe('Session belongs to another server');
+    finally
+      ForeignSession.Free;
+    end;
+  finally
+    ForeignServer.Free;
+  end;
+end;
+
+procedure TSessionIsolation.TestNilSessionRejected;
+var
+  ErrorMessage, Response: string;
+begin
+  ErrorMessage := '';
+  try
+    FServer.HandleMessage(nil,
+      '{"jsonrpc":"2.0","id":1,"method":"tools/list",' +
+      '"params":{' + META_MODERN + '}}', Response);
+  except
+    on E: EMCPServer do
+      ErrorMessage := E.Message;
+  end;
+  Expect<string>(ErrorMessage).ToBe('Session must not be nil');
+end;
+
 procedure TSessionIsolation.SetupTests;
 begin
   Test('legacy negotiation and re-initialize are session-local',
@@ -3611,6 +3859,117 @@ begin
     TestIndependentNotificationSinks);
   Test('legacy lifecycle transitions are session-local',
     TestLifecycleIsolation);
+  Test('session from another server raises EMCPServer',
+    TestForeignSessionRejected);
+  Test('nil session raises EMCPServer', TestNilSessionRejected);
+end;
+
+{ ───────── byte-exact wire compatibility ───────── }
+
+procedure TWireEncoding.TestModernToolsListLine;
+var
+  Response: string;
+  Server: TMCPServer;
+  Session: TMCPSession;
+begin
+  Server := TMCPServer.Create('wire-server', '1.0');
+  try
+    Session := Server.CreateSession;
+    try
+      Expect<Boolean>(Server.HandleMessage(Session,
+        '{"jsonrpc":"2.0","id":1,"method":"tools/list",' +
+        '"params":{' + META_MODERN + '}}', Response)).ToBe(True);
+      Expect<string>(Response).ToBe(
+        '{ "jsonrpc" : "2.0", "id" : 1, "result" : { "tools" : [], ' +
+        '"ttlMs" : 300000, "cacheScope" : "private", ' +
+        '"resultType" : "complete", "_meta" : { ' +
+        '"io.modelcontextprotocol/serverInfo" : { ' +
+        '"name" : "wire-server", "version" : "1.0" } } } }');
+    finally
+      Session.Free;
+    end;
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TWireEncoding.TestLegacyInitializeLine;
+var
+  Response: string;
+  Server: TMCPServer;
+  Session: TMCPSession;
+begin
+  Server := TMCPServer.Create('wire-server', '1.0');
+  try
+    Session := Server.CreateSession;
+    try
+      Expect<Boolean>(Server.HandleMessage(Session,
+        '{"jsonrpc":"2.0","id":2,"method":"initialize",' +
+        '"params":{"protocolVersion":"2025-11-25",' +
+        '"capabilities":{},"clientInfo":{' +
+        '"name":"wire-client","version":"1.0"}}}', Response)).ToBe(True);
+      Expect<string>(Response).ToBe(
+        '{ "jsonrpc" : "2.0", "id" : 2, "result" : { ' +
+        '"protocolVersion" : "2025-11-25", "capabilities" : { ' +
+        '"tools" : {}, "resources" : {}, "prompts" : {} }, ' +
+        '"serverInfo" : { "name" : "wire-server", ' +
+        '"version" : "1.0" } } }');
+    finally
+      Session.Free;
+    end;
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TWireEncoding.TestProgressNotificationLine;
+var
+  Lines: TStringList;
+  Response: string;
+  Server: TMCPServer;
+  Session: TMCPSession;
+begin
+  Server := TMCPServer.Create('wire-server', '1.0');
+  try
+    Server.RegisterTool('noisy', 'Emits notifications',
+      '{"type":"object"}', NoisyHandler);
+    Session := Server.CreateSession;
+    try
+      Lines := TStringList.Create;
+      try
+        Expect<Boolean>(Server.HandleMessage(Session,
+          '{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+          '"params":{"name":"noisy","_meta":{' +
+          '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+          '"io.modelcontextprotocol/clientCapabilities":{},' +
+          '"progressToken":"wire-token"}}}', CaptureSink, Lines,
+          Response)).ToBe(True);
+        Expect<Integer>(Lines.Count).ToBe(1);
+        Expect<string>(Lines[0]).ToBe(
+          '{ "jsonrpc" : "2.0", "method" : "notifications/progress", ' +
+          '"params" : { "progressToken" : "wire-token", ' +
+          '"progress" : 2.5000000000000000E-001, ' +
+          '"total" : 1.0000000000000000E+000, ' +
+          '"message" : "working" } }');
+      finally
+        Lines.Free;
+      end;
+    finally
+      Session.Free;
+    end;
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TWireEncoding.SetupTests;
+begin
+  Test('modern tools/list response line is byte-exact',
+    TestModernToolsListLine);
+  Test('legacy initialize response line is byte-exact',
+    TestLegacyInitializeLine);
+  Test('progress notification line is byte-exact',
+    TestProgressNotificationLine);
 end;
 
 begin
@@ -3630,5 +3989,7 @@ begin
   TestRunnerProgram.AddSuite(TLegacyEra.Create('Server: legacy era'));
   TestRunnerProgram.AddSuite(
     TSessionIsolation.Create('Server: shared-core session isolation'));
+  TestRunnerProgram.AddSuite(
+    TWireEncoding.Create('Server: byte-exact wire compatibility'));
   TestRunnerProgram.Run;
 end.

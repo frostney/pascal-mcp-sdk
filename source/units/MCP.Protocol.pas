@@ -91,6 +91,9 @@ type
   // injection. Nil means the request cannot currently be cancelled.
   TMCPCancellationProbe = function: Boolean of object;
 
+  // Call-scoped handler context. The record and its object-bound
+  // Notifier/CancellationProbe callbacks are valid only for the duration
+  // of the synchronous handler invocation and must not be retained.
   TMCPRequestContext = record
     ProtocolVersion: string;
     ClientName: string;          // '' when clientInfo absent
