@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to pascal-mcp-sdk are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); entries are generated from Conventional Commits by git-cliff.
+## [1.1.0] - 2026-07-21
+
+### New Features
+
+- v1.1.0 hardened contracts — registration guards, disclosure flag, lifecycle state machine (#30)
+
 ## [1.0.1] - 2026-07-20
 
 ### Bug Fixes
