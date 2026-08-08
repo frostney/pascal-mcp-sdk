@@ -83,16 +83,32 @@ type
 
   TMCPArgsClass = class of TMCPArgs;
 
-  // Record copies share the underlying JSON objects, so chaining and
-  // reassigning both mutate the same schema-in-progress. Build is
-  // called exactly once per schema (the registration overloads own
-  // that call); a schema that is never built leaks its objects, so
-  // build what you create.
-  TMCPSchema = record
+  // Heap-allocated builder state shared by every record copy of
+  // TMCPSchema (issue #29): FPC 3.2.2 records have no copy hook, so
+  // per-record fields cannot make `B := A; A.Build` visible through B.
+  // The schema-in-progress and its consumed flag live here instead;
+  // the record holds the core through a ref-counted interface field,
+  // so copies alias the same core, Build-reuse raises through every
+  // alias, and a never-built schema is freed with the last copy
+  // instead of leaking.
+  TMCPSchemaCore = class(TInterfacedObject)
   private
     FRoot: TJSONObject;
     FProperties: TJSONObject; // borrowed: owned by FRoot
     FRequired: TJSONArray;    // owned here until Build attaches it
+  public
+    destructor Destroy; override;
+  end;
+
+  // Record copies share the same schema-in-progress: chaining and
+  // reassigning mutate one underlying builder. Build is called exactly
+  // once per schema (the registration overloads own that call) and is
+  // detected through any copy afterwards.
+  TMCPSchema = record
+  private
+    FLifetime: IInterface; // ref-counts FCore across record copies
+    FCore: TMCPSchemaCore; // typed view of the same object
+    function ActiveCore: TMCPSchemaCore;
     function AddProperty(const AName, AJsonType, ADescription: string;
       ARequired: Boolean): TMCPSchema;
   public
@@ -228,23 +244,22 @@ begin
             for E := GetTypeData(EnumInfo)^.MinValue to
               GetTypeData(EnumInfo)^.MaxValue do
               EnumValues.Add(GetEnumName(EnumInfo, E));
-            PropObj := TJSONObject(Result.FProperties.Find(Prop^.Name));
+            PropObj := TJSONObject(
+              Result.FCore.FProperties.Find(Prop^.Name));
             PropObj.Add('enum', EnumValues);
           end;
       else
-        begin
-          // Free the half-built schema before failing registration.
-          Result.FRequired.Free;
-          Result.FRoot.Free;
-          raise EMCPSchema.CreateFmt(
-            'Property "%s" of %s has no JSON Schema mapping ' +
-            '(supported: string, float, integer, boolean, enum)',
-            [Prop^.Name, AClass.ClassName]);
-        end;
+        // The half-built schema is freed by the shared core when the
+        // result record goes out of scope during unwinding.
+        raise EMCPSchema.CreateFmt(
+          'Property "%s" of %s has no JSON Schema mapping ' +
+          '(supported: string, float, integer, boolean, enum)',
+          [Prop^.Name, AClass.ClassName]);
       end;
       if MCPPropHasDefault(Prop) then
       begin
-        PropObj := TJSONObject(Result.FProperties.Find(Prop^.Name));
+        PropObj := TJSONObject(
+          Result.FCore.FProperties.Find(Prop^.Name));
         case Prop^.PropType^.Kind of
           tkInteger:
             PropObj.Add('default', Prop^.Default);
@@ -316,32 +331,59 @@ begin
   end;
 end;
 
-function ObjectSchema: TMCPSchema;
+destructor TMCPSchemaCore.Destroy;
 begin
-  Result.FProperties := TJSONObject.Create;
-  Result.FRequired := TJSONArray.Create;
-  Result.FRoot := TJSONObject.Create;
-  Result.FRoot.Add('type', 'object');
-  Result.FRoot.Add('properties', Result.FProperties);
+  // A schema that was never built still owns its JSON: free it with
+  // the last record copy instead of leaking.
+  if FRoot <> nil then
+  begin
+    FRequired.Free;
+    FRoot.Free;
+  end;
+  inherited Destroy;
+end;
+
+function ObjectSchema: TMCPSchema;
+var
+  Core: TMCPSchemaCore;
+begin
+  Core := TMCPSchemaCore.Create;
+  Result.FCore := Core;
+  Result.FLifetime := Core;
+  Core.FProperties := TJSONObject.Create;
+  Core.FRequired := TJSONArray.Create;
+  Core.FRoot := TJSONObject.Create;
+  Core.FRoot.Add('type', 'object');
+  Core.FRoot.Add('properties', Core.FProperties);
+end;
+
+function TMCPSchema.ActiveCore: TMCPSchemaCore;
+begin
+  // FCore = nil covers the default record (never created through
+  // ObjectSchema/SchemaFrom); a nil FRoot on a live core means some
+  // copy already called Build.
+  if (FCore = nil) or (FCore.FRoot = nil) then
+    raise EMCPSchema.Create('Schema was already built');
+  Result := FCore;
 end;
 
 function TMCPSchema.AddProperty(const AName, AJsonType, ADescription: string;
   ARequired: Boolean): TMCPSchema;
 var
+  Core: TMCPSchemaCore;
   Prop: TJSONObject;
 begin
-  if FRoot = nil then
-    raise EMCPSchema.Create('Schema was already built');
-  if FProperties.IndexOfName(AName) >= 0 then
+  Core := ActiveCore;
+  if Core.FProperties.IndexOfName(AName) >= 0 then
     raise EMCPSchema.CreateFmt(
       'Schema property "%s" is already defined', [AName]);
   Prop := TJSONObject.Create;
   Prop.Add('type', AJsonType);
   if ADescription <> '' then
     Prop.Add('description', ADescription);
-  FProperties.Add(AName, Prop);
+  Core.FProperties.Add(AName, Prop);
   if ARequired then
-    FRequired.Add(AName);
+    Core.FRequired.Add(AName);
   Result := Self;
 end;
 
@@ -370,17 +412,20 @@ begin
 end;
 
 function TMCPSchema.Build: TJSONObject;
+var
+  Core: TMCPSchemaCore;
 begin
-  if FRoot = nil then
-    raise EMCPSchema.Create('Schema was already built');
-  if FRequired.Count > 0 then
-    FRoot.Add('required', FRequired)
+  Core := ActiveCore;
+  if Core.FRequired.Count > 0 then
+    Core.FRoot.Add('required', Core.FRequired)
   else
-    FRequired.Free;
-  Result := FRoot;
-  FRoot := nil;
-  FProperties := nil;
-  FRequired := nil;
+    Core.FRequired.Free;
+  Result := Core.FRoot;
+  // Consumed state is recorded on the shared core so every record
+  // copy sees it.
+  Core.FRoot := nil;
+  Core.FProperties := nil;
+  Core.FRequired := nil;
 end;
 
 end.

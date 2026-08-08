@@ -132,6 +132,7 @@ type
     procedure TestSameSchemaRejectedWithoutLeak;
     procedure TestPromptArgumentsBuildReuse;
     procedure TestPromptArgumentsAddReuse;
+    procedure TestPromptArgumentsCopyConsumed;
     procedure TestPromptArgumentsConsumedByRegistration;
     procedure TestRegistryFrozenAfterSessionCreation;
     procedure TestEmptyResourceTemplate;
@@ -2160,6 +2161,27 @@ begin
   BuiltArguments.Free;
 end;
 
+procedure TRegistrationGuards.TestPromptArgumentsCopyConsumed;
+var
+  Original, Copied: TMCPPromptArguments;
+  BuiltArguments: TJSONArray;
+  ErrorMessage: string;
+begin
+  // The reuse guard must survive record copies (issue #29).
+  Original := PromptArguments.Add('value');
+  Copied := Original;
+  BuiltArguments := Original.Build;
+  ErrorMessage := '';
+  try
+    Copied.Build;
+  except
+    on E: EMCPServer do
+      ErrorMessage := E.Message;
+  end;
+  Expect<string>(ErrorMessage).ToBe('Prompt arguments were already built');
+  BuiltArguments.Free;
+end;
+
 procedure TRegistrationGuards.TestPromptArgumentsConsumedByRegistration;
 var
   Arguments: TMCPPromptArguments;
@@ -2397,6 +2419,8 @@ begin
     TestSameSchemaRejectedWithoutLeak);
   Test('prompt argument Build rejects reuse', TestPromptArgumentsBuildReuse);
   Test('prompt argument Add rejects reuse', TestPromptArgumentsAddReuse);
+  Test('prompt arguments record copy sees consumed state',
+    TestPromptArgumentsCopyConsumed);
   Test('prompt registration consumes argument builder',
     TestPromptArgumentsConsumedByRegistration);
   Test('session creation freezes registries and request configuration',

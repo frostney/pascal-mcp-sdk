@@ -173,13 +173,27 @@ type
 
   TMCPServer = class;
 
+  // Heap-allocated builder state shared by every record copy of
+  // TMCPPromptArguments — same copy-safety design as TMCPSchemaCore
+  // (issue #29): the consumed flag lives on the ref-counted core, so
+  // Build-reuse raises through any record copy and a never-built list
+  // is freed with the last copy.
+  TMCPPromptArgumentsCore = class(TInterfacedObject)
+  private
+    FList: TJSONArray; // owned here until Build transfers it
+  public
+    destructor Destroy; override;
+  end;
+
   // Fluent declaration of a prompt's flat argument list (name /
   // description / required — prompts do not use JSON Schema). Same
-  // value semantics as TMCPSchema: registration calls Build through
-  // constref so invalidation reaches the caller's record.
+  // value semantics as TMCPSchema: record copies share one underlying
+  // builder and Build consumes it for every copy.
   TMCPPromptArguments = record
   private
-    FList: TJSONArray;
+    FLifetime: IInterface; // ref-counts FCore across record copies
+    FCore: TMCPPromptArgumentsCore; // typed view of the same object
+    function ActiveCore: TMCPPromptArgumentsCore;
   public
     function Add(const AName: string; const ADescription: string = '';
       ARequired: Boolean = True): TMCPPromptArguments;
@@ -728,34 +742,60 @@ end;
 
 { ───────── prompt builders ───────── }
 
-function PromptArguments: TMCPPromptArguments;
+destructor TMCPPromptArgumentsCore.Destroy;
 begin
-  Result.FList := TJSONArray.Create;
+  // An argument list that was never built is freed with the last
+  // record copy instead of leaking.
+  FList.Free;
+  inherited Destroy;
+end;
+
+function PromptArguments: TMCPPromptArguments;
+var
+  Core: TMCPPromptArgumentsCore;
+begin
+  Core := TMCPPromptArgumentsCore.Create;
+  Result.FCore := Core;
+  Result.FLifetime := Core;
+  Core.FList := TJSONArray.Create;
+end;
+
+function TMCPPromptArguments.ActiveCore: TMCPPromptArgumentsCore;
+begin
+  // FCore = nil covers the default record (never created through
+  // PromptArguments); a nil FList on a live core means some copy
+  // already called Build.
+  if (FCore = nil) or (FCore.FList = nil) then
+    raise EMCPServer.Create('Prompt arguments were already built');
+  Result := FCore;
 end;
 
 function TMCPPromptArguments.Add(const AName: string;
   const ADescription: string; ARequired: Boolean): TMCPPromptArguments;
 var
+  Core: TMCPPromptArgumentsCore;
   Arg: TJSONObject;
 begin
-  if FList = nil then
-    raise EMCPServer.Create('Prompt arguments were already built');
+  Core := ActiveCore;
   Arg := TJSONObject.Create;
   Arg.Add('name', AName);
   if ADescription <> '' then
     Arg.Add('description', ADescription);
   if ARequired then
     Arg.Add('required', True);
-  FList.Add(Arg);
+  Core.FList.Add(Arg);
   Result := Self;
 end;
 
 function TMCPPromptArguments.Build: TJSONArray;
+var
+  Core: TMCPPromptArgumentsCore;
 begin
-  if FList = nil then
-    raise EMCPServer.Create('Prompt arguments were already built');
-  Result := FList;
-  FList := nil;
+  Core := ActiveCore;
+  Result := Core.FList;
+  // Consumed state is recorded on the shared core so every record
+  // copy sees it.
+  Core.FList := nil;
 end;
 
 function MCPPromptMessage(const ARole, AText: string): TJSONObject;
