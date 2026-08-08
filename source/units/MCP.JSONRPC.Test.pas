@@ -44,6 +44,9 @@ type
     procedure TestNullId;
     procedure TestArrayParams;
     procedure TestIdPreservedOnInvalid;
+    procedure TestInvalidNotificationShapeFlagged;
+    procedure TestInvalidRequestShapeNotFlagged;
+    procedure TestNullIdIsRequestShaped;
   end;
 
   TUnicodeEscapeInput = class(TTestSuite)
@@ -248,6 +251,45 @@ begin
   FreeJSONRPCMessage(Msg);
 end;
 
+procedure TParseInvalid.TestInvalidNotificationShapeFlagged;
+var
+  Msg: TJSONRPCMessage;
+begin
+  // Malformed but identifiably a notification (method, no id): callers
+  // must be able to drop it instead of replying (MCP fire-and-forget).
+  Msg := ParseJSONRPCMessage(
+    '{"jsonrpc":"2.0","method":"notifications/cancelled","params":[1]}');
+  Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkInvalid));
+  Expect<Boolean>(Msg.NotificationShaped).ToBe(True);
+  FreeJSONRPCMessage(Msg);
+end;
+
+procedure TParseInvalid.TestInvalidRequestShapeNotFlagged;
+var
+  Msg: TJSONRPCMessage;
+begin
+  // The same malformation with an id stays answerable with -32600.
+  Msg := ParseJSONRPCMessage(
+    '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":[1]}');
+  Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkInvalid));
+  Expect<Boolean>(Msg.NotificationShaped).ToBe(False);
+  FreeJSONRPCMessage(Msg);
+end;
+
+procedure TParseInvalid.TestNullIdIsRequestShaped;
+var
+  Msg: TJSONRPCMessage;
+begin
+  // An id member — even the forbidden null — makes the message
+  // request-shaped: only the complete absence of id marks a
+  // notification (JSON-RPC 2.0 §4.1).
+  Msg := ParseJSONRPCMessage(
+    '{"jsonrpc":"2.0","id":null,"method":"notifications/cancelled"}');
+  Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkInvalid));
+  Expect<Boolean>(Msg.NotificationShaped).ToBe(False);
+  FreeJSONRPCMessage(Msg);
+end;
+
 procedure TParseInvalid.SetupTests;
 begin
   Test('unparseable input → -32700', TestGarbage);
@@ -259,6 +301,11 @@ begin
   Test('null id → -32600 (MCP forbids null ids)', TestNullId);
   Test('array params → -32600', TestArrayParams);
   Test('readable id preserved on invalid message', TestIdPreservedOnInvalid);
+  Test('invalid notification shape flagged for dropping',
+    TestInvalidNotificationShapeFlagged);
+  Test('invalid request shape stays answerable',
+    TestInvalidRequestShapeNotFlagged);
+  Test('null id counts as request-shaped', TestNullIdIsRequestShaped);
 end;
 
 { ───────── Unicode escape input ───────── }

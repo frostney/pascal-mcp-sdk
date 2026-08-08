@@ -54,6 +54,8 @@ type
     procedure TestMethodNotFound;
     procedure TestNotificationSilent;
     procedure TestMalformedLine;
+    procedure TestInvalidNotificationDropped;
+    procedure TestInvalidRequestAnswered;
     procedure TestMissingMeta;
   end;
 
@@ -758,6 +760,32 @@ begin
   Response.Free;
 end;
 
+procedure TDiscoverAndErrors.TestInvalidNotificationDropped;
+var
+  Response: string;
+begin
+  // Invalid but notification-shaped (method, no id): dropped, not
+  // answered — MCP's fire-and-forget rule for malformed notifications.
+  Expect<Boolean>(Dispatch(
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+    '"params":[1,2]}', Response)).ToBe(False);
+  Expect<string>(Response).ToBe('');
+end;
+
+procedure TDiscoverAndErrors.TestInvalidRequestAnswered;
+var
+  Response: TJSONObject;
+begin
+  // The same malformation carrying an id keeps the -32600 reply with
+  // the id echoed back.
+  Response := Call('{"jsonrpc":"2.0","id":6,"method":"tools/call",' +
+    '"params":[1,2]}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INVALID_REQUEST);
+  Expect<Integer>(Response.Get('id', 0)).ToBe(6);
+  Response.Free;
+end;
+
 procedure TDiscoverAndErrors.TestMissingMeta;
 var
   Response: TJSONObject;
@@ -780,6 +808,10 @@ begin
   Test('unknown method → -32601', TestMethodNotFound);
   Test('notification produces no response', TestNotificationSilent);
   Test('malformed line → -32700, id null', TestMalformedLine);
+  Test('invalid notification-shaped message dropped',
+    TestInvalidNotificationDropped);
+  Test('invalid id-carrying request answered with -32600',
+    TestInvalidRequestAnswered);
   Test('missing _meta → -32602', TestMissingMeta);
 end;
 

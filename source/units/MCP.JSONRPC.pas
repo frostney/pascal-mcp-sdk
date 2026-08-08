@@ -68,6 +68,15 @@ type
     Raw: TJSONData;      // owns the tree; nil when the line did not parse
     ErrorCode: Integer;  // set when Kind = jrkInvalid
     ErrorMessage: string;
+    // True when the parsed object carries a method member and no id
+    // member — identifiably a notification even when otherwise invalid.
+    // JSON-RPC 2.0 §4.1 forbids replying to notifications, and MCP
+    // treats malformed notifications as fire-and-forget no-ops, so
+    // callers drop these instead of answering -32600. Verified
+    // 2026-08-08 (Error Handling: "Invalid cancellation notifications
+    // SHOULD be ignored ... Malformed notifications"):
+    // https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation
+    NotificationShaped: Boolean;
   end;
 
 // Decode one line into a message. Never raises: malformed input comes
@@ -248,6 +257,12 @@ begin
       'Invalid request: expected a JSON object (MCP does not support batching)'));
   Obj := TJSONObject(Result.Raw);
 
+  // Shape is classified before validation: once a message is
+  // identifiably a notification (method present, id absent) it stays
+  // one for reply-suppression purposes no matter which check fails.
+  Result.NotificationShaped := (Obj.Find('method') <> nil) and
+    (Obj.Find('id') = nil);
+
   // A readable id is captured before any validation so error replies
   // can echo it (JSON-RPC 2.0 §5).
   IdData := Obj.Find('id');
@@ -291,6 +306,7 @@ begin
   AMessage.Id := nil;
   AMessage.Params := nil;
   AMessage.Kind := jrkInvalid;
+  AMessage.NotificationShaped := False;
 end;
 
 function CloneId(AId: TJSONData): TJSONData;

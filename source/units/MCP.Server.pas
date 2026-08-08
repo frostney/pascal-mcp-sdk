@@ -2183,9 +2183,17 @@ begin
     case Msg.Kind of
       jrkInvalid:
         begin
-          AResponse := BuildErrorResponse(Msg.Id, Msg.ErrorCode,
-            Msg.ErrorMessage);
-          Result := True;
+          // Notification-shaped invalid messages (method present, id
+          // absent) are dropped: JSON-RPC 2.0 §4.1 forbids replying to
+          // notifications, and MCP treats malformed notifications as
+          // fire-and-forget no-ops (see the classification note in
+          // MCP.JSONRPC). Id-carrying invalid requests keep the reply.
+          if not Msg.NotificationShaped then
+          begin
+            AResponse := BuildErrorResponse(Msg.Id, Msg.ErrorCode,
+              Msg.ErrorMessage);
+            Result := True;
+          end;
         end;
       jrkNotification:
         begin
