@@ -29,6 +29,12 @@ const
     '"io.modelcontextprotocol/clientCapabilities":{}}';
   UTF8_PAYLOAD = 'h' + #$C3#$A9 + 'llo ' + #$E4#$B8#$96 + #$E7#$95#$8C;
   UTF8_WORLD = #$E4#$B8#$96 + #$E7#$95#$8C;
+  // Modern _meta declaring the elicitation capability the MRTR
+  // battery needs.
+  META_MRTR =
+    '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientInfo":{"name":"mcpsmoke","version":"0.1.0"},' +
+    '"io.modelcontextprotocol/clientCapabilities":{"elicitation":{}}}';
 
 var
   Failures: Integer = 0;
@@ -294,6 +300,38 @@ begin
       '"name":"nope",' + META_MODERN + '}}');
     Check(PathInt(Response, 'error.code') = -32602,
       'tools/call unknown: -32602');
+    Response.Free;
+
+    // MRTR (#4): round 1 returns input_required with an elicitation
+    // form and opaque state; the retry with inputResponses completes.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{' +
+      '"name":"greet_user",' + META_MRTR + '}}');
+    Check(PathString(Response, 'result.resultType') = 'input_required',
+      'MRTR round 1: resultType input_required');
+    Check(PathString(Response, 'result.inputRequests.who.method') =
+      'elicitation/create', 'MRTR round 1: elicitation request present');
+    Check(PathString(Response, 'result.requestState') = 'greet-round-1',
+      'MRTR round 1: requestState carried');
+    Response.Free;
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{' +
+      '"name":"greet_user","inputResponses":{"who":{"action":"accept",' +
+      '"content":{"name":"Ada"}}},"requestState":"greet-round-1",' +
+      META_MRTR + '}}');
+    Check(PathString(Response, 'result.resultType') = 'complete',
+      'MRTR retry: resultType complete');
+    Check(PathString(Response, 'result.content[0].text') = 'Hello, Ada!',
+      'MRTR retry: elicited name woven into the result');
+    Response.Free;
+
+    // MRTR without the declared capability — the spec forbids sending
+    // the request kind, so the call fails with -32021.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{' +
+      '"name":"greet_user",' + META_MODERN + '}}');
+    Check(PathInt(Response, 'error.code') = -32021,
+      'MRTR without capability: -32021');
     Response.Free;
 
     // resources/list + read.

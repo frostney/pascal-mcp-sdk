@@ -79,8 +79,15 @@ const demo = await startDemo(port);
 try {
   const client = new Client(
     { name: 'ts-http-interop', version: '0.1.0' },
-    { versionNegotiation: { mode: { pin: '2026-07-28' } } },
+    {
+      versionNegotiation: { mode: { pin: '2026-07-28' } },
+      capabilities: { elicitation: {} },
+    },
   );
+  client.setRequestHandler('elicitation/create', async () => ({
+    action: 'accept',
+    content: { name: 'Ada' },
+  }));
   const transport = new StreamableHTTPClientTransport(
     new URL(`http://127.0.0.1:${port}/mcp`),
   );
@@ -95,8 +102,8 @@ try {
 
   const tools = await client.listTools();
   check(
-    tools.tools.map((t) => t.name).join(',') === 'echo,add',
-    'tools/list: echo,add in registration order',
+    tools.tools.map((t) => t.name).join(',') === 'echo,add,greet_user',
+    'tools/list: echo,add,greet_user in registration order',
   );
 
   const echo = await client.callTool({
@@ -167,6 +174,12 @@ try {
   check(
     prompt.messages?.[0]?.content?.text?.includes('Ada'),
     'prompts/get: argument woven into message (validated shape)',
+  );
+
+  const greeted = await client.callTool({ name: 'greet_user', arguments: {} });
+  check(
+    greeted.content?.[0]?.text === 'Hello, Ada!',
+    'tools/call greet_user: MRTR elicitation round trip over HTTP',
   );
 
   let unknownRejected = false;

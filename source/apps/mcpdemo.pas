@@ -88,6 +88,23 @@ begin
     AArguments.Get('name', 'the user') + '.')]);
 end;
 
+// MRTR example: the first round returns input_required with an
+// elicitation form; the client gathers the name and retries the same
+// call with inputResponses + the echoed requestState.
+function GreetUserHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Content: TJSONObject;
+begin
+  Content := MCPElicitationContent(ACtx, 'who');
+  if Content = nil then
+    Exit(MCPInputRequired(TJSONObject.Create(['who',
+      MCPElicitFormRequest('Who should be greeted?',
+      ObjectSchema.AddString('name', 'Name of the person to greet'))]),
+      'greet-round-1'));
+  Result := MCPTextResult('Hello, ' + Content.Get('name', 'stranger') + '!');
+end;
+
 function AddHandler(AArgs: TMCPArgs;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 var
@@ -135,6 +152,10 @@ begin
     Server.RegisterTool('add', 'Add two numbers and return the sum',
       TAddArgs, TSumResult, AddHandler)
       .Title('Adder').ReadOnlyHint.IdempotentHint;
+
+    Server.RegisterTool('greet_user',
+      'Greet a person; asks who to greet via elicitation (MRTR)',
+      '{"type":"object"}', GreetUserHandler);
 
     Server.RegisterPrompt('greet', 'Compose a friendly greeting',
       PromptArguments.Add('name', 'Who to greet'), GreetPromptHandler);

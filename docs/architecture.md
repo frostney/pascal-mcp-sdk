@@ -111,6 +111,24 @@ rather than records because FPC 3.2.2 RTTI has no record field names).
 Richer schemas use the JSON-string or definition-object overloads,
 parsed for well-formedness at registration (`EMCPServer` on error).
 
+**MRTR** (Multi Round-Trip Requests, SEP-2322; #4) is the 2026-07-28
+replacement for server-initiated requests: a `tools/call` or
+`prompts/get` handler that needs more input returns
+`MCPInputRequired(...)` / `MCPPromptInputRequired(...)` — an
+`input_required` result carrying an `inputRequests` map (entry
+builders for elicitation form/url, `sampling/createMessage`,
+`roots/list`) and the handler's opaque `requestState`. The client
+retries the original request with `inputResponses` plus the echoed
+state, and the library re-enters the *same handler* with both exposed
+on `TMCPRequestContext` — each round is one ordinary `HandleMessage`
+call, so the server stays stateless across rounds. Kinds are gated on
+the per-request client capabilities (`-32021` when undeclared), and
+the whole mechanism is modern-era only. Sampling and roots are
+deprecated in the final spec (SEP-2577) but carried deliberately —
+each kind is one builder plus one accessor, so a later sunset is
+cheap. Proven against the official client's auto-fulfilment driver in
+all three interop batteries and by `mcpsmoke`.
+
 Since the HTTP era inverted the trust boundary (#23), **every raw-handler
 tool call is validated against its registered schema's enforceable
 subset before the handler runs** — `type`, `properties`, `required`,

@@ -41,14 +41,34 @@ unit MCP.Server;
 //                                      lifecycle, negotiated identity,
 //                                      and active-request cancellation
 //                                      belong to TMCPSession.
-// Not in v1 (deliberate): subscriptions/listen and the listChanged
-// capability flags (registries are fixed after startup, so there is
-// nothing to notify), pagination cursors (lists are returned whole),
-// MRTR input_required results, and a general JSON-Schema validation
-// engine — typed-argument tools (MCP.Schema argument classes) get
-// presence and type checking bound from the class; beyond that,
-// handlers validate their own inputs and report problems as isError
-// tool results, which is what models can act on.
+// Not implemented (deliberate): subscriptions/listen and the
+// listChanged capability flags (registries are fixed after startup, so
+// there is nothing to notify), pagination cursors (lists are returned
+// whole), and a general JSON-Schema validation engine — the schema
+// subset the builders emit is server-enforced per call (#23);
+// beyond it, handlers validate their own inputs and report problems
+// as isError tool results, which is what models can act on.
+//
+// MRTR (Multi Round-Trip Requests, SEP-2322; spec pattern verified
+// 2026-08-08 at .../2026-07-28/basic/patterns/mrtr): a tools/call or
+// prompts/get handler needing more input returns
+// MCPInputRequired(...) / MCPPromptInputRequired(...) — an
+// input_required result carrying inputRequests (elicitation form/url,
+// sampling/createMessage, roots/list entry builders below) and the
+// handler's opaque requestState. The client retries the ORIGINAL
+// request with inputResponses + the echoed requestState; the library
+// re-enters the same handler with both exposed on TMCPRequestContext.
+// Each round is one ordinary HandleMessage call — no threads, no
+// suspension. Modern era only: legacy calls get an in-band error
+// (tools) or -32603 (prompts), and mapping onto legacy
+// server-initiated requests is out of scope. Kinds are gated on the
+// per-request client capabilities: an entry the client did not
+// declare support for is answered with -32021
+// (MissingRequiredClientCapability) instead of the result, per the
+// spec's "MUST NOT send an inputRequests the client has not declared
+// support for". resources/read MAY also return input_required per the
+// final spec; this library deliberately surfaces MRTR on tools/call
+// and prompts/get only.
 //
 // Handlers are synchronous and may be plain functions or methods (both
 // overloads are provided). A handler that raises becomes an isError
@@ -90,10 +110,17 @@ type
   // Result of one tool invocation. Content is a JSON array of content
   // blocks (owned; use the MCP*Result builders), StructuredContent is
   // the optional machine-readable payload (owned; nil when absent).
+  // InputRequired marks an MRTR interim result (use MCPInputRequired):
+  // InputRequests is the owned inputRequests map (may be nil for a
+  // state-only round) and RequestState the handler's opaque state
+  // ('' = absent).
   TMCPToolResult = record
     Content: TJSONArray;
     StructuredContent: TJSONData;
     IsError: Boolean;
+    InputRequired: Boolean;
+    InputRequests: TJSONObject;
+    RequestState: string;
   end;
 
   TMCPToolHandler = function(AArguments: TJSONObject;
@@ -171,11 +198,30 @@ type
   TMCPPromptMethod = function(AArguments: TJSONObject;
     const ACtx: TMCPRequestContext): TJSONArray of object;
 
+  // MRTR-capable prompt result: either Messages (owned; the ordinary
+  // GetPromptResult payload, use MCPPromptMessagesResult) or an
+  // input_required round (use MCPPromptInputRequired — same fields as
+  // the tool variant). Prompt handlers that never need MRTR keep the
+  // plain TJSONArray signature above.
+  TMCPPromptResult = record
+    Messages: TJSONArray;
+    InputRequired: Boolean;
+    InputRequests: TJSONObject;
+    RequestState: string;
+  end;
+
+  TMCPPromptResultHandler = function(AArguments: TJSONObject;
+    const ACtx: TMCPRequestContext): TMCPPromptResult;
+  TMCPPromptResultMethod = function(AArguments: TJSONObject;
+    const ACtx: TMCPRequestContext): TMCPPromptResult of object;
+
   TMCPPromptRegistration = record
     Definition: TJSONObject; // owned: name/description/arguments
     Description: string;     // echoed as GetPromptResult.description
     Handler: TMCPPromptHandler;
     Method: TMCPPromptMethod;
+    ResultHandler: TMCPPromptResultHandler;
+    ResultMethod: TMCPPromptResultMethod;
   end;
 
   TMCPServer = class;
@@ -324,7 +370,9 @@ type
     function FindPrompt(const AName: string): Integer;
     procedure AddPrompt(const AName, ADescription: string;
       AArguments: TJSONArray; AHandler: TMCPPromptHandler;
-      AMethod: TMCPPromptMethod);
+      AMethod: TMCPPromptMethod;
+      AResultHandler: TMCPPromptResultHandler = nil;
+      AResultMethod: TMCPPromptResultMethod = nil);
     procedure AddTemplate(const AUriTemplate, AName, AMimeType,
       ADescription: string; AReader: TMCPTemplateReader;
       AMethod: TMCPTemplateMethod);
@@ -481,6 +529,19 @@ type
     procedure RegisterPrompt(const AName, ADescription: string;
       constref AArguments: TMCPPromptArguments;
       AMethod: TMCPPromptMethod); overload;
+    // MRTR-capable prompt overloads: the handler returns a
+    // TMCPPromptResult and may answer with an input_required round
+    // (see the MRTR notes in the unit header).
+    procedure RegisterPrompt(const AName, ADescription: string;
+      AHandler: TMCPPromptResultHandler); overload;
+    procedure RegisterPrompt(const AName, ADescription: string;
+      AMethod: TMCPPromptResultMethod); overload;
+    procedure RegisterPrompt(const AName, ADescription: string;
+      constref AArguments: TMCPPromptArguments;
+      AHandler: TMCPPromptResultHandler); overload;
+    procedure RegisterPrompt(const AName, ADescription: string;
+      constref AArguments: TMCPPromptArguments;
+      AMethod: TMCPPromptResultMethod); overload;
 
     // The core entry point: one inbound line in, at most one response
     // line out. The sink overload binds server-to-client notifications
@@ -512,6 +573,52 @@ function MCPStructuredResult(const AText: string;
   AObj: TMCPArgs): TMCPToolResult; overload;
 function MCPTextContents(const AUri, AMimeType, AText: string): TJSONArray;
 function MCPBlobContents(const AUri, AMimeType, ABase64: string): TJSONArray;
+
+// ── MRTR (input_required) builders and accessors ──
+//
+// A handler that needs more input assembles an inputRequests map —
+// keys are handler-assigned identifiers, values come from the entry
+// builders below — and returns MCPInputRequired(Requests, State).
+// On the client's retry the same handler runs again with
+// ACtx.InputResponses / ACtx.RequestState populated.
+//
+// AInputRequests ownership transfers ('' RequestState = absent); at
+// least one of the two must be present (spec MUST) — EMCPServer
+// otherwise, surfaced in-band by the dispatch wrapper.
+function MCPInputRequired(AInputRequests: TJSONObject;
+  const ARequestState: string = ''): TMCPToolResult;
+function MCPPromptMessagesResult(AMessages: TJSONArray): TMCPPromptResult;
+function MCPPromptInputRequired(AInputRequests: TJSONObject;
+  const ARequestState: string = ''): TMCPPromptResult;
+
+// inputRequests entry builders — one per embedded request kind.
+// Deprecation provenance: the final 2026-07-28 changelog deprecates
+// Roots and Sampling wholesale (SEP-2577, "new implementations should
+// not add support") under the 12-month lifecycle policy (SEP-2596);
+// they are carried here deliberately (maintainer decision 2026-07-20:
+// an incomplete MRTR design is worse) and each kind is one builder +
+// one accessor, so a later sunset is cheap.
+function MCPElicitFormRequest(const AMessage: string;
+  ARequestedSchema: TJSONObject): TJSONObject; overload;
+function MCPElicitFormRequest(const AMessage: string;
+  constref ASchema: TMCPSchema): TJSONObject; overload;
+function MCPElicitURLRequest(const AMessage, AUrl: string): TJSONObject;
+// ASamplingParams is the caller-built CreateMessageRequest params
+// object (messages/systemPrompt/maxTokens/...); ownership transfers.
+function MCPSamplingRequest(ASamplingParams: TJSONObject): TJSONObject;
+// Convenience single-turn text sampling request.
+function MCPSamplingTextRequest(const APrompt: string;
+  AMaxTokens: Integer): TJSONObject;
+function MCPRootsRequest: TJSONObject;
+
+// Retry-side accessors: the response entry for AKey (borrowed from
+// the request tree; nil when absent), and the accepted-form shortcut
+// for elicitation responses (content object when action = "accept",
+// nil otherwise).
+function MCPInputResponse(const ACtx: TMCPRequestContext;
+  const AKey: string): TJSONObject;
+function MCPElicitationContent(const ACtx: TMCPRequestContext;
+  const AKey: string): TJSONObject;
 
 // RFC 6570 level-1 simple-variable template match: {var} captures one
 // or more characters excluding '/', delimited by the complete
@@ -1105,6 +1212,209 @@ begin
   Result := TJSONObject.Create;
   Result.Add('type', 'text');
   Result.Add('text', AText);
+end;
+
+{ ───────── MRTR builders and accessors (#4) ───────── }
+
+function MCPInputRequired(AInputRequests: TJSONObject;
+  const ARequestState: string): TMCPToolResult;
+begin
+  if ((AInputRequests = nil) or (AInputRequests.Count = 0)) and
+     (ARequestState = '') then
+  begin
+    AInputRequests.Free;
+    raise EMCPServer.Create(
+      'MCPInputRequired requires inputRequests or a requestState ' +
+      '(the spec mandates at least one)');
+  end;
+  Result := Default(TMCPToolResult);
+  Result.InputRequired := True;
+  Result.InputRequests := AInputRequests;
+  Result.RequestState := ARequestState;
+end;
+
+function MCPPromptMessagesResult(AMessages: TJSONArray): TMCPPromptResult;
+begin
+  Result := Default(TMCPPromptResult);
+  Result.Messages := AMessages;
+end;
+
+function MCPPromptInputRequired(AInputRequests: TJSONObject;
+  const ARequestState: string): TMCPPromptResult;
+begin
+  if ((AInputRequests = nil) or (AInputRequests.Count = 0)) and
+     (ARequestState = '') then
+  begin
+    AInputRequests.Free;
+    raise EMCPServer.Create(
+      'MCPPromptInputRequired requires inputRequests or a ' +
+      'requestState (the spec mandates at least one)');
+  end;
+  Result := Default(TMCPPromptResult);
+  Result.InputRequired := True;
+  Result.InputRequests := AInputRequests;
+  Result.RequestState := ARequestState;
+end;
+
+function EmbeddedRequest(const AMethod: string;
+  AParams: TJSONObject): TJSONObject;
+begin
+  Result := TJSONObject.Create;
+  Result.Add('method', AMethod);
+  if AParams <> nil then
+    Result.Add('params', AParams);
+end;
+
+function MCPElicitFormRequest(const AMessage: string;
+  ARequestedSchema: TJSONObject): TJSONObject;
+var
+  Params: TJSONObject;
+begin
+  Params := TJSONObject.Create;
+  try
+    Params.Add('mode', 'form');
+    Params.Add('message', AMessage);
+    Params.Add('requestedSchema', ARequestedSchema);
+    ARequestedSchema := nil;
+  except
+    Params.Free;
+    ARequestedSchema.Free;
+    raise;
+  end;
+  Result := EmbeddedRequest('elicitation/create', Params);
+end;
+
+function MCPElicitFormRequest(const AMessage: string;
+  constref ASchema: TMCPSchema): TJSONObject;
+begin
+  Result := MCPElicitFormRequest(AMessage, ASchema.Build);
+end;
+
+function MCPElicitURLRequest(const AMessage, AUrl: string): TJSONObject;
+var
+  Params: TJSONObject;
+begin
+  Params := TJSONObject.Create;
+  Params.Add('mode', 'url');
+  Params.Add('message', AMessage);
+  Params.Add('url', AUrl);
+  Result := EmbeddedRequest('elicitation/create', Params);
+end;
+
+function MCPSamplingRequest(ASamplingParams: TJSONObject): TJSONObject;
+begin
+  Result := EmbeddedRequest('sampling/createMessage', ASamplingParams);
+end;
+
+function MCPSamplingTextRequest(const APrompt: string;
+  AMaxTokens: Integer): TJSONObject;
+var
+  Params, Message, Content: TJSONObject;
+  Messages: TJSONArray;
+begin
+  Content := TJSONObject.Create;
+  Content.Add('type', 'text');
+  Content.Add('text', APrompt);
+  Message := TJSONObject.Create;
+  Message.Add('role', 'user');
+  Message.Add('content', Content);
+  Messages := TJSONArray.Create;
+  Messages.Add(Message);
+  Params := TJSONObject.Create;
+  Params.Add('messages', Messages);
+  Params.Add('maxTokens', AMaxTokens);
+  Result := EmbeddedRequest('sampling/createMessage', Params);
+end;
+
+function MCPRootsRequest: TJSONObject;
+begin
+  Result := EmbeddedRequest('roots/list', nil);
+end;
+
+function MCPInputResponse(const ACtx: TMCPRequestContext;
+  const AKey: string): TJSONObject;
+var
+  Data: TJSONData;
+begin
+  Result := nil;
+  if ACtx.InputResponses = nil then
+    Exit;
+  Data := ACtx.InputResponses.Find(AKey);
+  if (Data <> nil) and (Data.JSONType = jtObject) then
+    Result := TJSONObject(Data);
+end;
+
+function MCPElicitationContent(const ACtx: TMCPRequestContext;
+  const AKey: string): TJSONObject;
+var
+  Response: TJSONObject;
+  ContentData: TJSONData;
+begin
+  Result := nil;
+  Response := MCPInputResponse(ACtx, AKey);
+  if (Response = nil) or (Response.Get('action', '') <> 'accept') then
+    Exit;
+  ContentData := Response.Find('content');
+  if (ContentData <> nil) and (ContentData.JSONType = jtObject) then
+    Result := TJSONObject(ContentData);
+end;
+
+// The client capability each embedded request kind requires. '' for
+// an unrecognized kind (rejected separately — the library only emits
+// the three MRTR kinds).
+function CapabilityForInputRequest(const AMethod: string): string;
+begin
+  if AMethod = 'elicitation/create' then
+    Result := 'elicitation'
+  else if AMethod = 'sampling/createMessage' then
+    Result := 'sampling'
+  else if AMethod = 'roots/list' then
+    Result := 'roots'
+  else
+    Result := '';
+end;
+
+// '' when every inputRequests entry names a kind the client declared;
+// otherwise the first missing capability. AUnknownKind carries the
+// method of an entry that is not an MRTR kind at all.
+function MissingInputCapability(AInputRequests: TJSONObject;
+  const ACtx: TMCPRequestContext; out AUnknownKind: string): string;
+var
+  I: Integer;
+  Entry: TJSONData;
+  Method, Capability: string;
+begin
+  Result := '';
+  AUnknownKind := '';
+  if AInputRequests = nil then
+    Exit;
+  for I := 0 to AInputRequests.Count - 1 do
+  begin
+    Entry := AInputRequests.Items[I];
+    Method := '';
+    if Entry.JSONType = jtObject then
+      Method := TJSONObject(Entry).Get('method', '');
+    Capability := CapabilityForInputRequest(Method);
+    if Capability = '' then
+    begin
+      AUnknownKind := Method;
+      Exit;
+    end;
+    if not ACtx.HasCapability(Capability) then
+      Exit(Capability);
+  end;
+end;
+
+// -32021 data payload: {requiredCapabilities: {<name>: {}}} (schema
+// anchor MissingRequiredClientCapabilityError, verified 2026-08-08).
+function CapabilityErrorData(const ACapability: string): TJSONObject;
+var
+  Capabilities: TJSONObject;
+begin
+  Capabilities := TJSONObject.Create;
+  Capabilities.Add(ACapability, TJSONObject.Create);
+  Result := TJSONObject.Create;
+  Result.Add('requiredCapabilities', Capabilities);
 end;
 
 function MCPTextResult(const AText: string): TMCPToolResult;
@@ -2371,9 +2681,11 @@ end;
 
 procedure TMCPServer.AddPrompt(const AName, ADescription: string;
   AArguments: TJSONArray; AHandler: TMCPPromptHandler;
-  AMethod: TMCPPromptMethod);
+  AMethod: TMCPPromptMethod; AResultHandler: TMCPPromptResultHandler;
+  AResultMethod: TMCPPromptResultMethod);
 var
   Definition: TJSONObject;
+  CallableCount: Integer;
 begin
   try
     EnsureMutable;
@@ -2386,7 +2698,9 @@ begin
     AArguments.Free;
     raise EMCPServer.Create('Prompt registration requires a non-empty name');
   end;
-  if Assigned(AHandler) = Assigned(AMethod) then
+  CallableCount := Ord(Assigned(AHandler)) + Ord(Assigned(AMethod)) +
+    Ord(Assigned(AResultHandler)) + Ord(Assigned(AResultMethod));
+  if CallableCount <> 1 then
   begin
     AArguments.Free;
     raise EMCPServer.CreateFmt(
@@ -2408,6 +2722,8 @@ begin
   FPrompts[High(FPrompts)].Description := ADescription;
   FPrompts[High(FPrompts)].Handler := AHandler;
   FPrompts[High(FPrompts)].Method := AMethod;
+  FPrompts[High(FPrompts)].ResultHandler := AResultHandler;
+  FPrompts[High(FPrompts)].ResultMethod := AResultMethod;
 end;
 
 procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
@@ -2432,6 +2748,32 @@ procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
   constref AArguments: TMCPPromptArguments; AMethod: TMCPPromptMethod);
 begin
   AddPrompt(AName, ADescription, AArguments.Build, nil, AMethod);
+end;
+
+procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
+  AHandler: TMCPPromptResultHandler);
+begin
+  AddPrompt(AName, ADescription, nil, nil, nil, AHandler, nil);
+end;
+
+procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
+  AMethod: TMCPPromptResultMethod);
+begin
+  AddPrompt(AName, ADescription, nil, nil, nil, nil, AMethod);
+end;
+
+procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
+  constref AArguments: TMCPPromptArguments;
+  AHandler: TMCPPromptResultHandler);
+begin
+  AddPrompt(AName, ADescription, AArguments.Build, nil, nil, AHandler, nil);
+end;
+
+procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
+  constref AArguments: TMCPPromptArguments;
+  AMethod: TMCPPromptResultMethod);
+begin
+  AddPrompt(AName, ADescription, AArguments.Build, nil, nil, nil, AMethod);
 end;
 
 function TMCPServer.ToolCount: Integer;
@@ -2869,6 +3211,7 @@ var
   Arguments, OwnedEmpty, CallResult: TJSONObject;
   ToolResult: TMCPToolResult;
   ArgsInstance: TMCPArgs;
+  MissingCapability, UnknownKind: string;
 begin
   if AMessage.Params = nil then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
@@ -2942,6 +3285,49 @@ begin
     end;
   finally
     OwnedEmpty.Free;
+  end;
+
+  if ToolResult.InputRequired then
+  begin
+    // MRTR interim result (#4): modern era only, kinds gated on the
+    // client's declared capabilities.
+    ToolResult.Content.Free;
+    ToolResult.StructuredContent.Free;
+    if ALegacy then
+    begin
+      ToolResult.InputRequests.Free;
+      ToolResult := MCPErrorResult('Tool "' + ToolName +
+        '" requires additional input (input_required), which is not ' +
+        'available to legacy-era clients');
+    end
+    else
+    begin
+      MissingCapability := MissingInputCapability(
+        ToolResult.InputRequests, ACtx, UnknownKind);
+      if UnknownKind <> '' then
+      begin
+        ToolResult.InputRequests.Free;
+        Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
+          'Tool "' + ToolName + '" produced an unsupported input ' +
+          'request kind "' + UnknownKind + '"'));
+      end;
+      if MissingCapability <> '' then
+      begin
+        ToolResult.InputRequests.Free;
+        Exit(BuildErrorResponse(AMessage.Id,
+          MCP_ERROR_MISSING_CLIENT_CAPABILITY,
+          'Tool "' + ToolName + '" requires the client capability "' +
+          MissingCapability + '"',
+          CapabilityErrorData(MissingCapability)));
+      end;
+      CallResult := TJSONObject.Create;
+      CallResult.Add('resultType', RESULT_TYPE_INPUT_REQUIRED);
+      if ToolResult.InputRequests <> nil then
+        CallResult.Add('inputRequests', ToolResult.InputRequests);
+      if ToolResult.RequestState <> '' then
+        CallResult.Add('requestState', ToolResult.RequestState);
+      Exit(ResultResponse(AMessage, CallResult, ALegacy));
+    end;
   end;
 
   if ToolResult.Content = nil then
@@ -3097,6 +3483,8 @@ var
   Arguments, OwnedEmpty, GetResult, Declared: TJSONObject;
   DeclaredArgs: TJSONArray;
   Messages: TJSONArray;
+  PromptResult: TMCPPromptResult;
+  MissingCapability, UnknownKind: string;
 begin
   if AMessage.Params = nil then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
@@ -3144,16 +3532,70 @@ begin
     end;
 
     try
-      if Assigned(FPrompts[Index].Method) then
-        Messages := FPrompts[Index].Method(Arguments, ACtx)
+      if Assigned(FPrompts[Index].ResultHandler) or
+         Assigned(FPrompts[Index].ResultMethod) then
+      begin
+        // MRTR-capable prompt: the handler may answer with an
+        // input_required round instead of messages (#4).
+        if Assigned(FPrompts[Index].ResultMethod) then
+          PromptResult := FPrompts[Index].ResultMethod(Arguments, ACtx)
+        else
+          PromptResult := FPrompts[Index].ResultHandler(Arguments, ACtx);
+        Messages := PromptResult.Messages;
+      end
       else
-        Messages := FPrompts[Index].Handler(Arguments, ACtx);
+      begin
+        PromptResult := Default(TMCPPromptResult);
+        if Assigned(FPrompts[Index].Method) then
+          Messages := FPrompts[Index].Method(Arguments, ACtx)
+        else
+          Messages := FPrompts[Index].Handler(Arguments, ACtx);
+      end;
     except
       on E: Exception do
         Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
           ExceptionClientMessage('prompts/get handler',
             'Prompt handler failed: ', 'Prompt handler failed', E)));
     end;
+
+    if PromptResult.InputRequired then
+    begin
+      Messages.Free;
+      if ALegacy then
+      begin
+        PromptResult.InputRequests.Free;
+        Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
+          'Prompt "' + PromptName + '" requires additional input ' +
+          '(input_required), which is not available to legacy-era ' +
+          'clients'));
+      end;
+      MissingCapability := MissingInputCapability(
+        PromptResult.InputRequests, ACtx, UnknownKind);
+      if UnknownKind <> '' then
+      begin
+        PromptResult.InputRequests.Free;
+        Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
+          'Prompt "' + PromptName + '" produced an unsupported input ' +
+          'request kind "' + UnknownKind + '"'));
+      end;
+      if MissingCapability <> '' then
+      begin
+        PromptResult.InputRequests.Free;
+        Exit(BuildErrorResponse(AMessage.Id,
+          MCP_ERROR_MISSING_CLIENT_CAPABILITY,
+          'Prompt "' + PromptName + '" requires the client capability "' +
+          MissingCapability + '"',
+          CapabilityErrorData(MissingCapability)));
+      end;
+      GetResult := TJSONObject.Create;
+      GetResult.Add('resultType', RESULT_TYPE_INPUT_REQUIRED);
+      if PromptResult.InputRequests <> nil then
+        GetResult.Add('inputRequests', PromptResult.InputRequests);
+      if PromptResult.RequestState <> '' then
+        GetResult.Add('requestState', PromptResult.RequestState);
+      Exit(ResultResponse(AMessage, GetResult, ALegacy));
+    end;
+
     if Messages = nil then
       Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
         'Prompt handler for "' + PromptName + '" returned no messages'));

@@ -58,8 +58,8 @@ try {
 
   const tools = await client.listTools();
   check(
-    tools.tools.map((t) => t.name).join(',') === 'echo,add',
-    'tools/list: echo,add',
+    tools.tools.map((t) => t.name).join(',') === 'echo,add,greet_user',
+    'tools/list: echo,add,greet_user',
   );
 
   const echo = await client.callTool({

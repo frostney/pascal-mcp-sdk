@@ -43,8 +43,14 @@ async function battery(label, versionNegotiation) {
   console.log(`\n=== ${label} ===`);
   const client = new Client(
     { name: 'ts-interop', version: '0.1.0' },
-    { versionNegotiation },
+    { versionNegotiation, capabilities: { elicitation: {} } },
   );
+  // MRTR auto-fulfilment: input_required elicitations are answered
+  // through this handler and the original call retried by the client.
+  client.setRequestHandler('elicitation/create', async () => ({
+    action: 'accept',
+    content: { name: 'Ada' },
+  }));
   const transport = new StdioClientTransport({ command: DEMO });
   await client.connect(transport);
 
@@ -62,8 +68,8 @@ async function battery(label, versionNegotiation) {
 
   const tools = await client.listTools();
   check(
-    tools.tools.map((t) => t.name).join(',') === 'echo,add',
-    'tools/list: echo,add in registration order',
+    tools.tools.map((t) => t.name).join(',') === 'echo,add,greet_user',
+    'tools/list: echo,add,greet_user in registration order',
   );
 
   const echo = await client.callTool({
@@ -135,6 +141,15 @@ async function battery(label, versionNegotiation) {
   check(
     prompt.messages?.[0]?.content?.text?.includes('Ada'),
     'prompts/get: argument woven into message (validated shape)',
+  );
+
+  // MRTR (SEP-2322): greet_user answers input_required with an
+  // elicitation form; the client's driver fulfils it via the handler
+  // above and retries with inputResponses + the echoed requestState.
+  const greeted = await client.callTool({ name: 'greet_user', arguments: {} });
+  check(
+    greeted.content?.[0]?.text === 'Hello, Ada!',
+    'tools/call greet_user: MRTR elicitation round trip (auto-fulfilled)',
   );
 
   // Unknown tool must surface as a protocol error (-32602), not a result.
