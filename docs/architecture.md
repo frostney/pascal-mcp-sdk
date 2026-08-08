@@ -176,13 +176,31 @@ end-to-end by `tools/interop-ts`: the stable v2 client negotiates modern
 completes the classic handshake, and Claude Code itself connects via
 `claude mcp add`.
 
-## The HTTP follow-up
+## The HTTP binding
 
-`MCP.Transport.HTTP` (Streamable HTTP: JSON-RPC per POST, SSE response
-streams, `Mcp-Method`/`Mcp-Name` header mirroring) is deliberately not
-in v1. Default server primitive when it lands: FPC's `fphttpserver`
-(fcl-web, ships with FPC, cross-platform); fallback is a minimal
-hand-rolled HTTP/1.1 server if avoiding fcl-web matters. lwpt
-httpclient's `TransportSecurity` (server-side TLS) and `StringBuffer`
-are reusable building blocks. The decision on the exact primitive is
-made at that milestone, not now.
+`MCP.Transport.HTTP` is the second transport shell (Streamable HTTP,
+2026-07-28 profile): every JSON-RPC message is its own POST to a
+single `/mcp` endpoint, notifications answer `202`, and requests that
+opt into request-scoped notifications (`_meta.progressToken` /
+`logLevel`) on handler-backed methods are answered as SSE streams —
+events first, final response last, stream closed after. The mirrored
+metadata headers (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`
+with the base64 sentinel) are validated against the body before
+dispatch (`-32020` on mismatch), JSON-RPC outcomes map onto HTTP
+statuses (`-32601` → 404; parse/invalid/`-32020..-32022` → 400;
+everything else 200), and the Origin allowlist plus the 127.0.0.1
+default binding implement the spec's DNS-rebinding defenses. The
+server primitive is FPC's own `fphttpserver` (fcl-web ships inside
+FPC 3.2.2, the same reading of the dependency rule that admits
+fpjson), confined to the transport unit. The binding is modern-only
+(`DualEra := False`): legacy clients keep using stdio. Each
+connection runs on its own thread with its own `TMCPSession` against
+the frozen core — the concurrency model the v1.2.0 state split was
+built for. One SDK-anchor fact lives in the transport (verified
+2026-08-08 against `@modelcontextprotocol/client` 2.0.0): the
+official client derives the mirrored headers from the body's `_meta`
+envelope and sends its pre-negotiation `server/discover` probe bare,
+so header validation keys on the envelope claim rather than demanding
+the header on literally every POST. Proven end-to-end by the
+`tools/interop-ts` Streamable HTTP battery (`http-interop.mjs`)
+driving `mcpdemo --http`, including streamed progress notifications.

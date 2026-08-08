@@ -1,12 +1,13 @@
 program mcpdemo;
 
-// Example stdio MCP server: the smallest complete pascal-mcp-sdk program.
+// Example MCP server: the smallest complete pascal-mcp-sdk program.
 // Exposes two tools showing both registration styles — echo via the
 // fluent schema builder, add via a typed argument class (the class
 // expands into the schema, and the handler receives a populated,
-// validated instance) — plus one static resource, then serves
-// newline-delimited JSON-RPC on stdin/stdout until the client closes
-// stdin.
+// validated instance) — plus one static resource. By default it
+// serves newline-delimited JSON-RPC on stdin/stdout until the client
+// closes stdin; with `--http <port>` the same registrations are
+// served over Streamable HTTP on 127.0.0.1 instead (modern era only).
 //
 // Try it by hand (all on one line; _meta is required on every request):
 //   ./build/mcpdemo <<'EOF'
@@ -16,6 +17,10 @@ program mcpdemo;
 {$I Shared.inc}
 
 uses
+  // Thread driver for the HTTP listener; must be first (Unix).
+  {$IFDEF UNIX}
+  cthreads,
+  {$ENDIF}
   SysUtils,
 
   fpjson,
@@ -23,6 +28,7 @@ uses
   MCP.Protocol,
   MCP.Schema,
   MCP.Server,
+  MCP.Transport.HTTP,
   MCP.Transport.Stdio;
 
 function EchoHandler(AArguments: TJSONObject;
@@ -94,8 +100,25 @@ begin
   Result := MCPStructuredResult('The sum is ' + FloatToStr(Res.sum), Res);
 end;
 
+// `--http <port>` selects the Streamable HTTP binding; anything else
+// (including no arguments) serves stdio.
+function HTTPPortFromArgs(out APort: Word): Boolean;
+var
+  PortValue: Integer;
+begin
+  Result := (ParamCount = 2) and (ParamStr(1) = '--http') and
+    TryStrToInt(ParamStr(2), PortValue) and (PortValue > 0) and
+    (PortValue <= 65535);
+  if Result then
+    APort := Word(PortValue)
+  else
+    APort := 0;
+end;
+
 var
   Server: TMCPServer;
+  Transport: TMCPHTTPServer;
+  HTTPPort: Word;
 
 begin
   Server := TMCPServer.Create('pascal-mcp-sdk-demo', '0.1.0');
@@ -123,9 +146,26 @@ begin
     Server.RegisterResourceTemplate('mcp://pascal-mcp-sdk/shout/{text}',
       'shout', 'text/plain', ShoutReader, 'Uppercase echo of {text}');
 
-    MCPLogToStderr('mcpdemo: serving MCP ' + MCP_PROTOCOL_VERSION +
-      ' on stdio (2 tools, 1 resource, 1 template, 1 prompt)');
-    RunMCPStdioServer(Server);
+    if HTTPPortFromArgs(HTTPPort) then
+    begin
+      Transport := TMCPHTTPServer.Create(Server);
+      try
+        Transport.Port := HTTPPort;
+        MCPLogToStderr('mcpdemo: serving MCP ' + MCP_PROTOCOL_VERSION +
+          ' on http://127.0.0.1:' + IntToStr(HTTPPort) +
+          Transport.EndpointPath +
+          ' (2 tools, 1 resource, 1 template, 1 prompt)');
+        Transport.Run;
+      finally
+        Transport.Free;
+      end;
+    end
+    else
+    begin
+      MCPLogToStderr('mcpdemo: serving MCP ' + MCP_PROTOCOL_VERSION +
+        ' on stdio (2 tools, 1 resource, 1 template, 1 prompt)');
+      RunMCPStdioServer(Server);
+    end;
   finally
     Server.Free;
   end;

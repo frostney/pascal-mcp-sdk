@@ -41,8 +41,8 @@ unit MCP.Transport.Stdio;
 // a protocol decision (TMCPServer.OversizedLineResponse), the
 // transport only enforces the byte budget.
 //
-// MCP.Transport.HTTP is the planned second binding (Streamable HTTP);
-// it will wrap the same TMCPServer without changes here.
+// MCP.Transport.HTTP is the second binding (Streamable HTTP); it
+// wraps the same TMCPServer without changes here.
 
 {$I Shared.inc}
 

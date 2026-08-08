@@ -16,9 +16,10 @@ cleanly rather than port it.
 One transport-agnostic core (`MCP.Server` over `MCP.Protocol` and
 `MCP.JSONRPC`) owns every protocol rule and performs no I/O. Transports
 are thin bindings around it: **stdio** (newline-delimited JSON-RPC, pure
-RTL — v1, complete) and, as an explicit follow-up, **Streamable HTTP**
-(`MCP.Transport.HTTP`). The same tested core sits behind every binding
-unchanged — the sans-I/O discipline proven in duetto.
+RTL — v1, complete) and **Streamable HTTP** (`MCP.Transport.HTTP`,
+fcl-web's fphttpserver confined to the transport unit). The same tested
+core sits behind every binding unchanged — the sans-I/O discipline
+proven in duetto.
 
 Cross-platform coverage (Linux, macOS, Windows) and embeddability (a
 library that compiles into the host binary via lwpt, with zero

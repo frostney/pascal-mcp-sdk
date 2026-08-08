@@ -13,6 +13,11 @@ Python `websockets` reference). Two batteries:
   negotiates modern, proving capable clients get upgraded). The client
   also validates `structuredContent` against each tool's
   `outputSchema` on its side.
+- **`http-interop.mjs`** — the same stable v2 client over **Streamable
+  HTTP**: spawns `mcpdemo --http` on a free localhost port and runs
+  the battery via real POSTs, including a progress check that only
+  passes when the server streams request-scoped notifications on the
+  SSE response before the final result.
 - **`legacy-interop.mjs`** — the v1 SDK (`@modelcontextprotocol/sdk`),
   the client library today's clients (Claude Code, Claude Desktop)
   are built on: full `initialize` handshake, tools, resources, and
