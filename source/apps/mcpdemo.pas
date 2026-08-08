@@ -1,10 +1,11 @@
 program mcpdemo;
 
 // Example MCP server: the smallest complete pascal-mcp-sdk program.
-// Exposes two tools showing both registration styles — echo via the
+// Exposes three tools showing every registration style — echo via the
 // fluent schema builder, add via a typed argument class (the class
 // expands into the schema, and the handler receives a populated,
-// validated instance) — plus one static resource. By default it
+// validated instance), greet_user via a raw schema string — plus a
+// static resource, a resource template, and a prompt. By default it
 // serves newline-delimited JSON-RPC on stdin/stdout until the client
 // closes stdin; with `--http <port>` the same registrations are
 // served over Streamable HTTP on 127.0.0.1 instead (modern era only).
@@ -117,6 +118,24 @@ begin
   Result := MCPStructuredResult('The sum is ' + FloatToStr(Res.sum), Res);
 end;
 
+// Banner suffix derived from the live registries, so it can never drift
+// from what was actually registered. Templates have no public count, so
+// the summary claims only what the server exposes.
+function RegistrationSummary(AServer: TMCPServer): string;
+
+  function Plural(ACount: Integer; const ANoun: string): string;
+  begin
+    Result := IntToStr(ACount) + ' ' + ANoun;
+    if ACount <> 1 then
+      Result := Result + 's';
+  end;
+
+begin
+  Result := '(' + Plural(AServer.ToolCount, 'tool') + ', ' +
+    Plural(AServer.ResourceCount, 'resource') + ', ' +
+    Plural(AServer.PromptCount, 'prompt') + ')';
+end;
+
 // `--http <port>` selects the Streamable HTTP binding; anything else
 // (including no arguments) serves stdio.
 function HTTPPortFromArgs(out APort: Word): Boolean;
@@ -174,8 +193,7 @@ begin
         Transport.Port := HTTPPort;
         MCPLogToStderr('mcpdemo: serving MCP ' + MCP_PROTOCOL_VERSION +
           ' on http://127.0.0.1:' + IntToStr(HTTPPort) +
-          Transport.EndpointPath +
-          ' (2 tools, 1 resource, 1 template, 1 prompt)');
+          Transport.EndpointPath + ' ' + RegistrationSummary(Server));
         Transport.Run;
       finally
         Transport.Free;
@@ -184,7 +202,7 @@ begin
     else
     begin
       MCPLogToStderr('mcpdemo: serving MCP ' + MCP_PROTOCOL_VERSION +
-        ' on stdio (2 tools, 1 resource, 1 template, 1 prompt)');
+        ' on stdio ' + RegistrationSummary(Server));
       RunMCPStdioServer(Server);
     end;
   finally

@@ -49,9 +49,15 @@ unit MCP.Transport.HTTP;
 //   - a request that opted into request-scoped notifications
 //     (_meta.progressToken or the logLevel key) on a handler-backed
 //     method (tools/call, resources/read, prompts/get) is answered as
-//     an SSE stream: notifications as data: events before the final
-//     response event, Cache-Control: no-cache and X-Accel-Buffering:
-//     no on the stream, and the final response terminates it. All
+//     an SSE stream *once a notification actually flows*: the stream
+//     headers (200, text/event-stream, Cache-Control: no-cache,
+//     X-Accel-Buffering: no) are deferred until the first event, the
+//     notifications follow as data: events, and the final response
+//     event terminates the stream. An opted-in request that emits no
+//     notification — every protocol error does, since errors are
+//     decided before a handler runs — is answered as a single
+//     application/json object under the status mapping above, so the
+//     status a client sees never depends on the streaming opt-in. All
 //     other requests get a single application/json object. (The spec
 //     lets the server choose per request; this is the policy.)
 //   - closing the SSE response stream is the cancellation signal:
@@ -68,7 +74,9 @@ unit MCP.Transport.HTTP;
 //
 // Concurrency: connections are served on one thread each. The frozen
 // server core is read-only at that point and every POST gets its own
-// TMCPSession, so requests share no mutable library state; handler
+// TMCPSession, so per-request protocol state is isolated; the
+// process-global diagnostics the core keeps (the error-reference
+// counter, stderr logging) are internally synchronized. Handler
 // thread-safety remains the consumer's contract. On Unix the hosting
 // program must list cthreads first in its uses clause (the standard
 // FPC thread-driver contract) — see mcpdemo.
@@ -103,6 +111,10 @@ type
   //   Transport := TMCPHTTPServer.Create(Server);
   //   Transport.Port := 3000;
   //   Transport.Run;
+  //
+  // The listener is threaded, so on Unix the hosting program must
+  // list cthreads first in its uses clause (the standard FPC
+  // thread-driver contract) — see mcpdemo.
   TMCPHTTPServer = class(TObject)
   private
     FServer: TMCPServer; // borrowed: must outlive the transport
@@ -110,6 +122,8 @@ type
     FEndpointPath: string;
     FMaxBodyBytes: Integer;
     FAllowedOrigins: TStringList; // owned: exact-match additions
+    FStopPending: Boolean;
+    procedure HandleAcceptIdle(ASender: TObject);
     function GetPort: Word;
     procedure SetPort(AValue: Word);
     function GetAddress: string;
@@ -130,9 +144,13 @@ type
     destructor Destroy; override;
 
     // Serve until Stop. Freezes the server configuration up front so
-    // connection threads only ever read frozen state.
+    // connection threads only ever read frozen state. Returns
+    // immediately when Stop already ran — a stopped transport stays
+    // stopped.
     procedure Run;
-    // Thread-safe: unblocks Run.
+    // Unblocks Run, and may be called in any order relative to it: a
+    // Stop that lands before the listener is up is remembered and
+    // takes effect within one accept-idle interval (250 ms).
     procedure Stop;
 
     // 0 lets the OS choose (useful only when something else reports
@@ -173,8 +191,16 @@ begin
   if SchemeEnd = 0 then
     Exit;
   Rest := Copy(AOrigin, SchemeEnd + 3, MaxInt);
+  // A serialized origin is scheme://host[:port] and nothing more.
+  // Userinfo and a path would let a foreign host hide behind a
+  // loopback-looking prefix ('http://localhost:99@evil.example'), so
+  // both are refused before the host is read out.
+  if (Pos('@', Rest) > 0) or (Pos('/', Rest) > 0) then
+    Exit;
   if Copy(Rest, 1, 5) = '[::1]' then
-    Exit(True);
+    // The bracketed literal must be the whole host: a prefix match
+    // would also accept 'http://[::1].attacker.example'.
+    Exit((Length(Rest) = 5) or (Rest[6] = ':'));
   PortSep := Pos(':', Rest);
   if PortSep = 0 then
     Host := Rest
@@ -294,27 +320,64 @@ end;
 type
   PSSEStream = ^TSSEStream;
   TSSEStream = record
+    Response: TFPHTTPConnectionResponse; // borrowed
     Socket: TStream; // borrowed: the connection socket
+    HeadersSent: Boolean; // the stream is committed once this is set
   end;
 
 // Notification sink for streaming responses: one SSE data event per
-// line, written immediately. A failed write raises through the
-// running handler — that abort is the disconnect-as-cancellation
-// contract.
+// line, written immediately. The stream headers ride on the first
+// event — until one arrives the request is still answerable as a
+// single JSON object under the normal status mapping. A failed write
+// raises through the running handler — that abort is the
+// disconnect-as-cancellation contract.
 procedure SSESink(const ALine: string; AUserData: Pointer);
 var
   Frame: string;
+  Stream: PSSEStream;
 begin
+  Stream := PSSEStream(AUserData);
+  if not Stream^.HeadersSent then
+  begin
+    // Committed before the write: a header write that fails has still
+    // spent the response, so the caller must not fall back to JSON.
+    Stream^.HeadersSent := True;
+    Stream^.Response.Code := 200;
+    Stream^.Response.ContentType := 'text/event-stream';
+    Stream^.Response.CacheControl := 'no-cache';
+    Stream^.Response.SetCustomHeader('X-Accel-Buffering', 'no');
+    Stream^.Response.SendHeaders;
+  end;
   Frame := 'data: ' + ALine + #10#10;
-  PSSEStream(AUserData)^.Socket.WriteBuffer(Frame[1], Length(Frame));
+  Stream^.Socket.WriteBuffer(Frame[1], Length(Frame));
 end;
 
 { ───────── TMCPHTTPServer ───────── }
 
 type
+  // fphttpserver 3.2.2 buffers the whole declared Content-Length into
+  // a string before OnRequest ever fires, so a cap checked in the
+  // handler bounds nothing. This connection refuses the read itself:
+  // an over-cap Content-Length means the body is never drained, the
+  // request reaches the handler with empty content, and the refusal
+  // travels on the connection for the handler to answer 413.
+  TMCPHTTPConnection = class(TFPHTTPConnection)
+  private
+    FMaxBodyBytes: Integer;
+    FBodyRefused: Boolean;
+  protected
+    procedure ReadRequestContent(ARequest: TFPHTTPConnectionRequest);
+      override;
+  public
+    property MaxBodyBytes: Integer read FMaxBodyBytes write FMaxBodyBytes;
+    property BodyRefused: Boolean read FBodyRefused;
+  end;
+
   // TFPHttpServer publishes Port/Threaded/OnRequest but keeps the
   // bind address protected; surface it for the localhost default.
   TMCPHTTPListener = class(TFPHTTPServer)
+  private
+    FOwner: TMCPHTTPServer; // borrowed: owns this listener
   protected
     function CreateConnection(AData: TSocketStream): TFPHTTPConnection;
       override;
@@ -327,6 +390,20 @@ const
   // Not declared by the 3.2.2 sockets unit on Darwin.
   MCP_SO_NOSIGPIPE = $1022;
 {$ENDIF}
+
+procedure TMCPHTTPConnection.ReadRequestContent(
+  ARequest: TFPHTTPConnectionRequest);
+begin
+  if (FMaxBodyBytes > 0) and (ARequest.ContentLength > FMaxBodyBytes) then
+  begin
+    // Declared length alone decides: nothing is allocated and nothing
+    // is read. The unread body stays in the socket, which is why the
+    // 413 answer closes the connection.
+    FBodyRefused := True;
+    Exit;
+  end;
+  inherited ReadRequestContent(ARequest);
+end;
 
 function TMCPHTTPListener.CreateConnection(
   AData: TSocketStream): TFPHTTPConnection;
@@ -344,7 +421,10 @@ begin
   fpsetsockopt(AData.Handle, SOL_SOCKET, MCP_SO_NOSIGPIPE,
     @OptionValue, SizeOf(OptionValue));
   {$ENDIF}
-  Result := inherited CreateConnection(AData);
+  Result := TMCPHTTPConnection.Create(Self, AData);
+  // MaxBodyBytes is settable up to the moment a connection arrives;
+  // snapshot it here so the connection thread reads a stable value.
+  TMCPHTTPConnection(Result).MaxBodyBytes := FOwner.FMaxBodyBytes;
 end;
 
 constructor TMCPHTTPServer.Create(AServer: TMCPServer);
@@ -361,11 +441,13 @@ begin
   FMaxBodyBytes := MCP_HTTP_DEFAULT_MAX_BODY;
   FAllowedOrigins := TStringList.Create;
   FHTTP := TMCPHTTPListener.Create(nil);
+  TMCPHTTPListener(FHTTP).FOwner := Self;
   TMCPHTTPListener(FHTTP).Address := '127.0.0.1';
   FHTTP.Threaded := True;
   // The accept loop wakes at this interval to notice Stop; without
   // it, deactivation waits for the next inbound connection.
   FHTTP.AcceptIdleTimeout := 250;
+  FHTTP.OnAcceptIdle := HandleAcceptIdle;
   FHTTP.OnRequest := HandleHTTPRequest;
 end;
 
@@ -396,10 +478,26 @@ begin
   TMCPHTTPListener(FHTTP).Address := AValue;
 end;
 
+// The accept loop's idle tick, the one place that runs on the Run
+// thread while the listener is up. fphttpserver's deactivation is
+// edge-triggered — SetActive(False) no-ops while the listener socket
+// does not exist yet, and StartAccepting then sets its own accepting
+// flag — so a Stop that raced ahead of activation would otherwise be
+// lost and Run would block forever. Here it is picked up instead.
+procedure TMCPHTTPServer.HandleAcceptIdle(ASender: TObject);
+begin
+  if FStopPending and FHTTP.Active then
+    FHTTP.Active := False;
+end;
+
 procedure TMCPHTTPServer.Run;
 var
   Session: TMCPSession;
 begin
+  // A stopped transport stays stopped: Run after Stop returns at once
+  // rather than opening a listener nothing will ever close.
+  if FStopPending then
+    Exit;
   // Freeze deterministically before the listener starts so connection
   // threads never observe a configuration transition.
   Session := FServer.CreateSession;
@@ -409,7 +507,10 @@ end;
 
 procedure TMCPHTTPServer.Stop;
 begin
-  FHTTP.Active := False;
+  // Record first, deactivate second: the flag is what makes an early
+  // Stop survive until the accept loop can act on it.
+  FStopPending := True;
+  FHTTP.Active := False; // best effort; a no-op before activation
 end;
 
 function TMCPHTTPServer.OriginAllowed(const AOrigin: string): Boolean;
@@ -517,7 +618,8 @@ begin
 end;
 
 // Dispatch one request body through the core and answer it — a
-// single JSON object, or an SSE stream when AStream is set.
+// single JSON object, or an SSE stream when AStream is set and the
+// handler actually emits a notification.
 procedure TMCPHTTPServer.AnswerRequest(ARequest: TFPHTTPConnectionRequest;
   AResponse: TFPHTTPConnectionResponse; const ABody: string;
   AStream: Boolean);
@@ -531,16 +633,18 @@ begin
   try
     if AStream then
     begin
-      AResponse.Code := 200;
-      AResponse.ContentType := 'text/event-stream';
-      AResponse.CacheControl := 'no-cache';
-      AResponse.SetCustomHeader('X-Accel-Buffering', 'no');
-      AResponse.SendHeaders;
+      // Nothing is committed up front: the sink opens the stream on
+      // its first event, so a request that fails at protocol level —
+      // which no notification ever precedes — still gets the status
+      // the mapping prescribes instead of a 200 SSE stream.
+      Stream.Response := AResponse;
       Stream.Socket := ARequest.Connection.Socket;
+      Stream.HeadersSent := False;
+      Produced := False;
       try
         Produced := FServer.HandleMessage(Session, ABody, @SSESink,
           @Stream, ResponseLine);
-        if Produced then
+        if Stream.HeadersSent and Produced then
           SSESink(ResponseLine, @Stream);
       except
         // A dead client stream: the spec forbids sending anything
@@ -548,6 +652,14 @@ begin
         // the end of it.
         on EStreamError do;
       end;
+      if not Stream.HeadersSent then
+        // No notification flowed, so the opt-in changed nothing about
+        // how this request is answered.
+        if Produced then
+          AnswerJSON(AResponse, HTTPStatusForResponse(ResponseLine),
+            ResponseLine)
+        else
+          AResponse.Code := 202;
     end
     else
     begin
@@ -601,8 +713,16 @@ begin
     Exit;
   end;
 
+  // Over-cap bodies are already refused at the socket by
+  // TMCPHTTPConnection, which is the only place the cap can bound
+  // memory; the Length check behind it is the second line of defense
+  // for a body that arrives without a usable Content-Length.
+  // Connection: close (set above) matters here: the refused body was
+  // never drained out of the socket.
   Body := ARequest.Content;
-  if Length(Body) > FMaxBodyBytes then
+  if ((ARequest.Connection is TMCPHTTPConnection) and
+      TMCPHTTPConnection(ARequest.Connection).BodyRefused) or
+     (Length(Body) > FMaxBodyBytes) then
   begin
     // The refusal text stays a protocol decision.
     AnswerJSON(AResponse, 413,

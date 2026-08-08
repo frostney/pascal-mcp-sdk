@@ -19,17 +19,24 @@ finally
   Server.Free;
 end;`;
 
-const COVERAGE: [string, string][] = [
-  ['server/discover', 'mandatory entry point, capabilities + instructions'],
-  ['tools/list, tools/call', 'text / structured content, in-band errors, server-side argument validation'],
-  ['resources/list, resources/read', 'static + dynamic, text + blob builders'],
-  ['resources/templates/list', 'RFC 6570 level-1 templates, vars passed to readers'],
-  ['prompts/list, prompts/get', 'fluent argument declaration, message builders'],
-  ['MRTR input_required (SEP-2322)', 'elicitation / sampling / roots, capability-gated, stateless re-entry'],
-  ['notifications/progress, notifications/message', 'opt-in per request, severity-filtered'],
-  ['stdio transport', 'newline-delimited, EOF shutdown contract'],
-  ['Streamable HTTP transport', 'single POST endpoint, SSE streams, header mirroring, Origin allowlist'],
-  ['Legacy era (initialize)', '2024-11-05 / 2025-06-18 / 2025-11-25 — Claude Code and Claude Desktop connect out of the box'],
+// Source of truth: the "Protocol coverage" table in the repository
+// README.md. This array mirrors it row for row — when that table
+// changes, mirror the change here (and keep each row's own status
+// marker, so a not-implemented row renders as ⏳ rather than ✅).
+const COVERAGE: [surface: string, marker: string, status: string][] = [
+  ['server/discover', '✅', 'mandatory entry point, capabilities + instructions'],
+  ['tools/list, tools/call', '✅', 'text / structured content, in-band errors, server-side argument validation'],
+  ['resources/list, resources/read', '✅', 'static + dynamic, text + blob builders'],
+  ['resources/templates/list', '✅', 'RFC 6570 level-1 templates, vars passed to readers'],
+  ['prompts/list, prompts/get', '✅', 'fluent argument declaration, message builders'],
+  ['MRTR input_required (SEP-2322)', '✅', 'elicitation / sampling / roots, capability-gated, stateless re-entry'],
+  ['notifications/progress, notifications/message', '✅', 'opt-in per request, severity-filtered'],
+  ['_meta validation, version negotiation', '✅', '-32602 / -32021 / -32022 per spec'],
+  ['ttlMs / cacheScope caching hints (SEP-2549)', '✅', 'on discover/list/read, tunable via CacheTtlMs / CacheScope'],
+  ['stdio transport', '✅', 'newline-delimited, EOF shutdown contract'],
+  ['Streamable HTTP transport', '✅', 'single POST endpoint, SSE streams, header mirroring, Origin allowlist'],
+  ['Legacy era (initialize)', '✅', '2024-11-05 / 2025-06-18 / 2025-11-25 — Claude Code and Claude Desktop connect out of the box'],
+  ['subscriptions/listen, list-changed', '⏳', 'not implemented (registries are static after startup)'],
 ];
 
 export default function HomePage() {
@@ -112,13 +119,13 @@ export default function HomePage() {
               </tr>
             </thead>
             <tbody>
-              {COVERAGE.map(([surface, status]) => (
+              {COVERAGE.map(([surface, marker, status]) => (
                 <tr key={surface} className="border-b last:border-b-0">
                   <td className="px-4 py-2 font-mono text-xs whitespace-nowrap">
                     {surface}
                   </td>
                   <td className="px-4 py-2 text-fd-muted-foreground">
-                    ✅ {status}
+                    {marker} {status}
                   </td>
                 </tr>
               ))}

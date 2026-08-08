@@ -130,6 +130,14 @@ fluent builder, JSON-string, and definition-object registration
 overloads remain available, validated at registration (schemas beyond
 the server-enforced subset are marked `.ApplicationValidated`, handing
 argument validation to your handler).
+
+**Upgrading:** raw-schema registrations are now checked at startup
+against the enforced JSON Schema subset. A tool whose `inputSchema`
+uses a keyword outside that subset fails at registration, naming the
+offending keyword, instead of being silently under-validated at call
+time. Mark such registrations `.ApplicationValidated` to keep the
+previous behaviour, with argument validation owned by your handler.
+
 Results are built with `MCPTextResult` / `MCPErrorResult` /
 `MCPStructuredResult`; handler exceptions become in-band
 `isError: true` tool results automatically. Resources register either
@@ -140,6 +148,10 @@ Serving the same registrations over **Streamable HTTP** instead of
 stdio is a transport swap (modern-era only; binds 127.0.0.1):
 
 ```pascal
+uses
+  {$IFDEF UNIX} cthreads, {$ENDIF}   // first in the program uses clause
+  ..., MCP.Transport.HTTP;
+
 Transport := TMCPHTTPServer.Create(Server);
 Transport.Port := 3000;   // POST http://127.0.0.1:3000/mcp
 Transport.Run;            // blocks; Transport.Stop unblocks it

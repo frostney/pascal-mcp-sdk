@@ -401,6 +401,10 @@ type
       ALegacy: Boolean): string;
     function HandlePromptsGet(const AMessage: TJSONRPCMessage;
       const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
+    function InputRequiredResponse(const AMessage: TJSONRPCMessage;
+      const ACtx: TMCPRequestContext;
+      const ASubjectKind, ASubjectName: string;
+      AInputRequests: TJSONObject; const ARequestState: string): string;
     function ResultResponse(const AMessage: TJSONRPCMessage;
       AResult: TJSONObject; ALegacy: Boolean): string;
     procedure AddCacheFields(AResult: TJSONObject; ATtlMs: Integer);
@@ -654,11 +658,15 @@ procedure MCPLogMessage(const ACtx: TMCPRequestContext;
 implementation
 
 var
-  // Process-global correlation references intentionally remain outside
-  // session/request state. Increment retains its single-threaded
-  // assumption and is deliberately non-atomic; no locking belongs in
-  // this lifetime split.
-  ErrorSequence: QWord = 0;
+  // Process-global diagnostic state intentionally remains outside
+  // session/request state. It is shared across threads — a Streamable
+  // HTTP transport dispatches from one thread per connection into the
+  // same core — so the contract is: the correlation counter increments
+  // atomically, and StderrLock serializes the write+flush pair so
+  // concurrent diagnostics cannot interleave within a line. Both are
+  // process-wide, matching the lifetime of the stderr handle itself.
+  ErrorSequence: Int64 = 0;
+  StderrLock: TRTLCriticalSection;
 
 type
   TMCPRequestCancellationToken = class
@@ -803,8 +811,10 @@ end;
 
 function NextErrorReference: string;
 begin
-  Inc(ErrorSequence);
-  Result := 'mcp-err-' + UIntToStr(ErrorSequence);
+  // Atomic read-modify-write: concurrent connection threads must never
+  // hand the same reference to two different clients.
+  Result := 'mcp-err-' +
+    IntToStr(System.InterLockedIncrement64(ErrorSequence));
 end;
 
 {$IFDEF UNIX}
@@ -850,13 +860,21 @@ begin
   {$IFDEF UNIX}
   EnsureSigPipeIgnored;
   {$ENDIF}
+  // Write and Flush are one indivisible diagnostic: without the lock,
+  // two connection threads can splice their text into a single line
+  // and make the redacted reference unreadable.
+  System.EnterCriticalSection(StderrLock);
   try
-    Write(ErrOutput, AMessage, #10);
-    Flush(ErrOutput);
-  except
-    on EInOutError do
-    begin
+    try
+      Write(ErrOutput, AMessage, #10);
+      Flush(ErrOutput);
+    except
+      on EInOutError do
+      begin
+      end;
     end;
+  finally
+    System.LeaveCriticalSection(StderrLock);
   end;
 end;
 
@@ -1376,12 +1394,15 @@ end;
 
 // '' when every inputRequests entry names a kind the client declared;
 // otherwise the first missing capability. AUnknownKind carries the
-// method of an entry that is not an MRTR kind at all.
+// method of an entry that is not an MRTR kind at all, and stays
+// non-empty for a malformed entry too — one that is not an object, or
+// carries no string "method" — so callers can keep testing it with a
+// single `<> ''` guard and never emit such a map on the wire.
 function MissingInputCapability(AInputRequests: TJSONObject;
   const ACtx: TMCPRequestContext; out AUnknownKind: string): string;
 var
   I: Integer;
-  Entry: TJSONData;
+  Entry, MethodData: TJSONData;
   Method, Capability: string;
 begin
   Result := '';
@@ -1393,11 +1414,20 @@ begin
     Entry := AInputRequests.Items[I];
     Method := '';
     if Entry.JSONType = jtObject then
-      Method := TJSONObject(Entry).Get('method', '');
+    begin
+      MethodData := TJSONObject(Entry).Find('method');
+      if (MethodData <> nil) and (MethodData.JSONType = jtString) then
+        Method := MethodData.AsString;
+    end;
     Capability := CapabilityForInputRequest(Method);
     if Capability = '' then
     begin
-      AUnknownKind := Method;
+      // A malformed entry has no method to quote back; the placeholder
+      // keeps the unknown-kind signal distinguishable from success.
+      if Method = '' then
+        AUnknownKind := '(missing method)'
+      else
+        AUnknownKind := Method;
       Exit;
     end;
     if not ACtx.HasCapability(Capability) then
@@ -3202,6 +3232,49 @@ begin
   Result := ResultResponse(AMessage, ListResult, ALegacy);
 end;
 
+// The input_required tail shared by tools/call and prompts/get (#4).
+// Gate first, assemble second: an entry naming a kind the library
+// never emits is a server bug (-32603), a kind the client did not
+// declare is one the spec forbids sending (-32021). ASubjectKind /
+// ASubjectName name the offender in diagnostics ('Tool' / 'Prompt'
+// plus the registered name). AInputRequests is consumed on every
+// path, error paths included. Modern era only — each caller keeps its
+// own legacy-era branch, which never reaches here.
+function TMCPServer.InputRequiredResponse(const AMessage: TJSONRPCMessage;
+  const ACtx: TMCPRequestContext;
+  const ASubjectKind, ASubjectName: string;
+  AInputRequests: TJSONObject; const ARequestState: string): string;
+var
+  MissingCapability, UnknownKind: string;
+  InterimResult: TJSONObject;
+begin
+  MissingCapability := MissingInputCapability(AInputRequests, ACtx,
+    UnknownKind);
+  if UnknownKind <> '' then
+  begin
+    AInputRequests.Free;
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
+      ASubjectKind + ' "' + ASubjectName + '" produced an unsupported ' +
+      'input request kind "' + UnknownKind + '"'));
+  end;
+  if MissingCapability <> '' then
+  begin
+    AInputRequests.Free;
+    Exit(BuildErrorResponse(AMessage.Id,
+      MCP_ERROR_MISSING_CLIENT_CAPABILITY,
+      ASubjectKind + ' "' + ASubjectName + '" requires the client ' +
+      'capability "' + MissingCapability + '"',
+      CapabilityErrorData(MissingCapability)));
+  end;
+  InterimResult := TJSONObject.Create;
+  InterimResult.Add('resultType', RESULT_TYPE_INPUT_REQUIRED);
+  if AInputRequests <> nil then
+    InterimResult.Add('inputRequests', AInputRequests);
+  if ARequestState <> '' then
+    InterimResult.Add('requestState', ARequestState);
+  Result := ResultResponse(AMessage, InterimResult, False);
+end;
+
 function TMCPServer.HandleToolsCall(const AMessage: TJSONRPCMessage;
   const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
 var
@@ -3211,7 +3284,6 @@ var
   Arguments, OwnedEmpty, CallResult: TJSONObject;
   ToolResult: TMCPToolResult;
   ArgsInstance: TMCPArgs;
-  MissingCapability, UnknownKind: string;
 begin
   if AMessage.Params = nil then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
@@ -3301,33 +3373,8 @@ begin
         'available to legacy-era clients');
     end
     else
-    begin
-      MissingCapability := MissingInputCapability(
-        ToolResult.InputRequests, ACtx, UnknownKind);
-      if UnknownKind <> '' then
-      begin
-        ToolResult.InputRequests.Free;
-        Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
-          'Tool "' + ToolName + '" produced an unsupported input ' +
-          'request kind "' + UnknownKind + '"'));
-      end;
-      if MissingCapability <> '' then
-      begin
-        ToolResult.InputRequests.Free;
-        Exit(BuildErrorResponse(AMessage.Id,
-          MCP_ERROR_MISSING_CLIENT_CAPABILITY,
-          'Tool "' + ToolName + '" requires the client capability "' +
-          MissingCapability + '"',
-          CapabilityErrorData(MissingCapability)));
-      end;
-      CallResult := TJSONObject.Create;
-      CallResult.Add('resultType', RESULT_TYPE_INPUT_REQUIRED);
-      if ToolResult.InputRequests <> nil then
-        CallResult.Add('inputRequests', ToolResult.InputRequests);
-      if ToolResult.RequestState <> '' then
-        CallResult.Add('requestState', ToolResult.RequestState);
-      Exit(ResultResponse(AMessage, CallResult, ALegacy));
-    end;
+      Exit(InputRequiredResponse(AMessage, ACtx, 'Tool', ToolName,
+        ToolResult.InputRequests, ToolResult.RequestState));
   end;
 
   if ToolResult.Content = nil then
@@ -3484,7 +3531,6 @@ var
   DeclaredArgs: TJSONArray;
   Messages: TJSONArray;
   PromptResult: TMCPPromptResult;
-  MissingCapability, UnknownKind: string;
 begin
   if AMessage.Params = nil then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
@@ -3569,31 +3615,8 @@ begin
           '(input_required), which is not available to legacy-era ' +
           'clients'));
       end;
-      MissingCapability := MissingInputCapability(
-        PromptResult.InputRequests, ACtx, UnknownKind);
-      if UnknownKind <> '' then
-      begin
-        PromptResult.InputRequests.Free;
-        Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
-          'Prompt "' + PromptName + '" produced an unsupported input ' +
-          'request kind "' + UnknownKind + '"'));
-      end;
-      if MissingCapability <> '' then
-      begin
-        PromptResult.InputRequests.Free;
-        Exit(BuildErrorResponse(AMessage.Id,
-          MCP_ERROR_MISSING_CLIENT_CAPABILITY,
-          'Prompt "' + PromptName + '" requires the client capability "' +
-          MissingCapability + '"',
-          CapabilityErrorData(MissingCapability)));
-      end;
-      GetResult := TJSONObject.Create;
-      GetResult.Add('resultType', RESULT_TYPE_INPUT_REQUIRED);
-      if PromptResult.InputRequests <> nil then
-        GetResult.Add('inputRequests', PromptResult.InputRequests);
-      if PromptResult.RequestState <> '' then
-        GetResult.Add('requestState', PromptResult.RequestState);
-      Exit(ResultResponse(AMessage, GetResult, ALegacy));
+      Exit(InputRequiredResponse(AMessage, ACtx, 'Prompt', PromptName,
+        PromptResult.InputRequests, PromptResult.RequestState));
     end;
 
     if Messages = nil then
@@ -3609,5 +3632,13 @@ begin
   GetResult.Add('messages', Messages);
   Result := ResultResponse(AMessage, GetResult, ALegacy);
 end;
+
+initialization
+  // RTL-only mutual exclusion for the process-wide stderr diagnostic;
+  // it outlives every session, so unit lifetime is the right scope.
+  InitCriticalSection(StderrLock);
+
+finalization
+  DoneCriticalSection(StderrLock);
 
 end.

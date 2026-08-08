@@ -492,4 +492,7 @@ begin
   TestRunnerProgram.AddSuite(
     TResponseBuilders.Create('JSONRPC: response builders'));
   TestRunnerProgram.Run;
+  // Fail the process when any suite failed, so lwpt test and CI
+  // actually gate on assertions (the runner does not set it).
+  ExitCode := TestResultToExitCode;
 end.

@@ -4,9 +4,11 @@
   403 / 404 / 405 / 413), 202-with-no-body for notifications, the
   mirrored-header validation (-32020 for missing or mismatched
   MCP-Protocol-Version / Mcp-Method / Mcp-Name, sentinel decoding),
-  the SSE response mode for notification-opted requests, legacy
-  GET/DELETE refusal, Origin allowlisting, and the ignored legacy
-  session/resumability headers. }
+  the SSE response mode for notification-opted requests (and the
+  single-JSON answer when such a request emits nothing), legacy
+  GET/DELETE refusal, Origin allowlisting including the host-spoofing
+  shapes, the ignored legacy session/resumability headers, and the
+  Stop/Run ordering contract. }
 
 program MCP.Transport.HTTP.Test;
 
@@ -95,9 +97,17 @@ type
     procedure TestWrongPath;
     procedure TestForeignOriginRejected;
     procedure TestLocalhostOriginAccepted;
+    procedure TestIPv6LoopbackOriginAccepted;
+    procedure TestIPv6PrefixedOriginRejected;
+    procedure TestIPv6SuffixedOriginRejected;
+    procedure TestUserinfoOriginRejected;
     procedure TestSessionHeaderIgnored;
     procedure TestOversizedBody;
     procedure TestSSEStream;
+    procedure TestStreamingProtocolErrorIsJSON;
+    procedure TestStreamingWithoutNotificationsIsJSON;
+    procedure TestStopBeforeRunReturns;
+    procedure TestStopDuringStartupReturns;
   end;
 
 function PingHandler(AArguments: TJSONObject;
@@ -114,6 +124,14 @@ begin
   MCPReportProgress(ACtx, 0.5, 1.0, 'halfway');
   MCPLogMessage(ACtx, 'info', 'echo invoked');
   Result := MCPTextResult(AArguments.Get('message', ''));
+end;
+
+// Emits nothing while it runs: a streaming-opted call to this tool
+// must still come back as a single JSON object.
+function QuietHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPTextResult('quiet');
 end;
 
 // Ask the kernel for a free localhost port: bind port 0, read the
@@ -163,6 +181,7 @@ begin
   FServer.RegisterTool('ping', 'Ping', '{"type":"object"}', PingHandler);
   FServer.RegisterTool('echo', 'Echo',
     ObjectSchema.AddString('message', 'Text to echo'), NoisyEchoHandler);
+  FServer.RegisterTool('quiet', 'Quiet', '{"type":"object"}', QuietHandler);
   FTransport := TMCPHTTPServer.Create(FServer);
   FTransport.Port := FindFreePort;
   FBaseUrl := 'http://127.0.0.1:' + IntToStr(FTransport.Port);
@@ -286,14 +305,20 @@ var
   Body, ContentType: string;
   Status: Integer;
 begin
-  // The official client's pre-negotiation server/discover probe has
-  // no _meta envelope and no mirrored headers (SDK-anchor fact, see
-  // the unit header): it must be served, not rejected with -32020.
+  // A body carrying no _meta envelope and no mirrored headers is not
+  // rejected by the transport with a misleading -32020 header
+  // mismatch: header validation keys on the envelope claim, so the
+  // request reaches the core (SDK-anchor fact, see the unit header).
+  // server/discover still carries _meta like every request (spec
+  // verified 2026-08-08:
+  // https://modelcontextprotocol.io/specification/2026-07-28/server/discover),
+  // so the core answers the accurate -32602 for the missing _meta
+  // rather than the transport masking it as a header error.
   Status := Exchange('POST', '/mcp',
     '{"jsonrpc":"2.0","id":0,"method":"server/discover","params":{}}',
     [], Body, ContentType);
   Expect<Integer>(Status).ToBe(200);
-  Expect<Boolean>(Pos('"supportedVersions"', Body) > 0).ToBe(True);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32602);
 end;
 
 procedure THTTPBinding.TestNotificationAccepted;
@@ -500,6 +525,62 @@ begin
   Expect<Integer>(Status).ToBe(200);
 end;
 
+procedure THTTPBinding.TestIPv6LoopbackOriginAccepted;
+var
+  Body, ContentType: string;
+  Status: Integer;
+begin
+  Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
+    [HeaderPair('Origin', 'http://[::1]:8080'),
+     HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+     HeaderPair('Mcp-Method', 'tools/call'),
+     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
+  Expect<Integer>(Status).ToBe(200);
+end;
+
+procedure THTTPBinding.TestIPv6PrefixedOriginRejected;
+var
+  Body, ContentType: string;
+  Status: Integer;
+begin
+  // The bracketed loopback literal is the whole host or nothing: a
+  // foreign host that merely starts with it is not localhost.
+  Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
+    [HeaderPair('Origin', 'http://[::1].attacker.example'),
+     HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+     HeaderPair('Mcp-Method', 'tools/call'),
+     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
+  Expect<Integer>(Status).ToBe(403);
+end;
+
+procedure THTTPBinding.TestIPv6SuffixedOriginRejected;
+var
+  Body, ContentType: string;
+  Status: Integer;
+begin
+  Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
+    [HeaderPair('Origin', 'http://[::1]evil'),
+     HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+     HeaderPair('Mcp-Method', 'tools/call'),
+     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
+  Expect<Integer>(Status).ToBe(403);
+end;
+
+procedure THTTPBinding.TestUserinfoOriginRejected;
+var
+  Body, ContentType: string;
+  Status: Integer;
+begin
+  // Userinfo would make 'localhost' the credentials and the foreign
+  // host the target; a serialized origin never carries it.
+  Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
+    [HeaderPair('Origin', 'http://localhost:99@evil.example'),
+     HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+     HeaderPair('Mcp-Method', 'tools/call'),
+     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
+  Expect<Integer>(Status).ToBe(403);
+end;
+
 procedure THTTPBinding.TestSessionHeaderIgnored;
 var
   Body, ContentType: string;
@@ -565,6 +646,116 @@ begin
   Expect<Boolean>(Pos('"hi"', LastEvent) > 0).ToBe(True);
 end;
 
+procedure THTTPBinding.TestStreamingProtocolErrorIsJSON;
+var
+  Line, Body, ContentType: string;
+  Status: Integer;
+begin
+  // The streaming opt-in must not change the status a client sees:
+  // this request fails the version gate before any handler runs, so
+  // no notification is emitted and the answer is the same 400 the
+  // non-streaming form gets.
+  Line := '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{' +
+    '"name":"ping","arguments":{},' +
+    '"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"progressToken":"tok-1"}}}';
+  Status := Exchange('POST', '/mcp', Line,
+    [HeaderPair('MCP-Protocol-Version', '2025-11-25'),
+     HeaderPair('Mcp-Method', 'tools/call'),
+     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
+  Expect<Integer>(Status).ToBe(400);
+  Expect<string>(ContentType).ToBe('application/json');
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32022);
+end;
+
+procedure THTTPBinding.TestStreamingWithoutNotificationsIsJSON;
+var
+  Body, ContentType: string;
+  Status: Integer;
+begin
+  // Opted in, but the handler emits nothing: the stream is never
+  // opened and the response stays a single JSON object.
+  Status := Exchange('POST', '/mcp',
+    CallLine(4, 'quiet', META_MODERN_STREAMING),
+    [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+     HeaderPair('Mcp-Method', 'tools/call'),
+     HeaderPair('Mcp-Name', 'quiet')], Body, ContentType);
+  Expect<Integer>(Status).ToBe(200);
+  Expect<string>(ContentType).ToBe('application/json');
+  Expect<Boolean>(Pos('data: ', Body) > 0).ToBe(False);
+  Expect<Boolean>(Pos('quiet', Body) > 0).ToBe(True);
+end;
+
+procedure THTTPBinding.TestStopBeforeRunReturns;
+var
+  Server: TMCPServer;
+  Transport: TMCPHTTPServer;
+  Started: QWord;
+begin
+  // Stop before Run: the transport stays stopped and Run does not
+  // block on a listener nothing would ever close.
+  Server := TMCPServer.Create('stop-test', '1.0');
+  try
+    Transport := TMCPHTTPServer.Create(Server);
+    try
+      Transport.Port := FindFreePort;
+      Transport.Stop;
+      Started := GetTickCount64;
+      Transport.Run;
+      Expect<Boolean>(GetTickCount64 - Started < 2000).ToBe(True);
+    finally
+      Transport.Free;
+    end;
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure THTTPBinding.TestStopDuringStartupReturns;
+var
+  Server: TMCPServer;
+  Transport: TMCPHTTPServer;
+  Thread: TServerThread;
+  Attempt: Integer;
+  Finished: Boolean;
+begin
+  // Stop racing the listener's startup: whichever side wins, the
+  // accept-idle tick picks the request up and Run returns.
+  Server := TMCPServer.Create('stop-race-test', '1.0');
+  try
+    Transport := TMCPHTTPServer.Create(Server);
+    try
+      Transport.Port := FindFreePort;
+      Thread := TServerThread.CreateFor(Transport);
+      try
+        Transport.Stop;
+        Finished := False;
+        for Attempt := 1 to 40 do
+        begin
+          if Thread.Finished then
+          begin
+            Finished := True;
+            Break;
+          end;
+          Sleep(100);
+        end;
+        Expect<Boolean>(Finished).ToBe(True);
+        // Safety net: a regression that lost the early Stop would
+        // still be unblocked here rather than hanging the suite.
+        Transport.Stop;
+        Thread.WaitFor;
+      finally
+        Thread.Free;
+      end;
+    finally
+      Transport.Free;
+    end;
+  finally
+    Server.Free;
+  end;
+end;
+
 procedure THTTPBinding.SetupTests;
 begin
   Test('request → single application/json response',
@@ -595,14 +786,32 @@ begin
   Test('wrong path → 404', TestWrongPath);
   Test('foreign Origin → 403', TestForeignOriginRejected);
   Test('localhost Origin accepted', TestLocalhostOriginAccepted);
+  Test('[::1] loopback Origin accepted',
+    TestIPv6LoopbackOriginAccepted);
+  Test('Origin merely prefixed with [::1] → 403',
+    TestIPv6PrefixedOriginRejected);
+  Test('Origin with trailing junk after [::1] → 403',
+    TestIPv6SuffixedOriginRejected);
+  Test('Origin with userinfo → 403', TestUserinfoOriginRejected);
   Test('legacy session/resume headers ignored',
     TestSessionHeaderIgnored);
   Test('oversized body → 413', TestOversizedBody);
   Test('notification-opted request → SSE stream, response last',
     TestSSEStream);
+  Test('notification-opted protocol error → 400 JSON, -32022',
+    TestStreamingProtocolErrorIsJSON);
+  Test('notification-opted call emitting nothing → 200 JSON',
+    TestStreamingWithoutNotificationsIsJSON);
+  Test('Stop before Run → Run returns at once',
+    TestStopBeforeRunReturns);
+  Test('Stop racing startup → Run still returns',
+    TestStopDuringStartupReturns);
 end;
 
 begin
   TestRunnerProgram.AddSuite(THTTPBinding.Create('Transport.HTTP: binding'));
   TestRunnerProgram.Run;
+  // Fail the process when any suite failed, so lwpt test and CI
+  // actually gate on assertions (the runner does not set it).
+  ExitCode := TestResultToExitCode;
 end.

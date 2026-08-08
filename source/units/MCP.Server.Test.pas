@@ -297,6 +297,11 @@ type
     procedure TestStateOnlyRound;
     procedure TestMissingCapabilityRejected;
     procedure TestUnknownKindRejected;
+    procedure TestMissingMethodEntryRejected;
+    procedure TestNonObjectEntryRejected;
+    procedure TestPromptMissingCapabilityRejected;
+    procedure TestPromptUnknownKindRejected;
+    procedure TestPromptMalformedEntryRejected;
     procedure TestEmptyInputRequiredGuard;
     procedure TestLegacyToolGetsInBandError;
     procedure TestPromptRoundTrip;
@@ -4110,6 +4115,29 @@ begin
   Result := MCPInputRequired(TJSONObject.Create(['x', Entry]));
 end;
 
+// Malformed entries the capability gate must reject just as firmly:
+// an object carrying no "method" string, and an entry that is not an
+// object at all. Neither names a kind, so neither may reach the wire.
+function NoMethodEntryHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Requests: TJSONObject;
+begin
+  Requests := TJSONObject.Create;
+  Requests.Add('x', TJSONObject.Create);
+  Result := MCPInputRequired(Requests);
+end;
+
+function NonObjectEntryHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Requests: TJSONObject;
+begin
+  Requests := TJSONObject.Create;
+  Requests.Add('x', 'elicitation/create');
+  Result := MCPInputRequired(Requests);
+end;
+
 // The at-least-one-of guard: neither requests nor state.
 function EmptyInputRequiredHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
@@ -4131,6 +4159,28 @@ begin
     MCPUserMessage('Set up ' + Content.Get('name', ''))]));
 end;
 
+// Prompt-side mirrors of the tools-side rejection handlers: the gate
+// lives in one shared helper, so both arms must prove it fires.
+function PromptBadKindHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPPromptResult;
+var
+  Entry: TJSONObject;
+begin
+  Entry := TJSONObject.Create;
+  Entry.Add('method', 'weird/thing');
+  Result := MCPPromptInputRequired(TJSONObject.Create(['x', Entry]));
+end;
+
+function PromptNoMethodEntryHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPPromptResult;
+var
+  Requests: TJSONObject;
+begin
+  Requests := TJSONObject.Create;
+  Requests.Add('x', TJSONObject.Create);
+  Result := MCPPromptInputRequired(Requests);
+end;
+
 procedure TMRTRDispatch.BeforeEach;
 begin
   inherited BeforeEach;
@@ -4140,10 +4190,18 @@ begin
     '{"type":"object"}', StateOnlyHandler);
   FServer.RegisterTool('badkind', 'Unsupported request kind',
     '{"type":"object"}', BadKindHandler);
+  FServer.RegisterTool('nomethod', 'Entry without a method',
+    '{"type":"object"}', NoMethodEntryHandler);
+  FServer.RegisterTool('nonobject', 'Entry that is not an object',
+    '{"type":"object"}', NonObjectEntryHandler);
   FServer.RegisterTool('emptyround', 'Neither requests nor state',
     '{"type":"object"}', EmptyInputRequiredHandler);
   FServer.RegisterPrompt('setup', 'Elicits the project first',
     SetupPromptHandler);
+  FServer.RegisterPrompt('badkindprompt', 'Unsupported request kind',
+    PromptBadKindHandler);
+  FServer.RegisterPrompt('nomethodprompt', 'Entry without a method',
+    PromptNoMethodEntryHandler);
 end;
 
 function GreetCall(const AExtraParams: string): string;
@@ -4245,6 +4303,83 @@ begin
   Response.Free;
 end;
 
+procedure TMRTRDispatch.TestMissingMethodEntryRejected;
+var
+  Response: TJSONObject;
+begin
+  // An entry object with no "method" names no kind: the gate must
+  // reject it instead of letting an empty unknown-kind signal through.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"nomethod",' + META_MRTR + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INTERNAL_ERROR);
+  Expect<Boolean>(Pos('(missing method)',
+    TJSONObject(Response.Find('error')).Get('message', '')) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Response.Find('result') = nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TMRTRDispatch.TestNonObjectEntryRejected;
+var
+  Response: TJSONObject;
+begin
+  // Same verdict when the entry is not an object at all.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"nonobject",' + META_MRTR + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INTERNAL_ERROR);
+  Expect<Boolean>(Pos('(missing method)',
+    TJSONObject(Response.Find('error')).Get('message', '')) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Response.Find('result') = nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TMRTRDispatch.TestPromptMissingCapabilityRejected;
+var
+  Response: TJSONObject;
+begin
+  // Prompts share the tools' gate: no declared elicitation capability,
+  // so the round is refused rather than sent.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"prompts/get",' +
+    '"params":{"name":"setup",' + META_MODERN + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(-32021);
+  Expect<Boolean>(Response.FindPath(
+    'error.data.requiredCapabilities.elicitation') <> nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TMRTRDispatch.TestPromptUnknownKindRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"prompts/get",' +
+    '"params":{"name":"badkindprompt",' + META_MRTR + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INTERNAL_ERROR);
+  Expect<Boolean>(Pos('weird/thing',
+    TJSONObject(Response.Find('error')).Get('message', '')) > 0)
+    .ToBe(True);
+  Response.Free;
+end;
+
+procedure TMRTRDispatch.TestPromptMalformedEntryRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"prompts/get",' +
+    '"params":{"name":"nomethodprompt",' + META_MRTR + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INTERNAL_ERROR);
+  Expect<Boolean>(Pos('(missing method)',
+    TJSONObject(Response.Find('error')).Get('message', '')) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Response.Find('result') = nil).ToBe(True);
+  Response.Free;
+end;
+
 procedure TMRTRDispatch.TestEmptyInputRequiredGuard;
 var
   Response: TJSONObject;
@@ -4335,6 +4470,16 @@ begin
   Test('state-only round (no inputRequests)', TestStateOnlyRound);
   Test('undeclared capability → -32021', TestMissingCapabilityRejected);
   Test('unknown request kind → -32603', TestUnknownKindRejected);
+  Test('entry without a method → -32603',
+    TestMissingMethodEntryRejected);
+  Test('entry that is not an object → -32603',
+    TestNonObjectEntryRejected);
+  Test('prompt undeclared capability → -32021',
+    TestPromptMissingCapabilityRejected);
+  Test('prompt unknown request kind → -32603',
+    TestPromptUnknownKindRejected);
+  Test('prompt entry without a method → -32603',
+    TestPromptMalformedEntryRejected);
   Test('neither requests nor state → guarded',
     TestEmptyInputRequiredGuard);
   Test('legacy era → in-band error, no resultType',
@@ -4533,4 +4678,7 @@ begin
   TestRunnerProgram.AddSuite(
     TMRTRDispatch.Create('Server: MRTR input_required'));
   TestRunnerProgram.Run;
+  // Fail the process when any suite failed, so lwpt test and CI
+  // actually gate on assertions (the runner does not set it).
+  ExitCode := TestResultToExitCode;
 end.

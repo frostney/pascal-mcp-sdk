@@ -34,12 +34,16 @@ trim = true
 conventional_commits = true
 filter_unconventional = false
 split_commits = false
-protect_breaking_commits = false
+protect_breaking_commits = true
 tag_pattern = "^v?[0-9]+\\.[0-9]+\\.[0-9]+(-.*)?$"
 sort_commits = "newest"
 
 commit_parsers = [
   { message = "^chore\\(release\\)", skip = true },
+  # Breaking changes first, whatever their type: `type!:` subjects and
+  # BREAKING CHANGE footers both set this flag, and protect_breaking_commits
+  # keeps them in the changelog even when their type would be skipped.
+  { field = "breaking", pattern = "true", group = "Breaking Changes" },
   { message = "^feat",     group = "New Features" },
   { message = "^fix",      group = "Bug Fixes" },
   { message = "^perf",     group = "Performance" },
