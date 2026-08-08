@@ -101,6 +101,7 @@ type
     procedure TestIPv6PrefixedOriginRejected;
     procedure TestIPv6SuffixedOriginRejected;
     procedure TestUserinfoOriginRejected;
+    procedure TestNonWebSchemeOriginRejected;
     procedure TestSessionHeaderIgnored;
     procedure TestOversizedBody;
     procedure TestSSEStream;
@@ -581,6 +582,22 @@ begin
   Expect<Integer>(Status).ToBe(403);
 end;
 
+procedure THTTPBinding.TestNonWebSchemeOriginRejected;
+var
+  Body, ContentType: string;
+  Status: Integer;
+begin
+  // The loopback allowlist is for web origins only: a non-http(s)
+  // scheme in front of a loopback host must not slip through, or
+  // 'weird://localhost' would inherit localhost's trust.
+  Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
+    [HeaderPair('Origin', 'weird://localhost'),
+     HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+     HeaderPair('Mcp-Method', 'tools/call'),
+     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
+  Expect<Integer>(Status).ToBe(403);
+end;
+
 procedure THTTPBinding.TestSessionHeaderIgnored;
 var
   Body, ContentType: string;
@@ -637,13 +654,19 @@ begin
   EventCount := Length(Events);
   // progress(0.5) + log message + final response, in stream order.
   Expect<Integer>(EventCount).ToBe(3);
-  Expect<Boolean>(
-    Pos('notifications/progress', Events[0]) > 0).ToBe(True);
-  Expect<Boolean>(
-    Pos('notifications/message', Events[1]) > 0).ToBe(True);
-  LastEvent := Events[EventCount - 1];
-  Expect<Boolean>(Pos('"result"', LastEvent) > 0).ToBe(True);
-  Expect<Boolean>(Pos('"hi"', LastEvent) > 0).ToBe(True);
+  // Guard the per-event indexing: a short stream must report the
+  // failed count expectation above and let the suite continue, not
+  // range-error on Events[...] and abort the whole program.
+  if EventCount >= 3 then
+  begin
+    Expect<Boolean>(
+      Pos('notifications/progress', Events[0]) > 0).ToBe(True);
+    Expect<Boolean>(
+      Pos('notifications/message', Events[1]) > 0).ToBe(True);
+    LastEvent := Events[EventCount - 1];
+    Expect<Boolean>(Pos('"result"', LastEvent) > 0).ToBe(True);
+    Expect<Boolean>(Pos('"hi"', LastEvent) > 0).ToBe(True);
+  end;
 end;
 
 procedure THTTPBinding.TestStreamingProtocolErrorIsJSON;
@@ -793,6 +816,8 @@ begin
   Test('Origin with trailing junk after [::1] → 403',
     TestIPv6SuffixedOriginRejected);
   Test('Origin with userinfo → 403', TestUserinfoOriginRejected);
+  Test('Origin with non-web scheme → 403',
+    TestNonWebSchemeOriginRejected);
   Test('legacy session/resume headers ignored',
     TestSessionHeaderIgnored);
   Test('oversized body → 413', TestOversizedBody);

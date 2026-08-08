@@ -305,7 +305,7 @@ begin
     // MRTR (#4): round 1 returns input_required with an elicitation
     // form and opaque state; the retry with inputResponses completes.
     Response := RoundTrip(Demo,
-      '{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{' +
+      '{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{' +
       '"name":"greet_user",' + META_MRTR + '}}');
     Check(PathString(Response, 'result.resultType') = 'input_required',
       'MRTR round 1: resultType input_required');
@@ -315,7 +315,7 @@ begin
       'MRTR round 1: requestState carried');
     Response.Free;
     Response := RoundTrip(Demo,
-      '{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{' +
+      '{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{' +
       '"name":"greet_user","inputResponses":{"who":{"action":"accept",' +
       '"content":{"name":"Ada"}}},"requestState":"greet-round-1",' +
       META_MRTR + '}}');
@@ -328,7 +328,7 @@ begin
     // MRTR without the declared capability — the spec forbids sending
     // the request kind, so the call fails with -32021.
     Response := RoundTrip(Demo,
-      '{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{' +
+      '{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{' +
       '"name":"greet_user",' + META_MODERN + '}}');
     Check(PathInt(Response, 'error.code') = -32021,
       'MRTR without capability: -32021');

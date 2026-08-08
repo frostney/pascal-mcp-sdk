@@ -108,6 +108,12 @@ Key behaviours you get for free:
   responses on `ACtx` — see `greet_user` in
   [mcpdemo.pas](../source/apps/mcpdemo.pas).
 
+> These protocol behaviours — MRTR, Streamable HTTP/SSE, the per-request
+> `_meta` model, and the EOF shutdown contract — implement spec revision
+> 2026-07-28. The dated official-spec citations
+> (modelcontextprotocol.io) live in architecture.md's
+> [Spec grounding](../docs/architecture.md#spec-grounding) section.
+
 ## Serve over Streamable HTTP
 
 The same server object serves HTTP with a transport swap (modern era
@@ -126,6 +132,12 @@ Transport.Run;            // blocks; Transport.Stop unblocks it
 ```
 
 Try it: `./build/mcpdemo --http 3000`.
+
+Every HTTP request still carries `_meta` in its body, and the mirrored
+`Mcp-*` headers are derived from it. The transport does not reject a
+request that omits the header with a header error, but the core still
+requires `_meta` and answers `-32602` when it is missing — the header
+tolerance is not a way to skip `_meta`.
 
 ## Talk to a stdio server by hand
 

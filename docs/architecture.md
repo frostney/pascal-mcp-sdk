@@ -25,14 +25,20 @@ MCP.Transport.Stdio      MCP.Transport.HTTP
 lines in/out, LF framing     POST + SSE, header mirroring, statuses
         │                        │
         └────────────┬───────────┘
-MCP.Server               frozen core + session; HandleMessage(session, line) → line
-        │
+MCP.Server ◄── MCP.Schema    frozen core + session; HandleMessage(session, line) → line
+        │       (fluent builder + RTTI argument classes; consumed by
+        │        MCP.Server, off the linear request chain)
 MCP.Protocol             _meta validation, version negotiation, result stamping
         │
 MCP.JSONRPC              JSON-RPC 2.0 parse/build, MCP profile + error codes
         │
 RTL + fpjson             the only runtime dependencies
 ```
+
+The strict bottom-up request chain is `MCP.JSONRPC` → `MCP.Protocol` →
+`MCP.Server` → transport. `MCP.Schema` sits to the side of that chain: a
+helper `MCP.Server` consumes to build and enforce tool schemas, not a
+layer a request passes through.
 
 Rules live in the layer that owns them and nowhere else:
 
@@ -53,6 +59,11 @@ Rules live in the layer that owns them and nowhere else:
   (handler exceptions → `isError: true` results; dispatch faults →
   JSON-RPC errors), the legacy-`initialize` rejection that names
   supported versions. Knows nothing about bytes or streams.
+- **`MCP.Schema`** — the tool-schema helper `MCP.Server` consumes, not a
+  link in the request chain: the fluent builder
+  (`ObjectSchema.AddString(...)`) and the RTTI-derived `TMCPArgs`
+  argument classes, both emitting the JSON Schema 2020-12 subset the
+  server enforces. Knows nothing about dispatch, bytes, or streams.
 - **`MCP.Transport.Stdio`** — LF-terminated writes on every platform,
   CR tolerance on reads, blank-line skipping, stderr-only logging, EOF
   as the graceful-shutdown signal. Contains not a single protocol
@@ -136,8 +147,10 @@ all three interop batteries and by `mcpsmoke`.
 
 Since the HTTP era inverted the trust boundary (#23), **every raw-handler
 tool call is validated against its registered schema's enforceable
-subset before the handler runs** — `type`, `properties`, `required`,
-`enum`, `default`, exactly the dialect the builders emit — with
+subset before the handler runs** — `type`, `description`, `title`,
+`properties`, `required`, `enum`, `default`, exactly the dialect the
+builders emit (the fluent builder stamps non-empty `description`s, which
+the server accepts without `.ApplicationValidated`) — with
 violations returned as in-band `isError` results, the same shape the
 typed path produces. Absent optional arguments are seeded with their
 schema `default`; unknown argument properties are ignored (the same
@@ -234,8 +247,15 @@ the frozen core — the concurrency model the v1.2.0 state split was
 built for. One SDK-anchor fact lives in the transport (verified
 2026-08-08 against `@modelcontextprotocol/client` 2.0.0): the
 official client derives the mirrored headers from the body's `_meta`
-envelope and sends its pre-negotiation `server/discover` probe bare,
-so header validation keys on the envelope claim rather than demanding
-the header on literally every POST. Proven end-to-end by the
+envelope and sends its pre-negotiation `server/discover` probe with no
+mirrored header, so header validation keys on the envelope claim rather
+than demanding the header on literally every POST. This is only about
+not masking the request with a `-32020` header error: the body still
+carries `_meta` (`server/discover` does, like every request), and the
+core still answers `-32602` for a request missing it — the header
+tolerance never lets a bare-`_meta` request succeed (spec verified
+2026-08-08:
+<https://modelcontextprotocol.io/specification/2026-07-28/server/discover>).
+Proven end-to-end by the
 `tools/interop-ts` Streamable HTTP battery (`http-interop.mjs`)
 driving `mcpdemo --http`, including streamed progress notifications.

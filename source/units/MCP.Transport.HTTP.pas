@@ -183,12 +183,17 @@ uses
 // are opaque tokens, not URLs to resolve.
 function IsLocalhostOrigin(const AOrigin: string): Boolean;
 var
-  Rest, Host: string;
+  Rest, Host, Scheme: string;
   SchemeEnd, PortSep: Integer;
 begin
   Result := False;
   SchemeEnd := Pos('://', AOrigin);
   if SchemeEnd = 0 then
+    Exit;
+  // Only web origins are loopback-trusted: a foreign scheme
+  // ('weird://localhost') must not ride the host allowlist.
+  Scheme := Copy(AOrigin, 1, SchemeEnd - 1);
+  if not (SameText(Scheme, 'http') or SameText(Scheme, 'https')) then
     Exit;
   Rest := Copy(AOrigin, SchemeEnd + 3, MaxInt);
   // A serialized origin is scheme://host[:port] and nothing more.

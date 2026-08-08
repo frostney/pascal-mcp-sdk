@@ -8,9 +8,12 @@ consumers never need the toolchain below.
 ## Toolchain
 
 - **FPC 3.2.2** — `apt install fpc` / `brew install fpc` / the
-  win32+win64 combo installer from freepascal.org. The exact version
-  matters: compiler flags live in `source/units/Shared.inc` and CI
-  pins 3.2.2.
+  win32+win64 combo installer from freepascal.org. The version must be
+  **exactly 3.2.2**: compiler flags are pinned in
+  `source/units/Shared.inc` and CI pins 3.2.2. Where your package
+  manager ships a different release, install 3.2.2 from the official
+  [FPC downloads](https://www.freepascal.org/download.html) instead
+  (`fpc -iV` prints the installed version).
 - **lwpt** — the canonical build/test/format entry point. Download the
   release tarball for your platform from
   [lwpt's releases](https://github.com/frostney/lwpt/releases), verify
@@ -35,7 +38,9 @@ lwpt format --check    # formatter gate (no flag = rewrite in place)
 ```
 
 `lwpt install --frozen` is the CI mode: verify the lockfile and the
-committed modules without touching the network.
+committed modules without touching the network. Exception: Windows CI
+skips `--frozen` and runs `lwpt install` online, pending
+[lwpt#78](https://github.com/frostney/lwpt/issues/78).
 
 `lwpt.cfg` and `lwpt.lock` are **generated** by `lwpt install` — never
 hand-edit them; `lwpt.toml` is the manifest you edit. The committed
@@ -63,8 +68,9 @@ trees under `.lwpt/modules/` and `.lwpt/archives/` are deliberate
    npm run interop
    ```
 
-Nothing in the test stack touches the network; everything runs against
-local pipes, sockets on 127.0.0.1, and temp files.
+Test *execution* touches no network — everything runs against local
+pipes, sockets on 127.0.0.1, and temp files. Dependency *installation*
+is separate: `npm ci` for the interop harness may reach the npm registry.
 
 ## CI expectations
 
