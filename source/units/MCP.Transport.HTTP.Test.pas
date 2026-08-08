@@ -740,7 +740,7 @@ var
   Server: TMCPServer;
   Transport: TMCPHTTPServer;
   Thread: TServerThread;
-  Attempt: Integer;
+  Deadline: QWord;
   Finished: Boolean;
 begin
   // Stop racing the listener's startup: whichever side wins, the
@@ -753,21 +753,26 @@ begin
       Thread := TServerThread.CreateFor(Transport);
       try
         Transport.Stop;
+        // Bounded poll instead of an unconditional WaitFor: if the
+        // transport regressed and Run never returns, a blocking WaitFor
+        // would hang the whole suite instead of reporting the failed
+        // expectation. Wait at most a few seconds, then assert Run
+        // finished; only join the thread when it actually did so
+        // cleanup cannot block on the failure path.
+        Deadline := GetTickCount64 + 4000;
         Finished := False;
-        for Attempt := 1 to 40 do
+        while GetTickCount64 < Deadline do
         begin
           if Thread.Finished then
           begin
             Finished := True;
             Break;
           end;
-          Sleep(100);
+          Sleep(50);
         end;
         Expect<Boolean>(Finished).ToBe(True);
-        // Safety net: a regression that lost the early Stop would
-        // still be unblocked here rather than hanging the suite.
-        Transport.Stop;
-        Thread.WaitFor;
+        if Finished then
+          Thread.WaitFor;
       finally
         Thread.Free;
       end;

@@ -661,11 +661,17 @@ var
   // Process-global diagnostic state intentionally remains outside
   // session/request state. It is shared across threads — a Streamable
   // HTTP transport dispatches from one thread per connection into the
-  // same core — so the contract is: the correlation counter increments
-  // atomically, and StderrLock serializes the write+flush pair so
-  // concurrent diagnostics cannot interleave within a line. Both are
-  // process-wide, matching the lifetime of the stderr handle itself.
+  // same core — so the contract is: the correlation counter's
+  // read-modify-write is guarded by ErrorSequenceLock (a plain
+  // critical section, portable across 32- and 64-bit targets, rather
+  // than a 64-bit atomic intrinsic that FPC 3.2.2 only declares for
+  // cpu64), and StderrLock serializes the write+flush pair so
+  // concurrent diagnostics cannot interleave within a line. The two
+  // locks are kept separate so error-ref allocation never waits on
+  // logging latency. All three are process-wide, matching the lifetime
+  // of the stderr handle itself.
   ErrorSequence: Int64 = 0;
+  ErrorSequenceLock: TRTLCriticalSection;
   StderrLock: TRTLCriticalSection;
 
 type
@@ -810,11 +816,22 @@ begin
 end;
 
 function NextErrorReference: string;
+var
+  Reference: Int64;
 begin
-  // Atomic read-modify-write: concurrent connection threads must never
-  // hand the same reference to two different clients.
-  Result := 'mcp-err-' +
-    IntToStr(System.InterLockedIncrement64(ErrorSequence));
+  // Lock-guarded read-modify-write: concurrent connection threads must
+  // never hand the same reference to two different clients. A critical
+  // section (not a 64-bit atomic intrinsic) keeps this portable to the
+  // i386-win32 CI target, where FPC 3.2.2 does not declare
+  // InterlockedIncrement64.
+  System.EnterCriticalSection(ErrorSequenceLock);
+  try
+    Inc(ErrorSequence);
+    Reference := ErrorSequence;
+  finally
+    System.LeaveCriticalSection(ErrorSequenceLock);
+  end;
+  Result := 'mcp-err-' + IntToStr(Reference);
 end;
 
 {$IFDEF UNIX}
@@ -3634,11 +3651,15 @@ begin
 end;
 
 initialization
-  // RTL-only mutual exclusion for the process-wide stderr diagnostic;
-  // it outlives every session, so unit lifetime is the right scope.
+  // RTL-only mutual exclusion for the process-wide diagnostic state;
+  // both outlive every session, so unit lifetime is the right scope.
+  // ErrorSequenceLock guards the error-reference counter (portable in
+  // place of a 64-bit atomic); StderrLock serializes stderr writes.
+  InitCriticalSection(ErrorSequenceLock);
   InitCriticalSection(StderrLock);
 
 finalization
   DoneCriticalSection(StderrLock);
+  DoneCriticalSection(ErrorSequenceLock);
 
 end.

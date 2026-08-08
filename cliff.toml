@@ -39,11 +39,14 @@ tag_pattern = "^v?[0-9]+\\.[0-9]+\\.[0-9]+(-.*)?$"
 sort_commits = "newest"
 
 commit_parsers = [
-  { message = "^chore\\(release\\)", skip = true },
   # Breaking changes first, whatever their type: `type!:` subjects and
   # BREAKING CHANGE footers both set this flag, and protect_breaking_commits
-  # keeps them in the changelog even when their type would be skipped.
+  # keeps them in the changelog even when their type would be skipped. This
+  # parser must precede the release-skip below: a breaking `chore(release)!`
+  # would otherwise match the skip parser first and never reach Breaking
+  # Changes classification.
   { field = "breaking", pattern = "true", group = "Breaking Changes" },
+  { message = "^chore\\(release\\)", skip = true },
   { message = "^feat",     group = "New Features" },
   { message = "^fix",      group = "Bug Fixes" },
   { message = "^perf",     group = "Performance" },
