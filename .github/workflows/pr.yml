@@ -181,17 +181,13 @@ jobs:
           fpc @lwpt.cfg -FEbuild-nolwpt source/apps/mcpdemo.pas
           test -x build-nolwpt/mcpdemo
 
-  # Official TS clients (v2 RC beta + v1 SDK) driven against mcpdemo
-  # over real stdio pipes. Advisory while the RC client is in beta:
-  # the pins + lockfile keep unrelated PRs stable, but every deliberate
-  # SDK bump can shift the beta contract, so failures here must not
-  # gate merges. continue-on-error lets the workflow pass while the
-  # job shows red; that holds only while branch protection does not
-  # list `interop` as a required check. Required-ness is bundled with
-  # the post-final-spec pass (#3).
+  # Official TS clients (stable v2 + v1 SDK) driven against mcpdemo
+  # over real stdio pipes. A required PR gate since the post-final-spec
+  # pass (#3): the pins target the stable 2026-07-28 SDKs and the
+  # committed lockfile keeps resolutions reproducible, so a red interop
+  # job is a real cross-implementation regression, not beta churn.
   interop:
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 10
     defaults:
       run:

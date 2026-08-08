@@ -17,7 +17,7 @@ unit MCP.JSONRPC;
 // inbound parser also normalizes non-ASCII Unicode escapes before the
 // FPC 3.2.2 scanner sees them, avoiding its adjacent-escape corruption.
 // UTF-8 transport requirement verified 2026-07-20:
-// https://modelcontextprotocol.io/specification/draft/basic/transports/stdio
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio
 //
 // Ownership: TJSONRPCMessage.Raw owns the whole parse tree; Id and
 // Params are borrowed views into it. Free with FreeJSONRPCMessage.

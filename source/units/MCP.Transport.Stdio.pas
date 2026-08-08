@@ -31,8 +31,8 @@ unit MCP.Transport.Stdio;
 // The stdio binding says clients MUST send notifications/cancelled and
 // servers SHOULD stop work as soon as practical and MUST NOT send any
 // further messages for that request (verified 2026-07-21):
-// https://modelcontextprotocol.io/specification/draft/basic/transports/stdio
-// https://modelcontextprotocol.io/specification/draft/basic/patterns/cancellation
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation
 //
 // Inbound lines are length-capped (default 4 MiB, the same order as
 // the official SDKs' stdio buffer limit): an oversized line is

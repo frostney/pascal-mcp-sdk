@@ -60,11 +60,11 @@ unit MCP.Server;
 // to stderr under the same reference. Deliberate MCPErrorResult values
 // remain verbatim. The stderr/stdout split follows the transport spec
 // (verified 2026-07-21):
-// https://modelcontextprotocol.io/specification/draft/basic/transports/stdio
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio
 // Cancellation behavior (stop work, free resources, and send no response;
 // unknown, completed, and malformed targets are ignored) is verified
 // 2026-07-21 against:
-// https://modelcontextprotocol.io/specification/draft/basic/patterns/cancellation
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation
 
 {$I Shared.inc}
 
@@ -507,7 +507,7 @@ function MCPBlobContents(const AUri, AMimeType, ABase64: string): TJSONArray;
 // deliberately not performed. On success AVars carries the captured
 // variables (caller frees). Exposed for tests.
 // Resource-template semantics verified 2026-07-20:
-// https://modelcontextprotocol.io/specification/draft/server/resources
+// https://modelcontextprotocol.io/specification/2026-07-28/server/resources
 function MatchUriTemplate(const ATemplate, AUri: string;
   out AVars: TJSONObject): Boolean;
 
@@ -1435,8 +1435,8 @@ begin
   if AToolName = '' then
     raise EMCPServer.Create('Tool definition must carry a non-empty name');
   // Tool.inputSchema is a required JSON Schema object:
-  // https://modelcontextprotocol.io/specification/draft/server/tools
-  // https://modelcontextprotocol.io/specification/draft/schema
+  // https://modelcontextprotocol.io/specification/2026-07-28/server/tools
+  // https://modelcontextprotocol.io/specification/2026-07-28/schema
   // (verified 2026-07-21).
   InputSchema := ADefinition.Find('inputSchema');
   if (InputSchema = nil) or (InputSchema.JSONType <> jtObject) then
@@ -2245,7 +2245,7 @@ begin
             // A malformed reason invalidates the whole notification;
             // accepted reasons are logged best-effort for debugging.
             // Spec verified 2026-07-21:
-            // https://modelcontextprotocol.io/specification/draft/basic/patterns/cancellation
+            // https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation
             ReasonData := Msg.Params.Find('reason');
             if ((ReasonData = nil) or
                 (ReasonData.JSONType = jtString)) and
@@ -2280,7 +2280,7 @@ begin
             // A server that accepted cancellation MUST NOT send the
             // response, even when the cooperative handler returned one.
             // Spec verified 2026-07-21:
-            // https://modelcontextprotocol.io/specification/draft/basic/patterns/cancellation
+            // https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation
             if (RequestToken <> nil) and RequestToken.IsCancelled then
               AResponse := ''
             else

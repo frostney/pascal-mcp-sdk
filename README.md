@@ -167,12 +167,13 @@ uses the complete following literal and may backtrack. Captured values are passe
 to readers exactly as encoded in the URI—percent-decoding is not performed.
 
 Spec facts verified against the official
-[MCP specification](https://modelcontextprotocol.io/specification/draft/basic/transports/stdio)
-on 2026-07-20, and the full surface **interop-tested against both
-official MCP TypeScript clients**: the v2 RC beta
-(`@modelcontextprotocol/client` 2.0.0-beta.4, pinned + auto-probe
-modes) and the v1 SDK (`@modelcontextprotocol/sdk`, the legacy era
-Claude Code speaks) — plus a live `claude mcp add` health check. See
+[MCP specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio)
+(2026-07-20, re-verified 2026-08-08 against the published final
+2026-07-28 text), and the full surface **interop-tested against both
+official MCP TypeScript clients**: the stable v2 client
+(`@modelcontextprotocol/client` 2.0.0, pinned + auto-probe modes) and
+the v1 SDK (`@modelcontextprotocol/sdk`, the legacy era Claude Code
+speaks) — plus a live `claude mcp add` health check. See
 [tools/interop-ts/](tools/interop-ts/) and
 [docs/architecture.md](docs/architecture.md) for the grounding notes.
 

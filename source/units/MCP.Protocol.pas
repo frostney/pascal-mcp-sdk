@@ -12,13 +12,13 @@ unit MCP.Protocol;
 // Spec grounding (verified 2026-07-20 against the official draft pages
 // for the 2026-07-28 revision):
 //   - required _meta fields, -32602 on absence:
-//       modelcontextprotocol.io/specification/draft/basic/index#meta
+//       modelcontextprotocol.io/specification/2026-07-28/basic/index#meta
 //   - version negotiation, UnsupportedProtocolVersionError (-32022):
-//       modelcontextprotocol.io/specification/draft/basic/versioning
+//       modelcontextprotocol.io/specification/2026-07-28/basic/versioning
 //   - exact lowercase RFC 5424-derived logging levels:
-//       modelcontextprotocol.io/specification/draft/server/utilities/logging
+//       modelcontextprotocol.io/specification/2026-07-28/server/utilities/logging
 //   - cooperative request cancellation:
-//       https://modelcontextprotocol.io/specification/draft/basic/patterns/cancellation
+//       https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation
 //     (verified 2026-07-21)
 
 {$I Shared.inc}

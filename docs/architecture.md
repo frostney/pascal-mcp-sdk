@@ -115,30 +115,34 @@ results that a model can read and correct against.
 
 ## Spec grounding
 
-Verified 2026-07-20 against the official spec (modelcontextprotocol.io):
+Verified 2026-07-20 against the RC pages; re-verified 2026-08-08
+against the published final text (modelcontextprotocol.io):
 
-- The **current ratified** revision is `2025-11-25`
+- The **current ratified** revision is `2026-07-28` — final shipped
+  July 28, 2026
   ([versioning](https://modelcontextprotocol.io/specification/versioning)).
-- **`2026-07-28` is the locked release candidate** (locked 2026-05-21;
-  final ships July 28, 2026 —
-  [release post](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/)).
   It removes the `initialize` handshake, protocol-level sessions, the
   `Mcp-Session-Id` header, and the GET SSE stream; server→client
   requests are replaced by Multi Round-Trip Requests.
-- This library implements `2026-07-28` from its **draft spec pages**,
-  which carry the RC content:
-  [transports overview](https://modelcontextprotocol.io/specification/draft/basic/transports),
-  [stdio binding](https://modelcontextprotocol.io/specification/draft/basic/transports/stdio),
-  [`_meta` + error codes](https://modelcontextprotocol.io/specification/draft/basic/index),
-  [versioning](https://modelcontextprotocol.io/specification/draft/basic/versioning),
-  [server/discover](https://modelcontextprotocol.io/specification/draft/server/discover),
-  [tools](https://modelcontextprotocol.io/specification/draft/server/tools),
-  [resources](https://modelcontextprotocol.io/specification/draft/server/resources).
-- When the final `2026-07-28` text publishes, re-verify the implemented
-  surface against it; any drift from the RC is a `fix(protocol)`.
+- This library implements `2026-07-28` from the pinned final pages:
+  [transports overview](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports),
+  [stdio binding](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio),
+  [`_meta` + error codes](https://modelcontextprotocol.io/specification/2026-07-28/basic/index),
+  [versioning](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning),
+  [server/discover](https://modelcontextprotocol.io/specification/2026-07-28/server/discover),
+  [tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools),
+  [resources](https://modelcontextprotocol.io/specification/2026-07-28/server/resources).
+- The 2026-08-08 re-verification diffed the
+  [final changelog](https://modelcontextprotocol.io/specification/2026-07-28/changelog)
+  against the RC surface this library implements and re-ran the interop
+  batteries on the **stable** SDKs (`@modelcontextprotocol/client`
+  2.0.0, `@modelcontextprotocol/sdk` 1.30.0): **no drift** on the
+  implemented surface — the RC facts the library absorbed (top-level
+  `serverInfo`, required `ttlMs`/`cacheScope`, `-32020..-32022` error
+  codes, resource-not-found `-32602`, per-request `logLevel` gating)
+  all appear unchanged in the final text.
 - **The prose pages are not the whole truth — the schema anchor is.**
-  Interop against the official TypeScript client beta
-  (`@modelcontextprotocol/client` 2.0.0-beta.4, via
+  Interop against the official TypeScript client (via
   `tools/interop-ts/`) surfaced two requirements the prose pages
   underplay: `DiscoverResult` requires a **top-level `serverInfo`**
   field (the `_meta` stamp alone reads as a legacy server to the
@@ -146,8 +150,8 @@ Verified 2026-07-20 against the official spec (modelcontextprotocol.io):
   **required** on discover/list/read results. Both are implemented and
   pinned by unit tests, `mcpsmoke`, and the interop battery. Protocol
   claims should be checked against the
-  [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/draft/schema.ts)
-  and a real RC implementation, not prose alone.
+  [schema](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2026-07-28/schema.ts)
+  and a real client implementation, not prose alone.
 
 pascal-mcp-sdk is a **dual-era server** (spec's compatibility matrix, on
 by default): era selection follows how the client opens. A request
@@ -167,7 +171,7 @@ edges: no `resultType`/`serverInfo` stamps, no SEP-2549 cache fields,
 resource-not-found `-32002`, and `ping` answered. `DualEra := False`
 restores strict modern-only behavior (initialize rejected with a
 diagnostic naming supported versions, as the spec recommends). Proven
-end-to-end by `tools/interop-ts`: the v2 RC beta client negotiates modern
+end-to-end by `tools/interop-ts`: the stable v2 client negotiates modern
 (auto-probe included), the v1 SDK client (Claude Code's library)
 completes the classic handshake, and Claude Code itself connects via
 `claude mcp add`.

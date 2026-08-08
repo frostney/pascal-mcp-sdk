@@ -1,5 +1,5 @@
-// Cross-implementation interop: the OFFICIAL MCP TypeScript client beta
-// (@modelcontextprotocol/client 2.0.0-beta.4, the 2026-07-28 RC client)
+// Cross-implementation interop: the OFFICIAL stable MCP TypeScript
+// client (@modelcontextprotocol/client 2.0.0, the 2026-07-28 client)
 // against pascal-mcp-sdk's mcpdemo over real stdio.
 //
 // Runs the battery twice:
@@ -159,7 +159,7 @@ try {
 
 console.log(
   failures === 0
-    ? '\ninterop: ALL CHECKS PASSED against the official TS client beta'
+    ? '\ninterop: ALL CHECKS PASSED against the official TS client'
     : `\ninterop: ${failures} check(s) FAILED`,
 );
 process.exit(failures === 0 ? 0 : 1);
