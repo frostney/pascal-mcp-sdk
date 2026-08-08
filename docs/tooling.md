@@ -82,13 +82,34 @@ Two workflows, mirroring duetto's split (see
 
 ## Cross-implementation check — tools/interop-ts
 
-The official MCP TypeScript client beta run against `build/mcpdemo`
-over stdio, in both pinned-`2026-07-28` and `auto`-probe modes (see
+The official stable MCP TypeScript clients run against
+`build/mcpdemo` — the v2 client over stdio (pinned-`2026-07-28` and
+`auto`-probe modes) and over Streamable HTTP, plus the v1 SDK's
+legacy handshake (see
 [tools/interop-ts/README.md](../tools/interop-ts/README.md)). Runs in
-CI as the advisory `interop` job on every PR: the pinned SDK versions
-and committed lockfile keep unrelated PRs stable, but the beta
-contract can shift on every deliberate SDK bump, so the job is
-`continue-on-error` and stays non-blocking as long as branch
-protection does not require it. Each battery prints the resolved
-versions at startup. Still worth running locally whenever the
-protocol surface changes.
+CI as the **required** `interop` job on every PR since the
+post-final-spec pass upgraded the pins to the stable SDKs (#3): a red
+interop job is a real cross-implementation regression, not beta
+churn. Each battery prints the resolved versions at startup. Still
+worth running locally whenever the protocol surface changes.
+
+## Website — website/
+
+The project site (<https://frostney.github.io/pascal-mcp-sdk/>) is a
+[Fumadocs](https://fumadocs.dev) (Next.js) static export under
+`website/`, adopted wholesale from the frostney/lwpt#90 decision
+record: landing page + docs site in one deployment, `basePath`
+`/pascal-mcp-sdk`, built-in search, **no analytics**. The site
+renders the repository's `docs/` tree **directly** — no curated
+second copy; only landing-page content and glue live under
+`website/`. A remark plugin maps repo-relative links: links within
+`docs/` become site routes, links leaving the rendered set resolve to
+their GitHub URLs, and a broken mapping **fails the build**.
+Deployment is `.github/workflows/pages.yml` (official
+`configure-pages` / `upload-pages-artifact` / `deploy-pages`
+actions): pushes to `main` touching `website/**` or `docs/**` deploy;
+PRs touching those paths build without deploying. The Node toolchain
+is contributor/CI tooling only (precedent: `tools/interop-ts`) and
+never touches the shipped library or its RTL + fpjson dependency
+policy. **Node pin: 24** (`actions/setup-node`, matching the version
+the site was built and verified with).
