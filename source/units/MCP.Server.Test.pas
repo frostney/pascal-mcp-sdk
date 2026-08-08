@@ -283,6 +283,24 @@ type
     procedure TestProgressNotificationLine;
   end;
 
+  // #23: call-time validation of raw-handler tool arguments against
+  // the registered schema's enforceable subset, plus the freeze-time
+  // subset gate and its ApplicationValidated escape hatch.
+  TSubsetValidation = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestMissingRequiredRejected;
+    procedure TestMistypedStringRejected;
+    procedure TestEnumViolationRejected;
+    procedure TestEnumAcceptedAndDefaultSeeded;
+    procedure TestFloatForIntegerRejected;
+    procedure TestUnknownArgumentIgnored;
+    procedure TestOutOfSubsetSchemaFailsFreeze;
+    procedure TestApplicationValidatedSkipsChecks;
+  end;
+
 { ───────── handlers under test ───────── }
 
 var
@@ -4028,6 +4046,172 @@ begin
     TestProgressNotificationLine);
 end;
 
+{ ───────── subset validation (#23) ───────── }
+
+// Mirrors the arguments the handler actually received, so tests can
+// observe default seeding and unvalidated passthrough.
+function ArgsMirrorHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPTextResult(AArguments.AsJSON);
+end;
+
+procedure TSubsetValidation.BeforeEach;
+begin
+  inherited BeforeEach;
+  // Raw-handler tool exercising every subset keyword: required,
+  // enum, default, integer.
+  FServer.RegisterTool('pick', 'Pick a color',
+    '{"type":"object","properties":{' +
+    '"color":{"type":"string","enum":["red","green"]},' +
+    '"count":{"type":"integer","default":3}},' +
+    '"required":["color"]}',
+    ArgsMirrorHandler);
+end;
+
+function PickLine(const AArgumentsJson: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{' +
+    '"name":"pick","arguments":' + AArgumentsJson + ',' + META_MODERN +
+    '}}';
+end;
+
+procedure TSubsetValidation.TestMissingRequiredRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(PickLine('{}'));
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Missing required argument "color"');
+  Response.Free;
+end;
+
+procedure TSubsetValidation.TestMistypedStringRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(PickLine('{"color":7}'));
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Argument "color" must be a string');
+  Response.Free;
+end;
+
+procedure TSubsetValidation.TestEnumViolationRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(PickLine('{"color":"blue"}'));
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Argument "color" must be a string from the declared enum values');
+  Response.Free;
+end;
+
+procedure TSubsetValidation.TestEnumAcceptedAndDefaultSeeded;
+var
+  Response: TJSONObject;
+  MirroredText: string;
+begin
+  Response := Call(PickLine('{"color":"red"}'));
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(False);
+  // The absent optional argument arrives seeded with its default,
+  // the same view a typed handler gets.
+  MirroredText :=
+    TJSONData(Response.FindPath('result.content[0].text')).AsString;
+  Expect<Boolean>(Pos('"count" : 3', MirroredText) > 0).ToBe(True);
+  Response.Free;
+end;
+
+procedure TSubsetValidation.TestFloatForIntegerRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(PickLine('{"color":"red","count":2.5}'));
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Argument "count" must be an integer');
+  Response.Free;
+end;
+
+procedure TSubsetValidation.TestUnknownArgumentIgnored;
+var
+  Response: TJSONObject;
+begin
+  // Unknown properties pass through untouched — the same tolerance
+  // the typed path applies to unknown keys (documented policy).
+  Response := Call(PickLine('{"color":"green","extra":"x"}'));
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(False);
+  Response.Free;
+end;
+
+procedure TSubsetValidation.TestOutOfSubsetSchemaFailsFreeze;
+var
+  ErrorMessage, Response: string;
+begin
+  FServer.RegisterTool('rich', 'Array-typed input',
+    '{"type":"object","properties":{"data":{"type":"array"}}}',
+    ArgsMirrorHandler);
+  ErrorMessage := '';
+  try
+    Dispatch('{"jsonrpc":"2.0","id":1,"method":"tools/list",' +
+      '"params":{' + META_MODERN + '}}', Response);
+  except
+    on E: EMCPServer do
+      ErrorMessage := E.Message;
+  end;
+  Expect<Boolean>(Pos('Tool "rich"', ErrorMessage) > 0).ToBe(True);
+  Expect<Boolean>(Pos('ApplicationValidated', ErrorMessage) > 0)
+    .ToBe(True);
+end;
+
+procedure TSubsetValidation.TestApplicationValidatedSkipsChecks;
+var
+  Response: TJSONObject;
+  MirroredText: string;
+begin
+  FServer.RegisterTool('rich', 'Array-typed input',
+    '{"type":"object","properties":{"data":{"type":"array"}}}',
+    ArgsMirrorHandler).ApplicationValidated;
+  // Arguments that would fail any schema check flow through to the
+  // handler untouched: validation is the application's contract now.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"rich","arguments":{"data":42},' + META_MODERN +
+    '}}');
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(False);
+  MirroredText :=
+    TJSONData(Response.FindPath('result.content[0].text')).AsString;
+  Expect<Boolean>(Pos('"data" : 42', MirroredText) > 0).ToBe(True);
+  Response.Free;
+end;
+
+procedure TSubsetValidation.SetupTests;
+begin
+  Test('missing required argument → isError', TestMissingRequiredRejected);
+  Test('mistyped argument → isError', TestMistypedStringRejected);
+  Test('enum violation → isError', TestEnumViolationRejected);
+  Test('valid enum accepted, default seeded',
+    TestEnumAcceptedAndDefaultSeeded);
+  Test('float for integer → isError', TestFloatForIntegerRejected);
+  Test('unknown argument ignored', TestUnknownArgumentIgnored);
+  Test('out-of-subset schema fails at freeze',
+    TestOutOfSubsetSchemaFailsFreeze);
+  Test('ApplicationValidated skips call-time checks',
+    TestApplicationValidatedSkipsChecks);
+end;
+
 begin
   TestRunnerProgram.AddSuite(
     TDiscoverAndErrors.Create('Server: discover + protocol errors'));
@@ -4047,5 +4231,7 @@ begin
     TSessionIsolation.Create('Server: shared-core session isolation'));
   TestRunnerProgram.AddSuite(
     TWireEncoding.Create('Server: byte-exact wire compatibility'));
+  TestRunnerProgram.AddSuite(
+    TSubsetValidation.Create('Server: subset argument validation'));
   TestRunnerProgram.Run;
 end.

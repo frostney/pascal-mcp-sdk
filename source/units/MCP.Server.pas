@@ -125,6 +125,13 @@ type
     ArgsClass: TMCPArgsClass; // non-nil marks a typed-argument tool
     ArgsHandler: TMCPArgsHandler;
     ArgsMethod: TMCPArgsMethod;
+    // Escape hatch (#23): the application owns argument validation
+    // for this tool; its schema may use keywords outside the
+    // enforceable subset and the server skips call-time checks.
+    AppValidated: Boolean;
+    // Set at freeze: the inputSchema is within the enforceable
+    // subset, so arguments are validated against it per call.
+    SubsetValidate: Boolean;
   end;
 
   TMCPResourceRegistration = record
@@ -223,6 +230,11 @@ type
     function DestructiveHint(AValue: Boolean = True): TMCPToolOptions;
     function IdempotentHint(AValue: Boolean = True): TMCPToolOptions;
     function OpenWorldHint(AValue: Boolean = True): TMCPToolOptions;
+    // Escape hatch (#23): declare that this tool's handler owns its
+    // argument validation. Required for raw-handler schemas that use
+    // keywords outside the server-enforced subset (type/properties/
+    // required/enum/default); such tools skip call-time validation.
+    function ApplicationValidated: TMCPToolOptions;
   end;
 
   // Where the server writes server-to-client notification lines
@@ -296,6 +308,7 @@ type
     function BuildToolDefinition(const AName, ADescription,
       AInputSchemaJson: string): TJSONObject;
     // ADefinition is borrowed; validation frees nothing.
+    procedure MarkToolApplicationValidated(ADefinition: TJSONObject);
     procedure ValidateToolDefinition(ADefinition: TJSONObject;
       out AToolName: string);
     function AddTool(ADefinition: TJSONObject; AHandler: TMCPToolHandler;
@@ -1267,10 +1280,241 @@ begin
       'Server configuration is frozen after session creation');
 end;
 
-procedure TMCPServer.FreezeConfiguration;
+{ ───────── subset schema validation (#23) ───────── }
+
+// The server-enforced subset is exactly the dialect this SDK's
+// builders emit: a root object schema with properties / required /
+// enum / default plus annotation keywords. Returns '' when ASchema is
+// within the subset, otherwise a diagnostic naming the first
+// offending keyword. Decided 2026-07-20 (roadmap): no general
+// JSON-Schema engine — foreign dialects need the ApplicationValidated
+// escape hatch.
+function SchemaSubsetViolation(ASchema: TJSONObject): string;
+
+  function PropertyViolation(const AName: string;
+    ASpec: TJSONObject): string;
+  var
+    I: Integer;
+    Key, PropType: string;
+    EnumData, DefaultData: TJSONData;
+  begin
+    Result := '';
+    PropType := ASpec.Get('type', '');
+    if (PropType <> 'string') and (PropType <> 'number') and
+       (PropType <> 'integer') and (PropType <> 'boolean') then
+      Exit(Format('property "%s" has unsupported type "%s"',
+        [AName, PropType]));
+    for I := 0 to ASpec.Count - 1 do
+    begin
+      Key := ASpec.Names[I];
+      if (Key = 'type') or (Key = 'description') or (Key = 'title') then
+        Continue
+      else if Key = 'enum' then
+      begin
+        if PropType <> 'string' then
+          Exit(Format('property "%s" uses enum with type "%s" ' +
+            '(only string enums are enforceable)', [AName, PropType]));
+        EnumData := ASpec.Items[I];
+        if EnumData.JSONType <> jtArray then
+          Exit(Format('property "%s" enum must be an array', [AName]));
+      end
+      else if Key = 'default' then
+      begin
+        DefaultData := ASpec.Items[I];
+        if not (DefaultData.JSONType in
+          [jtString, jtNumber, jtBoolean]) then
+          Exit(Format('property "%s" default must be a primitive',
+            [AName]));
+      end
+      else
+        Exit(Format('property "%s" uses unsupported keyword "%s"',
+          [AName, Key]));
+    end;
+  end;
+
+var
+  I: Integer;
+  Key: string;
+  Data: TJSONData;
+  Properties: TJSONObject;
 begin
-  if not FFrozen then
-    FFrozen := True;
+  Result := '';
+  for I := 0 to ASchema.Count - 1 do
+  begin
+    Key := ASchema.Names[I];
+    if (Key = 'type') or (Key = 'description') or (Key = 'title') or
+       (Key = '$schema') then
+      Continue
+    else if Key = 'properties' then
+    begin
+      if ASchema.Items[I].JSONType <> jtObject then
+        Exit('properties must be an object');
+    end
+    else if Key = 'required' then
+    begin
+      if ASchema.Items[I].JSONType <> jtArray then
+        Exit('required must be an array');
+    end
+    else
+      Exit(Format('uses unsupported root keyword "%s"', [Key]));
+  end;
+  Data := ASchema.Find('properties');
+  if Data = nil then
+    Exit;
+  Properties := TJSONObject(Data);
+  for I := 0 to Properties.Count - 1 do
+  begin
+    if Properties.Items[I].JSONType <> jtObject then
+      Exit(Format('property "%s" must be an object schema',
+        [Properties.Names[I]]));
+    Result := PropertyViolation(Properties.Names[I],
+      TJSONObject(Properties.Items[I]));
+    if Result <> '' then
+      Exit;
+  end;
+end;
+
+// Call-time argument validation against a subset schema (raw-handler
+// tools only; the typed path validates through BindArguments). The
+// checks mirror BindProperty: required presence, JSON type per
+// property (integer means an integral JSON number), enum membership,
+// and default seeding into AArguments for absent optional
+// properties. Unknown argument properties are deliberately ignored —
+// the same tolerance the typed path applies to unknown keys.
+function ValidateSubsetArguments(ASchema, AArguments: TJSONObject;
+  out AError: string): Boolean;
+var
+  I: Integer;
+  Data, Value, EnumData, DefaultData: TJSONData;
+  Required: TJSONArray;
+  Properties, PropSpec: TJSONObject;
+  PropName, PropType: string;
+  EnumMatched: Boolean;
+  J: Integer;
+begin
+  Result := False;
+  AError := '';
+
+  Data := ASchema.Find('required');
+  if (Data <> nil) and (Data.JSONType = jtArray) then
+  begin
+    Required := TJSONArray(Data);
+    for I := 0 to Required.Count - 1 do
+      if (Required[I].JSONType = jtString) and
+         (AArguments.Find(Required[I].AsString) = nil) then
+      begin
+        AError := Format('Missing required argument "%s"',
+          [Required[I].AsString]);
+        Exit;
+      end;
+  end;
+
+  Data := ASchema.Find('properties');
+  if (Data <> nil) and (Data.JSONType = jtObject) then
+  begin
+    Properties := TJSONObject(Data);
+    for I := 0 to Properties.Count - 1 do
+    begin
+      PropName := Properties.Names[I];
+      PropSpec := TJSONObject(Properties.Items[I]);
+      Value := AArguments.Find(PropName);
+      if Value = nil then
+      begin
+        // Absent optional argument: seed the declared default so the
+        // handler sees the same view a typed handler would.
+        DefaultData := PropSpec.Find('default');
+        if DefaultData <> nil then
+          AArguments.Add(PropName, DefaultData.Clone);
+        Continue;
+      end;
+      PropType := PropSpec.Get('type', '');
+      if PropType = 'string' then
+      begin
+        if Value.JSONType <> jtString then
+        begin
+          AError := Format('Argument "%s" must be a string', [PropName]);
+          Exit;
+        end;
+        EnumData := PropSpec.Find('enum');
+        if (EnumData <> nil) and (EnumData.JSONType = jtArray) then
+        begin
+          EnumMatched := False;
+          for J := 0 to TJSONArray(EnumData).Count - 1 do
+            if (TJSONArray(EnumData)[J].JSONType = jtString) and
+               (TJSONArray(EnumData)[J].AsString = Value.AsString) then
+            begin
+              EnumMatched := True;
+              Break;
+            end;
+          if not EnumMatched then
+          begin
+            AError := Format(
+              'Argument "%s" must be a string from the declared enum values',
+              [PropName]);
+            Exit;
+          end;
+        end;
+      end
+      else if PropType = 'number' then
+      begin
+        if Value.JSONType <> jtNumber then
+        begin
+          AError := Format('Argument "%s" must be a number', [PropName]);
+          Exit;
+        end;
+      end
+      else if PropType = 'integer' then
+      begin
+        if (Value.JSONType <> jtNumber) or
+           not (TJSONNumber(Value).NumberType in
+             [ntInteger, ntInt64, ntQWord]) then
+        begin
+          AError := Format('Argument "%s" must be an integer', [PropName]);
+          Exit;
+        end;
+      end
+      else if PropType = 'boolean' then
+      begin
+        if Value.JSONType <> jtBoolean then
+        begin
+          AError := Format('Argument "%s" must be a boolean', [PropName]);
+          Exit;
+        end;
+      end;
+    end;
+  end;
+
+  Result := True;
+end;
+
+procedure TMCPServer.FreezeConfiguration;
+var
+  I: Integer;
+  Violation: string;
+  InputSchema: TJSONData;
+begin
+  if FFrozen then
+    Exit;
+  // Subset conformance is decided here rather than at RegisterTool so
+  // the fluent .ApplicationValidated mark — which runs after
+  // RegisterTool returns — is visible (#23). A raw-handler tool whose
+  // schema leaves the subset without the mark fails startup, matching
+  // the fail-fast registration guards.
+  for I := 0 to High(FTools) do
+    if FTools[I].ArgsClass = nil then
+    begin
+      InputSchema := FTools[I].Definition.Find('inputSchema');
+      Violation := SchemaSubsetViolation(TJSONObject(InputSchema));
+      if Violation = '' then
+        FTools[I].SubsetValidate := not FTools[I].AppValidated
+      else if not FTools[I].AppValidated then
+        raise EMCPServer.CreateFmt(
+          'Tool "%s" inputSchema %s — outside the server-validated ' +
+          'subset (type/properties/required/enum/default). Mark the ' +
+          'registration .ApplicationValidated to take over argument ' +
+          'validation', [FTools[I].Definition.Get('name', ''), Violation]);
+    end;
+  FFrozen := True;
 end;
 
 function TMCPServer.CreateSession: TMCPSession;
@@ -1424,6 +1668,20 @@ begin
   end;
 end;
 
+procedure TMCPServer.MarkToolApplicationValidated(ADefinition: TJSONObject);
+var
+  I: Integer;
+begin
+  for I := 0 to High(FTools) do
+    if FTools[I].Definition = ADefinition then
+    begin
+      FTools[I].AppValidated := True;
+      Exit;
+    end;
+  raise EMCPServer.Create(
+    'ApplicationValidated: tool registration not found');
+end;
+
 procedure TMCPServer.ValidateToolDefinition(ADefinition: TJSONObject;
   out AToolName: string);
 var
@@ -1542,6 +1800,13 @@ end;
 function TMCPToolOptions.IdempotentHint(AValue: Boolean): TMCPToolOptions;
 begin
   Result := SetAnnotation('idempotentHint', AValue);
+end;
+
+function TMCPToolOptions.ApplicationValidated: TMCPToolOptions;
+begin
+  FServer.EnsureMutable;
+  FServer.MarkToolApplicationValidated(FDefinition);
+  Result := Self;
 end;
 
 function TMCPToolOptions.OpenWorldHint(AValue: Boolean): TMCPToolOptions;
@@ -2654,6 +2919,14 @@ begin
         else
           ToolResult := MCPErrorResult(BindError);
       end
+      else if FTools[Index].SubsetValidate and
+        not ValidateSubsetArguments(
+          TJSONObject(FTools[Index].Definition.Find('inputSchema')),
+          Arguments, BindError) then
+        // Raw path (#23): the registered schema's enforceable subset
+        // is checked before the handler runs; violations travel
+        // in-band exactly like typed binding failures.
+        ToolResult := MCPErrorResult(BindError)
       else if Assigned(FTools[Index].Method) then
         ToolResult := FTools[Index].Method(Arguments, ACtx)
       else

@@ -110,8 +110,20 @@ become in-band `isError` results before the handler runs; classes
 rather than records because FPC 3.2.2 RTTI has no record field names).
 Richer schemas use the JSON-string or definition-object overloads,
 parsed for well-formedness at registration (`EMCPServer` on error).
-Deeper validation is the handler's job, reported as in-band `isError`
-results that a model can read and correct against.
+
+Since the HTTP era inverted the trust boundary (#23), **every raw-handler
+tool call is validated against its registered schema's enforceable
+subset before the handler runs** — `type`, `properties`, `required`,
+`enum`, `default`, exactly the dialect the builders emit — with
+violations returned as in-band `isError` results, the same shape the
+typed path produces. Absent optional arguments are seeded with their
+schema `default`; unknown argument properties are ignored (the same
+tolerance the typed path applies to unknown keys). A raw schema using
+keywords outside the subset fails at freeze unless the registration is
+marked `.ApplicationValidated` — the documented escape hatch that hands
+argument validation back to the handler. Deeper, semantic validation
+remains the handler's job, reported as in-band `isError` results that a
+model can read and correct against.
 
 ## Spec grounding
 
