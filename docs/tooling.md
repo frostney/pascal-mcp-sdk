@@ -1,5 +1,7 @@
 # Tooling
 
+> **Audience: contributors.** This describes the library's internals and toolchain; consumers only need the [README](../README.md) and [quick start](quick-start.md).
+
 ## Executive Summary
 
 lwpt is the single toolchain entry point: `install` resolves the one

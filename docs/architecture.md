@@ -1,25 +1,30 @@
 # Architecture
 
+> **Audience: contributors.** This describes the library's internals and toolchain; consumers only need the [README](../README.md) and [quick start](quick-start.md).
+
 ## Executive Summary
 
-pascal-mcp-sdk is five units layered strictly bottom-up: `MCP.JSONRPC`
+pascal-mcp-sdk is six units layered strictly bottom-up: `MCP.JSONRPC`
 (the JSON-RPC 2.0 profile MCP mandates), `MCP.Protocol` (the stateless
 per-request `_meta` model of spec revision 2026-07-28), `MCP.Schema`
 (tool schemas as Pascal — fluent builder and RTTI-derived argument
 classes), `MCP.Server` (the sans-I/O dispatch core holding frozen
-tool/resource registries plus per-connection sessions), and
-`MCP.Transport.Stdio` (the newline-delimited stdio binding). The core
-performs no I/O — `CreateSession` binds connection state and
-`HandleMessage` maps one inbound line to at most one response line — so
-the planned Streamable HTTP binding wraps the same tested core without
-touching it. The runtime dependency set is FPC's RTL + fpjson, nothing
-else.
+tool/resource registries plus per-connection sessions), and two
+transport shells: `MCP.Transport.Stdio` (the newline-delimited stdio
+binding) and `MCP.Transport.HTTP` (Streamable HTTP). The core performs
+no I/O — `CreateSession` binds connection state and `HandleMessage`
+maps one inbound line to at most one response line — so both bindings
+wrap the same tested core without touching it. The runtime dependency
+set is FPC's RTL + fpjson (plus fcl-web, shipped inside FPC, confined
+to the HTTP transport unit), nothing else.
 
 ## Layering
 
 ```text
-MCP.Transport.Stdio      thin shell: lines in/out, LF framing, EOF = shutdown
-        │
+MCP.Transport.Stdio      MCP.Transport.HTTP
+lines in/out, LF framing     POST + SSE, header mirroring, statuses
+        │                        │
+        └────────────┬───────────┘
 MCP.Server               frozen core + session; HandleMessage(session, line) → line
         │
 MCP.Protocol             _meta validation, version negotiation, result stamping
@@ -59,8 +64,8 @@ Rules live in the layer that owns them and nowhere else:
 `TMCPServer.HandleMessage(ASession, const ALine; out AResponse): Boolean`
 is the line-oriented protocol surface. Unit tests drive both directly
 (no pipes, no processes); `RunMCPStdioLoop` creates one session for its
-connection and passes it on every call; `MCP.Transport.HTTP` will do the
-same for each connection/session lifetime when it lands. This mirrors
+connection and passes it on every call; `MCP.Transport.HTTP` does the
+same per HTTP request. This mirrors
 duetto's `WS.Protocol` discipline: one tested core, transports as
 delivery. Passing nil or a session from another server is API misuse and
 raises `EMCPServer`; malformed wire input is still converted to JSON-RPC
