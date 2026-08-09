@@ -54,6 +54,8 @@ type
     procedure TestMethodNotFound;
     procedure TestNotificationSilent;
     procedure TestMalformedLine;
+    procedure TestInvalidNotificationDropped;
+    procedure TestInvalidRequestAnswered;
     procedure TestMissingMeta;
   end;
 
@@ -130,6 +132,7 @@ type
     procedure TestSameSchemaRejectedWithoutLeak;
     procedure TestPromptArgumentsBuildReuse;
     procedure TestPromptArgumentsAddReuse;
+    procedure TestPromptArgumentsCopyConsumed;
     procedure TestPromptArgumentsConsumedByRegistration;
     procedure TestRegistryFrozenAfterSessionCreation;
     procedure TestEmptyResourceTemplate;
@@ -278,6 +281,49 @@ type
     procedure TestModernToolsListLine;
     procedure TestLegacyInitializeLine;
     procedure TestProgressNotificationLine;
+  end;
+
+  // #4: MRTR (input_required) — result-driven re-entry for tools and
+  // prompts: interim result shape, retry with inputResponses +
+  // requestState, capability gating (-32021), era gating, and the
+  // at-least-one-of guard.
+  TMRTRDispatch = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestFirstRoundInputRequired;
+    procedure TestRetryCompletes;
+    procedure TestStateOnlyRound;
+    procedure TestMissingCapabilityRejected;
+    procedure TestUnknownKindRejected;
+    procedure TestMissingMethodEntryRejected;
+    procedure TestNonObjectEntryRejected;
+    procedure TestPromptMissingCapabilityRejected;
+    procedure TestPromptUnknownKindRejected;
+    procedure TestPromptMalformedEntryRejected;
+    procedure TestEmptyInputRequiredGuard;
+    procedure TestLegacyToolGetsInBandError;
+    procedure TestPromptRoundTrip;
+    procedure TestSamplingAndRootsBuilders;
+  end;
+
+  // #23: call-time validation of raw-handler tool arguments against
+  // the registered schema's enforceable subset, plus the freeze-time
+  // subset gate and its ApplicationValidated escape hatch.
+  TSubsetValidation = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestMissingRequiredRejected;
+    procedure TestMistypedStringRejected;
+    procedure TestEnumViolationRejected;
+    procedure TestEnumAcceptedAndDefaultSeeded;
+    procedure TestFloatForIntegerRejected;
+    procedure TestUnknownArgumentIgnored;
+    procedure TestOutOfSubsetSchemaFailsFreeze;
+    procedure TestApplicationValidatedSkipsChecks;
   end;
 
 { ───────── handlers under test ───────── }
@@ -758,6 +804,32 @@ begin
   Response.Free;
 end;
 
+procedure TDiscoverAndErrors.TestInvalidNotificationDropped;
+var
+  Response: string;
+begin
+  // Invalid but notification-shaped (method, no id): dropped, not
+  // answered — MCP's fire-and-forget rule for malformed notifications.
+  Expect<Boolean>(Dispatch(
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+    '"params":[1,2]}', Response)).ToBe(False);
+  Expect<string>(Response).ToBe('');
+end;
+
+procedure TDiscoverAndErrors.TestInvalidRequestAnswered;
+var
+  Response: TJSONObject;
+begin
+  // The same malformation carrying an id keeps the -32600 reply with
+  // the id echoed back.
+  Response := Call('{"jsonrpc":"2.0","id":6,"method":"tools/call",' +
+    '"params":[1,2]}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INVALID_REQUEST);
+  Expect<Integer>(Response.Get('id', 0)).ToBe(6);
+  Response.Free;
+end;
+
 procedure TDiscoverAndErrors.TestMissingMeta;
 var
   Response: TJSONObject;
@@ -780,6 +852,10 @@ begin
   Test('unknown method → -32601', TestMethodNotFound);
   Test('notification produces no response', TestNotificationSilent);
   Test('malformed line → -32700, id null', TestMalformedLine);
+  Test('invalid notification-shaped message dropped',
+    TestInvalidNotificationDropped);
+  Test('invalid id-carrying request answered with -32600',
+    TestInvalidRequestAnswered);
   Test('missing _meta → -32602', TestMissingMeta);
 end;
 
@@ -2128,6 +2204,27 @@ begin
   BuiltArguments.Free;
 end;
 
+procedure TRegistrationGuards.TestPromptArgumentsCopyConsumed;
+var
+  Original, Copied: TMCPPromptArguments;
+  BuiltArguments: TJSONArray;
+  ErrorMessage: string;
+begin
+  // The reuse guard must survive record copies (issue #29).
+  Original := PromptArguments.Add('value');
+  Copied := Original;
+  BuiltArguments := Original.Build;
+  ErrorMessage := '';
+  try
+    Copied.Build;
+  except
+    on E: EMCPServer do
+      ErrorMessage := E.Message;
+  end;
+  Expect<string>(ErrorMessage).ToBe('Prompt arguments were already built');
+  BuiltArguments.Free;
+end;
+
 procedure TRegistrationGuards.TestPromptArgumentsConsumedByRegistration;
 var
   Arguments: TMCPPromptArguments;
@@ -2365,6 +2462,8 @@ begin
     TestSameSchemaRejectedWithoutLeak);
   Test('prompt argument Build rejects reuse', TestPromptArgumentsBuildReuse);
   Test('prompt argument Add rejects reuse', TestPromptArgumentsAddReuse);
+  Test('prompt arguments record copy sees consumed state',
+    TestPromptArgumentsCopyConsumed);
   Test('prompt registration consumes argument builder',
     TestPromptArgumentsConsumedByRegistration);
   Test('session creation freezes registries and request configuration',
@@ -3972,6 +4071,589 @@ begin
     TestProgressNotificationLine);
 end;
 
+{ ───────── MRTR (#4) ───────── }
+
+const
+  // Modern _meta declaring the elicitation capability MRTR tests need.
+  META_MRTR =
+    '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{"elicitation":{}}}';
+
+// Round 1: elicit a name; retry: greet it, proving the state echo and
+// the response accessor.
+function GreetUserHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Content: TJSONObject;
+begin
+  Content := MCPElicitationContent(ACtx, 'who');
+  if Content = nil then
+    Exit(MCPInputRequired(TJSONObject.Create(['who',
+      MCPElicitFormRequest('Who should be greeted?',
+      ObjectSchema.AddString('name'))]), 'state-42'));
+  Result := MCPTextResult('Hello, ' + Content.Get('name', '') +
+    ' [' + ACtx.RequestState + ']');
+end;
+
+// Load-shedding shape: requestState only, no inputRequests.
+function StateOnlyHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  if ACtx.RequestState = '' then
+    Exit(MCPInputRequired(nil, 'opaque-state'));
+  Result := MCPTextResult('resumed:' + ACtx.RequestState);
+end;
+
+// A hand-crafted entry outside the three MRTR kinds.
+function BadKindHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Entry: TJSONObject;
+begin
+  Entry := TJSONObject.Create;
+  Entry.Add('method', 'weird/thing');
+  Result := MCPInputRequired(TJSONObject.Create(['x', Entry]));
+end;
+
+// Malformed entries the capability gate must reject just as firmly:
+// an object carrying no "method" string, and an entry that is not an
+// object at all. Neither names a kind, so neither may reach the wire.
+function NoMethodEntryHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Requests: TJSONObject;
+begin
+  Requests := TJSONObject.Create;
+  Requests.Add('x', TJSONObject.Create);
+  Result := MCPInputRequired(Requests);
+end;
+
+function NonObjectEntryHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Requests: TJSONObject;
+begin
+  Requests := TJSONObject.Create;
+  Requests.Add('x', 'elicitation/create');
+  Result := MCPInputRequired(Requests);
+end;
+
+// The at-least-one-of guard: neither requests nor state.
+function EmptyInputRequiredHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPInputRequired(nil, '');
+end;
+
+function SetupPromptHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPPromptResult;
+var
+  Content: TJSONObject;
+begin
+  Content := MCPElicitationContent(ACtx, 'project');
+  if Content = nil then
+    Exit(MCPPromptInputRequired(TJSONObject.Create(['project',
+      MCPElicitFormRequest('Which project?',
+      ObjectSchema.AddString('name'))]), 'p-state'));
+  Result := MCPPromptMessagesResult(MCPMessages([
+    MCPUserMessage('Set up ' + Content.Get('name', ''))]));
+end;
+
+// Prompt-side mirrors of the tools-side rejection handlers: the gate
+// lives in one shared helper, so both arms must prove it fires.
+function PromptBadKindHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPPromptResult;
+var
+  Entry: TJSONObject;
+begin
+  Entry := TJSONObject.Create;
+  Entry.Add('method', 'weird/thing');
+  Result := MCPPromptInputRequired(TJSONObject.Create(['x', Entry]));
+end;
+
+function PromptNoMethodEntryHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPPromptResult;
+var
+  Requests: TJSONObject;
+begin
+  Requests := TJSONObject.Create;
+  Requests.Add('x', TJSONObject.Create);
+  Result := MCPPromptInputRequired(Requests);
+end;
+
+procedure TMRTRDispatch.BeforeEach;
+begin
+  inherited BeforeEach;
+  FServer.RegisterTool('greet_user', 'Greets a person it asks about',
+    '{"type":"object"}', GreetUserHandler);
+  FServer.RegisterTool('resume', 'State-only round trip',
+    '{"type":"object"}', StateOnlyHandler);
+  FServer.RegisterTool('badkind', 'Unsupported request kind',
+    '{"type":"object"}', BadKindHandler);
+  FServer.RegisterTool('nomethod', 'Entry without a method',
+    '{"type":"object"}', NoMethodEntryHandler);
+  FServer.RegisterTool('nonobject', 'Entry that is not an object',
+    '{"type":"object"}', NonObjectEntryHandler);
+  FServer.RegisterTool('emptyround', 'Neither requests nor state',
+    '{"type":"object"}', EmptyInputRequiredHandler);
+  FServer.RegisterPrompt('setup', 'Elicits the project first',
+    SetupPromptHandler);
+  FServer.RegisterPrompt('badkindprompt', 'Unsupported request kind',
+    PromptBadKindHandler);
+  FServer.RegisterPrompt('nomethodprompt', 'Entry without a method',
+    PromptNoMethodEntryHandler);
+end;
+
+function GreetCall(const AExtraParams: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{' +
+    '"name":"greet_user",' + AExtraParams + META_MRTR + '}}';
+end;
+
+procedure TMRTRDispatch.TestFirstRoundInputRequired;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(GreetCall(''));
+  Expect<string>(
+    TJSONData(Response.FindPath('result.resultType')).AsString)
+    .ToBe('input_required');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.inputRequests.who.method'))
+    .AsString).ToBe('elicitation/create');
+  Expect<string>(
+    TJSONData(Response.FindPath(
+    'result.inputRequests.who.params.mode')).AsString).ToBe('form');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.requestState')).AsString)
+    .ToBe('state-42');
+  // An interim result still carries the serverInfo stamp.
+  Expect<Boolean>(
+    Response.FindPath('result._meta') <> nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TMRTRDispatch.TestRetryCompletes;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(GreetCall(
+    '"inputResponses":{"who":{"action":"accept",' +
+    '"content":{"name":"Ada"}}},"requestState":"state-42",'));
+  Expect<string>(
+    TJSONData(Response.FindPath('result.resultType')).AsString)
+    .ToBe('complete');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Hello, Ada [state-42]');
+  Response.Free;
+end;
+
+procedure TMRTRDispatch.TestStateOnlyRound;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"resume",' + META_MRTR + '}}');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.resultType')).AsString)
+    .ToBe('input_required');
+  Expect<Boolean>(
+    Response.FindPath('result.inputRequests') = nil).ToBe(True);
+  Expect<string>(
+    TJSONData(Response.FindPath('result.requestState')).AsString)
+    .ToBe('opaque-state');
+  Response.Free;
+
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"resume","requestState":"opaque-state",' +
+    META_MRTR + '}}');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('resumed:opaque-state');
+  Response.Free;
+end;
+
+procedure TMRTRDispatch.TestMissingCapabilityRejected;
+var
+  Response: TJSONObject;
+begin
+  // Same tool, but the client declares no elicitation capability:
+  // the spec forbids sending the request kind, so -32021.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"greet_user",' + META_MODERN + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(-32021);
+  Expect<Boolean>(Response.FindPath(
+    'error.data.requiredCapabilities.elicitation') <> nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TMRTRDispatch.TestUnknownKindRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"badkind",' + META_MRTR + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INTERNAL_ERROR);
+  Expect<Boolean>(Pos('weird/thing',
+    TJSONObject(Response.Find('error')).Get('message', '')) > 0)
+    .ToBe(True);
+  Response.Free;
+end;
+
+procedure TMRTRDispatch.TestMissingMethodEntryRejected;
+var
+  Response: TJSONObject;
+begin
+  // An entry object with no "method" names no kind: the gate must
+  // reject it instead of letting an empty unknown-kind signal through.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"nomethod",' + META_MRTR + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INTERNAL_ERROR);
+  Expect<Boolean>(Pos('(missing method)',
+    TJSONObject(Response.Find('error')).Get('message', '')) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Response.Find('result') = nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TMRTRDispatch.TestNonObjectEntryRejected;
+var
+  Response: TJSONObject;
+begin
+  // Same verdict when the entry is not an object at all.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"nonobject",' + META_MRTR + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INTERNAL_ERROR);
+  Expect<Boolean>(Pos('(missing method)',
+    TJSONObject(Response.Find('error')).Get('message', '')) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Response.Find('result') = nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TMRTRDispatch.TestPromptMissingCapabilityRejected;
+var
+  Response: TJSONObject;
+begin
+  // Prompts share the tools' gate: no declared elicitation capability,
+  // so the round is refused rather than sent.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"prompts/get",' +
+    '"params":{"name":"setup",' + META_MODERN + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(-32021);
+  Expect<Boolean>(Response.FindPath(
+    'error.data.requiredCapabilities.elicitation') <> nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TMRTRDispatch.TestPromptUnknownKindRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"prompts/get",' +
+    '"params":{"name":"badkindprompt",' + META_MRTR + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INTERNAL_ERROR);
+  Expect<Boolean>(Pos('weird/thing',
+    TJSONObject(Response.Find('error')).Get('message', '')) > 0)
+    .ToBe(True);
+  Response.Free;
+end;
+
+procedure TMRTRDispatch.TestPromptMalformedEntryRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"prompts/get",' +
+    '"params":{"name":"nomethodprompt",' + META_MRTR + '}}');
+  Expect<Integer>(TJSONObject(Response.Find('error')).Get('code', 0))
+    .ToBe(JSONRPC_INTERNAL_ERROR);
+  Expect<Boolean>(Pos('(missing method)',
+    TJSONObject(Response.Find('error')).Get('message', '')) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Response.Find('result') = nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TMRTRDispatch.TestEmptyInputRequiredGuard;
+var
+  Response: TJSONObject;
+begin
+  // The builder itself raises; the dispatch wrapper surfaces it
+  // in-band like any handler failure.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"emptyround",' + META_MRTR + '}}');
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+  Response.Free;
+end;
+
+procedure TMRTRDispatch.TestLegacyToolGetsInBandError;
+var
+  Response: TJSONObject;
+  Ignored: string;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy","version":"1.0"}}}');
+  Response.Free;
+  Dispatch('{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    Ignored);
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"greet_user"}}');
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+  Expect<Boolean>(Pos('legacy-era',
+    TJSONData(Response.FindPath('result.content[0].text')).AsString) > 0)
+    .ToBe(True);
+  // Legacy results never carry the modern resultType stamp.
+  Expect<Boolean>(
+    Response.FindPath('result.resultType') = nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TMRTRDispatch.TestPromptRoundTrip;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"prompts/get",' +
+    '"params":{"name":"setup",' + META_MRTR + '}}');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.resultType')).AsString)
+    .ToBe('input_required');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.requestState')).AsString)
+    .ToBe('p-state');
+  Response.Free;
+
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"prompts/get",' +
+    '"params":{"name":"setup",' +
+    '"inputResponses":{"project":{"action":"accept",' +
+    '"content":{"name":"herakles"}}},"requestState":"p-state",' +
+    META_MRTR + '}}');
+  Expect<string>(
+    TJSONData(Response.FindPath('result.resultType')).AsString)
+    .ToBe('complete');
+  Expect<Boolean>(Pos('Set up herakles',
+    TJSONData(Response.FindPath(
+    'result.messages[0].content.text')).AsString) > 0).ToBe(True);
+  Response.Free;
+end;
+
+procedure TMRTRDispatch.TestSamplingAndRootsBuilders;
+var
+  Sampling, Roots: TJSONObject;
+begin
+  Sampling := MCPSamplingTextRequest('What is 2+2?', 50);
+  Expect<string>(Sampling.Get('method', ''))
+    .ToBe('sampling/createMessage');
+  Expect<string>(TJSONData(Sampling.FindPath(
+    'params.messages[0].content.text')).AsString).ToBe('What is 2+2?');
+  Expect<Integer>(TJSONData(Sampling.FindPath('params.maxTokens'))
+    .AsInteger).ToBe(50);
+  Sampling.Free;
+  Roots := MCPRootsRequest;
+  Expect<string>(Roots.Get('method', '')).ToBe('roots/list');
+  Roots.Free;
+end;
+
+procedure TMRTRDispatch.SetupTests;
+begin
+  Test('first round → input_required with requests and state',
+    TestFirstRoundInputRequired);
+  Test('retry with inputResponses completes', TestRetryCompletes);
+  Test('state-only round (no inputRequests)', TestStateOnlyRound);
+  Test('undeclared capability → -32021', TestMissingCapabilityRejected);
+  Test('unknown request kind → -32603', TestUnknownKindRejected);
+  Test('entry without a method → -32603',
+    TestMissingMethodEntryRejected);
+  Test('entry that is not an object → -32603',
+    TestNonObjectEntryRejected);
+  Test('prompt undeclared capability → -32021',
+    TestPromptMissingCapabilityRejected);
+  Test('prompt unknown request kind → -32603',
+    TestPromptUnknownKindRejected);
+  Test('prompt entry without a method → -32603',
+    TestPromptMalformedEntryRejected);
+  Test('neither requests nor state → guarded',
+    TestEmptyInputRequiredGuard);
+  Test('legacy era → in-band error, no resultType',
+    TestLegacyToolGetsInBandError);
+  Test('prompt input_required round trip', TestPromptRoundTrip);
+  Test('sampling and roots entry builders', TestSamplingAndRootsBuilders);
+end;
+
+{ ───────── subset validation (#23) ───────── }
+
+// Mirrors the arguments the handler actually received, so tests can
+// observe default seeding and unvalidated passthrough.
+function ArgsMirrorHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPTextResult(AArguments.AsJSON);
+end;
+
+procedure TSubsetValidation.BeforeEach;
+begin
+  inherited BeforeEach;
+  // Raw-handler tool exercising every subset keyword: required,
+  // enum, default, integer.
+  FServer.RegisterTool('pick', 'Pick a color',
+    '{"type":"object","properties":{' +
+    '"color":{"type":"string","enum":["red","green"]},' +
+    '"count":{"type":"integer","default":3}},' +
+    '"required":["color"]}',
+    ArgsMirrorHandler);
+end;
+
+function PickLine(const AArgumentsJson: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{' +
+    '"name":"pick","arguments":' + AArgumentsJson + ',' + META_MODERN +
+    '}}';
+end;
+
+procedure TSubsetValidation.TestMissingRequiredRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(PickLine('{}'));
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Missing required argument "color"');
+  Response.Free;
+end;
+
+procedure TSubsetValidation.TestMistypedStringRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(PickLine('{"color":7}'));
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Argument "color" must be a string');
+  Response.Free;
+end;
+
+procedure TSubsetValidation.TestEnumViolationRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(PickLine('{"color":"blue"}'));
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Argument "color" must be a string from the declared enum values');
+  Response.Free;
+end;
+
+procedure TSubsetValidation.TestEnumAcceptedAndDefaultSeeded;
+var
+  Response: TJSONObject;
+  MirroredText: string;
+begin
+  Response := Call(PickLine('{"color":"red"}'));
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(False);
+  // The absent optional argument arrives seeded with its default,
+  // the same view a typed handler gets.
+  MirroredText :=
+    TJSONData(Response.FindPath('result.content[0].text')).AsString;
+  Expect<Boolean>(Pos('"count" : 3', MirroredText) > 0).ToBe(True);
+  Response.Free;
+end;
+
+procedure TSubsetValidation.TestFloatForIntegerRejected;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(PickLine('{"color":"red","count":2.5}'));
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Argument "count" must be an integer');
+  Response.Free;
+end;
+
+procedure TSubsetValidation.TestUnknownArgumentIgnored;
+var
+  Response: TJSONObject;
+begin
+  // Unknown properties pass through untouched — the same tolerance
+  // the typed path applies to unknown keys (documented policy).
+  Response := Call(PickLine('{"color":"green","extra":"x"}'));
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(False);
+  Response.Free;
+end;
+
+procedure TSubsetValidation.TestOutOfSubsetSchemaFailsFreeze;
+var
+  ErrorMessage, Response: string;
+begin
+  FServer.RegisterTool('rich', 'Array-typed input',
+    '{"type":"object","properties":{"data":{"type":"array"}}}',
+    ArgsMirrorHandler);
+  ErrorMessage := '';
+  try
+    Dispatch('{"jsonrpc":"2.0","id":1,"method":"tools/list",' +
+      '"params":{' + META_MODERN + '}}', Response);
+  except
+    on E: EMCPServer do
+      ErrorMessage := E.Message;
+  end;
+  Expect<Boolean>(Pos('Tool "rich"', ErrorMessage) > 0).ToBe(True);
+  Expect<Boolean>(Pos('ApplicationValidated', ErrorMessage) > 0)
+    .ToBe(True);
+end;
+
+procedure TSubsetValidation.TestApplicationValidatedSkipsChecks;
+var
+  Response: TJSONObject;
+  MirroredText: string;
+begin
+  FServer.RegisterTool('rich', 'Array-typed input',
+    '{"type":"object","properties":{"data":{"type":"array"}}}',
+    ArgsMirrorHandler).ApplicationValidated;
+  // Arguments that would fail any schema check flow through to the
+  // handler untouched: validation is the application's contract now.
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"rich","arguments":{"data":42},' + META_MODERN +
+    '}}');
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(False);
+  MirroredText :=
+    TJSONData(Response.FindPath('result.content[0].text')).AsString;
+  Expect<Boolean>(Pos('"data" : 42', MirroredText) > 0).ToBe(True);
+  Response.Free;
+end;
+
+procedure TSubsetValidation.SetupTests;
+begin
+  Test('missing required argument → isError', TestMissingRequiredRejected);
+  Test('mistyped argument → isError', TestMistypedStringRejected);
+  Test('enum violation → isError', TestEnumViolationRejected);
+  Test('valid enum accepted, default seeded',
+    TestEnumAcceptedAndDefaultSeeded);
+  Test('float for integer → isError', TestFloatForIntegerRejected);
+  Test('unknown argument ignored', TestUnknownArgumentIgnored);
+  Test('out-of-subset schema fails at freeze',
+    TestOutOfSubsetSchemaFailsFreeze);
+  Test('ApplicationValidated skips call-time checks',
+    TestApplicationValidatedSkipsChecks);
+end;
+
 begin
   TestRunnerProgram.AddSuite(
     TDiscoverAndErrors.Create('Server: discover + protocol errors'));
@@ -3991,5 +4673,12 @@ begin
     TSessionIsolation.Create('Server: shared-core session isolation'));
   TestRunnerProgram.AddSuite(
     TWireEncoding.Create('Server: byte-exact wire compatibility'));
+  TestRunnerProgram.AddSuite(
+    TSubsetValidation.Create('Server: subset argument validation'));
+  TestRunnerProgram.AddSuite(
+    TMRTRDispatch.Create('Server: MRTR input_required'));
   TestRunnerProgram.Run;
+  // Fail the process when any suite failed, so lwpt test and CI
+  // actually gate on assertions (the runner does not set it).
+  ExitCode := TestResultToExitCode;
 end.

@@ -27,6 +27,9 @@
     ".lwpt/",
     ".agents/",
     ".claude/",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "website/out/",
+    "website/.next/",
+    "website/.source/"
   ]
 }

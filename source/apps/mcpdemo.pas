@@ -1,12 +1,14 @@
 program mcpdemo;
 
-// Example stdio MCP server: the smallest complete pascal-mcp-sdk program.
-// Exposes two tools showing both registration styles — echo via the
+// Example MCP server: the smallest complete pascal-mcp-sdk program.
+// Exposes three tools showing every registration style — echo via the
 // fluent schema builder, add via a typed argument class (the class
 // expands into the schema, and the handler receives a populated,
-// validated instance) — plus one static resource, then serves
-// newline-delimited JSON-RPC on stdin/stdout until the client closes
-// stdin.
+// validated instance), greet_user via a raw schema string — plus a
+// static resource, a resource template, and a prompt. By default it
+// serves newline-delimited JSON-RPC on stdin/stdout until the client
+// closes stdin; with `--http <port>` the same registrations are
+// served over Streamable HTTP on 127.0.0.1 instead (modern era only).
 //
 // Try it by hand (all on one line; _meta is required on every request):
 //   ./build/mcpdemo <<'EOF'
@@ -16,6 +18,10 @@ program mcpdemo;
 {$I Shared.inc}
 
 uses
+  // Thread driver for the HTTP listener; must be first (Unix).
+  {$IFDEF UNIX}
+  cthreads,
+  {$ENDIF}
   SysUtils,
 
   fpjson,
@@ -23,6 +29,7 @@ uses
   MCP.Protocol,
   MCP.Schema,
   MCP.Server,
+  MCP.Transport.HTTP,
   MCP.Transport.Stdio;
 
 function EchoHandler(AArguments: TJSONObject;
@@ -82,6 +89,23 @@ begin
     AArguments.Get('name', 'the user') + '.')]);
 end;
 
+// MRTR example: the first round returns input_required with an
+// elicitation form; the client gathers the name and retries the same
+// call with inputResponses + the echoed requestState.
+function GreetUserHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Content: TJSONObject;
+begin
+  Content := MCPElicitationContent(ACtx, 'who');
+  if Content = nil then
+    Exit(MCPInputRequired(TJSONObject.Create(['who',
+      MCPElicitFormRequest('Who should be greeted?',
+      ObjectSchema.AddString('name', 'Name of the person to greet'))]),
+      'greet-round-1'));
+  Result := MCPTextResult('Hello, ' + Content.Get('name', 'stranger') + '!');
+end;
+
 function AddHandler(AArgs: TMCPArgs;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 var
@@ -94,8 +118,43 @@ begin
   Result := MCPStructuredResult('The sum is ' + FloatToStr(Res.sum), Res);
 end;
 
+// Banner suffix derived from the live registries, so it can never drift
+// from what was actually registered. Templates have no public count, so
+// the summary claims only what the server exposes.
+function RegistrationSummary(AServer: TMCPServer): string;
+
+  function Plural(ACount: Integer; const ANoun: string): string;
+  begin
+    Result := IntToStr(ACount) + ' ' + ANoun;
+    if ACount <> 1 then
+      Result := Result + 's';
+  end;
+
+begin
+  Result := '(' + Plural(AServer.ToolCount, 'tool') + ', ' +
+    Plural(AServer.ResourceCount, 'resource') + ', ' +
+    Plural(AServer.PromptCount, 'prompt') + ')';
+end;
+
+// `--http <port>` selects the Streamable HTTP binding; anything else
+// (including no arguments) serves stdio.
+function HTTPPortFromArgs(out APort: Word): Boolean;
+var
+  PortValue: Integer;
+begin
+  Result := (ParamCount = 2) and (ParamStr(1) = '--http') and
+    TryStrToInt(ParamStr(2), PortValue) and (PortValue > 0) and
+    (PortValue <= 65535);
+  if Result then
+    APort := Word(PortValue)
+  else
+    APort := 0;
+end;
+
 var
   Server: TMCPServer;
+  Transport: TMCPHTTPServer;
+  HTTPPort: Word;
 
 begin
   Server := TMCPServer.Create('pascal-mcp-sdk-demo', '0.1.0');
@@ -113,6 +172,10 @@ begin
       TAddArgs, TSumResult, AddHandler)
       .Title('Adder').ReadOnlyHint.IdempotentHint;
 
+    Server.RegisterTool('greet_user',
+      'Greet a person; asks who to greet via elicitation (MRTR)',
+      '{"type":"object"}', GreetUserHandler);
+
     Server.RegisterPrompt('greet', 'Compose a friendly greeting',
       PromptArguments.Add('name', 'Who to greet'), GreetPromptHandler);
 
@@ -123,9 +186,25 @@ begin
     Server.RegisterResourceTemplate('mcp://pascal-mcp-sdk/shout/{text}',
       'shout', 'text/plain', ShoutReader, 'Uppercase echo of {text}');
 
-    MCPLogToStderr('mcpdemo: serving MCP ' + MCP_PROTOCOL_VERSION +
-      ' on stdio (2 tools, 1 resource, 1 template, 1 prompt)');
-    RunMCPStdioServer(Server);
+    if HTTPPortFromArgs(HTTPPort) then
+    begin
+      Transport := TMCPHTTPServer.Create(Server);
+      try
+        Transport.Port := HTTPPort;
+        MCPLogToStderr('mcpdemo: serving MCP ' + MCP_PROTOCOL_VERSION +
+          ' on http://127.0.0.1:' + IntToStr(HTTPPort) +
+          Transport.EndpointPath + ' ' + RegistrationSummary(Server));
+        Transport.Run;
+      finally
+        Transport.Free;
+      end;
+    end
+    else
+    begin
+      MCPLogToStderr('mcpdemo: serving MCP ' + MCP_PROTOCOL_VERSION +
+        ' on stdio ' + RegistrationSummary(Server));
+      RunMCPStdioServer(Server);
+    end;
   finally
     Server.Free;
   end;

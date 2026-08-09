@@ -107,7 +107,7 @@ jobs:
             echo "LWPT_INSTANTFPC=$(cygpath -w "$INSTANTFPC_BIN")" >> "$GITHUB_ENV"
           fi
           FPC_UNIT_PATHS=""
-          for unit_dir in rtl rtl-objpas rtl-generics rtl-extra fcl-base fcl-process fcl-json paszlib hash; do
+          for unit_dir in rtl rtl-objpas rtl-generics rtl-extra fcl-base fcl-process fcl-json fcl-net fcl-web paszlib hash; do
             UNIT_PATH=""
             for unit_target in ${{ matrix.fpc-win-target }} i386-win32 x86_64-win64; do
               UNIT_PATH=$(find /c/fpc322 /c/tools/freepascal /c/fpc -path "*/units/${unit_target}/${unit_dir}" -type d 2>/dev/null | head -1 || true)
@@ -181,17 +181,13 @@ jobs:
           fpc @lwpt.cfg -FEbuild-nolwpt source/apps/mcpdemo.pas
           test -x build-nolwpt/mcpdemo
 
-  # Official TS clients (v2 RC beta + v1 SDK) driven against mcpdemo
-  # over real stdio pipes. Advisory while the RC client is in beta:
-  # the pins + lockfile keep unrelated PRs stable, but every deliberate
-  # SDK bump can shift the beta contract, so failures here must not
-  # gate merges. continue-on-error lets the workflow pass while the
-  # job shows red; that holds only while branch protection does not
-  # list `interop` as a required check. Required-ness is bundled with
-  # the post-final-spec pass (#3).
+  # Official TS clients (stable v2 + v1 SDK) driven against mcpdemo
+  # over real stdio pipes. A required PR gate since the post-final-spec
+  # pass (#3): the pins target the stable 2026-07-28 SDKs and the
+  # committed lockfile keeps resolutions reproducible, so a red interop
+  # job is a real cross-implementation regression, not beta churn.
   interop:
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 10
     defaults:
       run:

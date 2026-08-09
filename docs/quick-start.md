@@ -2,57 +2,44 @@
 
 ## Executive Summary
 
-Install FPC 3.2.2 (and optionally the lwpt release binary), clone,
-`lwpt build` — or `fpc @lwpt.cfg -FEbuild source/apps/mcpdemo.pas` with
-no lwpt at all. Register tools with a name, description, JSON-Schema
-string, and a handler function; call `RunMCPStdioServer`. Wire the
-binary into any MCP client as a stdio server.
+Add pascal-mcp-sdk to your project (`lwpt add` or vendor seven
+files), register tools with a name, description, schema, and a
+handler function, and call `RunMCPStdioServer` — or serve the same
+registrations over Streamable HTTP with `TMCPHTTPServer`. Wire the
+binary into any MCP client.
+
+This page is for **consumers** of the library. Building and testing
+the library itself is covered in
+[CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Prerequisites
 
 - **FPC 3.2.2** — `apt install fpc` / `brew install fpc` / the
   win32+win64 combo installer from freepascal.org.
-- **lwpt** (optional but canonical) — download the release tarball for
-  your platform from
+- **lwpt** (optional — for the dependency path) — download the release
+  tarball for your platform from
   [lwpt's releases](https://github.com/frostney/lwpt/releases), verify
   the checksum, put `lwpt` on PATH.
-- **lefthook** (contributors) — `lefthook install` once per clone wires
-  the formatting pre-commit hook.
 
-## Build and verify
+## Get the library
 
-```sh
-git clone https://github.com/frostney/pascal-mcp-sdk
-cd pascal-mcp-sdk
-lwpt install       # resolves the dev-time testing dep, writes lwpt.cfg
-lwpt build         # build/mcpdemo, build/mcpsmoke
-lwpt test          # 5 co-located suites
-./build/mcpsmoke   # 19-check E2E battery against the real subprocess
-```
-
-Without lwpt (the committed `.lwpt/modules` + `lwpt.cfg` make the repo
-zero-install):
+As an lwpt dependency, from your project root (this exact command was
+verified against a scratch consumer project):
 
 ```sh
-fpc @lwpt.cfg -FEbuild source/apps/mcpdemo.pas
+lwpt add frostney/pascal-mcp-sdk@^1.0
+lwpt build
 ```
 
-## Talk to the demo server by hand
+Your program's `uses MCP.Server` resolves through the nested manifest;
+the library's `*.Test.pas` files do not leak into your `lwpt test`
+discovery.
 
-Every request must carry the per-request `_meta` (this is the stateless
-2026-07-28 revision — there is no initialize handshake):
-
-```sh
-./build/mcpdemo <<'EOF'
-{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add","arguments":{"a":19,"b":23},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
-EOF
-```
-
-The first line answers with `supportedVersions`, capabilities, and the
-server's instructions; the second with `content` +
-`structuredContent: {"sum": 42}`. Closing stdin (the heredoc ending)
-makes the server exit — that is the spec's graceful-shutdown contract.
+Without lwpt, vendor the seven files —
+`source/units/MCP.JSONRPC.pas`, `MCP.Protocol.pas`, `MCP.Schema.pas`,
+`MCP.Server.pas`, `MCP.Transport.Stdio.pas`, `MCP.Transport.HTTP.pas`,
+`Shared.inc` — into your unit path and compile with
+`-Fu<that-path> -Fi<that-path>`.
 
 ## Write your own server
 
@@ -89,9 +76,6 @@ begin
 end.
 ```
 
-Compile it inside this repo's unit paths (`fpc @lwpt.cfg ...`), or in
-your own project with `-Fu<path-to>/source/units`.
-
 Prefer typed arguments? Declare a `TMCPArgs` descendant and register
 the class — it expands into the schema, and your handler receives a
 populated, validated instance (see the `add` tool in
@@ -100,6 +84,11 @@ example).
 
 Key behaviours you get for free:
 
+- **Argument validation before your handler runs**: raw-handler tools
+  are checked against their registered schema's subset (required,
+  types, enums, defaults) and typed tools against their class —
+  violations become in-band `isError` results a model can correct
+  against.
 - **Validation errors** (`-32602`), **version negotiation** (`-32022`
   with the supported list), and **method-not-found** (`-32601`) are
   produced by the library; handlers never see malformed metadata.
@@ -112,11 +101,65 @@ Key behaviours you get for free:
   while modern `_meta` requests stay stateless — same registries, same
   handlers. Set `Server.DualEra := False` for a strict modern-only
   server that rejects `initialize` naming its supported versions.
+- **Mid-call input** (MRTR): return
+  `MCPInputRequired(...)` from a tool or prompt handler to ask the
+  client for more input (elicitation form/url, sampling, roots); the
+  client retries the call and your handler re-enters with the
+  responses on `ACtx` — see `greet_user` in
+  [mcpdemo.pas](../source/apps/mcpdemo.pas).
+
+> These protocol behaviours — MRTR, Streamable HTTP/SSE, the per-request
+> `_meta` model, and the EOF shutdown contract — implement spec revision
+> 2026-07-28. The dated official-spec citations
+> (modelcontextprotocol.io) live in architecture.md's
+> [Spec grounding](../docs/architecture.md#spec-grounding) section.
+
+## Serve over Streamable HTTP
+
+The same server object serves HTTP with a transport swap (modern era
+only — HTTP clients speak 2026-07-28; the binding validates the
+mirrored `Mcp-*` headers, streams SSE for requests that opt into
+progress/log notifications, and binds 127.0.0.1 by default):
+
+```pascal
+uses
+  {$IFDEF UNIX} cthreads, {$ENDIF}   // first in the program uses clause
+  ..., MCP.Transport.HTTP;
+
+Transport := TMCPHTTPServer.Create(Server);
+Transport.Port := 3000;   // POST http://127.0.0.1:3000/mcp
+Transport.Run;            // blocks; Transport.Stop unblocks it
+```
+
+Try it: `./build/mcpdemo --http 3000`.
+
+Every HTTP request still carries `_meta` in its body, and the mirrored
+`Mcp-*` headers are derived from it. The transport does not reject a
+request that omits the header with a header error, but the core still
+requires `_meta` and answers `-32602` when it is missing — the header
+tolerance is not a way to skip `_meta`.
+
+## Talk to a stdio server by hand
+
+Every modern request carries the per-request `_meta` (this is the
+stateless 2026-07-28 revision — there is no initialize handshake):
+
+```sh
+./build/mcpdemo <<'EOF'
+{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add","arguments":{"a":19,"b":23},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+EOF
+```
+
+The first line answers with `supportedVersions`, capabilities, and the
+server's instructions; the second with `content` +
+`structuredContent: {"sum": 42}`. Closing stdin (the heredoc ending)
+makes the server exit — that is the spec's graceful-shutdown contract.
 
 ## Register the server with an MCP client
 
-Any client that launches stdio servers works — legacy or RC-era, thanks
-to the dual-era default. With Claude Code it is one command
+Any client that launches stdio servers works — legacy or modern,
+thanks to the dual-era default. With Claude Code it is one command
 (verified against `mcpdemo`):
 
 ```sh

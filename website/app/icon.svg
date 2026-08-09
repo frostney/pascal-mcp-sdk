@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <!-- Favicon variant of the mark: fixed mid-tone so it reads on both
+       light and dark browser chrome. -->
+  <g stroke="#6366f1" stroke-width="2" stroke-linecap="round">
+    <path d="M16 7.5 L9.5 18.5" />
+    <path d="M16 7.5 L22.5 18.5" />
+    <path d="M9.5 18.5 L22.5 18.5" />
+  </g>
+  <g fill="#6366f1">
+    <circle cx="16" cy="6" r="3.4" />
+    <circle cx="8.5" cy="20" r="3.4" />
+    <circle cx="23.5" cy="20" r="3.4" />
+  </g>
+  <circle cx="16" cy="26" r="2.4" fill="#6366f1" opacity="0.55" />
+</svg>

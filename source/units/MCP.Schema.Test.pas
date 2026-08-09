@@ -75,6 +75,9 @@ type
     procedure TestNoRequiredKeyWhenEmpty;
     procedure TestBuildReuseRaises;
     procedure TestAddAfterBuildRaises;
+    procedure TestCopySeesConsumedState;
+    procedure TestCopySharesInProgressState;
+    procedure TestDefaultRecordRaises;
     procedure TestDuplicatePropertyRaises;
   end;
 
@@ -211,6 +214,69 @@ begin
   Schema.Free;
 end;
 
+procedure TSchemaBuilder.TestCopySeesConsumedState;
+var
+  Original, Copied: TMCPSchema;
+  ErrorMessage: string;
+  Schema: TJSONObject;
+begin
+  // The reuse guard must survive record copies (issue #29): after any
+  // alias builds, every other alias is consumed too.
+  Original := ObjectSchema.AddString('name');
+  Copied := Original;
+  Schema := Original.Build;
+  ErrorMessage := '';
+  try
+    Copied.AddString('late');
+  except
+    on E: EMCPSchema do
+      ErrorMessage := E.Message;
+  end;
+  Expect<string>(ErrorMessage).ToBe('Schema was already built');
+  ErrorMessage := '';
+  try
+    Copied.Build;
+  except
+    on E: EMCPSchema do
+      ErrorMessage := E.Message;
+  end;
+  Expect<string>(ErrorMessage).ToBe('Schema was already built');
+  Schema.Free;
+end;
+
+procedure TSchemaBuilder.TestCopySharesInProgressState;
+var
+  Original, Copied: TMCPSchema;
+  Schema: TJSONObject;
+begin
+  // Copies alias one schema-in-progress by design: additions through
+  // either alias land in the same schema.
+  Original := ObjectSchema.AddString('first');
+  Copied := Original;
+  Copied.AddNumber('second');
+  Schema := Original.Build;
+  Expect<Integer>(TJSONObject(Schema.Find('properties')).Count).ToBe(2);
+  Schema.Free;
+end;
+
+procedure TSchemaBuilder.TestDefaultRecordRaises;
+var
+  Unbound: TMCPSchema;
+  ErrorMessage: string;
+begin
+  // A default record never went through ObjectSchema: building it must
+  // raise instead of dereferencing nil.
+  Unbound := Default(TMCPSchema);
+  ErrorMessage := '';
+  try
+    Unbound.Build;
+  except
+    on E: EMCPSchema do
+      ErrorMessage := E.Message;
+  end;
+  Expect<string>(ErrorMessage).ToBe('Schema was already built');
+end;
+
 procedure TSchemaBuilder.TestDuplicatePropertyRaises;
 var
   Builder: TMCPSchema;
@@ -243,6 +309,10 @@ begin
     TestNoRequiredKeyWhenEmpty);
   Test('Build rejects builder reuse', TestBuildReuseRaises);
   Test('property add rejects builder reuse', TestAddAfterBuildRaises);
+  Test('record copy sees consumed state', TestCopySeesConsumedState);
+  Test('record copies share the schema-in-progress',
+    TestCopySharesInProgressState);
+  Test('default record rejects Build', TestDefaultRecordRaises);
   Test('duplicate property names rejected', TestDuplicatePropertyRaises);
 end;
 
@@ -404,4 +474,7 @@ begin
   TestRunnerProgram.AddSuite(
     TSchemaFromClass.Create('Schema: derived from classes'));
   TestRunnerProgram.Run;
+  // Fail the process when any suite failed, so lwpt test and CI
+  // actually gate on assertions (the runner does not set it).
+  ExitCode := TestResultToExitCode;
 end.

@@ -6,8 +6,11 @@
   `source/units/Shared.inc`. Do not introduce another compiled language or
   repeat compiler directives per unit.
 - **Zero third-party runtime dependencies.** The library is RTL + fpjson
-  only. lwpt's `testing` package is dev-time; anything beyond that needs
-  explicit maintainer approval with a recorded justification.
+  only. Packages that ship inside FPC 3.2.2 are not third-party: fcl-web
+  is admitted on the same footing as fcl-json (fpjson), and stays
+  confined to `MCP.Transport.HTTP`. lwpt's `testing` package is dev-time;
+  anything beyond that needs explicit maintainer approval with a recorded
+  justification.
 - **lwpt is the only toolchain entry point** — install, build, test, format
   all go through it. Do not add another build system (no Make/CMake for
   builds) and do not invoke `fpc` directly except as `fpc @lwpt.cfg`.
@@ -41,7 +44,7 @@ lwpt install           # resolve deps, regenerate lwpt.cfg + lwpt.lock
 lwpt install --frozen  # CI mode: verify lockfile + committed modules, no network
 lwpt format --check    # formatter gate (no flag = rewrite in place)
 lwpt build             # mcpdemo + mcpsmoke
-lwpt test              # five co-located unit suites
+lwpt test              # six co-located unit suites
 ./build/mcpsmoke       # E2E battery: spawns mcpdemo, drives the protocol
 ```
 
@@ -49,16 +52,17 @@ lwpt test              # five co-located unit suites
 
 | Path | Role |
 | --- | --- |
-| `source/units/` | Library: `MCP.JSONRPC` (JSON-RPC 2.0 profile), `MCP.Protocol` (per-request `_meta` model), `MCP.Schema` (fluent schema builder + RTTI-derived argument classes), `MCP.Server` (sans-I/O dispatch core; tool/resource/prompt registries), `MCP.Transport.Stdio` (newline-delimited stdio binding) |
+| `source/units/` | Library: `MCP.JSONRPC` (JSON-RPC 2.0 profile), `MCP.Protocol` (per-request `_meta` model), `MCP.Schema` (fluent schema builder + RTTI-derived argument classes), `MCP.Server` (sans-I/O dispatch core; tool/resource/prompt registries), `MCP.Transport.Stdio` (newline-delimited stdio binding), `MCP.Transport.HTTP` (Streamable HTTP binding: single POST endpoint, SSE response streams) |
 | `source/apps/` | Programs: `mcpdemo` (example stdio server), `mcpsmoke` (subprocess E2E battery) |
-| `tools/` | Cross-implementation checks: `interop-ts/` (official MCP TypeScript client beta vs `mcpdemo`) |
+| `tools/` | Cross-implementation checks: `interop-ts/` (official MCP TypeScript clients vs `mcpdemo` over stdio, the legacy era, and Streamable HTTP) |
 | `docs/` | Architecture, quick-start, tooling, code style, deployment |
+| `website/` | GitHub Pages site: Fumadocs static export rendering `docs/` directly — contributor/CI tooling, not part of the library |
 
 Layering is strictly bottom-up: `MCP.JSONRPC` → `MCP.Protocol` →
-`MCP.Server` → `MCP.Transport.Stdio`. The server core performs no I/O
-(`HandleMessage`: line in, line out) — the planned `MCP.Transport.HTTP`
-(Streamable HTTP) wraps the same core without changes, mirroring
-duetto's sans-I/O discipline. See
+`MCP.Server` → `MCP.Transport.Stdio` / `MCP.Transport.HTTP`. The server
+core performs no I/O (`HandleMessage`: line in, line out) — both
+transports wrap the same core without changes, mirroring duetto's
+sans-I/O discipline. See
 [docs/architecture.md](docs/architecture.md).
 
 ## Testing
@@ -68,8 +72,13 @@ duetto's sans-I/O discipline. See
 - `mcpsmoke` is the in-repo E2E battery: it launches `mcpdemo` the way a
   real MCP client does (subprocess, pipes) and drives the full v1
   surface including error paths and the EOF shutdown contract.
-- Nothing in the test stack touches the network; everything runs against
-  local pipes and temp files.
+- Nothing in the test stack touches the **external** network; everything
+  runs against local pipes, loopback (127.0.0.1) sockets, and temp
+  files. The loopback sockets are a recorded maintainer exception for
+  the transport binding suites: `MCP.Transport.HTTP.Test.pas`
+  deliberately drives a live listener on an ephemeral 127.0.0.1 port,
+  and stays co-located per the fixed layout above (this repo has no
+  separate integration-test layer).
 
 ## Safety / Boundaries
 

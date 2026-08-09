@@ -1,5 +1,7 @@
 # Deployment
 
+> **Audience: contributors.** This describes the library's internals and toolchain; consumers only need the [README](../README.md) and [quick start](quick-start.md).
+
 ## Executive Summary
 
 A pascal-mcp-sdk server deploys as a single static-ish native binary per

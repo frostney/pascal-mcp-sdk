@@ -16,9 +16,10 @@ cleanly rather than port it.
 One transport-agnostic core (`MCP.Server` over `MCP.Protocol` and
 `MCP.JSONRPC`) owns every protocol rule and performs no I/O. Transports
 are thin bindings around it: **stdio** (newline-delimited JSON-RPC, pure
-RTL — v1, complete) and, as an explicit follow-up, **Streamable HTTP**
-(`MCP.Transport.HTTP`). The same tested core sits behind every binding
-unchanged — the sans-I/O discipline proven in duetto.
+RTL — v1, complete) and **Streamable HTTP** (`MCP.Transport.HTTP`,
+fcl-web's fphttpserver confined to the transport unit). The same tested
+core sits behind every binding unchanged — the sans-I/O discipline
+proven in duetto.
 
 Cross-platform coverage (Linux, macOS, Windows) and embeddability (a
 library that compiles into the host binary via lwpt, with zero
@@ -44,11 +45,13 @@ lantaarn is its first named consumer, mirroring duetto → lantaarn.
   requests, subscriptions, setLevel) are not implemented, and the
   legacy dialect sunsets when the ecosystem's clients finish
   migrating.
-- **No general JSON-Schema validation engine.** Handlers own argument
-  validation in the stdio era and report problems as in-band `isError`
-  results; the schema subset the library itself emits becomes
-  server-enforced when Streamable HTTP lands (#23) — arbitrary/foreign
-  schema dialects stay out of scope for a dependency-light library.
+- **No general JSON-Schema validation engine.** The schema subset the
+  library itself emits is server-enforced on every tool call (#23);
+  handlers own deeper semantic validation and report problems as
+  in-band `isError` results. Arbitrary/foreign schema dialects stay
+  out of scope for a dependency-light library — the
+  `.ApplicationValidated` escape hatch hands validation back to the
+  handler for those.
 - **No framework ambitions.** pascal-mcp-sdk registers tools and moves
   messages; logging policy, auth, and application state belong to the
   host program.

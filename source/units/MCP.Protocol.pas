@@ -12,13 +12,13 @@ unit MCP.Protocol;
 // Spec grounding (verified 2026-07-20 against the official draft pages
 // for the 2026-07-28 revision):
 //   - required _meta fields, -32602 on absence:
-//       modelcontextprotocol.io/specification/draft/basic/index#meta
+//       modelcontextprotocol.io/specification/2026-07-28/basic/index#meta
 //   - version negotiation, UnsupportedProtocolVersionError (-32022):
-//       modelcontextprotocol.io/specification/draft/basic/versioning
+//       modelcontextprotocol.io/specification/2026-07-28/basic/versioning
 //   - exact lowercase RFC 5424-derived logging levels:
-//       modelcontextprotocol.io/specification/draft/server/utilities/logging
+//       modelcontextprotocol.io/specification/2026-07-28/server/utilities/logging
 //   - cooperative request cancellation:
-//       https://modelcontextprotocol.io/specification/draft/basic/patterns/cancellation
+//       https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation
 //     (verified 2026-07-21)
 
 {$I Shared.inc}
@@ -66,6 +66,11 @@ const
     'error', 'critical', 'alert', 'emergency');
 
   RESULT_TYPE_COMPLETE = 'complete';
+  // MRTR interim results (SEP-2322): the request needs additional
+  // input; the client retries the original request with
+  // inputResponses/requestState. Verified 2026-08-08:
+  // https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr
+  RESULT_TYPE_INPUT_REQUIRED = 'input_required';
 
   // CacheableResult scopes (SEP-2549): whether shared intermediaries
   // may cache a response. "private" is the safe default for local
@@ -106,6 +111,16 @@ type
     HasProgressToken: Boolean;
     ProgressToken: string;
     ProgressTokenIsString: Boolean;
+    // MRTR retry payload (modern era only; spec pattern verified
+    // 2026-08-08, see RESULT_TYPE_INPUT_REQUIRED): inputResponses is
+    // borrowed from the request tree (nil when this is not a retry);
+    // RequestState is the handler's own opaque state echoed verbatim
+    // by the client ('' when absent). The spec requires servers to
+    // treat requestState as attacker-controlled input — integrity
+    // protection is the handler's contract when the state influences
+    // authorization or business logic.
+    InputResponses: TJSONObject;
+    RequestState: string;
     // Set by the dispatching server, not by ExtractRequestContext.
     Notifier: TMCPNotifier;
     // Set by the dispatching server. The serial stdio transport cannot
@@ -204,6 +219,7 @@ function ExtractRequestContext(AParams: TJSONObject;
   out ACtx: TMCPRequestContext; out AError: TMCPMetaError): Boolean;
 var
   MetaData, VersionData, CapsData, InfoData, LevelData: TJSONData;
+  ResponsesData, StateData: TJSONData;
   Meta, Info: TJSONObject;
   Version, Level: string;
   Known: Boolean;
@@ -274,6 +290,25 @@ begin
   end;
 
   ExtractProgressToken(Meta, ACtx);
+
+  // MRTR retry payload: top-level params fields on the supported
+  // client requests (InputResponseRequestParams in the schema anchor).
+  ResponsesData := AParams.Find('inputResponses');
+  if ResponsesData <> nil then
+  begin
+    if ResponsesData.JSONType <> jtObject then
+      Exit(MetaError(AError, JSONRPC_INVALID_PARAMS,
+        'Invalid params: inputResponses must be an object'));
+    ACtx.InputResponses := TJSONObject(ResponsesData);
+  end;
+  StateData := AParams.Find('requestState');
+  if StateData <> nil then
+  begin
+    if StateData.JSONType <> jtString then
+      Exit(MetaError(AError, JSONRPC_INVALID_PARAMS,
+        'Invalid params: requestState must be a string'));
+    ACtx.RequestState := StateData.AsString;
+  end;
 
   Result := True;
 end;

@@ -7,34 +7,17 @@
 //
 // Usage: node legacy-interop.mjs /abs/path/to/mcpdemo
 
-import { readFileSync } from 'node:fs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { check, fatal, printPackageVersions, report } from './battery.mjs';
 
-function installedVersion(packageName) {
-  const packageUrl = new URL(
-    `./node_modules/${packageName}/package.json`,
-    import.meta.url,
-  );
-  return JSON.parse(readFileSync(packageUrl, 'utf8')).version;
-}
-
-console.log(
-  'interop packages: ' +
-    `@modelcontextprotocol/client ${installedVersion('@modelcontextprotocol/client')}, ` +
-    `@modelcontextprotocol/sdk ${installedVersion('@modelcontextprotocol/sdk')}`,
-);
+// The v1 SDK is the only implementation under test here.
+printPackageVersions('@modelcontextprotocol/sdk');
 
 const DEMO = process.argv[2];
 if (!DEMO) {
   console.error('usage: node legacy-interop.mjs <path-to-mcpdemo>');
   process.exit(2);
-}
-
-let failures = 0;
-function check(cond, what) {
-  console.log((cond ? 'ok    ' : 'FAIL  ') + what);
-  if (!cond) failures++;
 }
 
 const client = new Client(
@@ -58,8 +41,8 @@ try {
 
   const tools = await client.listTools();
   check(
-    tools.tools.map((t) => t.name).join(',') === 'echo,add',
-    'tools/list: echo,add',
+    tools.tools.map((t) => t.name).join(',') === 'echo,add,greet_user',
+    'tools/list: echo,add,greet_user',
   );
 
   const echo = await client.callTool({
@@ -142,14 +125,10 @@ try {
   check(notFound, 'resources/read unknown: legacy -32002 surfaced');
 
   await client.close();
-} catch (e) {
-  console.error('\nFATAL', e);
-  failures++;
+} catch (error) {
+  fatal(error);
 }
 
-console.log(
-  failures === 0
-    ? '\nlegacy-interop: ALL CHECKS PASSED against the v1 SDK client'
-    : `\nlegacy-interop: ${failures} check(s) FAILED`,
+process.exit(
+  report('legacy-interop', 'ALL CHECKS PASSED against the v1 SDK client'),
 );
-process.exit(failures === 0 ? 0 : 1);

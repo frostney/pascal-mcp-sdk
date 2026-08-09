@@ -1,5 +1,7 @@
 # Code Style
 
+> **Audience: contributors.** This describes the library's internals and toolchain; consumers only need the [README](../README.md) and [quick start](quick-start.md).
+
 ## Executive Summary
 
 FPC 3.2.2, Delphi mode, one shared flags block (`Shared.inc`), `lwpt

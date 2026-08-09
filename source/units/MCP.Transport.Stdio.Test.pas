@@ -257,4 +257,7 @@ end;
 begin
   TestRunnerProgram.AddSuite(TStdioLoop.Create('Transport.Stdio: loop'));
   TestRunnerProgram.Run;
+  // Fail the process when any suite failed, so lwpt test and CI
+  // actually gate on assertions (the runner does not set it).
+  ExitCode := TestResultToExitCode;
 end.
