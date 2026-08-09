@@ -29,7 +29,7 @@ agents — no second language runtime, no framework.
 command below was run and verified against a fresh scratch project):
 
 ```sh
-lwpt add frostney/pascal-mcp-sdk@^1.0
+lwpt add frostney/pascal-mcp-sdk@^2.0
 ```
 
 Your programs then `uses MCP.Server` (and friends) directly — lwpt
