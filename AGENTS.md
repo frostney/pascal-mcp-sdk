@@ -17,7 +17,7 @@
 - **`lwpt.cfg` and `lwpt.lock` are generated** by `lwpt install`; never
   hand-edit them. `lwpt.toml` is the manifest you edit.
 - **The `units` array in `lwpt.toml` lists only `source/units`** —
-  lwpt 0.2.0 discovers dep units through nested manifests. Keep
+  lwpt (0.2.0+) discovers dep units through nested manifests. Keep
   `[format] exclude = [".lwpt/**"]` so the formatter never rewrites
   fetched modules.
 - **Layout is fixed:** library units in `source/units/` (namespaced
