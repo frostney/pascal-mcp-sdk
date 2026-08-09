@@ -139,10 +139,17 @@ time. Mark such registrations `.ApplicationValidated` to keep the
 previous behaviour, with argument validation owned by your handler.
 
 Results are built with `MCPTextResult` / `MCPErrorResult` /
-`MCPStructuredResult`; handler exceptions become in-band
-`isError: true` tool results automatically. Resources register either
-as static text (`RegisterTextResource`) or with a reader callback
-(`RegisterResource`).
+`MCPStructuredResult` / `MCPImageResult`; handler exceptions become
+in-band `isError: true` tool results automatically. `MCPImageResult`
+takes either raw bytes (encoded to base64 for you) or data that is
+already base64, plus the image's media type:
+
+```pascal
+Result := MCPImageResult(ScreenshotBytes, 'image/png');
+```
+
+Resources register either as static text (`RegisterTextResource`) or
+with a reader callback (`RegisterResource`).
 
 Serving the same registrations over **Streamable HTTP** instead of
 stdio is a transport swap (modern-era only; binds 127.0.0.1):
@@ -167,7 +174,7 @@ walkthrough lives in [docs/quick-start.md](docs/quick-start.md).
 | Surface | Status |
 | --- | --- |
 | `server/discover` | ✅ mandatory entry point, capabilities + instructions |
-| `tools/list`, `tools/call` | ✅ text / structured content, in-band execution errors, server-side subset validation of arguments |
+| `tools/list`, `tools/call` | ✅ text / image / structured content, in-band execution errors, server-side subset validation of arguments |
 | `resources/list`, `resources/read` | ✅ static + dynamic, text + blob builders |
 | `resources/templates/list` + template matching | ✅ RFC 6570 level-1 (`{var}`), exact resources win, vars passed to readers |
 | `prompts/list`, `prompts/get` | ✅ fluent argument declaration, message builders, spec error codes |

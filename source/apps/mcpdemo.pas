@@ -1,11 +1,12 @@
 program mcpdemo;
 
 // Example MCP server: the smallest complete pascal-mcp-sdk program.
-// Exposes three tools showing every registration style — echo via the
+// Exposes four tools showing every registration style — echo via the
 // fluent schema builder, add via a typed argument class (the class
 // expands into the schema, and the handler receives a populated,
-// validated instance), greet_user via a raw schema string — plus a
-// static resource, a resource template, and a prompt. By default it
+// validated instance), greet_user via a raw schema string, and pixel
+// returning binary image content — plus a static resource, a resource
+// template, and a prompt. By default it
 // serves newline-delimited JSON-RPC on stdin/stdout until the client
 // closes stdin; with `--http <port>` the same registrations are
 // served over Streamable HTTP on 127.0.0.1 instead (modern era only).
@@ -106,6 +107,32 @@ begin
   Result := MCPTextResult('Hello, ' + Content.Get('name', 'stranger') + '!');
 end;
 
+const
+  // A 1x1 fully transparent PNG, inline so the demo needs no asset
+  // file. Handlers hold image bytes rather than base64, so this uses
+  // the TBytes overload of MCPImageResult and lets the library encode.
+  ONE_PIXEL_PNG: array[0..69] of Byte = (
+    $89, $50, $4E, $47, $0D, $0A, $1A, $0A, $00,
+    $00, $00, $0D, $49, $48, $44, $52, $00, $00,
+    $00, $01, $00, $00, $00, $01, $08, $06, $00,
+    $00, $00, $1F, $15, $C4, $89, $00, $00, $00,
+    $0D, $49, $44, $41, $54, $78, $DA, $63, $64,
+    $60, $F8, $5F, $0F, $00, $02, $87, $01, $80,
+    $EB, $47, $BA, $92, $00, $00, $00, $00, $49,
+    $45, $4E, $44, $AE, $42, $60, $82);
+
+function PixelHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Pixel: TBytes;
+  I: Integer;
+begin
+  SetLength(Pixel, Length(ONE_PIXEL_PNG));
+  for I := 0 to High(ONE_PIXEL_PNG) do
+    Pixel[I] := ONE_PIXEL_PNG[I];
+  Result := MCPImageResult(Pixel, 'image/png');
+end;
+
 function AddHandler(AArgs: TMCPArgs;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 var
@@ -161,8 +188,8 @@ begin
   try
     Server.Instructions :=
       'Demo server for the pascal-mcp-sdk library. Use "echo" to mirror a ' +
-      'message, "add" to add two numbers; read mcp://pascal-mcp-sdk/greeting ' +
-      'for a hello.';
+      'message, "add" to add two numbers, "pixel" for a sample image; ' +
+      'read mcp://pascal-mcp-sdk/greeting for a hello.';
 
     Server.RegisterTool('echo', 'Echo a message back to the caller',
       ObjectSchema.AddString('message', 'Text to echo back'),
@@ -175,6 +202,10 @@ begin
     Server.RegisterTool('greet_user',
       'Greet a person; asks who to greet via elicitation (MRTR)',
       '{"type":"object"}', GreetUserHandler);
+
+    Server.RegisterTool('pixel',
+      'Return a 1x1 transparent PNG as image content',
+      '{"type":"object"}', PixelHandler);
 
     Server.RegisterPrompt('greet', 'Compose a friendly greeting',
       PromptArguments.Add('name', 'Who to greet'), GreetPromptHandler);
