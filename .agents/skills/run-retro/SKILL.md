@@ -2,133 +2,82 @@
 name: run-retro
 description: >-
   Reviews a completed workstream from conversation, repository, and forge
-  evidence, uses grilling to agree durable lessons, and updates project vision
-  and readiness/completion definitions after confirmation. Use when ending a
-  substantial workstream or running a project retrospective.
+  evidence, uses grilling to agree improvements to delivery speed, process, and
+  codebase health, then applies selected documentation edits and follow-up
+  ticket actions. Use when ending a substantial workstream or running a project
+  retrospective.
 license: Unlicense OR MIT
 compatibility: >-
-  Requires a registered grilling skill and access to the current workstream's
-  available conversation, repository, and forge evidence.
+  Requires a registered grilling skill and access to the workstream's available
+  conversation, repository, and forge evidence. Selected tickets also require
+  create-issue and forge access.
 ---
 
 # Run retrospective
 
-## Instructions
+Assess the completed workstream through delivery-speed, process, and
+codebase-health lenses. The actual `grilling` skill owns the decision loop.
+Apply only documentation edits and ticket actions the user selects from the
+detailed summary.
 
-Review the completed workstream, use the actual `grilling` skill to reach shared
-understanding about durable project lessons, and then directly update the
-project's `VISION.md`, `DEFINITION_OF_READY.md`, and
-`DEFINITION_OF_DONE.md` after the user explicitly confirms the exact edits.
+## Gates
 
-### Non-negotiable gates
+- Define the workstream boundary from the current conversation, handoff, diffs,
+  commits, issues, PRs, reviews, checks, outcomes, and rework. Record unavailable
+  evidence and lower confidence; do not invent a narrative or broaden into a
+  repository audit.
+- Invoke `grilling` with the evidence and candidates. Do not imitate it with
+  ad-hoc questions; stop if it is unavailable. Let it ask one decision at a time
+  with a recommendation. Act only after it reaches shared understanding and
+  confirms the exact action set.
+- Assess all three lenses, even when one produces no durable finding:
+  - **Delivery speed:** less waiting, rework, handoff friction, unnecessary
+    scope, or cognitive load without weakening quality.
+  - **Process:** planning, decisions, handoffs, gates, tools, and collaboration.
+  - **Codebase:** architecture, maintainability, tests, developer experience,
+    reliability, and accumulated friction.
+- Promote only generalized, project-level lessons supported by evidence. Exclude
+  chronology, one-off mistakes, personal preferences, duplicates, existing
+  rules, and speculation.
 
-#### GATE A — Ground the retrospective in workstream evidence
+## Route each lesson
 
-Use the current workstream conversation together with the repository and forge
-evidence it produced. Inspect the relevant diff, commits, issues, pull requests,
-reviews, checks, rework, and missed or successful gates. Look facts up rather
-than asking the user to recall them.
+- **Documentation edit:** durable guidance in existing contracts, READMEs,
+  `docs/`, ADRs, AGENTS, skills, templates, policies, or contributor guidance.
+  Prefer tightening or coupling with existing text. Direct edits are limited to
+  documentation.
+- **Follow-up ticket:** source, executable configuration, or other implementation
+  is needed. Offer more detail, further grilling, normal or automatic
+  `create-issue`, or skip; the delegated workflow retains its own gates.
+- **Report only:** useful evidence warrants neither an edit nor a ticket.
 
-If an evidence source is unavailable, record the absence and lower confidence;
-never fill the gap with memory or an unsupported narrative. Keep the evidence
-scope tied to the workstream rather than turning the retrospective into an
-unrelated repository audit.
+Use both edit and ticket only when the guidance and its implementation are
+separately necessary. A missing document may be created only when the user
+selects its exact proposed contents.
 
-#### GATE B — `grilling` owns the decision loop
+## Workflow
 
-The registered `grilling` skill is a hard dependency. Invoke the actual skill,
-give it the evidence and candidate lessons, and let it ask every decision
-question one at a time with a recommended answer. Do not imitate its style or
-replace it with an ad-hoc interview. If `grilling` is unavailable, stop with a
-clear dependency message.
+1. Resolve the workstream boundary and read relevant project documentation.
+2. Build an evidence ledger of outcomes, friction, rework, surprises, effective
+   or missed gates, and successful practices under all three lenses.
+3. Remove unsupported, session-specific, duplicate, and already-covered
+   candidates; classify the rest using the routes above.
+4. Run `grilling` one decision at a time with the boundary, evidence, current
+   docs, absences, and candidates.
+5. Present the detailed summary:
+   - findings under every lens, including no-finding results;
+   - exact proposed documentation additions, replacements, or removals by file;
+   - concise ticket summaries with all available action paths;
+   - report-only observations, supporting evidence, confidence, and gaps.
+6. Obtain exact user selections through `grilling`. More detail or further
+   grilling returns to that loop and regenerates the summary.
+7. Apply only selected documentation changes, preserving structure and avoiding
+   duplication. Run only the selected ticket actions through `create-issue`.
+8. Compare the result with the confirmed action set, reread edited sections, and
+   run declared documentation checks.
+9. Report changed docs, created issue links, report-only findings, confidence
+   limits, and observed validation. Keep workstream history in chat.
 
-Do not edit project documents until `grilling` has reached shared understanding
-and the user explicitly confirms the exact edit set.
-
-#### GATE C — Promote only durable project lessons
-
-A document change must be generalized, project-level, and supported by the
-workstream evidence. Do not turn one-off mistakes, session chronology, personal
-preferences, rules already covered, or speculative improvements into permanent
-project policy.
-
-Classify each durable lesson by the contract it changes:
-
-- **`VISION.md`:** product purpose, intended users and outcomes, scope,
-  non-goals, strategic direction, or architectural boundaries.
-- **`DEFINITION_OF_READY.md`:** evidence, decisions, dependencies, acceptance
-  criteria, or other conditions that must hold before work starts.
-- **`DEFINITION_OF_DONE.md`:** implementation, verification, review,
-  documentation, delivery, or operational conditions required before work is
-  complete.
-- **Report only:** a useful improvement that belongs in `AGENTS.md`, tooling,
-  another skill, an upstream project, or nowhere in the three target documents.
-
-Direct edits are limited to the three target documents. Report other
-improvements separately without silently widening scope.
-
-#### GATE D — Exact confirmation authorizes direct edits
-
-Before editing, present the exact proposed changes grouped by target document,
-the evidence for each change, and any observations intentionally left as
-report-only. Ask for one explicit confirmation of that edit set through
-`grilling`.
-
-An existing target document may be edited after confirmation. A missing target
-document may be created only when its creation and proposed contents are
-explicitly included in that confirmation. If the user changes the proposal,
-return to the `grilling` loop and confirm the revised set.
-
-Confirmation authorizes only the agreed document edits. It does not authorize
-commits, pushes, pull requests, issue changes, or edits to other files.
-
-### Steps
-
-1. **Resolve the workstream.** Identify the repository, completed task, linked
-   issues or pull requests, and the time or turn boundary of the work being
-   reviewed. Use the current conversation and `.agent/HANDOFF.md` when
-   available; state any boundary that remains uncertain.
-2. **Read the project contracts.** Search the root, relevant product areas, and
-   `docs/` for the three target documents and spelling/case variants. Read every
-   relevant match before proposing changes. Record which targets are absent.
-3. **Build an evidence ledger.** Record concrete outcomes, friction, rework,
-   surprises, missed expectations, gates that failed or caught problems, and
-   successful practices worth preserving. Link every candidate lesson to the
-   conversation, repository, or forge evidence that supports it.
-4. **Filter and classify.** Remove duplicates, already-covered rules,
-   session-specific details, and claims without evidence. Classify the remaining
-   candidates under Vision, Ready, Done, or Report only using GATE C.
-5. **Invoke `grilling`.** Give it the workstream boundary, evidence ledger,
-   current target documents, absences, and classified candidates. Complete its
-   one-question-at-a-time loop; all unresolved judgments belong in that loop.
-6. **Present the edit set.** Show the exact proposed additions, replacements, or
-   removals per target document, with evidence and rationale. Include missing
-   documents proposed for creation and list report-only improvements separately.
-7. **Confirm through `grilling`.** Obtain explicit confirmation of the complete
-   edit set. Do not treat the original request to run a retrospective as this
-   final confirmation.
-8. **Apply the confirmed edits.** Preserve each document's structure and voice,
-   make the smallest coherent change, and avoid duplicating or contradicting
-   existing policy. Create a missing document only when confirmed and follow the
-   project's existing documentation conventions.
-9. **Verify.** Inspect the final diff against the confirmed edit set, re-read the
-   affected sections for conflicts or accidental scope expansion, and run the
-   project's declared documentation or markdown checks when available. Never
-   invent a validation command.
-10. **Report.** Summarize the changed contracts, report-only improvements,
-    unavailable evidence, confidence limits, and verification results.
-
-### Output
-
-Before confirmation, provide:
-
-1. **Evidence-backed lessons** — the observed event and durable implication.
-2. **Proposed contract changes** — exact edits grouped by Vision, Ready, and
-   Done, including any proposed document creation.
-3. **Report-only improvements** — useful findings intentionally not promoted to
-   the three project contracts.
-4. **Confidence and gaps** — unavailable sources or uncertain boundaries.
-
-After applying the confirmed edits, provide a concise changed-files summary and
-the verification evidence. Keep the retrospective narrative in chat; do not add
-session history to the project contracts.
+Confirmation does not authorize commits, pushes, PRs, unselected issues, or
+other file edits. The original request to run a retrospective is not this final
+confirmation.
