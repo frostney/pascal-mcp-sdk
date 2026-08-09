@@ -96,6 +96,23 @@ type
   end;
 
   TRegistrationGuards = class(TTestSuite)
+  private
+    // Shared raise-expectation shapes. FPC 3.2.2 has no anonymous
+    // procedures, so each shape gets its own helper rather than one
+    // generic ExpectRaises; only sites with identical assertions
+    // share one.
+    //
+    // ADefinition is handed to RegisterTool, which owns it either way
+    // (a rejected definition is freed by the registration guard).
+    // ToolCount is asserted here because every definition-rejection
+    // site checks it.
+    procedure ExpectToolDefinitionRejected(AServer: TMCPServer;
+      ADefinition: TJSONObject);
+    // The string-schema overload. Callers assert ToolCount themselves
+    // — the expected count differs per site.
+    procedure ExpectToolSchemaRejected(AServer: TMCPServer;
+      const AName, ADescription, AInputSchemaJson: string);
+    procedure ExpectServerCreateRejected(const AName, AVersion: string);
   public
     procedure SetupTests; override;
     procedure TestDuplicateTool;
@@ -1439,22 +1456,63 @@ end;
 
 { ───────── registration guards ───────── }
 
+procedure TRegistrationGuards.ExpectToolDefinitionRejected(
+  AServer: TMCPServer; ADefinition: TJSONObject);
+var
+  Raised: Boolean;
+begin
+  Raised := False;
+  try
+    AServer.RegisterTool(ADefinition, EchoHandler);
+  except
+    on EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  Expect<Integer>(AServer.ToolCount).ToBe(0);
+end;
+
+procedure TRegistrationGuards.ExpectToolSchemaRejected(AServer: TMCPServer;
+  const AName, ADescription, AInputSchemaJson: string);
+var
+  Raised: Boolean;
+begin
+  Raised := False;
+  try
+    AServer.RegisterTool(AName, ADescription, AInputSchemaJson, EchoHandler);
+  except
+    on EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+end;
+
+procedure TRegistrationGuards.ExpectServerCreateRejected(
+  const AName, AVersion: string);
+var
+  Raised: Boolean;
+  Server: TMCPServer;
+begin
+  Server := nil;
+  Raised := False;
+  try
+    Server := TMCPServer.Create(AName, AVersion);
+  except
+    on EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  Server.Free;
+end;
+
 procedure TRegistrationGuards.TestDuplicateTool;
 var
   Server: TMCPServer;
-  Raised: Boolean;
 begin
   Server := TMCPServer.Create('t', '1');
   try
     Server.RegisterTool('a', 'first', '{"type":"object"}', EchoHandler);
-    Raised := False;
-    try
-      Server.RegisterTool('a', 'second', '{"type":"object"}', EchoHandler);
-    except
-      on EMCPServer do
-        Raised := True;
-    end;
-    Expect<Boolean>(Raised).ToBe(True);
+    ExpectToolSchemaRejected(Server, 'a', 'second', '{"type":"object"}');
     Expect<Integer>(Server.ToolCount).ToBe(1);
   finally
     Server.Free;
@@ -1464,18 +1522,10 @@ end;
 procedure TRegistrationGuards.TestBadSchema;
 var
   Server: TMCPServer;
-  Raised: Boolean;
 begin
   Server := TMCPServer.Create('t', '1');
   try
-    Raised := False;
-    try
-      Server.RegisterTool('a', 'desc', '{not json', EchoHandler);
-    except
-      on EMCPServer do
-        Raised := True;
-    end;
-    Expect<Boolean>(Raised).ToBe(True);
+    ExpectToolSchemaRejected(Server, 'a', 'desc', '{not json');
     Expect<Integer>(Server.ToolCount).ToBe(0);
   finally
     Server.Free;
@@ -1665,7 +1715,6 @@ end;
 procedure TRegistrationGuards.TestNonObjectDefinitionInputSchema;
 var
   Definition: TJSONObject;
-  Raised: Boolean;
   Server: TMCPServer;
 begin
   Server := TMCPServer.Create('t', '1');
@@ -1673,15 +1722,7 @@ begin
     Definition := TJSONObject.Create;
     Definition.Add('name', 'raw');
     Definition.Add('inputSchema', 'not-an-object');
-    Raised := False;
-    try
-      Server.RegisterTool(Definition, EchoHandler);
-    except
-      on EMCPServer do
-        Raised := True;
-    end;
-    Expect<Boolean>(Raised).ToBe(True);
-    Expect<Integer>(Server.ToolCount).ToBe(0);
+    ExpectToolDefinitionRejected(Server, Definition);
   finally
     Server.Free;
   end;
@@ -1690,32 +1731,16 @@ end;
 procedure TRegistrationGuards.TestMissingInputSchemaRoot;
 var
   Definition: TJSONObject;
-  Raised: Boolean;
   Server: TMCPServer;
 begin
   Server := TMCPServer.Create('t', '1');
   try
-    Raised := False;
-    try
-      Server.RegisterTool('empty-root', 'desc', '{}', EchoHandler);
-    except
-      on EMCPServer do
-        Raised := True;
-    end;
-    Expect<Boolean>(Raised).ToBe(True);
+    ExpectToolSchemaRejected(Server, 'empty-root', 'desc', '{}');
 
     Definition := TJSONObject.Create;
     Definition.Add('name', 'empty-definition-root');
     Definition.Add('inputSchema', GetJSON('{}'));
-    Raised := False;
-    try
-      Server.RegisterTool(Definition, EchoHandler);
-    except
-      on EMCPServer do
-        Raised := True;
-    end;
-    Expect<Boolean>(Raised).ToBe(True);
-    Expect<Integer>(Server.ToolCount).ToBe(0);
+    ExpectToolDefinitionRejected(Server, Definition);
   finally
     Server.Free;
   end;
@@ -1724,33 +1749,17 @@ end;
 procedure TRegistrationGuards.TestWrongInputSchemaRoot;
 var
   Definition: TJSONObject;
-  Raised: Boolean;
   Server: TMCPServer;
 begin
   Server := TMCPServer.Create('t', '1');
   try
-    Raised := False;
-    try
-      Server.RegisterTool('array-root', 'desc', '{"type":"array"}',
-        EchoHandler);
-    except
-      on EMCPServer do
-        Raised := True;
-    end;
-    Expect<Boolean>(Raised).ToBe(True);
+    ExpectToolSchemaRejected(Server, 'array-root', 'desc',
+      '{"type":"array"}');
 
     Definition := TJSONObject.Create;
     Definition.Add('name', 'array-definition-root');
     Definition.Add('inputSchema', GetJSON('{"type":"array"}'));
-    Raised := False;
-    try
-      Server.RegisterTool(Definition, EchoHandler);
-    except
-      on EMCPServer do
-        Raised := True;
-    end;
-    Expect<Boolean>(Raised).ToBe(True);
-    Expect<Integer>(Server.ToolCount).ToBe(0);
+    ExpectToolDefinitionRejected(Server, Definition);
   finally
     Server.Free;
   end;
@@ -1759,7 +1768,6 @@ end;
 procedure TRegistrationGuards.TestNonObjectOutputSchema;
 var
   Definition: TJSONObject;
-  Raised: Boolean;
   Server: TMCPServer;
 begin
   Server := TMCPServer.Create('t', '1');
@@ -1768,15 +1776,7 @@ begin
     Definition.Add('name', 'bad-output');
     Definition.Add('inputSchema', GetJSON('{"type":"object"}'));
     Definition.Add('outputSchema', 'not-an-object');
-    Raised := False;
-    try
-      Server.RegisterTool(Definition, EchoHandler);
-    except
-      on EMCPServer do
-        Raised := True;
-    end;
-    Expect<Boolean>(Raised).ToBe(True);
-    Expect<Integer>(Server.ToolCount).ToBe(0);
+    ExpectToolDefinitionRejected(Server, Definition);
   finally
     Server.Free;
   end;
@@ -1785,7 +1785,6 @@ end;
 procedure TRegistrationGuards.TestWrongOutputSchemaRoot;
 var
   Definition: TJSONObject;
-  Raised: Boolean;
   Server: TMCPServer;
 begin
   Server := TMCPServer.Create('t', '1');
@@ -1794,15 +1793,7 @@ begin
     Definition.Add('name', 'array-output');
     Definition.Add('inputSchema', GetJSON('{"type":"object"}'));
     Definition.Add('outputSchema', GetJSON('{"type":"array"}'));
-    Raised := False;
-    try
-      Server.RegisterTool(Definition, EchoHandler);
-    except
-      on EMCPServer do
-        Raised := True;
-    end;
-    Expect<Boolean>(Raised).ToBe(True);
-    Expect<Integer>(Server.ToolCount).ToBe(0);
+    ExpectToolDefinitionRejected(Server, Definition);
   finally
     Server.Free;
   end;
@@ -2043,37 +2034,13 @@ begin
 end;
 
 procedure TRegistrationGuards.TestEmptyServerName;
-var
-  Raised: Boolean;
-  Server: TMCPServer;
 begin
-  Server := nil;
-  Raised := False;
-  try
-    Server := TMCPServer.Create('', '1');
-  except
-    on EMCPServer do
-      Raised := True;
-  end;
-  Expect<Boolean>(Raised).ToBe(True);
-  Server.Free;
+  ExpectServerCreateRejected('', '1');
 end;
 
 procedure TRegistrationGuards.TestEmptyServerVersion;
-var
-  Raised: Boolean;
-  Server: TMCPServer;
 begin
-  Server := nil;
-  Raised := False;
-  try
-    Server := TMCPServer.Create('t', '');
-  except
-    on EMCPServer do
-      Raised := True;
-  end;
-  Expect<Boolean>(Raised).ToBe(True);
-  Server.Free;
+  ExpectServerCreateRejected('t', '');
 end;
 
 procedure TRegistrationGuards.TestNegativeCacheTtl;

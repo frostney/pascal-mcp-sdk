@@ -27,7 +27,7 @@ As an lwpt dependency, from your project root (this exact command was
 verified against a scratch consumer project):
 
 ```sh
-lwpt add frostney/pascal-mcp-sdk@^1.0
+lwpt add frostney/pascal-mcp-sdk@^2.0
 lwpt build
 ```
 

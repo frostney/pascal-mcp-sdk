@@ -27,6 +27,7 @@ uses
   jsonparser,
   fphttpclient,
   sockets,
+  ssockets,
   MCP.Protocol,
   MCP.Schema,
   MCP.Server,
@@ -72,6 +73,20 @@ type
     // POST to the endpoint with the standard modern headers for
     // AMcpMethod/AMcpName; '' skips a header entirely.
     function Post(const ABody, AMcpMethod, AMcpName: string;
+      out AResponseBody: string): Integer;
+    // A well-formed tools/call POST that differs only in Origin, then
+    // the status the loopback allowlist must answer with.
+    procedure ExpectOriginStatus(const AOrigin: string;
+      AExpectedStatus: Integer);
+    // Raw POST declaring ADeclaredLength but sending no body, read to
+    // EOF. The over-cap refusal keys on the declared Content-Length
+    // alone, and a body the server never reads would sit unread at
+    // close and turn the close into an RST that races the client's
+    // read of the buffered 413 (the kernel discards pending data when
+    // the reset lands first). With nothing unsent the close is a
+    // clean FIN, so the response is always readable — and reaching
+    // EOF is itself the connection-close assertion.
+    function PostWithUnsentBody(ADeclaredLength: Integer;
       out AResponseBody: string): Integer;
   protected
     procedure BeforeEach; override;
@@ -273,6 +288,45 @@ begin
   finally
     Client.Free;
   end;
+end;
+
+function THTTPBinding.PostWithUnsentBody(ADeclaredLength: Integer;
+  out AResponseBody: string): Integer;
+var
+  Sock: TInetSocket;
+  Request, Response: string;
+  Buf: array[0..4095] of Byte;
+  Got, HeaderEnd: Integer;
+begin
+  Request := 'POST /mcp HTTP/1.1'#13#10 +
+    'Host: 127.0.0.1:' + IntToStr(FTransport.Port) + #13#10 +
+    'Content-Type: application/json'#13#10 +
+    'Content-Length: ' + IntToStr(ADeclaredLength) + #13#10#13#10;
+  Sock := TInetSocket.Create('127.0.0.1', FTransport.Port);
+  try
+    // A hang here would be a close-contract regression; fail the test
+    // via the timeout instead of wedging the suite.
+    Sock.IOTimeout := 5000;
+    Sock.WriteBuffer(Request[1], Length(Request));
+    Response := '';
+    repeat
+      Got := Sock.Read(Buf[0], SizeOf(Buf));
+      if Got > 0 then
+      begin
+        SetLength(Response, Length(Response) + Got);
+        Move(Buf[0], Response[Length(Response) - Got + 1], Got);
+      end;
+    until Got <= 0;
+  finally
+    Sock.Free;
+  end;
+  // 'HTTP/1.1 NNN ...' — the status code sits at a fixed offset.
+  Result := StrToIntDef(Copy(Response, 10, 3), -1);
+  HeaderEnd := Pos(#13#10#13#10, Response);
+  if HeaderEnd > 0 then
+    AResponseBody := Copy(Response, HeaderEnd + 4, MaxInt)
+  else
+    AResponseBody := '';
 end;
 
 function HeaderPair(const AName, AValue: string): THeaderPair;
@@ -532,102 +586,60 @@ begin
   Expect<Integer>(Status).ToBe(404);
 end;
 
-procedure THTTPBinding.TestForeignOriginRejected;
+procedure THTTPBinding.ExpectOriginStatus(const AOrigin: string;
+  AExpectedStatus: Integer);
 var
   Body, ContentType: string;
   Status: Integer;
 begin
   Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
-    [HeaderPair('Origin', 'https://evil.example'),
+    [HeaderPair('Origin', AOrigin),
      HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
      HeaderPair('Mcp-Method', 'tools/call'),
      HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
-  Expect<Integer>(Status).ToBe(403);
+  Expect<Integer>(Status).ToBe(AExpectedStatus);
+end;
+
+procedure THTTPBinding.TestForeignOriginRejected;
+begin
+  ExpectOriginStatus('https://evil.example', 403);
 end;
 
 procedure THTTPBinding.TestLocalhostOriginAccepted;
-var
-  Body, ContentType: string;
-  Status: Integer;
 begin
-  Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
-    [HeaderPair('Origin', 'http://localhost:5173'),
-     HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
-     HeaderPair('Mcp-Method', 'tools/call'),
-     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
-  Expect<Integer>(Status).ToBe(200);
+  ExpectOriginStatus('http://localhost:5173', 200);
 end;
 
 procedure THTTPBinding.TestIPv6LoopbackOriginAccepted;
-var
-  Body, ContentType: string;
-  Status: Integer;
 begin
-  Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
-    [HeaderPair('Origin', 'http://[::1]:8080'),
-     HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
-     HeaderPair('Mcp-Method', 'tools/call'),
-     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
-  Expect<Integer>(Status).ToBe(200);
+  ExpectOriginStatus('http://[::1]:8080', 200);
 end;
 
 procedure THTTPBinding.TestIPv6PrefixedOriginRejected;
-var
-  Body, ContentType: string;
-  Status: Integer;
 begin
   // The bracketed loopback literal is the whole host or nothing: a
   // foreign host that merely starts with it is not localhost.
-  Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
-    [HeaderPair('Origin', 'http://[::1].attacker.example'),
-     HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
-     HeaderPair('Mcp-Method', 'tools/call'),
-     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
-  Expect<Integer>(Status).ToBe(403);
+  ExpectOriginStatus('http://[::1].attacker.example', 403);
 end;
 
 procedure THTTPBinding.TestIPv6SuffixedOriginRejected;
-var
-  Body, ContentType: string;
-  Status: Integer;
 begin
-  Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
-    [HeaderPair('Origin', 'http://[::1]evil'),
-     HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
-     HeaderPair('Mcp-Method', 'tools/call'),
-     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
-  Expect<Integer>(Status).ToBe(403);
+  ExpectOriginStatus('http://[::1]evil', 403);
 end;
 
 procedure THTTPBinding.TestUserinfoOriginRejected;
-var
-  Body, ContentType: string;
-  Status: Integer;
 begin
   // Userinfo would make 'localhost' the credentials and the foreign
   // host the target; a serialized origin never carries it.
-  Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
-    [HeaderPair('Origin', 'http://localhost:99@evil.example'),
-     HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
-     HeaderPair('Mcp-Method', 'tools/call'),
-     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
-  Expect<Integer>(Status).ToBe(403);
+  ExpectOriginStatus('http://localhost:99@evil.example', 403);
 end;
 
 procedure THTTPBinding.TestNonWebSchemeOriginRejected;
-var
-  Body, ContentType: string;
-  Status: Integer;
 begin
   // The loopback allowlist is for web origins only: a non-http(s)
   // scheme in front of a loopback host must not slip through, or
   // 'weird://localhost' would inherit localhost's trust.
-  Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
-    [HeaderPair('Origin', 'weird://localhost'),
-     HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
-     HeaderPair('Mcp-Method', 'tools/call'),
-     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
-  Expect<Integer>(Status).ToBe(403);
+  ExpectOriginStatus('weird://localhost', 403);
 end;
 
 procedure THTTPBinding.TestSessionHeaderIgnored;
@@ -652,8 +664,11 @@ var
   Status: Integer;
 begin
   FTransport.MaxBodyBytes := 200;
-  Status := Post('{"pad":"' + StringOfChar('x', 300) + '"}',
-    'tools/call', 'ping', Body);
+  // Headers-only on purpose: see PostWithUnsentBody. Sending the
+  // over-cap body too made this assertion a kernel-timing race
+  // (~0.5% loss of the buffered 413 to the server's RST, measured
+  // 2026-08-09 at 2/400 vs 0/400 headers-only on Darwin).
+  Status := PostWithUnsentBody(308, Body);
   Expect<Integer>(Status).ToBe(413);
   Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32700);
 end;
