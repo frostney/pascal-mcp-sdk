@@ -1,0 +1,47 @@
+name: PR title
+
+# The repository squash-merges, so a PR's title becomes the squash
+# commit's subject — and therefore the CHANGELOG entry git-cliff
+# generates from it. This gate keeps that title a Conventional Commit.
+#
+# Why it exists: PR #38 was titled "Implement all remaining open
+# issues: ..." and shipped the whole HTTP-era release; git-cliff could
+# not classify the subject, so the generated changelog omitted every
+# feature in it and `--bumped-version` proposed a patch bump for a
+# release carrying a breaking change (caught while cutting 2.0.0).
+#
+# Deliberately its own workflow rather than a job in pr.yml: title
+# validation needs the `edited` event, and adding that to pr.yml would
+# re-run the full three-platform build/test matrix on every title or
+# description edit. The accepted types are read from cliff.toml by the
+# checker, so this gate cannot drift from the changelog generator.
+
+on:
+  pull_request:
+    branches:
+      - main
+    # `edited` covers title changes; the rest keep the check reported
+    # on every update so it stays valid as a required status check.
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read
+
+jobs:
+  conventional-title:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Check PR title is a Conventional Commit
+        # The title is attacker-controlled: pass it through the
+        # environment, never interpolated into the shell command.
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: python3 .github/scripts/check-pr-title.py

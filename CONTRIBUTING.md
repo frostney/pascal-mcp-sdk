@@ -74,6 +74,11 @@ is separate: `npm ci` for the interop harness may reach the npm registry.
 
 ## CI expectations
 
+`pr-title.yml` checks that the PR title is a Conventional Commit:
+the repo squash-merges, so the title becomes the commit subject and
+the changelog entry (allowed types are read from `cliff.toml`, so the
+gate cannot drift from the generator).
+
 `pr.yml` is the pre-merge gate on every PR: native
 `install --frozen` + format check + build + test + mcpsmoke on Linux,
 macOS, and Windows, the zero-install `fpc @lwpt.cfg` path, a Markdown
