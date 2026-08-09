@@ -152,6 +152,13 @@ function ExtractRequestContext(AParams: TJSONObject;
   const ASupportedVersions: array of string;
   out ACtx: TMCPRequestContext; out AError: TMCPMetaError): Boolean;
 
+// The {name, version} server identity object. Returns a fresh owned
+// object; the caller transfers it into a result tree or frees it.
+// Lives here because this unit owns response identity — the _meta
+// stamp below and the top-level serverInfo fields on
+// initialize/discover results must stay the same shape.
+function BuildServerInfo(const AName, AVersion: string): TJSONObject;
+
 // Stamp the fields the spec expects on every result: resultType
 // ("complete" unless the builder already set one) and the serverInfo
 // identity in _meta (servers SHOULD self-identify on every response).
@@ -339,11 +346,18 @@ begin
   end;
 end;
 
+function BuildServerInfo(const AName, AVersion: string): TJSONObject;
+begin
+  Result := TJSONObject.Create;
+  Result.Add('name', AName);
+  Result.Add('version', AVersion);
+end;
+
 procedure StampResult(AResult: TJSONObject;
   const AServerName, AServerVersion: string);
 var
   MetaData: TJSONData;
-  Meta, ServerInfo: TJSONObject;
+  Meta: TJSONObject;
 begin
   if AResult.Find('resultType') = nil then
     AResult.Add('resultType', RESULT_TYPE_COMPLETE);
@@ -358,12 +372,8 @@ begin
   end;
 
   if Meta.Find(META_KEY_SERVER_INFO) = nil then
-  begin
-    ServerInfo := TJSONObject.Create;
-    ServerInfo.Add('name', AServerName);
-    ServerInfo.Add('version', AServerVersion);
-    Meta.Add(META_KEY_SERVER_INFO, ServerInfo);
-  end;
+    Meta.Add(META_KEY_SERVER_INFO,
+      BuildServerInfo(AServerName, AServerVersion));
 end;
 
 end.

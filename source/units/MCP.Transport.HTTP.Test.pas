@@ -73,6 +73,10 @@ type
     // AMcpMethod/AMcpName; '' skips a header entirely.
     function Post(const ABody, AMcpMethod, AMcpName: string;
       out AResponseBody: string): Integer;
+    // A well-formed tools/call POST that differs only in Origin, then
+    // the status the loopback allowlist must answer with.
+    procedure ExpectOriginStatus(const AOrigin: string;
+      AExpectedStatus: Integer);
   protected
     procedure BeforeEach; override;
     procedure AfterEach; override;
@@ -532,102 +536,60 @@ begin
   Expect<Integer>(Status).ToBe(404);
 end;
 
-procedure THTTPBinding.TestForeignOriginRejected;
+procedure THTTPBinding.ExpectOriginStatus(const AOrigin: string;
+  AExpectedStatus: Integer);
 var
   Body, ContentType: string;
   Status: Integer;
 begin
   Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
-    [HeaderPair('Origin', 'https://evil.example'),
+    [HeaderPair('Origin', AOrigin),
      HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
      HeaderPair('Mcp-Method', 'tools/call'),
      HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
-  Expect<Integer>(Status).ToBe(403);
+  Expect<Integer>(Status).ToBe(AExpectedStatus);
+end;
+
+procedure THTTPBinding.TestForeignOriginRejected;
+begin
+  ExpectOriginStatus('https://evil.example', 403);
 end;
 
 procedure THTTPBinding.TestLocalhostOriginAccepted;
-var
-  Body, ContentType: string;
-  Status: Integer;
 begin
-  Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
-    [HeaderPair('Origin', 'http://localhost:5173'),
-     HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
-     HeaderPair('Mcp-Method', 'tools/call'),
-     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
-  Expect<Integer>(Status).ToBe(200);
+  ExpectOriginStatus('http://localhost:5173', 200);
 end;
 
 procedure THTTPBinding.TestIPv6LoopbackOriginAccepted;
-var
-  Body, ContentType: string;
-  Status: Integer;
 begin
-  Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
-    [HeaderPair('Origin', 'http://[::1]:8080'),
-     HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
-     HeaderPair('Mcp-Method', 'tools/call'),
-     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
-  Expect<Integer>(Status).ToBe(200);
+  ExpectOriginStatus('http://[::1]:8080', 200);
 end;
 
 procedure THTTPBinding.TestIPv6PrefixedOriginRejected;
-var
-  Body, ContentType: string;
-  Status: Integer;
 begin
   // The bracketed loopback literal is the whole host or nothing: a
   // foreign host that merely starts with it is not localhost.
-  Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
-    [HeaderPair('Origin', 'http://[::1].attacker.example'),
-     HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
-     HeaderPair('Mcp-Method', 'tools/call'),
-     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
-  Expect<Integer>(Status).ToBe(403);
+  ExpectOriginStatus('http://[::1].attacker.example', 403);
 end;
 
 procedure THTTPBinding.TestIPv6SuffixedOriginRejected;
-var
-  Body, ContentType: string;
-  Status: Integer;
 begin
-  Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
-    [HeaderPair('Origin', 'http://[::1]evil'),
-     HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
-     HeaderPair('Mcp-Method', 'tools/call'),
-     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
-  Expect<Integer>(Status).ToBe(403);
+  ExpectOriginStatus('http://[::1]evil', 403);
 end;
 
 procedure THTTPBinding.TestUserinfoOriginRejected;
-var
-  Body, ContentType: string;
-  Status: Integer;
 begin
   // Userinfo would make 'localhost' the credentials and the foreign
   // host the target; a serialized origin never carries it.
-  Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
-    [HeaderPair('Origin', 'http://localhost:99@evil.example'),
-     HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
-     HeaderPair('Mcp-Method', 'tools/call'),
-     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
-  Expect<Integer>(Status).ToBe(403);
+  ExpectOriginStatus('http://localhost:99@evil.example', 403);
 end;
 
 procedure THTTPBinding.TestNonWebSchemeOriginRejected;
-var
-  Body, ContentType: string;
-  Status: Integer;
 begin
   // The loopback allowlist is for web origins only: a non-http(s)
   // scheme in front of a loopback host must not slip through, or
   // 'weird://localhost' would inherit localhost's trust.
-  Status := Exchange('POST', '/mcp', CallLine(1, 'ping'),
-    [HeaderPair('Origin', 'weird://localhost'),
-     HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
-     HeaderPair('Mcp-Method', 'tools/call'),
-     HeaderPair('Mcp-Name', 'ping')], Body, ContentType);
-  Expect<Integer>(Status).ToBe(403);
+  ExpectOriginStatus('weird://localhost', 403);
 end;
 
 procedure THTTPBinding.TestSessionHeaderIgnored;
