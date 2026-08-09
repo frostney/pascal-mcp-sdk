@@ -39,3 +39,5 @@ applicable only with a recorded reason.
   maintainer approval is obtained first.
 - The verification story is known in advance: which co-located suite
   covers it, and whether `mcpsmoke` needs a new check.
+- The compatibility impact is known in advance: whether the change
+  breaks existing consumers, and if so what the migration is.
