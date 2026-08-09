@@ -55,7 +55,10 @@ recorded reason.
   title git-cliff cannot parse is dropped from the changelog and does
   not count toward the version bump (PR #38, caught while cutting
   2.0.0). Enforced by the `PR title` workflow, which reads the allowed
-  types from `cliff.toml`.
+  types from `cliff.toml`. Reverts need a `revert:` title — GitHub's
+  Revert button produces `Revert "..."`, which git-cliff cannot parse.
+  The gate relies on the repository squashing with the PR title as the
+  subject; the workflow asserts that setting.
 - PR descriptions that close issues put each closing keyword on its own
   line (`Closes #N`) — comma-separated same-line keywords failed to
   auto-close on merge (PR #25, 2026-07-20).

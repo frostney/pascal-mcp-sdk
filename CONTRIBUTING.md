@@ -77,7 +77,12 @@ is separate: `npm ci` for the interop harness may reach the npm registry.
 `pr-title.yml` checks that the PR title is a Conventional Commit:
 the repo squash-merges, so the title becomes the commit subject and
 the changelog entry (allowed types are read from `cliff.toml`, so the
-gate cannot drift from the generator).
+gate cannot drift from the generator). Reverting via GitHub's Revert
+button produces a `Revert "..."` title that git-cliff cannot parse —
+retitle it `revert: <original description>`. The workflow also asserts
+that the repo squashes using the PR title, since otherwise a
+single-commit PR would be squashed under its commit subject and the
+check would protect nothing.
 
 `pr.yml` is the pre-merge gate on every PR: native
 `install --frozen` + format check + build + test + mcpsmoke on Linux,

@@ -64,10 +64,23 @@ def main():
 
     print(f'::error::PR title is not a Conventional Commit: {title!r}')
     print()
-    print('This repository squash-merges, so the PR title becomes the')
-    print('commit subject and the CHANGELOG entry. A title git-cliff')
-    print('cannot parse is dropped from the changelog entirely and does')
-    print('not count toward the version bump.')
+
+    # Two different failures deserve two different explanations: an
+    # unparseable title vanishes from the changelog, while a parseable
+    # one with an uncurated type still appears — under "Other Changes".
+    # Saying "dropped entirely" for the latter sends the author hunting
+    # a changelog bug that is not there.
+    generic = re.match(r'^([A-Za-z]+)(\([^()\s]+\))?!?: \S.*$', title)
+    if generic:
+        print(f'The type "{generic.group(1)}" is not one of this '
+              "project's changelog types, so git-cliff would file the")
+        print('entry under "Other Changes" instead of a curated section.')
+    else:
+        print('This repository squash-merges, so the PR title becomes the')
+        print('commit subject and the CHANGELOG entry. A title git-cliff')
+        print('cannot parse is dropped from the changelog entirely and')
+        print('does not count toward the version bump.')
+
     print()
     print('Use:  type(optional-scope): description')
     print('      type(optional-scope)!: description   (breaking change)')
@@ -78,6 +91,14 @@ def main():
     print('  feat(transport): add Streamable HTTP binding')
     print('  fix(schema): make Build-reuse detection survive record copies')
     print('  feat(server)!: validate raw tool arguments against the subset')
+
+    if title.startswith('Revert "'):
+        print()
+        print("GitHub's Revert button titles the PR "
+              '`Revert "<original title>"`, which git-cliff cannot')
+        print('parse. Retitle it as a revert commit, keeping the subject '
+              'of the change being undone:')
+        print('  revert: <original description>')
     return 1
 
 
