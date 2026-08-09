@@ -16,14 +16,23 @@ name: PR title
 # description edit. The accepted types are read from cliff.toml by the
 # checker, so this gate cannot drift from the changelog generator.
 #
-# The gate only means anything while the repository's squash-merge
-# title source is PR_TITLE. Under GitHub's other setting,
-# COMMIT_OR_PR_TITLE, a single-commit PR is squashed using the
-# *commit's* subject and the validated title never reaches the
-# changelog — the gate silently becomes inert for the most common
-# shape of PR (this repository was configured that way until
-# 2026-08-09). The first step below asserts the setting so that drift
-# fails loudly instead of quietly reopening the hole.
+# DEPENDS ON A REPOSITORY SETTING: this gate only means anything while
+# Settings → General → Pull Requests → "Default to PR title for squash
+# merge commits" is on (API: squash_merge_commit_title = PR_TITLE).
+# Under GitHub's other setting, COMMIT_OR_PR_TITLE, a single-commit PR
+# is squashed using the *commit's* subject, so the validated title
+# never reaches the changelog and this gate is inert for the most
+# common shape of PR. This repository was configured that way until
+# 2026-08-09; see PR #36, whose title and single commit differ and
+# where main carries the commit's wording.
+#
+# The setting is deliberately NOT asserted here: GitHub only exposes
+# squash_merge_commit_title to tokens with admin on the repository, so
+# no workflow token (and no fork PR) can read it — an assertion step
+# fails with an empty value rather than the real setting. Closing that
+# drift risk properly means validating the sole commit's subject when
+# a PR has exactly one commit, which needs `pull-requests: read` and
+# makes the gate independent of the setting altogether.
 
 on:
   pull_request:
@@ -47,22 +56,6 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-
-      - name: Verify the squash subject comes from the PR title
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          SOURCE=$(gh api "repos/${GITHUB_REPOSITORY}" \
-            --jq .squash_merge_commit_title)
-          echo "squash_merge_commit_title: ${SOURCE}"
-          if [ "${SOURCE}" != "PR_TITLE" ]; then
-            echo "::error::squash_merge_commit_title is ${SOURCE}, not PR_TITLE — a single-commit PR would be squashed using its commit subject, so validating the title here would not protect the changelog."
-            echo "Restore it under Settings → General → Pull Requests →"
-            echo "'Default to PR title for squash merge commits', or extend"
-            echo "this workflow to validate commit subjects as well."
-            exit 1
-          fi
 
       - name: Check PR title is a Conventional Commit
         # The title is attacker-controlled: pass it through the

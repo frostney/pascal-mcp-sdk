@@ -58,7 +58,7 @@ recorded reason.
   types from `cliff.toml`. Reverts need a `revert:` title — GitHub's
   Revert button produces `Revert "..."`, which git-cliff cannot parse.
   The gate relies on the repository squashing with the PR title as the
-  subject; the workflow asserts that setting.
+  subject ("Default to PR title for squash merge commits").
 - PR descriptions that close issues put each closing keyword on its own
   line (`Closes #N`) — comma-separated same-line keywords failed to
   auto-close on merge (PR #25, 2026-07-20).
