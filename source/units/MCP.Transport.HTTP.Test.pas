@@ -27,6 +27,7 @@ uses
   jsonparser,
   fphttpclient,
   sockets,
+  ssockets,
   MCP.Protocol,
   MCP.Schema,
   MCP.Server,
@@ -77,6 +78,16 @@ type
     // the status the loopback allowlist must answer with.
     procedure ExpectOriginStatus(const AOrigin: string;
       AExpectedStatus: Integer);
+    // Raw POST declaring ADeclaredLength but sending no body, read to
+    // EOF. The over-cap refusal keys on the declared Content-Length
+    // alone, and a body the server never reads would sit unread at
+    // close and turn the close into an RST that races the client's
+    // read of the buffered 413 (the kernel discards pending data when
+    // the reset lands first). With nothing unsent the close is a
+    // clean FIN, so the response is always readable — and reaching
+    // EOF is itself the connection-close assertion.
+    function PostWithUnsentBody(ADeclaredLength: Integer;
+      out AResponseBody: string): Integer;
   protected
     procedure BeforeEach; override;
     procedure AfterEach; override;
@@ -277,6 +288,45 @@ begin
   finally
     Client.Free;
   end;
+end;
+
+function THTTPBinding.PostWithUnsentBody(ADeclaredLength: Integer;
+  out AResponseBody: string): Integer;
+var
+  Sock: TInetSocket;
+  Request, Response: string;
+  Buf: array[0..4095] of Byte;
+  Got, HeaderEnd: Integer;
+begin
+  Request := 'POST /mcp HTTP/1.1'#13#10 +
+    'Host: 127.0.0.1:' + IntToStr(FTransport.Port) + #13#10 +
+    'Content-Type: application/json'#13#10 +
+    'Content-Length: ' + IntToStr(ADeclaredLength) + #13#10#13#10;
+  Sock := TInetSocket.Create('127.0.0.1', FTransport.Port);
+  try
+    // A hang here would be a close-contract regression; fail the test
+    // via the timeout instead of wedging the suite.
+    Sock.IOTimeout := 5000;
+    Sock.WriteBuffer(Request[1], Length(Request));
+    Response := '';
+    repeat
+      Got := Sock.Read(Buf[0], SizeOf(Buf));
+      if Got > 0 then
+      begin
+        SetLength(Response, Length(Response) + Got);
+        Move(Buf[0], Response[Length(Response) - Got + 1], Got);
+      end;
+    until Got <= 0;
+  finally
+    Sock.Free;
+  end;
+  // 'HTTP/1.1 NNN ...' — the status code sits at a fixed offset.
+  Result := StrToIntDef(Copy(Response, 10, 3), -1);
+  HeaderEnd := Pos(#13#10#13#10, Response);
+  if HeaderEnd > 0 then
+    AResponseBody := Copy(Response, HeaderEnd + 4, MaxInt)
+  else
+    AResponseBody := '';
 end;
 
 function HeaderPair(const AName, AValue: string): THeaderPair;
@@ -614,8 +664,11 @@ var
   Status: Integer;
 begin
   FTransport.MaxBodyBytes := 200;
-  Status := Post('{"pad":"' + StringOfChar('x', 300) + '"}',
-    'tools/call', 'ping', Body);
+  // Headers-only on purpose: see PostWithUnsentBody. Sending the
+  // over-cap body too made this assertion a kernel-timing race
+  // (~0.5% loss of the buffered 413 to the server's RST, measured
+  // 2026-08-09 at 2/400 vs 0/400 headers-only on Darwin).
+  Status := PostWithUnsentBody(308, Body);
   Expect<Integer>(Status).ToBe(413);
   Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32700);
 end;
