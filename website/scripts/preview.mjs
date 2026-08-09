@@ -46,7 +46,15 @@ if (!fs.existsSync(outDir)) {
 // inside out/, honouring the trailingSlash export layout where every
 // route is a directory holding index.html.
 function resolveFile(urlPath) {
-  const clean = decodeURIComponent(urlPath.split('?')[0]);
+  // A malformed percent sequence (e.g. "/%") throws URIError inside
+  // the request handler; treat it as not-found instead of crashing
+  // the preview process.
+  let clean;
+  try {
+    clean = decodeURIComponent(urlPath.split('?')[0]);
+  } catch {
+    return null;
+  }
   // Contain traversal to out/.
   const abs = path.normalize(path.join(outDir, clean));
   if (abs !== outDir && !abs.startsWith(outDir + path.sep)) return null;
