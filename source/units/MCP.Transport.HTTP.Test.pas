@@ -173,6 +173,24 @@ begin
   FTransport.Run;
 end;
 
+// Poll AThread.Finished for up to ATimeoutMs, then join (WaitFor is
+// non-blocking once Finished is true). False means the thread is
+// still running at the deadline — the caller must then LEAK the
+// thread and everything it can still touch: TThread.Free would block
+// on the same hang, and freeing the transport/server under a live
+// Run corrupts it.
+function BoundedThreadJoin(AThread: TThread; ATimeoutMs: QWord): Boolean;
+var
+  Deadline: QWord;
+begin
+  Deadline := GetTickCount64 + ATimeoutMs;
+  while (GetTickCount64 < Deadline) and not AThread.Finished do
+    Sleep(25);
+  Result := AThread.Finished;
+  if Result then
+    AThread.WaitFor;
+end;
+
 procedure THTTPBinding.BeforeEach;
 var
   Attempt: Integer;
@@ -203,10 +221,24 @@ end;
 procedure THTTPBinding.AfterEach;
 begin
   FTransport.Stop;
-  FThread.WaitFor;
-  FreeAndNil(FThread);
-  FreeAndNil(FTransport);
-  FreeAndNil(FServer);
+  // Bounded teardown: an unbounded WaitFor would hang the whole
+  // suite if a regression ever kept Run from returning. On timeout
+  // the trio is leaked deliberately (every test binds a fresh port,
+  // so later tests still run) and the leak is reported loudly.
+  if BoundedThreadJoin(FThread, 5000) then
+  begin
+    FreeAndNil(FThread);
+    FreeAndNil(FTransport);
+    FreeAndNil(FServer);
+  end
+  else
+  begin
+    WriteLn(ErrOutput, 'WARNING: HTTP transport thread did not stop ',
+      'within 5s; leaking thread/transport/server for this test');
+    FThread := nil;
+    FTransport := nil;
+    FServer := nil;
+  end;
 end;
 
 function THTTPBinding.Exchange(const AMethod, APath, ABody: string;
@@ -714,25 +746,32 @@ procedure THTTPBinding.TestStopBeforeRunReturns;
 var
   Server: TMCPServer;
   Transport: TMCPHTTPServer;
-  Started: QWord;
+  Thread: TServerThread;
+  Finished: Boolean;
 begin
-  // Stop before Run: the transport stays stopped and Run does not
-  // block on a listener nothing would ever close.
+  // Stop before Run: the transport stays stopped and Run returns
+  // promptly. Run executes on a worker thread so a regression here
+  // cannot block the suite inline — the bounded join keeps the
+  // assertion reachable either way.
   Server := TMCPServer.Create('stop-test', '1.0');
-  try
-    Transport := TMCPHTTPServer.Create(Server);
-    try
-      Transport.Port := FindFreePort;
-      Transport.Stop;
-      Started := GetTickCount64;
-      Transport.Run;
-      Expect<Boolean>(GetTickCount64 - Started < 2000).ToBe(True);
-    finally
-      Transport.Free;
-    end;
-  finally
+  Transport := TMCPHTTPServer.Create(Server);
+  Transport.Port := FindFreePort;
+  Transport.Stop;
+  Thread := TServerThread.CreateFor(Transport);
+  Finished := BoundedThreadJoin(Thread, 2000);
+  Expect<Boolean>(Finished).ToBe(True);
+  if Finished then
+  begin
+    Thread.Free;
+    Transport.Free;
     Server.Free;
-  end;
+  end
+  else
+    // Run is still blocking: freeing anything it touches (or the
+    // thread itself — TThread.Free joins) would hang or corrupt the
+    // suite. Leak the trio; the failed expectation reports the bug.
+    WriteLn(ErrOutput, 'WARNING: Run did not return after early Stop; ',
+      'leaking thread/transport/server');
 end;
 
 procedure THTTPBinding.TestStopDuringStartupReturns;
@@ -740,7 +779,6 @@ var
   Server: TMCPServer;
   Transport: TMCPHTTPServer;
   Thread: TServerThread;
-  Deadline: QWord;
   Finished: Boolean;
 begin
   // Stop racing the listener's startup: whichever side wins, the
@@ -748,36 +786,30 @@ begin
   Server := TMCPServer.Create('stop-race-test', '1.0');
   try
     Transport := TMCPHTTPServer.Create(Server);
-    try
-      Transport.Port := FindFreePort;
-      Thread := TServerThread.CreateFor(Transport);
-      try
-        Transport.Stop;
-        // Bounded poll instead of an unconditional WaitFor: if the
-        // transport regressed and Run never returns, a blocking WaitFor
-        // would hang the whole suite instead of reporting the failed
-        // expectation. Wait at most a few seconds, then assert Run
-        // finished; only join the thread when it actually did so
-        // cleanup cannot block on the failure path.
-        Deadline := GetTickCount64 + 4000;
-        Finished := False;
-        while GetTickCount64 < Deadline do
-        begin
-          if Thread.Finished then
-          begin
-            Finished := True;
-            Break;
-          end;
-          Sleep(50);
-        end;
-        Expect<Boolean>(Finished).ToBe(True);
-        if Finished then
-          Thread.WaitFor;
-      finally
-        Thread.Free;
-      end;
-    finally
+    Transport.Port := FindFreePort;
+    Thread := TServerThread.CreateFor(Transport);
+    Transport.Stop;
+    // Bounded join instead of an unconditional WaitFor: if the
+    // transport regressed and Run never returns, a blocking WaitFor
+    // (or a TThread.Free, which joins) would hang the whole suite
+    // instead of reporting the failed expectation.
+    Finished := BoundedThreadJoin(Thread, 4000);
+    Expect<Boolean>(Finished).ToBe(True);
+    if Finished then
+    begin
+      Thread.Free;
       Transport.Free;
+      // Server is freed by the outer finally.
+    end
+    else
+    begin
+      // Run is still live: it can touch the transport (and through it
+      // the server) at any moment, so nothing it reaches may be freed.
+      // Leak thread + transport, and detach the server from the outer
+      // finally too.
+      WriteLn(ErrOutput, 'WARNING: Run did not return after racing ',
+        'Stop; leaking thread/transport/server');
+      Server := nil;
     end;
   finally
     Server.Free;

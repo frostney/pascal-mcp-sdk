@@ -14,7 +14,11 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const outDir = path.join(here, '..', 'out');
-const basePath = '/pascal-mcp-sdk';
+// Source of truth for the mount prefix is `basePath` in
+// ../next.config.mjs (mirrored by `basePath` in ../lib/shared.ts) —
+// the export in out/ is built for that prefix, so this preview must
+// serve under the same one. BASE_PATH overrides for experiments.
+const basePath = process.env.BASE_PATH ?? '/pascal-mcp-sdk';
 const port = Number(process.env.PORT ?? 3000);
 const host = process.env.HOST ?? 'localhost';
 

@@ -72,8 +72,13 @@ sans-I/O discipline. See
 - `mcpsmoke` is the in-repo E2E battery: it launches `mcpdemo` the way a
   real MCP client does (subprocess, pipes) and drives the full v1
   surface including error paths and the EOF shutdown contract.
-- Nothing in the test stack touches the network; everything runs against
-  local pipes and temp files.
+- Nothing in the test stack touches the **external** network; everything
+  runs against local pipes, loopback (127.0.0.1) sockets, and temp
+  files. The loopback sockets are a recorded maintainer exception for
+  the transport binding suites: `MCP.Transport.HTTP.Test.pas`
+  deliberately drives a live listener on an ephemeral 127.0.0.1 port,
+  and stays co-located per the fixed layout above (this repo has no
+  separate integration-test layer).
 
 ## Safety / Boundaries
 
