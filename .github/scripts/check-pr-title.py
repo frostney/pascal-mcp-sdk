@@ -1,21 +1,36 @@
 #!/usr/bin/env python3
-"""Validate a pull-request title as a Conventional Commit.
+"""Validate the subject a squash merge will carry, as a Conventional Commit.
 
-This repository squash-merges, so the PR title becomes the squash
-commit's subject — and therefore the CHANGELOG entry git-cliff
-generates for it. A non-conventional title is silently dropped by
-git-cliff: PR #38 ("Implement all remaining open issues: ...") shipped
-the entire HTTP-era release and contributed nothing to the changelog,
-and left `git cliff --bumped-version` recommending a patch bump for a
-release containing a breaking change (caught during the 2.0.0 cut).
+This repository squash-merges, so the squash commit's subject becomes
+the CHANGELOG entry git-cliff generates. A non-conventional subject is
+silently dropped: PR #38 ("Implement all remaining open issues: ...")
+shipped the entire HTTP-era release and contributed nothing to the
+changelog, and left `git cliff --bumped-version` recommending a patch
+bump for a release containing a breaking change (caught during the
+2.0.0 cut).
+
+Which text becomes that subject depends on a repository setting:
+
+  PR_TITLE            — always the pull-request title.
+  COMMIT_OR_PR_TITLE  — the sole commit's subject when the PR has
+                        exactly one commit, else the PR title.
+
+A workflow token cannot read that setting (GitHub exposes it only to
+admins), so this checker does not depend on knowing it: it validates
+the PR title, and additionally validates the sole commit's subject
+whenever the PR has exactly one commit. Whichever text GitHub picks,
+it has been checked.
 
 The accepted types are read from cliff.toml's commit_parsers rather
 than duplicated here, so this gate cannot drift from the generator it
 protects.
 
-Reads the title from the PR_TITLE environment variable (never from the
-command line or a shell interpolation — a PR title is attacker
-controlled).
+Inputs arrive through the environment (never a command line or shell
+interpolation — these strings are attacker controlled):
+
+  PR_TITLE            the pull-request title (required)
+  PR_COMMIT_COUNT     number of commits on the PR (optional)
+  PR_COMMIT_SUBJECT   subject of the sole commit when there is one
 """
 
 import os
@@ -52,18 +67,41 @@ def main():
               '.github/scripts/check-pr-title.py to match')
         return 1
 
-    title = os.environ.get('PR_TITLE', '')
     # type(optional-scope)!: description — the "!" marks a breaking
     # change, which git-cliff routes to the Breaking Changes group.
     pattern = re.compile(
         r'^(' + '|'.join(types) + r')(\([^()\s]+\))?!?: \S.*$')
 
-    if pattern.match(title):
-        print(f'PR title is a valid Conventional Commit: {title}')
+    # Every string GitHub could turn into the squash subject. The sole
+    # commit's subject is only a candidate when there is exactly one
+    # commit — that is the case where COMMIT_OR_PR_TITLE prefers it
+    # over the title.
+    candidates = [('PR title', os.environ.get('PR_TITLE', ''))]
+    commit_subject = os.environ.get('PR_COMMIT_SUBJECT', '')
+    if os.environ.get('PR_COMMIT_COUNT') == '1' and commit_subject:
+        candidates.append(("sole commit's subject", commit_subject))
+
+    failed = [(label, text)
+              for label, text in candidates if not pattern.match(text)]
+
+    if not failed:
+        for label, text in candidates:
+            print(f'{label} is a valid Conventional Commit: {text}')
         return 0
 
-    print(f'::error::PR title is not a Conventional Commit: {title!r}')
+    for label, text in failed:
+        print(f'::error::{label} is not a Conventional Commit: {text!r}')
     print()
+
+    if len(candidates) > 1:
+        print('This PR has a single commit, so depending on the')
+        print("repository's squash setting GitHub may use either the PR")
+        print('title or that commit subject as the squash subject — and')
+        print('therefore the CHANGELOG entry. Both must be valid.')
+        print()
+
+    # Explain against the first failure; the guidance is identical.
+    title = failed[0][1]
 
     # Two different failures deserve two different explanations: an
     # unparseable title vanishes from the changelog, while a parseable
@@ -76,8 +114,8 @@ def main():
               "project's changelog types, so git-cliff would file the")
         print('entry under "Other Changes" instead of a curated section.')
     else:
-        print('This repository squash-merges, so the PR title becomes the')
-        print('commit subject and the CHANGELOG entry. A title git-cliff')
+        print('This repository squash-merges, so that text becomes the')
+        print('commit subject and the CHANGELOG entry. A subject git-cliff')
         print('cannot parse is dropped from the changelog entirely and')
         print('does not count toward the version bump.')
 

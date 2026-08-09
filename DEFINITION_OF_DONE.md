@@ -57,8 +57,8 @@ recorded reason.
   2.0.0). Enforced by the `PR title` workflow, which reads the allowed
   types from `cliff.toml`. Reverts need a `revert:` title — GitHub's
   Revert button produces `Revert "..."`, which git-cliff cannot parse.
-  The gate relies on the repository squashing with the PR title as the
-  subject ("Default to PR title for squash merge commits").
+  On a single-commit PR the commit's own subject must be conventional
+  too — GitHub may squash under either it or the title.
 - PR descriptions that close issues put each closing keyword on its own
   line (`Closes #N`) — comma-separated same-line keywords failed to
   auto-close on merge (PR #25, 2026-07-20).
