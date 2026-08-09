@@ -50,6 +50,15 @@ recorded reason.
 
 - Commits follow Conventional Commits (git-cliff feeds CHANGELOG.md
   from them).
+- **PR titles follow Conventional Commits too.** PRs are squash-merged,
+  so the title becomes the commit subject and the CHANGELOG entry; a
+  title git-cliff cannot parse is dropped from the changelog and does
+  not count toward the version bump (PR #38, caught while cutting
+  2.0.0). Enforced by the `PR title` workflow, which reads the allowed
+  types from `cliff.toml`. Reverts need a `revert:` title — GitHub's
+  Revert button produces `Revert "..."`, which git-cliff cannot parse.
+  On a single-commit PR the commit's own subject must be conventional
+  too — GitHub may squash under either it or the title.
 - PR descriptions that close issues put each closing keyword on its own
   line (`Closes #N`) — comma-separated same-line keywords failed to
   auto-close on merge (PR #25, 2026-07-20).

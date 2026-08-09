@@ -1,0 +1,92 @@
+name: PR title
+
+# The repository squash-merges, so the squash commit's subject becomes
+# the CHANGELOG entry git-cliff generates. This gate keeps that subject
+# a Conventional Commit.
+#
+# Why it exists: PR #38 was titled "Implement all remaining open
+# issues: ..." and shipped the whole HTTP-era release; git-cliff could
+# not classify the subject, so the generated changelog omitted every
+# feature in it and `--bumped-version` proposed a patch bump for a
+# release carrying a breaking change (caught while cutting 2.0.0).
+#
+# Deliberately its own workflow rather than a job in pr.yml: title
+# validation needs the `edited` event, and adding that to pr.yml would
+# re-run the full three-platform build/test matrix on every title or
+# description edit. The accepted types are read from cliff.toml by the
+# checker, so this gate cannot drift from the changelog generator.
+#
+# WHICH text becomes that subject depends on a repository setting:
+# with squash_merge_commit_title = PR_TITLE it is always the pull
+# request's title; with COMMIT_OR_PR_TITLE it is the *commit's*
+# subject whenever the PR has exactly one commit. Validating only the
+# title would therefore be inert for single-commit PRs under the
+# latter — the most common shape here, and how this repository was
+# configured until 2026-08-09 (see PR #36, whose title and single
+# commit differ, where main carries the commit's wording).
+#
+# GitHub exposes that setting only to admin tokens, so no workflow
+# token (and no fork PR) can read it to branch on. The gate is instead
+# made independent of it: on a single-commit PR the sole commit's
+# subject is validated alongside the title, so whichever text GitHub
+# squashes under has been checked under either setting.
+
+on:
+  pull_request:
+    branches:
+      - main
+    # `edited` covers title changes; the rest keep the check reported
+    # on every update so it stays valid as a required status check.
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read
+  # Read the PR's commit list so a single-commit PR can have its commit
+  # subject validated too (see the note above).
+  pull-requests: read
+
+jobs:
+  conventional-title:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Collect the sole commit's subject (single-commit PRs)
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # per_page=2 is enough to distinguish "exactly one" from
+          # "more than one"; the subject only matters in the first case.
+          COMMITS=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/commits?per_page=2")
+          COUNT=$(printf '%s' "${COMMITS}" | jq 'length')
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+          if [ "${COUNT}" = "1" ]; then
+            # First line only: the subject is what becomes the squash
+            # subject. Written via a delimited heredoc so an arbitrary
+            # subject cannot forge extra step outputs.
+            {
+              echo "subject<<COMMIT_SUBJECT_EOF"
+              printf '%s' "${COMMITS}" \
+                | jq -r '.[0].commit.message | split("\n")[0]'
+              echo "COMMIT_SUBJECT_EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check the squash subject is a Conventional Commit
+        # These strings are attacker-controlled: pass them through the
+        # environment, never interpolated into the shell command.
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_COMMIT_COUNT: ${{ steps.commit.outputs.count }}
+          PR_COMMIT_SUBJECT: ${{ steps.commit.outputs.subject }}
+        run: python3 .github/scripts/check-pr-title.py
