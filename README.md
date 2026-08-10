@@ -23,6 +23,10 @@ agents — no second language runtime, no framework.
 - **Server-enforced argument validation** — every tool call is
   checked against its registered schema before your handler runs.
 
+📚 **Full documentation:** guides, API reference, and internals at
+<https://frostney.github.io/pascal-mcp-sdk/> — rendered from
+[docs/](docs/).
+
 ## Install
 
 **As an [lwpt](https://github.com/frostney/lwpt) dependency** (the
@@ -160,7 +164,7 @@ Transport.Run;            // blocks; Transport.Stop unblocks it
 The complete worked example is
 [source/apps/mcpdemo.pas](source/apps/mcpdemo.pas) — including the
 MRTR `greet_user` tool that elicits input mid-call; the protocol-level
-walkthrough lives in [docs/quick-start.md](docs/quick-start.md).
+walkthrough lives in [docs/guides/quick-start.md](docs/guides/quick-start.md).
 
 ## Protocol coverage
 
@@ -195,7 +199,7 @@ stdio and Streamable HTTP, including MRTR auto-fulfilment) and the v1
 SDK (`@modelcontextprotocol/sdk`, the legacy era Claude Code speaks) —
 plus a live `claude mcp add` health check. See
 [tools/interop-ts/](tools/interop-ts/) and
-[docs/architecture.md](docs/architecture.md) for the grounding notes.
+[docs/internals/architecture.md](docs/internals/architecture.md) for the grounding notes.
 
 ## Contributing
 

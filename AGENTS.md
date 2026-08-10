@@ -32,7 +32,7 @@
 - **Spec facts are verified, never recalled.** Any change to protocol
   behaviour cites the official spec page (modelcontextprotocol.io) it
   implements, with the verification date — see the unit headers and
-  [docs/architecture.md](docs/architecture.md) for the pattern.
+  [docs/internals/architecture.md](docs/internals/architecture.md) for the pattern.
 
 ## Runtime / Commands
 
@@ -55,7 +55,7 @@ the way a real client does).
 | `source/apps/` | Programs: `mcpdemo` (example stdio server), `mcpsmoke` (subprocess E2E battery) |
 | `scripts/` | Self-contained `lwpt run` wrappers (currently `smoke.pas` → runs the built `mcpsmoke`) |
 | `tools/` | Cross-implementation checks: `interop-ts/` (official MCP TypeScript clients vs `mcpdemo` over stdio, the legacy era, and Streamable HTTP) |
-| `docs/` | Architecture, quick-start, tooling, code style, deployment |
+| `docs/` | Consumer-first tree rendered by the website: `guides/` (quick start, tools, schemas, prompts, resources, configuration, notifications, shipping, troubleshooting, cookbook), `reference/` (public API, gated by `.github/scripts/check-reference-docs.sh`), `internals/` (architecture, tooling, code style, releasing — contributor pages) |
 | `website/` | GitHub Pages site: Fumadocs static export rendering `docs/` directly — contributor/CI tooling, not part of the library |
 
 Layering is strictly bottom-up: `MCP.JSONRPC` → `MCP.Protocol` →
@@ -63,7 +63,7 @@ Layering is strictly bottom-up: `MCP.JSONRPC` → `MCP.Protocol` →
 core performs no I/O (`HandleMessage`: line in, line out) — both
 transports wrap the same core without changes, mirroring duetto's
 sans-I/O discipline. See
-[docs/architecture.md](docs/architecture.md).
+[docs/internals/architecture.md](docs/internals/architecture.md).
 
 ## Testing
 

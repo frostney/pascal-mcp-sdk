@@ -15,8 +15,8 @@ applicable only with a recorded reason.
 - Applicable project skills under `.agents/skills/` have been
   identified before planning.
 - The relevant docs have been identified before forming a plan:
-  [Architecture](docs/architecture.md), [Code style](docs/code-style.md),
-  [Tooling](docs/tooling.md).
+  [Architecture](docs/internals/architecture.md), [Code style](docs/internals/code-style.md),
+  [Tooling](docs/internals/tooling.md).
 
 ## Ready to plan
 
