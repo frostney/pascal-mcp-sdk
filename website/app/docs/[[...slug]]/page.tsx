@@ -1,4 +1,10 @@
-import { getPageImageUrl, getPageMarkdownUrl, pageTitle, source } from '@/lib/source';
+import {
+  getPageImageUrl,
+  getPageMarkdownUrl,
+  pageDescription,
+  pageTitle,
+  source,
+} from '@/lib/source';
 import {
   DocsBody,
   DocsPage,
@@ -9,7 +15,7 @@ import { notFound } from 'next/navigation';
 import { getMDXComponents } from '@/components/mdx';
 import type { Metadata } from 'next';
 import { createRelativeLink } from 'fumadocs-ui/mdx';
-import { gitConfig } from '@/lib/shared';
+import { basePath, gitConfig, siteUrl } from '@/lib/shared';
 
 export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
   const params = await props.params;
@@ -18,11 +24,27 @@ export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
 
   const MDX = page.data.body;
   const markdownUrl = getPageMarkdownUrl(page).url;
+  const jsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'TechArticle',
+    headline: pageTitle(page),
+    description: await pageDescription(page),
+    url: `${siteUrl}${page.url}`,
+    isPartOf: {
+      '@type': 'WebSite',
+      name: 'pascal-mcp-sdk documentation',
+      url: `${siteUrl}/docs`,
+    },
+  };
 
   return (
     <DocsPage toc={page.data.toc} full={page.data.full}>
       {/* The markdown body carries its own H1 (the docs stay valid
           GitHub markdown), so no separate DocsTitle is rendered. */}
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
       <div className="flex flex-row gap-2 items-center border-b pb-6">
         <MarkdownCopyButton markdownUrl={markdownUrl} />
         <ViewOptionsPopover
@@ -53,9 +75,10 @@ export async function generateMetadata(props: PageProps<'/docs/[[...slug]]'>): P
 
   return {
     title: pageTitle(page),
-    description: page.data.description,
+    description: await pageDescription(page),
+    alternates: { canonical: `${siteUrl}${page.url}` },
     openGraph: {
-      images: getPageImageUrl(page).url,
+      images: `${basePath}${getPageImageUrl(page).url}`,
     },
   };
 }

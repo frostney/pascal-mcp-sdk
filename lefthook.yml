@@ -8,7 +8,7 @@
 # (see .github/workflows/) so local commits stay fast.
 #
 # lwpt is expected on PATH (installed from its GitHub release — see
-# docs/quick-start.md). Point PASCAL_MCP_SDK_LWPT at another lwpt binary to
+# docs/guides/quick-start.md). Point PASCAL_MCP_SDK_LWPT at another lwpt binary to
 # override.
 #
 # Do NOT bypass with `git commit --no-verify` unless a maintainer
@@ -29,4 +29,4 @@ pre-commit:
         lwpt format failed. Inspect the output above; the formatter only
         fails when it cannot parse a file. If lwpt is missing entirely
         (fresh clone), install the release binary first — see
-        docs/quick-start.md.
+        docs/guides/quick-start.md.

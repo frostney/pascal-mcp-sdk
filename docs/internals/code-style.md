@@ -1,6 +1,6 @@
 # Code Style
 
-> **Audience: contributors.** This describes the library's internals and toolchain; consumers only need the [README](../README.md) and [quick start](quick-start.md).
+> **Audience: contributors.** This describes the library's internals and toolchain; consumers only need the [guides](../guides/quick-start.md) and [reference](../reference/server.md) sections.
 
 ## Executive Summary
 

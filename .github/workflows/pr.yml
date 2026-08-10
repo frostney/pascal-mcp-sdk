@@ -166,6 +166,14 @@ jobs:
         if: matrix.fpc-install == 'apt'   # platform-independent; one runner
         run: lwpt format --check
 
+      - name: lwpt agents --check (AGENTS.md command reference fresh?)
+        if: matrix.fpc-install == 'apt'   # platform-independent; one runner
+        run: lwpt agents --check
+
+      - name: reference docs cover the public surface
+        if: matrix.fpc-install == 'apt'   # platform-independent; one runner
+        run: .github/scripts/check-reference-docs.sh
+
       - name: lwpt build (mcpdemo + mcpsmoke)
         run: lwpt build
 
@@ -226,7 +234,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: tools/interop-ts/package-lock.json
 

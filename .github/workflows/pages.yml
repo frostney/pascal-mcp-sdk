@@ -42,7 +42,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          # Node pin recorded in docs/tooling.md.
+          # Node pin recorded in docs/internals/tooling.md.
           node-version: 24
           cache: npm
           cache-dependency-path: website/package-lock.json
