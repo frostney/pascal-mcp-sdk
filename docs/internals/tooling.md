@@ -132,5 +132,5 @@ actions): pushes to `main` touching `website/**` or `docs/**` deploy;
 PRs touching those paths build without deploying. The Node toolchain
 is contributor/CI tooling only (precedent: `tools/interop-ts`) and
 never touches the shipped library or its RTL + fpjson dependency
-policy. **Node pin: 24** (`actions/setup-node` in pages.yml; the interop
-job in pr.yml pins its own Node 20).
+policy. **Node pin: 24** (`actions/setup-node` — both pages.yml and the
+interop job in pr.yml).
