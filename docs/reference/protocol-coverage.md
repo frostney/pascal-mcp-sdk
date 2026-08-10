@@ -17,7 +17,7 @@ the README links here.
 | `ttlMs` / `cacheScope` caching hints (SEP-2549) | ✅ on discover/list/read, tunable via `CacheTtlMs`/`CacheScope` |
 | stdio transport | ✅ newline-delimited, EOF shutdown contract |
 | Streamable HTTP transport | ✅ `MCP.Transport.HTTP`: single POST endpoint, SSE response streams, mirrored-header validation, Origin allowlist |
-| Classic handshake era (`initialize`: 2024-11-05, 2025-06-18, 2025-11-25 — what current clients speak; wire-verified 2026-08-10: Claude Code 2.1.226 → 2025-11-25, Codex 0.145.0 → 2025-06-18) | ✅ dual-era default: era-faithful dialect (unstamped results, `-32002`, `ping`); `DualEra := False` for strict modern-only |
+| Classic handshake era (`initialize`: 2024-11-05, 2025-06-18, 2025-11-25) | ✅ dual-era default: era-faithful dialect (unstamped results, `-32002`, `ping`); `DualEra := False` for strict modern-only |
 | `subscriptions/listen`, list-changed | ⏳ not implemented (registries are static after startup) |
 
 Resource-template matching is intentionally limited to simple `{var}`
@@ -35,8 +35,12 @@ Spec facts verified against the official
 official MCP TypeScript clients**: the stable v2 client
 (`@modelcontextprotocol/client` 2.0.0, pinned + auto-probe modes, over
 stdio and Streamable HTTP, including MRTR auto-fulfilment) and the v1
-SDK (`@modelcontextprotocol/sdk`, the handshake era Claude Code speaks) —
-plus a live `claude mcp add` health check. See
-[tools/interop-ts/](../../tools/interop-ts/) and the
+SDK (`@modelcontextprotocol/sdk`, the handshake era Claude Code
+speaks). See [tools/interop-ts/](../../tools/interop-ts/) and the
 [architecture page](../internals/architecture.md#spec-grounding) for
 the grounding notes.
+
+Wire captures from 2026-08-10 show current clients still opening
+with the classic handshake — Claude Code 2.1.226 with `2025-11-25`,
+Codex 0.145.0 with `2025-06-18`; the transcripts are in
+[Your first conversation](../guides/first-conversation.md).

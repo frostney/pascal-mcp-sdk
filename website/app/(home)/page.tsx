@@ -30,7 +30,7 @@ const FAQ: { q: string; a: string; extra?: React.ReactNode }[] = [
   },
   {
     q: 'Does Claude Code work with a Pascal MCP server?',
-    a: 'Yes — and so does Codex. Servers are dual-era by default: they answer the classic initialize handshake current clients still speak alongside the newest stateless protocol revision, and pick per connection. Wire-verified 2026-08-10: Claude Code 2.1.226 and Codex 0.145.0 both connect out of the box.',
+    a: 'Yes — and so does Codex. Servers are dual-era by default: they answer the classic initialize handshake current clients still speak alongside the newest stateless protocol revision, and pick per connection. No configuration needed on either side.',
   },
   {
     q: 'How do I build an MCP server in Pascal?',

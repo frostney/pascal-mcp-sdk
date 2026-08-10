@@ -20,9 +20,8 @@ Task-oriented pages for building and shipping your own MCP server:
   MCP standardizes, and where your Pascal code fits.
 - [Quick start](guides/quick-start.md) — install, write a server,
   serve it over stdio or Streamable HTTP, register it with a client.
-- [Your first conversation](guides/first-conversation.md) — a real
-  captured session: an agent calling a Pascal tool, on screen and on
-  the wire.
+- [Your first conversation](guides/first-conversation.md) — an agent
+  calling a Pascal tool, on screen and on the wire.
 - [Tools](guides/tools.md) — the core registration model: handlers,
   typed argument classes, validation, annotations, MRTR.
 - [Schemas](guides/schemas.md) — the fluent builder, RTTI-derived

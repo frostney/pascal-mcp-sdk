@@ -35,8 +35,8 @@ the error's data lists `supported` versions. A client speaking
 `2025-03-26` hits this — that revision requires JSON-RPC batch
 support the library deliberately omits (see
 [Spec grounding](../internals/architecture.md#spec-grounding)); the
-adjacent `2024-11-05`, `2025-06-18` (Codex today), and `2025-11-25`
-(Claude Code today) all work via the dual-era default.
+adjacent `2024-11-05`, `2025-06-18`, and `2025-11-25` — the revisions
+current clients actually speak — all work via the dual-era default.
 
 ## `EMCPServer` at startup
 

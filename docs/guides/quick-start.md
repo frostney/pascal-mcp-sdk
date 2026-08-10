@@ -16,15 +16,15 @@ the library itself is covered in
 
 - **FPC 3.2.2** — `apt install fpc` / `brew install fpc` / the
   win32+win64 combo installer from freepascal.org.
-- **lwpt** (optional — for the dependency path) — download the release
-  tarball for your platform from
-  [lwpt's releases](https://github.com/frostney/lwpt/releases), verify
-  the checksum, put `lwpt` on PATH.
+- **lwpt** (optional — for the dependency path) —
+  `brew install frostney/tap/lwpt`, or download the release tarball
+  for your platform from
+  [lwpt's releases](https://github.com/frostney/lwpt/releases) and put
+  `lwpt` on PATH.
 
 ## Get the library
 
-As an lwpt dependency, from your project root (this exact command was
-verified against a scratch consumer project):
+As an lwpt dependency, from your project root:
 
 ```sh
 lwpt add frostney/pascal-mcp-sdk@^2.0
@@ -98,7 +98,7 @@ Key behaviours you get for free:
 - **Today's clients work out of the box**: the server is dual-era by
   default, so a client opening with the classic `initialize`
   handshake — which current releases of Claude Code, Claude Desktop,
-  and Codex all still speak (verified 2026-08-10; see
+  and Codex all still speak (see
   [Your first conversation](first-conversation.md)) — is served that
   era faithfully, while stateless 2026-07-28 `_meta` requests are
   served natively — same registries, same handlers. Set
@@ -164,7 +164,7 @@ makes the server exit — that is the spec's graceful-shutdown contract.
 
 Any client that launches stdio servers works — whichever protocol
 revision it speaks, thanks to the dual-era default. With Claude Code
-it is one command (verified against `mcpdemo`):
+it is one command:
 
 ```sh
 claude mcp add my-server /absolute/path/to/myserver

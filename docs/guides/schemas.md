@@ -153,8 +153,3 @@ That publishes the full schema to clients unchanged, skips server-side
 argument validation, and hands the job to your handler — report
 violations as in-band `MCPErrorResult`s so the model can correct
 itself.
-
-**Upgrading from 1.x:** raw-schema registrations used to be accepted
-unchecked. If a startup now fails naming a schema keyword, either
-narrow the schema to the subset or mark the registration
-`.ApplicationValidated` to keep the previous behaviour.

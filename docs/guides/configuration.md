@@ -57,15 +57,12 @@ untouched.)
 `True` by default: the server answers the classic `initialize`
 handshake (protocol revisions `2024-11-05`, `2025-06-18`,
 `2025-11-25`) alongside stateless `2026-07-28` requests. This is not
-about supporting outdated software — it is what current clients
-speak: verified 2026-08-10, Claude Code 2.1.226 opens with
-`initialize`/`2025-11-25` and Codex 0.145.0 with
-`initialize`/`2025-06-18`, and both connect to a pascal-mcp-sdk
-server out of the box. (The `2026-07-28` machinery is visibly
-arriving in Claude Code — its 2.1.226 binary contains the new
-revision's strings — but is not yet active on the wire.) Era
+about supporting outdated software — the classic handshake is what
+current clients speak, Claude Code and Codex included (see the wire
+captures in [Your first conversation](first-conversation.md)). Era
 selection follows how each client opens; handlers are era-blind, so
-the transition costs you nothing either way.
+the spec's transition to the stateless revision costs you nothing
+either way.
 
 Set `DualEra := False` for a strict modern-only server: `initialize`
 is rejected with a diagnostic naming the supported versions. The

@@ -16,9 +16,7 @@ agents — no second language runtime, no framework.
   (per-request `_meta`, mandatory `server/discover`, no session
   handshake) *and* the classic `initialize` handshake current clients
   still speak: **Claude Code, Claude Desktop, and Codex connect out
-  of the box** (wire-verified 2026-08-10: Claude Code 2.1.226 opens
-  `initialize`/2025-11-25, Codex 0.145.0 opens
-  `initialize`/2025-06-18).
+  of the box**.
 - **MRTR (`input_required`)** — handlers can ask the client for more
   input mid-call (elicitation, sampling, roots) using the 2026-07-28
   multi-round-trip pattern, without any server-side session state.
@@ -31,8 +29,7 @@ agents — no second language runtime, no framework.
 
 ## Install
 
-**As an [lwpt](https://github.com/frostney/lwpt) dependency** (the
-command below was run and verified against a fresh scratch project):
+**As an [lwpt](https://github.com/frostney/lwpt) dependency:**
 
 ```sh
 lwpt add frostney/pascal-mcp-sdk@^2.0
@@ -136,13 +133,6 @@ fluent builder, JSON-string, and definition-object registration
 overloads remain available, validated at registration (schemas beyond
 the server-enforced subset are marked `.ApplicationValidated`, handing
 argument validation to your handler).
-
-**Upgrading:** raw-schema registrations are now checked at startup
-against the enforced JSON Schema subset. A tool whose `inputSchema`
-uses a keyword outside that subset fails at registration, naming the
-offending keyword, instead of being silently under-validated at call
-time. Mark such registrations `.ApplicationValidated` to keep the
-previous behaviour, with argument validation owned by your handler.
 
 Results are built with `MCPTextResult` / `MCPErrorResult` /
 `MCPStructuredResult`; handler exceptions become in-band

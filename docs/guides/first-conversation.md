@@ -1,11 +1,11 @@
 # Your First Conversation
 
-What talking to an MCP client *actually looks like* — a complete,
-real session between an AI agent and the demo server, shown twice:
-as the user saw it, and as your server saw it on the wire. Every
-transcript on this page was captured live on 2026-08-10 against
-`build/mcpdemo` (the [demo server](../../source/apps/mcpdemo.pas)),
-not reconstructed.
+What talking to an MCP client *actually looks like* — a complete
+session between an AI agent and the
+[demo server](../../source/apps/mcpdemo.pas), shown twice: as the
+user saw it, and as your server saw it on the wire. The transcripts
+are from 2026-08-10; the client versions shown are the releases
+current on that date.
 
 ## The user's view
 
@@ -98,9 +98,8 @@ server needs no signal handling and no restart loop.
 
 ## What Claude Code sends
 
-Same choreography, captured the same day from Claude Code (both the
-installed 2.1.217 and the then-latest 2.1.226 send the identical
-opening):
+Same choreography from Claude Code (versions 2.1.217 and 2.1.226
+both open with this):
 
 ```json
 {"jsonrpc":"2.0","id":0,"method":"initialize","params":{
@@ -113,12 +112,9 @@ Different client, different protocol revision (`2025-11-25` vs
 Codex's `2025-06-18`) — same server, zero configuration. That is what
 the dual-era default buys you: the library speaks every current
 client's handshake revision *and* the newest stateless `2026-07-28`
-revision, and picks per connection. (The 2026-07-28 support is
-arriving in Claude Code itself: its 2.1.226 binary already contains
-the new revision's machinery, though as of 2026-08-10 it still opens
-with `initialize` — see
-[the era story](configuration.md#dualera) for what this means for
-your server: nothing, it keeps working through the transition.)
+revision, and picks per connection — so as clients migrate to the
+stateless revision, your server needs no change (see
+[Configuration](configuration.md#dualera)).
 
 ## The same conversation, stateless style
 

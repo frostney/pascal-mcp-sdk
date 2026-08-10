@@ -95,8 +95,7 @@ until `Stop` is called from another thread.
 - **Modern era only.** This binding turns dual-era support off: it
   serves `2026-07-28` requests statelessly and rejects an
   `initialize` handshake with the version diagnostic. Clients that
-  speak the classic handshake (Claude Code and Codex today) keep
-  using stdio.
+  speak the classic handshake keep using stdio.
 
 The runtime contract above still holds otherwise: state is explicit,
 diagnostics go to stderr, and secrets come from the environment.
