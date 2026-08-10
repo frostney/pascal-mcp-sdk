@@ -19,8 +19,9 @@ the library itself is covered in
 - **lwpt** (optional — for the dependency path) —
   `brew install frostney/tap/lwpt`, or download the release tarball
   for your platform from
-  [lwpt's releases](https://github.com/frostney/lwpt/releases) and put
-  `lwpt` on PATH.
+  [lwpt's releases](https://github.com/frostney/lwpt/releases),
+  verify it against the release's checksums file, and put `lwpt` on
+  PATH.
 
 ## Get the library
 
