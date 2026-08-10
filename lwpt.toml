@@ -4,7 +4,7 @@
 [package]
 name = "pascal-mcp-sdk"
 version = "2.0.0"
-# lwpt 0.2.0 discovers dep units through nested manifests, so only
+# lwpt (0.2.0+) discovers dep units through nested manifests, so only
 # pascal-mcp-sdk's own source dir is listed here. Dep test files are
 # excluded at fetch time so `lwpt test` (which walks every units dir)
 # only discovers pascal-mcp-sdk's own suites; [format] likewise excludes
@@ -17,7 +17,7 @@ exclude = [".lwpt/**"]
 
 [dependencies]
 # Dev-time only: the runtime library is RTL + fpjson, zero third-party
-# dependencies (see docs/architecture.md). testing is the co-located
+# dependencies (see docs/internals/architecture.md). testing is the co-located
 # *.Test.pas framework; resolved from the lwpt 0.2.0 release tag via an
 # include filter (one filtered fetch per package), mirroring duetto.
 testing = { source = "frostney/lwpt", version = "^0.2.0", include = ["packages/testing/**"], exclude = ["**/*.Test.pas"] }
@@ -25,3 +25,9 @@ testing = { source = "frostney/lwpt", version = "^0.2.0", include = ["packages/t
 [build]
 mcpdemo  = { source = "source/apps/mcpdemo.pas",  output = "build/mcpdemo" }
 mcpsmoke = { source = "source/apps/mcpsmoke.pas", output = "build/mcpsmoke" }
+
+# `lwpt run smoke` — the E2E battery against the binaries `lwpt build`
+# produced. Run-scripts execute via InstantFPC without project include
+# paths, so the script is a self-contained wrapper, not mcpsmoke itself.
+[smoke]
+script = "scripts/smoke.pas"

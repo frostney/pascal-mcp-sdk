@@ -14,22 +14,25 @@ agents — no second language runtime, no framework.
   shells around the same sans-I/O server core.
 - **Stateless spec, dual-era by default** — native 2026-07-28
   (per-request `_meta`, mandatory `server/discover`, no session
-  handshake) *and* the legacy `initialize` handshake for today's
-  clients: **Claude Code and Claude Desktop connect out of the box**
-  (verified).
+  handshake) *and* the classic `initialize` handshake current clients
+  still speak: **Claude Code, Claude Desktop, and Codex connect out
+  of the box**.
 - **MRTR (`input_required`)** — handlers can ask the client for more
   input mid-call (elicitation, sampling, roots) using the 2026-07-28
   multi-round-trip pattern, without any server-side session state.
 - **Server-enforced argument validation** — every tool call is
   checked against its registered schema before your handler runs.
 
+📚 **Full documentation:** guides, API reference, and internals at
+<https://frostney.github.io/pascal-mcp-sdk/> — rendered from
+[docs/](docs/).
+
 ## Install
 
-**As an [lwpt](https://github.com/frostney/lwpt) dependency** (the
-command below was run and verified against a fresh scratch project):
+**As an [lwpt](https://github.com/frostney/lwpt) dependency:**
 
 ```sh
-lwpt add frostney/pascal-mcp-sdk@^1.0
+lwpt add frostney/pascal-mcp-sdk@^2.0
 ```
 
 Your programs then `uses MCP.Server` (and friends) directly — lwpt
@@ -131,13 +134,6 @@ overloads remain available, validated at registration (schemas beyond
 the server-enforced subset are marked `.ApplicationValidated`, handing
 argument validation to your handler).
 
-**Upgrading:** raw-schema registrations are now checked at startup
-against the enforced JSON Schema subset. A tool whose `inputSchema`
-uses a keyword outside that subset fails at registration, naming the
-offending keyword, instead of being silently under-validated at call
-time. Mark such registrations `.ApplicationValidated` to keep the
-previous behaviour, with argument validation owned by your handler.
-
 Results are built with `MCPTextResult` / `MCPErrorResult` /
 `MCPStructuredResult` / `MCPImageResult`; handler exceptions become
 in-band `isError: true` tool results automatically. `MCPImageResult`
@@ -167,42 +163,17 @@ Transport.Run;            // blocks; Transport.Stop unblocks it
 The complete worked example is
 [source/apps/mcpdemo.pas](source/apps/mcpdemo.pas) — including the
 MRTR `greet_user` tool that elicits input mid-call; the protocol-level
-walkthrough lives in [docs/quick-start.md](docs/quick-start.md).
+walkthrough lives in [docs/guides/quick-start.md](docs/guides/quick-start.md).
 
 ## Protocol coverage
 
-| Surface | Status |
-| --- | --- |
-| `server/discover` | ✅ mandatory entry point, capabilities + instructions |
-| `tools/list`, `tools/call` | ✅ text / image / structured content, in-band execution errors, server-side subset validation of arguments |
-| `resources/list`, `resources/read` | ✅ static + dynamic, text + blob builders |
-| `resources/templates/list` + template matching | ✅ RFC 6570 level-1 (`{var}`), exact resources win, vars passed to readers |
-| `prompts/list`, `prompts/get` | ✅ fluent argument declaration, message builders, spec error codes |
-| MRTR `input_required` (SEP-2322) | ✅ on `tools/call` + `prompts/get`: elicitation (form + url), sampling, roots entry builders; capability-gated; stateless re-entry |
-| `notifications/progress`, `notifications/message` | ✅ `MCPReportProgress` / `MCPLogMessage` from any handler; strictly opt-in per request (`progressToken` / `logLevel`), severity-filtered, emitted before the response |
-| `_meta` validation, version negotiation | ✅ `-32602` / `-32021` / `-32022` per spec |
-| `ttlMs` / `cacheScope` caching hints (SEP-2549) | ✅ on discover/list/read, tunable via `CacheTtlMs`/`CacheScope` |
-| stdio transport | ✅ newline-delimited, EOF shutdown contract |
-| Streamable HTTP transport | ✅ `MCP.Transport.HTTP`: single POST endpoint, SSE response streams, mirrored-header validation, Origin allowlist |
-| Legacy era (`initialize`: 2024-11-05, 2025-06-18, 2025-11-25) | ✅ dual-era default: era-faithful dialect (unstamped results, `-32002`, `ping`); `DualEra := False` for strict modern-only |
-| `subscriptions/listen`, list-changed | ⏳ not implemented (registries are static after startup) |
-
-Resource-template matching is intentionally limited to simple `{var}`
-expressions. Variables must be non-empty and separated by literal text; matching
-uses the complete following literal and may backtrack. Captured values are passed
-to readers exactly as encoded in the URI—percent-decoding is not performed.
-
-Spec facts verified against the official
-[MCP specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio)
-(2026-07-20, re-verified 2026-08-08 against the published final
-2026-07-28 text), and the full surface **interop-tested against both
-official MCP TypeScript clients**: the stable v2 client
-(`@modelcontextprotocol/client` 2.0.0, pinned + auto-probe modes, over
-stdio and Streamable HTTP, including MRTR auto-fulfilment) and the v1
-SDK (`@modelcontextprotocol/sdk`, the legacy era Claude Code speaks) —
-plus a live `claude mcp add` health check. See
-[tools/interop-ts/](tools/interop-ts/) and
-[docs/architecture.md](docs/architecture.md) for the grounding notes.
+Implemented: tools, resources (including RFC 6570 templates),
+prompts, MRTR, progress/log notifications, caching hints, both
+transports, and the classic `initialize` era. Deliberately out:
+`subscriptions/listen` and list-changed notifications — registries
+are static after startup. The authoritative surface-by-surface table,
+including verification and interop evidence, lives in
+[docs/reference/protocol-coverage.md](docs/reference/protocol-coverage.md).
 
 ## Contributing
 

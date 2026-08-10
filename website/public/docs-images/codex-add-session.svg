@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="368" viewBox="0 0 680 368" role="img" aria-label="Terminal capture: Codex CLI calling the pascal-mcp-sdk demo server's add tool">
+  <title>Codex CLI calling the demo server's add tool (captured 2026-08-10)</title>
+  <rect x="0" y="0" width="680" height="368" rx="10" fill="#1e1e2e"/>
+  <rect x="0" y="0" width="680" height="34" rx="10" fill="#181825"/>
+  <rect x="0" y="24" width="680" height="10" fill="#181825"/>
+  <circle cx="22" cy="17" r="6" fill="#f38ba8"/>
+  <circle cx="42" cy="17" r="6" fill="#f9e2af"/>
+  <circle cx="62" cy="17" r="6" fill="#a6e3a1"/>
+  <text x="340" y="21" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#7f849c" text-anchor="middle">codex — 80×24</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" xml:space="preserve">
+    <text x="20" y="62"><tspan fill="#a6e3a1">$</tspan><tspan fill="#cdd6f4"> codex exec "Use the demo MCP server's add tool to add 19 and 23,</tspan></text>
+    <text x="20" y="80"><tspan fill="#cdd6f4">              then tell me the result in one short sentence."</tspan></text>
+    <text x="20" y="110"><tspan fill="#7f849c">OpenAI Codex v0.145.0</tspan></text>
+    <text x="20" y="128"><tspan fill="#7f849c">model: gpt-5.6-sol · approval: never</tspan></text>
+    <text x="20" y="158"><tspan fill="#89b4fa" font-weight="bold">user</tspan></text>
+    <text x="20" y="176"><tspan fill="#cdd6f4">Use the demo MCP server's add tool to add 19 and 23, then tell me</tspan></text>
+    <text x="20" y="194"><tspan fill="#cdd6f4">the result in one short sentence.</tspan></text>
+    <text x="20" y="224"><tspan fill="#cba6f7" font-weight="bold">codex</tspan></text>
+    <text x="20" y="242"><tspan fill="#cdd6f4">I'll run the demo server's addition tool now.</tspan></text>
+    <text x="20" y="272"><tspan fill="#94e2d5">mcp: demo/add started</tspan></text>
+    <text x="20" y="290"><tspan fill="#94e2d5">mcp: demo/add (completed)</tspan></text>
+    <text x="20" y="320"><tspan fill="#cba6f7" font-weight="bold">codex</tspan></text>
+    <text x="20" y="338"><tspan fill="#cdd6f4" font-weight="bold">The result is 42.</tspan></text>
+  </g>
+</svg>

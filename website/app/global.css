@@ -6,6 +6,19 @@ html {
   scrollbar-gutter: stable;
 }
 
+/* The landing page's Shiki block is rendered with defaultColor: false,
+   emitting --shiki-light/--shiki-dark per token; switch on the theme
+   class next-themes stamps on <html>. */
+.landing-code .shiki,
+.landing-code .shiki span {
+  color: var(--shiki-light);
+  background-color: transparent;
+}
+.dark .landing-code .shiki,
+.dark .landing-code .shiki span {
+  color: var(--shiki-dark);
+}
+
 html > body[data-scroll-locked] {
   margin-right: 0px !important;
   --removed-body-scroll-bar-size: 0px !important;

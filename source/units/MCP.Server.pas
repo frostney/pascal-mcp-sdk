@@ -328,6 +328,10 @@ type
 
   TMCPServer = class
   private
+    type
+      // Registry name lookup (FindTool / FindPrompt): index or < 0.
+      TRegistryLookup = function(const AName: string): Integer of object;
+  private
     FName: string;
     FVersion: string;
     FInstructions: string;
@@ -391,6 +395,18 @@ type
     function HandleDiscover(const AMessage: TJSONRPCMessage): string;
     function HandleToolsList(const AMessage: TJSONRPCMessage;
       ALegacy: Boolean): string;
+    // Shared prologue for tools/call and prompts/get, which validate
+    // and resolve their target identically. ALookup is FindTool or
+    // FindPrompt; ANoun ('tool'/'prompt') names the registry in the
+    // unknown-name message. Returns '' once the target resolved,
+    // otherwise the error response the caller must Exit with.
+    // AArguments is never nil on success: a supplied arguments object
+    // is borrowed from AMessage and AOwnedEmpty stays nil, otherwise
+    // AOwnedEmpty is a fresh empty object the caller must free.
+    function ResolveCallTarget(const AMessage: TJSONRPCMessage;
+      ALookup: TRegistryLookup; const ANoun: string;
+      out AName: string; out AIndex: Integer;
+      out AArguments, AOwnedEmpty: TJSONObject): string;
     function HandleToolsCall(const AMessage: TJSONRPCMessage;
       const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
     function HandleResourcesList(const AMessage: TJSONRPCMessage;
@@ -1295,17 +1311,28 @@ end;
 
 { ───────── MRTR builders and accessors (#4) ───────── }
 
-function MCPInputRequired(AInputRequests: TJSONObject;
-  const ARequestState: string): TMCPToolResult;
+// Shared precondition for both input_required builders: the spec
+// mandates at least one of inputRequests / requestState. The builders
+// take ownership of AInputRequests, so the rejecting path frees it
+// before raising. ABuilderName names the caller in the message.
+procedure EnsureInputRequiredPayload(AInputRequests: TJSONObject;
+  const ARequestState, ABuilderName: string);
 begin
   if ((AInputRequests = nil) or (AInputRequests.Count = 0)) and
      (ARequestState = '') then
   begin
     AInputRequests.Free;
-    raise EMCPServer.Create(
-      'MCPInputRequired requires inputRequests or a requestState ' +
+    raise EMCPServer.Create(ABuilderName +
+      ' requires inputRequests or a requestState ' +
       '(the spec mandates at least one)');
   end;
+end;
+
+function MCPInputRequired(AInputRequests: TJSONObject;
+  const ARequestState: string): TMCPToolResult;
+begin
+  EnsureInputRequiredPayload(AInputRequests, ARequestState,
+    'MCPInputRequired');
   Result := Default(TMCPToolResult);
   Result.InputRequired := True;
   Result.InputRequests := AInputRequests;
@@ -1321,14 +1348,8 @@ end;
 function MCPPromptInputRequired(AInputRequests: TJSONObject;
   const ARequestState: string): TMCPPromptResult;
 begin
-  if ((AInputRequests = nil) or (AInputRequests.Count = 0)) and
-     (ARequestState = '') then
-  begin
-    AInputRequests.Free;
-    raise EMCPServer.Create(
-      'MCPPromptInputRequired requires inputRequests or a ' +
-      'requestState (the spec mandates at least one)');
-  end;
+  EnsureInputRequiredPayload(AInputRequests, ARequestState,
+    'MCPPromptInputRequired');
   Result := Default(TMCPPromptResult);
   Result.InputRequired := True;
   Result.InputRequests := AInputRequests;
@@ -2306,6 +2327,44 @@ begin
   Result := SchemaFrom(AArgsClass).Build;
 end;
 
+// Two-schema assembly for the overloads that build an output schema
+// too. AInputSchema is already built and owned by this function on
+// entry — building an output schema can raise (TMCPSchema.Build is
+// consuming, SchemaFromArgumentClass rejects nil/unmappable classes),
+// and the input tree would otherwise leak. Callers pass the input
+// build as an argument, so a raise there happens before the call and
+// leaves nothing allocated.
+function PairedSchemaDefinition(const AName, ADescription: string;
+  AInputSchema: TJSONObject;
+  constref AOutputSchema: TMCPSchema): TJSONObject;
+var
+  OutputSchema: TJSONObject;
+begin
+  try
+    OutputSchema := AOutputSchema.Build;
+  except
+    AInputSchema.Free;
+    raise;
+  end;
+  Result := SchemaDefinition(AName, ADescription, AInputSchema, OutputSchema);
+end;
+
+// As PairedSchemaDefinition, for the overloads whose output schema is
+// derived from an argument class rather than a fluent schema.
+function PairedClassDefinition(const AName, ADescription: string;
+  AInputSchema: TJSONObject; AOutputClass: TMCPArgsClass): TJSONObject;
+var
+  OutputSchema: TJSONObject;
+begin
+  try
+    OutputSchema := SchemaFromArgumentClass(AName, 'output', AOutputClass);
+  except
+    AInputSchema.Free;
+    raise;
+  end;
+  Result := SchemaDefinition(AName, ADescription, AInputSchema, OutputSchema);
+end;
+
 function TMCPServer.RegisterTool(const AName, ADescription: string;
   constref AInputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions;
 begin
@@ -2324,42 +2383,18 @@ end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
   constref AInputSchema, AOutputSchema: TMCPSchema; AHandler: TMCPToolHandler): TMCPToolOptions;
-var
-  InputSchema, OutputSchema: TJSONObject;
 begin
   EnsureMutable;
-  InputSchema := nil;
-  OutputSchema := nil;
-  try
-    InputSchema := AInputSchema.Build;
-    OutputSchema := AOutputSchema.Build;
-  except
-    InputSchema.Free;
-    OutputSchema.Free;
-    raise;
-  end;
-  Result := AddTool(SchemaDefinition(AName, ADescription, InputSchema,
-    OutputSchema), AHandler, nil);
+  Result := AddTool(PairedSchemaDefinition(AName, ADescription,
+    AInputSchema.Build, AOutputSchema), AHandler, nil);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
   constref AInputSchema, AOutputSchema: TMCPSchema; AMethod: TMCPToolMethod): TMCPToolOptions;
-var
-  InputSchema, OutputSchema: TJSONObject;
 begin
   EnsureMutable;
-  InputSchema := nil;
-  OutputSchema := nil;
-  try
-    InputSchema := AInputSchema.Build;
-    OutputSchema := AOutputSchema.Build;
-  except
-    InputSchema.Free;
-    OutputSchema.Free;
-    raise;
-  end;
-  Result := AddTool(SchemaDefinition(AName, ADescription, InputSchema,
-    OutputSchema), nil, AMethod);
+  Result := AddTool(PairedSchemaDefinition(AName, ADescription,
+    AInputSchema.Build, AOutputSchema), nil, AMethod);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
@@ -2383,86 +2418,38 @@ end;
 function TMCPServer.RegisterTool(const AName, ADescription: string;
   AArgsClass: TMCPArgsClass; constref AOutputSchema: TMCPSchema;
   AHandler: TMCPArgsHandler): TMCPToolOptions;
-var
-  InputSchema, OutputSchema: TJSONObject;
 begin
   EnsureMutable;
-  InputSchema := nil;
-  OutputSchema := nil;
-  try
-    InputSchema := SchemaFromArgumentClass(AName, 'input', AArgsClass);
-    OutputSchema := AOutputSchema.Build;
-  except
-    InputSchema.Free;
-    OutputSchema.Free;
-    raise;
-  end;
-  Result := AddTypedTool(SchemaDefinition(AName, ADescription, InputSchema,
-    OutputSchema),
+  Result := AddTypedTool(PairedSchemaDefinition(AName, ADescription,
+    SchemaFromArgumentClass(AName, 'input', AArgsClass), AOutputSchema),
     AArgsClass, AHandler, nil);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
   AArgsClass: TMCPArgsClass; constref AOutputSchema: TMCPSchema;
   AMethod: TMCPArgsMethod): TMCPToolOptions;
-var
-  InputSchema, OutputSchema: TJSONObject;
 begin
   EnsureMutable;
-  InputSchema := nil;
-  OutputSchema := nil;
-  try
-    InputSchema := SchemaFromArgumentClass(AName, 'input', AArgsClass);
-    OutputSchema := AOutputSchema.Build;
-  except
-    InputSchema.Free;
-    OutputSchema.Free;
-    raise;
-  end;
-  Result := AddTypedTool(SchemaDefinition(AName, ADescription, InputSchema,
-    OutputSchema),
+  Result := AddTypedTool(PairedSchemaDefinition(AName, ADescription,
+    SchemaFromArgumentClass(AName, 'input', AArgsClass), AOutputSchema),
     AArgsClass, nil, AMethod);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
   AArgsClass, AOutputClass: TMCPArgsClass; AHandler: TMCPArgsHandler): TMCPToolOptions;
-var
-  InputSchema, OutputSchema: TJSONObject;
 begin
   EnsureMutable;
-  InputSchema := nil;
-  OutputSchema := nil;
-  try
-    InputSchema := SchemaFromArgumentClass(AName, 'input', AArgsClass);
-    OutputSchema := SchemaFromArgumentClass(AName, 'output', AOutputClass);
-  except
-    InputSchema.Free;
-    OutputSchema.Free;
-    raise;
-  end;
-  Result := AddTypedTool(SchemaDefinition(AName, ADescription, InputSchema,
-    OutputSchema),
+  Result := AddTypedTool(PairedClassDefinition(AName, ADescription,
+    SchemaFromArgumentClass(AName, 'input', AArgsClass), AOutputClass),
     AArgsClass, AHandler, nil);
 end;
 
 function TMCPServer.RegisterTool(const AName, ADescription: string;
   AArgsClass, AOutputClass: TMCPArgsClass; AMethod: TMCPArgsMethod): TMCPToolOptions;
-var
-  InputSchema, OutputSchema: TJSONObject;
 begin
   EnsureMutable;
-  InputSchema := nil;
-  OutputSchema := nil;
-  try
-    InputSchema := SchemaFromArgumentClass(AName, 'input', AArgsClass);
-    OutputSchema := SchemaFromArgumentClass(AName, 'output', AOutputClass);
-  except
-    InputSchema.Free;
-    OutputSchema.Free;
-    raise;
-  end;
-  Result := AddTypedTool(SchemaDefinition(AName, ADescription, InputSchema,
-    OutputSchema),
+  Result := AddTypedTool(PairedClassDefinition(AName, ADescription,
+    SchemaFromArgumentClass(AName, 'input', AArgsClass), AOutputClass),
     AArgsClass, nil, AMethod);
 end;
 
@@ -3207,9 +3194,7 @@ begin
   try
     ClientCapabilities := TJSONObject(CapsData.Clone);
     Capabilities := ServerCapabilities;
-    ServerInfo := TJSONObject.Create;
-    ServerInfo.Add('name', FName);
-    ServerInfo.Add('version', FVersion);
+    ServerInfo := BuildServerInfo(FName, FVersion);
 
     InitResult := TJSONObject.Create;
     InitResult.Add('protocolVersion', NegotiatedVersion);
@@ -3251,9 +3236,11 @@ end;
 procedure TMCPServer.AddCacheFields(AResult: TJSONObject; ATtlMs: Integer);
 begin
   // CacheableResult (SEP-2549): ttlMs + cacheScope are REQUIRED on
-  // discover/list/read results — the official RC SDKs reject results
-  // without them (verified against @modelcontextprotocol/client
-  // 2.0.0-beta.4, whose wire schema marks them non-optional).
+  // discover/list/read results — the official SDKs reject results
+  // without them. Discovered on the RC client (2.0.0-beta.4) and
+  // unchanged in stable: verified 2026-08-08 against
+  // @modelcontextprotocol/client 2.0.0, whose wire schema marks them
+  // non-optional.
   AResult.Add('ttlMs', ATtlMs);
   AResult.Add('cacheScope', FCacheScope);
 end;
@@ -3268,13 +3255,12 @@ begin
 
   Capabilities := ServerCapabilities;
 
-  // serverInfo is a required TOP-LEVEL DiscoverResult field in the RC
+  // serverInfo is a required TOP-LEVEL DiscoverResult field in the
   // wire schema — the _meta stamp alone is not enough; the official
-  // client beta classifies a server without it as legacy (verified
-  // against @modelcontextprotocol/client 2.0.0-beta.4).
-  ServerInfo := TJSONObject.Create;
-  ServerInfo.Add('name', FName);
-  ServerInfo.Add('version', FVersion);
+  // client classifies a server without it as legacy. Discovered on
+  // the RC client (2.0.0-beta.4) and unchanged in stable: verified
+  // 2026-08-08 against @modelcontextprotocol/client 2.0.0.
+  ServerInfo := BuildServerInfo(FName, FVersion);
 
   DiscoverResult := TJSONObject.Create;
   DiscoverResult.Add('supportedVersions', Versions);
@@ -3349,16 +3335,18 @@ begin
   Result := ResultResponse(AMessage, InterimResult, False);
 end;
 
-function TMCPServer.HandleToolsCall(const AMessage: TJSONRPCMessage;
-  const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
+function TMCPServer.ResolveCallTarget(const AMessage: TJSONRPCMessage;
+  ALookup: TRegistryLookup; const ANoun: string;
+  out AName: string; out AIndex: Integer;
+  out AArguments, AOwnedEmpty: TJSONObject): string;
 var
   NameData, ArgsData: TJSONData;
-  ToolName, BindError: string;
-  Index: Integer;
-  Arguments, OwnedEmpty, CallResult: TJSONObject;
-  ToolResult: TMCPToolResult;
-  ArgsInstance: TMCPArgs;
 begin
+  AName := '';
+  AIndex := -1;
+  AArguments := nil;
+  AOwnedEmpty := nil;
+
   if AMessage.Params = nil then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
       'Invalid params: params are required'));
@@ -3366,27 +3354,43 @@ begin
   if (NameData = nil) or (NameData.JSONType <> jtString) then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
       'Invalid params: name must be a string'));
-  ToolName := NameData.AsString;
+  AName := NameData.AsString;
 
-  Index := FindTool(ToolName);
-  if Index < 0 then
+  AIndex := ALookup(AName);
+  if AIndex < 0 then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
-      'Unknown tool: ' + ToolName));
+      'Unknown ' + ANoun + ': ' + AName));
 
   ArgsData := AMessage.Params.Find('arguments');
   if (ArgsData <> nil) and (ArgsData.JSONType <> jtObject) then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
       'Invalid params: arguments must be an object'));
 
-  // Handlers always see a non-nil arguments object.
-  OwnedEmpty := nil;
+  // Handlers always see a non-nil arguments object. A supplied one is
+  // borrowed from AMessage; the substitute is owned by the caller.
   if ArgsData <> nil then
-    Arguments := TJSONObject(ArgsData)
+    AArguments := TJSONObject(ArgsData)
   else
   begin
-    OwnedEmpty := TJSONObject.Create;
-    Arguments := OwnedEmpty;
+    AOwnedEmpty := TJSONObject.Create;
+    AArguments := AOwnedEmpty;
   end;
+  Result := '';
+end;
+
+function TMCPServer.HandleToolsCall(const AMessage: TJSONRPCMessage;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
+var
+  ToolName, BindError, TargetError: string;
+  Index: Integer;
+  Arguments, OwnedEmpty, CallResult: TJSONObject;
+  ToolResult: TMCPToolResult;
+  ArgsInstance: TMCPArgs;
+begin
+  TargetError := ResolveCallTarget(AMessage, FindTool, 'tool', ToolName,
+    Index, Arguments, OwnedEmpty);
+  if TargetError <> '' then
+    Exit(TargetError);
 
   try
     try
@@ -3598,41 +3602,18 @@ end;
 function TMCPServer.HandlePromptsGet(const AMessage: TJSONRPCMessage;
   const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
 var
-  NameData, ArgsData, DeclaredData: TJSONData;
-  PromptName: string;
+  DeclaredData: TJSONData;
+  PromptName, TargetError: string;
   Index, I: Integer;
   Arguments, OwnedEmpty, GetResult, Declared: TJSONObject;
   DeclaredArgs: TJSONArray;
   Messages: TJSONArray;
   PromptResult: TMCPPromptResult;
 begin
-  if AMessage.Params = nil then
-    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
-      'Invalid params: params are required'));
-  NameData := AMessage.Params.Find('name');
-  if (NameData = nil) or (NameData.JSONType <> jtString) then
-    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
-      'Invalid params: name must be a string'));
-  PromptName := NameData.AsString;
-
-  Index := FindPrompt(PromptName);
-  if Index < 0 then
-    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
-      'Unknown prompt: ' + PromptName));
-
-  ArgsData := AMessage.Params.Find('arguments');
-  if (ArgsData <> nil) and (ArgsData.JSONType <> jtObject) then
-    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
-      'Invalid params: arguments must be an object'));
-
-  OwnedEmpty := nil;
-  if ArgsData <> nil then
-    Arguments := TJSONObject(ArgsData)
-  else
-  begin
-    OwnedEmpty := TJSONObject.Create;
-    Arguments := OwnedEmpty;
-  end;
+  TargetError := ResolveCallTarget(AMessage, FindPrompt, 'prompt',
+    PromptName, Index, Arguments, OwnedEmpty);
+  if TargetError <> '' then
+    Exit(TargetError);
 
   try
     // Missing required arguments are protocol errors for prompts

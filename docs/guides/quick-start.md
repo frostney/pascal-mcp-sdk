@@ -10,24 +10,25 @@ binary into any MCP client.
 
 This page is for **consumers** of the library. Building and testing
 the library itself is covered in
-[CONTRIBUTING.md](../CONTRIBUTING.md).
+[CONTRIBUTING.md](../../CONTRIBUTING.md).
 
 ## Prerequisites
 
 - **FPC 3.2.2** — `apt install fpc` / `brew install fpc` / the
   win32+win64 combo installer from freepascal.org.
-- **lwpt** (optional — for the dependency path) — download the release
-  tarball for your platform from
-  [lwpt's releases](https://github.com/frostney/lwpt/releases), verify
-  the checksum, put `lwpt` on PATH.
+- **lwpt** (optional — for the dependency path) —
+  `brew install frostney/tap/lwpt`, or download the release tarball
+  for your platform from
+  [lwpt's releases](https://github.com/frostney/lwpt/releases),
+  verify it against the release's checksums file, and put `lwpt` on
+  PATH.
 
 ## Get the library
 
-As an lwpt dependency, from your project root (this exact command was
-verified against a scratch consumer project):
+As an lwpt dependency, from your project root:
 
 ```sh
-lwpt add frostney/pascal-mcp-sdk@^1.0
+lwpt add frostney/pascal-mcp-sdk@^2.0
 lwpt build
 ```
 
@@ -78,9 +79,9 @@ end.
 
 Prefer typed arguments? Declare a `TMCPArgs` descendant and register
 the class — it expands into the schema, and your handler receives a
-populated, validated instance (see the `add` tool in
-[mcpdemo.pas](../source/apps/mcpdemo.pas) and the README's typed
-example).
+populated, validated instance. See
+[Schemas](schemas.md#typed-argument-classes) for the full model and
+the [cookbook](cookbook.md) for the worked `add` tool.
 
 Key behaviours you get for free:
 
@@ -95,24 +96,29 @@ Key behaviours you get for free:
 - **Handler exceptions** become `isError: true` tool results — the
   in-band error channel models can self-correct against.
 - **`resultType` and `serverInfo`** are stamped on every result.
-- **Legacy clients work out of the box**: the server is dual-era by
-  default, so a client opening with the classic `initialize` handshake
-  (Claude Code, Claude Desktop today) is served the legacy dialect
-  while modern `_meta` requests stay stateless — same registries, same
-  handlers. Set `Server.DualEra := False` for a strict modern-only
-  server that rejects `initialize` naming its supported versions.
+- **Today's clients work out of the box**: the server is dual-era by
+  default, so a client opening with the classic `initialize`
+  handshake — which current releases of Claude Code, Claude Desktop,
+  and Codex all still speak (see
+  [Your first conversation](first-conversation.md)) — is served that
+  era faithfully, while stateless 2026-07-28 `_meta` requests are
+  served natively — same registries, same handlers. Set
+  `Server.DualEra := False` for a strict modern-only server that
+  rejects `initialize` naming its supported versions.
 - **Mid-call input** (MRTR): return
-  `MCPInputRequired(...)` from a tool or prompt handler to ask the
-  client for more input (elicitation form/url, sampling, roots); the
+  `MCPInputRequired(...)` from a tool handler — or
+  `MCPPromptInputRequired(...)` from a prompt result handler — to ask
+  the client for more input (elicitation form/url, sampling, roots); the
   client retries the call and your handler re-enters with the
-  responses on `ACtx` — see `greet_user` in
-  [mcpdemo.pas](../source/apps/mcpdemo.pas).
+  responses on `ACtx` — see
+  [Tools](tools.md#asking-the-client-for-more-input-mrtr) and the
+  worked example in the [cookbook](cookbook.md#a-tool-that-asks-the-user-something-mrtr).
 
 > These protocol behaviours — MRTR, Streamable HTTP/SSE, the per-request
 > `_meta` model, and the EOF shutdown contract — implement spec revision
 > 2026-07-28. The dated official-spec citations
 > (modelcontextprotocol.io) live in architecture.md's
-> [Spec grounding](../docs/architecture.md#spec-grounding) section.
+> [Spec grounding](../internals/architecture.md#spec-grounding) section.
 
 ## Serve over Streamable HTTP
 
@@ -158,9 +164,10 @@ makes the server exit — that is the spec's graceful-shutdown contract.
 
 ## Register the server with an MCP client
 
-Any client that launches stdio servers works — legacy or modern,
-thanks to the dual-era default. With Claude Code it is one command
-(verified against `mcpdemo`):
+Any client that launches stdio servers and speaks a
+[supported protocol revision](../reference/protocol-coverage.md)
+works, thanks to the dual-era default. With Claude Code it is one
+command:
 
 ```sh
 claude mcp add my-server /absolute/path/to/myserver
@@ -181,3 +188,15 @@ The generic configuration shape:
 
 Logging goes to **stderr only** (`MCPLogToStderr`) — stdout belongs to
 the protocol.
+
+## Next steps
+
+- [Tools](tools.md) — the full registration and validation model.
+- [Prompts](prompts.md) and [resources](resources.md) — the other two
+  things a server exposes.
+- [Configuration](configuration.md) — instructions, caching hints,
+  error redaction, dual-era mode.
+- [Shipping your server](shipping.md) — release builds and the
+  runtime contract.
+- [Cookbook](cookbook.md) — every pattern above as a complete,
+  runnable example.

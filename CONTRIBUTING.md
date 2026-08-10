@@ -2,7 +2,7 @@
 
 This guide is for people changing the library itself. If you just want
 to **use** pascal-mcp-sdk in your program, see the
-[README](README.md) and [docs/quick-start.md](docs/quick-start.md) —
+[README](README.md) and [docs/guides/quick-start.md](docs/guides/quick-start.md) —
 consumers never need the toolchain below.
 
 ## Toolchain
@@ -107,16 +107,16 @@ batteries). `ci.yml` runs the wider per-arch matrix post-merge on
 - **Spec facts are verified, never recalled.** Any change to protocol
   behaviour cites the official spec page (modelcontextprotocol.io) it
   implements, with the verification date — see the unit headers and
-  [docs/architecture.md](docs/architecture.md) for the pattern.
+  [docs/internals/architecture.md](docs/internals/architecture.md) for the pattern.
 
 ## Contributor docs
 
-- [docs/architecture.md](docs/architecture.md) — layering, the
+- [docs/internals/architecture.md](docs/internals/architecture.md) — layering, the
   sans-I/O core, spec grounding notes.
-- [docs/tooling.md](docs/tooling.md) — toolchain decisions and pins.
-- [docs/code-style.md](docs/code-style.md) — formatting and FPC
+- [docs/internals/tooling.md](docs/internals/tooling.md) — toolchain decisions and pins.
+- [docs/internals/code-style.md](docs/internals/code-style.md) — formatting and FPC
   pitfalls.
-- [docs/deployment.md](docs/deployment.md) — release and packaging.
+- [docs/guides/shipping.md](docs/guides/shipping.md) — release builds, the runtime contract, HTTP deployment; [docs/internals/releasing.md](docs/internals/releasing.md) — cutting releases.
 - [DEFINITION_OF_READY.md](DEFINITION_OF_READY.md) /
   [DEFINITION_OF_DONE.md](DEFINITION_OF_DONE.md) — what makes work
   startable and finished here.

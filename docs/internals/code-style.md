@@ -1,6 +1,6 @@
 # Code Style
 
-> **Audience: contributors.** This describes the library's internals and toolchain; consumers only need the [README](../README.md) and [quick start](quick-start.md).
+> **Audience: contributors.** This describes the library's internals and toolchain; consumers only need the [guides](../guides/quick-start.md) and [reference](../reference/server.md) sections.
 
 ## Executive Summary
 
@@ -86,3 +86,8 @@ House rules distilled:
   as a conformance report.
 - Wire-level JSON fixtures are written inline as strings — what goes on
   the wire is what the test shows.
+- Live-socket suites: a server close with unread inbound bytes sends
+  RST, and the peer's kernel may then discard the response it had
+  already buffered — so refusal paths must be asserted with a client
+  that sends nothing the server won't read (measured as a ~0.5%
+  flake before `PostWithUnsentBody` in the HTTP suite; see #45).

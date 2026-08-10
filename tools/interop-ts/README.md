@@ -53,4 +53,4 @@ beta client; confirmed unchanged on stable 2.0.0, 2026-08-08): the
 wire schema requires a **top-level `serverInfo`** on `DiscoverResult`
 and **`ttlMs` + `cacheScope`** on discover/list/read results — both
 stricter than the prose spec pages suggested; see
-docs/architecture.md.
+docs/internals/architecture.md.
