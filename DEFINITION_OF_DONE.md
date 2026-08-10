@@ -13,6 +13,9 @@ recorded reason.
   dependencies arrive without explicit maintainer approval.
 - Protocol behaviour cites the official spec page it implements, with
   the verification date, next to the code (unit header or inline).
+- Workaround comments cite the issue that currently blocks removal.
+  When it closes, re-verify the condition and retarget or delete the
+  workaround; closure alone is not evidence it can go.
 - The solution is the smallest complete change; no unrelated
   refactoring rides along.
 
@@ -61,6 +64,10 @@ recorded reason.
 - A change that breaks existing consumers must carry the breaking
   marker (`type!:` or a `BREAKING CHANGE:` footer) and a migration note
   in the docs naming the replacement or escape hatch.
+- A release sweeps version-pinned references in the same change:
+  install commands in README and docs resolve to the released
+  version, and verification citations name the artifacts the
+  interop battery pins.
 - PR titles follow Conventional Commits, and on a single-commit PR the
   commit subject must too — a squash merge turns one of them into the
   CHANGELOG entry. Reverts need a `revert:` title. Enforced by the
