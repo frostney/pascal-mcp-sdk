@@ -166,6 +166,10 @@ jobs:
         if: matrix.fpc-install == 'apt'   # platform-independent; one runner
         run: lwpt format --check
 
+      - name: lwpt agents --check (AGENTS.md command reference fresh?)
+        if: matrix.fpc-install == 'apt'   # platform-independent; one runner
+        run: lwpt agents --check
+
       - name: lwpt build (mcpdemo + mcpsmoke)
         run: lwpt build
 
