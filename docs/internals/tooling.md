@@ -1,6 +1,6 @@
 # Tooling
 
-> **Audience: contributors.** This describes the library's internals and toolchain; consumers only need the [README](../README.md) and [quick start](quick-start.md).
+> **Audience: contributors.** This describes the library's internals and toolchain; consumers only need the [guides](../guides/quick-start.md) and [reference](../reference/server.md) sections.
 
 ## Executive Summary
 
@@ -70,7 +70,7 @@ npx markdownlint-cli2 "**/*.md"
 ## CI
 
 Two workflows, mirroring duetto's split (see
-[.github/workflows/](../.github/workflows/)):
+[.github/workflows/](../../.github/workflows/)):
 
 - **pr.yml** — every PR: Linux + macOS + Windows legs, each doing
   checksum-verified lwpt release install, `lwpt install --frozen`
@@ -86,7 +86,7 @@ The official stable MCP TypeScript clients run against
 `build/mcpdemo` — the v2 client over stdio (pinned-`2026-07-28` and
 `auto`-probe modes) and over Streamable HTTP, plus the v1 SDK's
 legacy handshake (see
-[tools/interop-ts/README.md](../tools/interop-ts/README.md)). Runs in
+[tools/interop-ts/README.md](../../tools/interop-ts/README.md)). Runs in
 CI as the **required** `interop` job on every PR since the
 post-final-spec pass upgraded the pins to the stable SDKs (#3): a red
 interop job is a real cross-implementation regression, not beta

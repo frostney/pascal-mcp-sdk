@@ -10,7 +10,7 @@ binary into any MCP client.
 
 This page is for **consumers** of the library. Building and testing
 the library itself is covered in
-[CONTRIBUTING.md](../CONTRIBUTING.md).
+[CONTRIBUTING.md](../../CONTRIBUTING.md).
 
 ## Prerequisites
 
@@ -79,7 +79,7 @@ end.
 Prefer typed arguments? Declare a `TMCPArgs` descendant and register
 the class — it expands into the schema, and your handler receives a
 populated, validated instance (see the `add` tool in
-[mcpdemo.pas](../source/apps/mcpdemo.pas) and the README's typed
+[mcpdemo.pas](../../source/apps/mcpdemo.pas) and the README's typed
 example).
 
 Key behaviours you get for free:
@@ -106,13 +106,13 @@ Key behaviours you get for free:
   client for more input (elicitation form/url, sampling, roots); the
   client retries the call and your handler re-enters with the
   responses on `ACtx` — see `greet_user` in
-  [mcpdemo.pas](../source/apps/mcpdemo.pas).
+  [mcpdemo.pas](../../source/apps/mcpdemo.pas).
 
 > These protocol behaviours — MRTR, Streamable HTTP/SSE, the per-request
 > `_meta` model, and the EOF shutdown contract — implement spec revision
 > 2026-07-28. The dated official-spec citations
 > (modelcontextprotocol.io) live in architecture.md's
-> [Spec grounding](../docs/architecture.md#spec-grounding) section.
+> [Spec grounding](../internals/architecture.md#spec-grounding) section.
 
 ## Serve over Streamable HTTP
 

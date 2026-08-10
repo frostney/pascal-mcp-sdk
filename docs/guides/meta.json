@@ -1,0 +1,16 @@
+{
+  "title": "Guides",
+  "defaultOpen": true,
+  "pages": [
+    "quick-start",
+    "tools",
+    "schemas",
+    "prompts",
+    "resources",
+    "configuration",
+    "progress-and-logging",
+    "shipping",
+    "troubleshooting",
+    "cookbook"
+  ]
+}
