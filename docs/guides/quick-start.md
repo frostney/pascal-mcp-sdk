@@ -78,9 +78,9 @@ end.
 
 Prefer typed arguments? Declare a `TMCPArgs` descendant and register
 the class — it expands into the schema, and your handler receives a
-populated, validated instance (see the `add` tool in
-[mcpdemo.pas](../../source/apps/mcpdemo.pas) and the README's typed
-example).
+populated, validated instance. See
+[Schemas](schemas.md#typed-argument-classes) for the full model and
+the [cookbook](cookbook.md) for the worked `add` tool.
 
 Key behaviours you get for free:
 
@@ -105,8 +105,9 @@ Key behaviours you get for free:
   `MCPInputRequired(...)` from a tool or prompt handler to ask the
   client for more input (elicitation form/url, sampling, roots); the
   client retries the call and your handler re-enters with the
-  responses on `ACtx` — see `greet_user` in
-  [mcpdemo.pas](../../source/apps/mcpdemo.pas).
+  responses on `ACtx` — see
+  [Tools](tools.md#asking-the-client-for-more-input-mrtr) and the
+  worked example in the [cookbook](cookbook.md#a-tool-that-asks-the-user-something-mrtr).
 
 > These protocol behaviours — MRTR, Streamable HTTP/SSE, the per-request
 > `_meta` model, and the EOF shutdown contract — implement spec revision
@@ -181,3 +182,15 @@ The generic configuration shape:
 
 Logging goes to **stderr only** (`MCPLogToStderr`) — stdout belongs to
 the protocol.
+
+## Next steps
+
+- [Tools](tools.md) — the full registration and validation model.
+- [Prompts](prompts.md) and [resources](resources.md) — the other two
+  things a server exposes.
+- [Configuration](configuration.md) — instructions, caching hints,
+  error redaction, dual-era mode.
+- [Shipping your server](shipping.md) — release builds and the
+  runtime contract.
+- [Cookbook](cookbook.md) — every pattern above as a complete,
+  runnable example.
