@@ -29,6 +29,12 @@ const
     '"io.modelcontextprotocol/clientCapabilities":{}}';
   UTF8_PAYLOAD = 'h' + #$C3#$A9 + 'llo ' + #$E4#$B8#$96 + #$E7#$95#$8C;
   UTF8_WORLD = #$E4#$B8#$96 + #$E7#$95#$8C;
+  // base64 of mcpdemo's inline 1x1 PNG, written out literally: the
+  // pixel check asserts it on the encoded wire line, so a platform's
+  // string handling cannot reshape the payload undetected.
+  ONE_PIXEL_PNG_BASE64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk' +
+    'YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
   // Modern _meta declaring the elicitation capability the MRTR
   // battery needs.
   META_MRTR =
@@ -283,6 +289,19 @@ begin
       '"name":"add","arguments":{"a":19,"b":23},' + META_MODERN + '}}');
     Check(PathInt(Response, 'result.structuredContent.sum') = 42,
       'tools/call add: structuredContent.sum = 42');
+    Response.Free;
+
+    // tools/call pixel — image content built by MCPImageResult from
+    // raw bytes; the wire form is the spec's ImageContent block.
+    Response := RoundTripWithLine(Demo,
+      '{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{' +
+      '"name":"pixel",' + META_MODERN + '}}', ResponseLine);
+    Check(PathString(Response, 'result.content[0].type') = 'image',
+      'tools/call pixel: image content block');
+    Check(PathString(Response, 'result.content[0].mimeType') = 'image/png',
+      'tools/call pixel: mimeType passed through');
+    Check(Pos('"data" : "' + ONE_PIXEL_PNG_BASE64 + '"', ResponseLine) > 0,
+      'tools/call pixel: image bytes base64-encoded byte-exactly');
     Response.Free;
 
     // tools/call add with missing argument — execution error in-band.

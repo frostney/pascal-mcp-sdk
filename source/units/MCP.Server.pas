@@ -591,6 +591,20 @@ function MCPStructuredResult(const AText: string;
 // properties (MCPSerialize) and frees it.
 function MCPStructuredResult(const AText: string;
   AObj: TMCPArgs): TMCPToolResult; overload;
+// Image tool result: one image content block
+// ({"type":"image","data":<base64>,"mimeType":<media type>}) in the
+// same content envelope MCPTextResult builds. Content-block shape
+// verified 2026-08-09 against:
+// https://modelcontextprotocol.io/specification/2026-07-28/server/tools
+// The string overload takes data that is ALREADY base64 (the same
+// contract as MCPBlobContents); the TBytes overload encodes the raw
+// bytes itself. AMimeType is the image's IANA media type
+// ('image/png', 'image/jpeg', ...) and goes on the wire verbatim —
+// the spec names no enumeration, so the handler owns that choice.
+function MCPImageResult(const ABase64,
+  AMimeType: string): TMCPToolResult; overload;
+function MCPImageResult(const AData: TBytes;
+  const AMimeType: string): TMCPToolResult; overload;
 function MCPTextContents(const AUri, AMimeType, AText: string): TJSONArray;
 function MCPBlobContents(const AUri, AMimeType, ABase64: string): TJSONArray;
 
@@ -672,6 +686,13 @@ procedure MCPLogMessage(const ACtx: TMCPRequestContext;
   const ALevel, AData: string; const ALogger: string = '');
 
 implementation
+
+// base64 encodes the raw-bytes overload of MCPImageResult. fcl-base
+// ships inside FPC 3.2.2, so it is admitted on the same reading of the
+// dependency rule as fpjson and fcl-web (AGENTS.md); MCP.Transport.HTTP
+// already depends on this unit for the mirrored-header sentinel.
+uses
+  base64;
 
 var
   // Process-global diagnostic state intentionally remains outside
@@ -1265,6 +1286,29 @@ begin
   Result.Add('text', AText);
 end;
 
+function ImageContentBlock(const ABase64, AMimeType: string): TJSONObject;
+begin
+  Result := TJSONObject.Create;
+  Result.Add('type', 'image');
+  Result.Add('data', ABase64);
+  Result.Add('mimeType', AMimeType);
+end;
+
+// fcl-base's encoder takes a string, so the bytes are moved in
+// byte-for-byte rather than assigned: an assignment would invite a
+// codepage conversion, and image bytes are not text. Empty input
+// encodes to '' (base64 of nothing), not to padding.
+function BytesToBase64(const AData: TBytes): string;
+var
+  Raw: string;
+begin
+  if Length(AData) = 0 then
+    Exit('');
+  SetLength(Raw, Length(AData));
+  Move(AData[0], Raw[1], Length(AData));
+  Result := EncodeStringBase64(Raw);
+end;
+
 { ───────── MRTR builders and accessors (#4) ───────── }
 
 // Shared precondition for both input_required builders: the spec
@@ -1513,6 +1557,19 @@ begin
   finally
     AObj.Free;
   end;
+end;
+
+function MCPImageResult(const ABase64, AMimeType: string): TMCPToolResult;
+begin
+  Result := Default(TMCPToolResult);
+  Result.Content := TJSONArray.Create;
+  Result.Content.Add(ImageContentBlock(ABase64, AMimeType));
+end;
+
+function MCPImageResult(const AData: TBytes;
+  const AMimeType: string): TMCPToolResult;
+begin
+  Result := MCPImageResult(BytesToBase64(AData), AMimeType);
 end;
 
 function MCPTextContents(const AUri, AMimeType, AText: string): TJSONArray;

@@ -343,6 +343,24 @@ type
     procedure TestApplicationValidatedSkipsChecks;
   end;
 
+  // MCPImageResult: the spec's image content block, the raw-bytes
+  // overload's base64 encoding (asserted against literal fixtures, not
+  // against a decode of what we just encoded), mimeType passthrough,
+  // and the empty-payload edge.
+  TImageResults = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestSpecContentBlock;
+    procedure TestBytesEncodedToBase64;
+    procedure TestNonAsciiBytesSurviveEncoding;
+    procedure TestPreEncodedDataPassesThrough;
+    procedure TestEmptyDataYieldsEmptyString;
+    procedure TestMimeTypePassthrough;
+    procedure TestResponseLineByteExact;
+  end;
+
 { ───────── handlers under test ───────── }
 
 var
@@ -4621,6 +4639,184 @@ begin
     TestApplicationValidatedSkipsChecks);
 end;
 
+{ ───────── image results ───────── }
+
+const
+  // The eight-byte signature every PNG file starts with; base64
+  // 'iVBORw0KGgo=' (padded, since 8 bytes is not a multiple of 3).
+  PNG_SIGNATURE: array[0..7] of Byte =
+    ($89, $50, $4E, $47, $0D, $0A, $1A, $0A);
+  // UTF-8 for 'é😀' — a two-byte sequence adjacent to an astral-plane
+  // four-byte one. Image payloads are opaque bytes, so the fixture is
+  // deliberately one that a codepage conversion would mangle; the
+  // expected base64 is written out literally rather than recomputed,
+  // so an encode/decode regression cannot cancel itself out (#10, #26).
+  ASTRAL_UTF8_BYTES: array[0..5] of Byte =
+    ($C3, $A9, $F0, $9F, $98, $80);
+
+function BytesOf(const AValues: array of Byte): TBytes;
+var
+  I: Integer;
+begin
+  SetLength(Result, Length(AValues));
+  for I := 0 to High(AValues) do
+    Result[I] := AValues[I];
+end;
+
+function PngImageHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPImageResult(BytesOf(PNG_SIGNATURE), 'image/png');
+end;
+
+function AstralImageHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPImageResult(BytesOf(ASTRAL_UTF8_BYTES), 'image/png');
+end;
+
+// Already-base64 payload plus a media type carrying a parameter: both
+// reach the wire verbatim, the same contract as MCPBlobContents.
+function PreEncodedImageHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPImageResult('iVBORw0KGgo=', 'image/svg+xml;charset=utf-8');
+end;
+
+function EmptyImageHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  NoBytes: TBytes;
+begin
+  NoBytes := nil;
+  Result := MCPImageResult(NoBytes, 'image/png');
+end;
+
+procedure TImageResults.BeforeEach;
+begin
+  inherited BeforeEach;
+  FServer.RegisterTool('png', 'Returns the PNG signature bytes',
+    '{"type":"object"}', PngImageHandler);
+  FServer.RegisterTool('astral', 'Returns astral-plane UTF-8 bytes',
+    '{"type":"object"}', AstralImageHandler);
+  FServer.RegisterTool('preencoded', 'Returns already-base64 data',
+    '{"type":"object"}', PreEncodedImageHandler);
+  FServer.RegisterTool('emptyimage', 'Returns a zero-byte payload',
+    '{"type":"object"}', EmptyImageHandler);
+end;
+
+function ImageCallLine(const AToolName: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{' +
+    '"name":"' + AToolName + '",' + META_MODERN + '}}';
+end;
+
+procedure TImageResults.TestSpecContentBlock;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(ImageCallLine('png'));
+  // One content block, exactly the spec's ImageContent keys.
+  Expect<Integer>(
+    TJSONArray(Response.FindPath('result.content')).Count).ToBe(1);
+  Expect<Integer>(
+    TJSONObject(Response.FindPath('result.content[0]')).Count).ToBe(3);
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].type')).AsString)
+    .ToBe('image');
+  Expect<Boolean>(
+    TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(False);
+  Response.Free;
+end;
+
+procedure TImageResults.TestBytesEncodedToBase64;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(ImageCallLine('png'));
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].data')).AsString)
+    .ToBe('iVBORw0KGgo=');
+  Response.Free;
+end;
+
+procedure TImageResults.TestNonAsciiBytesSurviveEncoding;
+var
+  Response: string;
+begin
+  // Asserted on the encoded wire line, not on a decoded value: the
+  // payload is bytes, and base64 of those six bytes is this and
+  // nothing else.
+  Expect<Boolean>(Dispatch(ImageCallLine('astral'), Response)).ToBe(True);
+  Expect<Boolean>(Pos('"data" : "w6nwn5iA"', Response) > 0).ToBe(True);
+end;
+
+procedure TImageResults.TestPreEncodedDataPassesThrough;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(ImageCallLine('preencoded'));
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].data')).AsString)
+    .ToBe('iVBORw0KGgo=');
+  Response.Free;
+end;
+
+procedure TImageResults.TestEmptyDataYieldsEmptyString;
+var
+  Response: TJSONObject;
+begin
+  // Zero bytes encode to '' — the key stays present (the spec makes
+  // data required), it just carries nothing.
+  Response := Call(ImageCallLine('emptyimage'));
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].data')).AsString)
+    .ToBe('');
+  Response.Free;
+end;
+
+procedure TImageResults.TestMimeTypePassthrough;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(ImageCallLine('preencoded'));
+  Expect<string>(
+    TJSONData(Response.FindPath('result.content[0].mimeType')).AsString)
+    .ToBe('image/svg+xml;charset=utf-8');
+  Response.Free;
+end;
+
+procedure TImageResults.TestResponseLineByteExact;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(ImageCallLine('png'), Response)).ToBe(True);
+  Expect<string>(Response).ToBe(
+    '{ "jsonrpc" : "2.0", "id" : 1, "result" : { "content" : [{ ' +
+    '"type" : "image", "data" : "iVBORw0KGgo=", ' +
+    '"mimeType" : "image/png" }], "isError" : false, ' +
+    '"resultType" : "complete", "_meta" : { ' +
+    '"io.modelcontextprotocol/serverInfo" : { ' +
+    '"name" : "test-server", "version" : "9.9.9" } } } }');
+end;
+
+procedure TImageResults.SetupTests;
+begin
+  Test('image result is one spec ImageContent block',
+    TestSpecContentBlock);
+  Test('raw bytes are base64-encoded into data',
+    TestBytesEncodedToBase64);
+  Test('non-ASCII payload bytes survive encoding byte-exactly',
+    TestNonAsciiBytesSurviveEncoding);
+  Test('pre-encoded base64 reaches the wire verbatim',
+    TestPreEncodedDataPassesThrough);
+  Test('empty payload yields an empty data string',
+    TestEmptyDataYieldsEmptyString);
+  Test('mimeType reaches the wire verbatim', TestMimeTypePassthrough);
+  Test('image tool result line is byte-exact',
+    TestResponseLineByteExact);
+end;
+
 begin
   TestRunnerProgram.AddSuite(
     TDiscoverAndErrors.Create('Server: discover + protocol errors'));
@@ -4644,6 +4840,8 @@ begin
     TSubsetValidation.Create('Server: subset argument validation'));
   TestRunnerProgram.AddSuite(
     TMRTRDispatch.Create('Server: MRTR input_required'));
+  TestRunnerProgram.AddSuite(
+    TImageResults.Create('Server: image tool results'));
   TestRunnerProgram.Run;
   // Fail the process when any suite failed, so lwpt test and CI
   // actually gate on assertions (the runner does not set it).

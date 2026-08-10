@@ -135,10 +135,17 @@ the server-enforced subset are marked `.ApplicationValidated`, handing
 argument validation to your handler).
 
 Results are built with `MCPTextResult` / `MCPErrorResult` /
-`MCPStructuredResult`; handler exceptions become in-band
-`isError: true` tool results automatically. Resources register either
-as static text (`RegisterTextResource`) or with a reader callback
-(`RegisterResource`).
+`MCPStructuredResult` / `MCPImageResult`; handler exceptions become
+in-band `isError: true` tool results automatically. `MCPImageResult`
+takes either raw bytes (encoded to base64 for you) or data that is
+already base64, plus the image's media type:
+
+```pascal
+Result := MCPImageResult(ScreenshotBytes, 'image/png');
+```
+
+Resources register either as static text (`RegisterTextResource`) or
+with a reader callback (`RegisterResource`).
 
 Serving the same registrations over **Streamable HTTP** instead of
 stdio is a transport swap (modern-era only; binds 127.0.0.1):

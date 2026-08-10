@@ -14,6 +14,10 @@ function MCPStructuredResult(const AText: string;
   AStructured: TJSONData): TMCPToolResult;
 function MCPStructuredResult(const AText: string;
   AObj: TMCPArgs): TMCPToolResult;
+function MCPImageResult(const ABase64,
+  AMimeType: string): TMCPToolResult;
+function MCPImageResult(const AData: TBytes;
+  const AMimeType: string): TMCPToolResult;
 ```
 
 - `MCPTextResult` — one text content block.
@@ -28,6 +32,13 @@ function MCPStructuredResult(const AText: string;
   `TMCPArgs` overload serializes an instance of a typed output class
   **and frees it** (see
   [Schemas](../guides/schemas.md#typed-argument-classes)).
+- `MCPImageResult` — one image content block (`type`, `data`,
+  `mimeType`). The string overload takes data that is **already**
+  base64 (the same contract as `MCPBlobContents`); the `TBytes`
+  overload base64-encodes the raw bytes itself. `AMimeType` is the
+  image's IANA media type (`image/png`, `image/jpeg`, …) and goes on
+  the wire verbatim — the spec names no enumeration, so the handler
+  owns that choice.
 
 The MRTR variant `MCPInputRequired` is documented with the other
 client-request builders in [Client requests](client-requests.md).

@@ -80,6 +80,8 @@ Results are built with the helpers in
 - `MCPTextResult('...')` — plain text content.
 - `MCPStructuredResult(Text, StructuredData)` — text plus
   `structuredContent` matching your output schema.
+- `MCPImageResult(Bytes, 'image/png')` — one image content block;
+  takes raw bytes (base64-encoded for you) or already-base64 data.
 - `MCPErrorResult('...')` — an explicit in-band error
   (`isError: true`).
 
