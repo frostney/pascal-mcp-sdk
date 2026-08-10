@@ -1,13 +1,14 @@
 import Link from 'next/link';
 import type { Metadata } from 'next';
+import { codeToHtml } from 'shiki';
 import { LogoMark } from '@/components/logo';
-import { gitConfig } from '@/lib/shared';
-import { readmeCoverage } from '@/lib/readme-coverage';
+import { gitConfig, siteUrl } from '@/lib/shared';
 
 export const metadata: Metadata = {
-  title: 'pascal-mcp-sdk — a FreePascal-native MCP server library',
+  title: { absolute: 'pascal-mcp-sdk — a FreePascal-native MCP server library' },
   description:
-    'Give AI agents tools written in Pascal: a FreePascal-native MCP server library with zero third-party dependencies.',
+    'Give AI agents tools written in Pascal: a FreePascal-native MCP (Model Context Protocol) server library with zero third-party dependencies, stdio and Streamable HTTP transports, and out-of-the-box Claude Code support.',
+  alternates: { canonical: '/' },
 };
 
 const QUICK_START = `Server := TMCPServer.Create('my-server', '1.0.0');
@@ -20,23 +21,92 @@ finally
   Server.Free;
 end;`;
 
-export default function HomePage() {
+// One source for the visible FAQ section and the FAQPage JSON-LD —
+// keep answers plain text (links live in the rendered extras below).
+const FAQ: { q: string; a: string; extra?: React.ReactNode }[] = [
+  {
+    q: 'What is pascal-mcp-sdk?',
+    a: 'A FreePascal-native library for building MCP (Model Context Protocol) servers: expose tools, resources, and prompts from any Pascal program to AI agents. It has zero third-party runtime dependencies — just FPC’s RTL and fpjson — and runs on Linux, macOS, and Windows.',
+  },
+  {
+    q: 'Does Claude Code work with a Pascal MCP server?',
+    a: 'Yes. Servers are dual-era by default: they answer the legacy initialize handshake that Claude Code and Claude Desktop use today alongside the current stateless protocol revision, so both clients connect out of the box (verified with claude mcp add).',
+  },
+  {
+    q: 'How do I build an MCP server in Pascal?',
+    a: 'Install FPC 3.2.2, add the library (lwpt add frostney/pascal-mcp-sdk@^2.0, or vendor its seven source files), register your tools with a name, description, and JSON Schema, and call RunMCPStdioServer. The quick start walks through a complete server in a few minutes.',
+  },
+  {
+    q: 'Which parts of the MCP specification are implemented?',
+    a: 'The full 2026-07-28 surface: tools, resources with RFC 6570 templates, prompts, multi-round-trip input requests (elicitation, sampling, roots), progress and log notifications, caching hints, stdio and Streamable HTTP transports, and the legacy era for older clients.',
+  },
+];
+
+function jsonLd() {
+  return {
+    '@context': 'https://schema.org',
+    '@graph': [
+      {
+        '@type': 'SoftwareApplication',
+        name: 'pascal-mcp-sdk',
+        description:
+          'A FreePascal-native MCP (Model Context Protocol) server library with zero third-party dependencies.',
+        url: siteUrl,
+        applicationCategory: 'DeveloperApplication',
+        operatingSystem: 'Linux, macOS, Windows',
+        license: 'https://opensource.org/license/mit',
+        codeRepository: `https://github.com/${gitConfig.user}/${gitConfig.repo}`,
+        programmingLanguage: 'Pascal',
+        offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+      },
+      {
+        '@type': 'FAQPage',
+        mainEntity: FAQ.map(({ q, a }) => ({
+          '@type': 'Question',
+          name: q,
+          acceptedAnswer: { '@type': 'Answer', text: a },
+        })),
+      },
+    ],
+  };
+}
+
+export default async function HomePage() {
   const github = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;
-  // Parsed at build time from the repository README's "Protocol
-  // coverage" table — edit the README, not this page.
-  const coverage = readmeCoverage();
+  const quickStartHtml = await codeToHtml(QUICK_START, {
+    lang: 'pascal',
+    themes: { light: 'github-light', dark: 'github-dark' },
+    defaultColor: false,
+  });
   return (
     <main className="flex flex-col items-center px-4 py-16 gap-14">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd()) }}
+      />
       <section className="flex flex-col items-center text-center gap-5 max-w-2xl">
         <div className="text-fd-primary">
           <LogoMark size={72} />
         </div>
         <h1 className="text-4xl font-bold">pascal-mcp-sdk</h1>
         <p className="text-lg text-fd-muted-foreground">
-          Give AI agents tools written in Pascal. pascal-mcp-sdk turns any
-          FreePascal program into an MCP (Model Context Protocol) server:
-          register tools, resources, and prompts as ordinary Pascal
-          functions, and clients like Claude Code and Claude Desktop
+          Give AI agents tools written in Pascal. pascal-mcp-sdk turns any{' '}
+          <a href="https://www.freepascal.org" className="underline">
+            FreePascal
+          </a>{' '}
+          program into an{' '}
+          <a href="https://modelcontextprotocol.io" className="underline">
+            MCP (Model Context Protocol)
+          </a>{' '}
+          server: register tools, resources, and prompts as ordinary
+          Pascal functions, and clients like{' '}
+          <a href="https://claude.com/product/claude-code" className="underline">
+            Claude Code
+          </a>{' '}
+          and{' '}
+          <a href="https://claude.com/download" className="underline">
+            Claude Desktop
+          </a>{' '}
           connect out of the box. No second language runtime, no
           framework, zero third-party dependencies — FPC&apos;s RTL and
           fpjson, cross-platform on Linux, macOS, and Windows.
@@ -64,14 +134,19 @@ export default function HomePage() {
         <h2 className="text-xl font-semibold mb-3 text-center">
           Register a tool, serve it
         </h2>
-        <pre className="rounded-lg border bg-fd-card p-4 text-left text-sm overflow-x-auto">
-          <code>{QUICK_START}</code>
-        </pre>
+        <div
+          className="landing-code rounded-lg border text-left text-sm overflow-x-auto [&>pre]:p-4 [&>pre]:m-0 [&>pre]:bg-transparent"
+          dangerouslySetInnerHTML={{ __html: quickStartHtml }}
+        />
         <p className="mt-3 text-sm text-fd-muted-foreground text-center">
-          The library validates arguments against your schema before the
-          handler runs, turns exceptions into errors the model can
-          correct against, and speaks both the current stateless protocol
-          revision and the legacy handshake today&apos;s clients use.{' '}
+          The library validates arguments against your{' '}
+          <a href="https://json-schema.org" className="underline">
+            JSON Schema
+          </a>{' '}
+          before the handler runs, turns exceptions into errors the model
+          can correct against, and speaks both the current stateless
+          protocol revision and the legacy handshake today&apos;s clients
+          use.{' '}
           <Link href="/docs/guides/tools" className="underline">
             How tools work →
           </Link>
@@ -82,7 +157,13 @@ export default function HomePage() {
         <h2 className="text-xl font-semibold mb-3 text-center">Install</h2>
         <div className="rounded-lg border bg-fd-card p-4 text-sm flex flex-col gap-3">
           <p>
-            <strong>As an lwpt dependency:</strong>{' '}
+            <strong>
+              As an{' '}
+              <a href="https://github.com/frostney/lwpt" className="underline">
+                lwpt
+              </a>{' '}
+              dependency:
+            </strong>{' '}
             <code className="rounded bg-fd-muted px-1.5 py-0.5">
               lwpt add {gitConfig.user}/{gitConfig.repo}@^2.0
             </code>{' '}
@@ -110,36 +191,29 @@ export default function HomePage() {
             into your MCP client.
           </p>
         </div>
+        <p className="mt-3 text-sm text-fd-muted-foreground text-center">
+          The full 2026-07-28 protocol surface is implemented and
+          interop-tested against both official MCP TypeScript clients —
+          see{' '}
+          <Link href="/docs/reference/protocol-coverage" className="underline">
+            protocol coverage
+          </Link>
+          .
+        </p>
       </section>
 
-      <section className="w-full max-w-3xl">
+      <section className="w-full max-w-2xl">
         <h2 className="text-xl font-semibold mb-3 text-center">
-          Protocol coverage
+          Frequently asked questions
         </h2>
-        <div className="rounded-lg border overflow-x-auto">
-          <table className="w-full text-sm text-left">
-            <thead>
-              <tr className="border-b bg-fd-muted/50">
-                <th className="px-4 py-2 font-medium">Surface</th>
-                <th className="px-4 py-2 font-medium">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {coverage.map(({ surface, marker, status }) => (
-                <tr key={surface} className="border-b last:border-b-0">
-                  <td className="px-4 py-2 font-mono text-xs">{surface}</td>
-                  <td className="px-4 py-2 text-fd-muted-foreground">
-                    {marker} {status}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="flex flex-col gap-4">
+          {FAQ.map(({ q, a }) => (
+            <details key={q} className="rounded-lg border bg-fd-card p-4 text-sm">
+              <summary className="font-medium cursor-pointer">{q}</summary>
+              <p className="mt-2 text-fd-muted-foreground">{a}</p>
+            </details>
+          ))}
         </div>
-        <p className="mt-3 text-sm text-fd-muted-foreground text-center">
-          Interop-tested against both official MCP TypeScript clients on
-          every pull request.
-        </p>
       </section>
     </main>
   );

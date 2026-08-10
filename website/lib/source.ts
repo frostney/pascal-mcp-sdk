@@ -3,7 +3,9 @@ import { docsContentRoute, docsImageRoute, docsRoute } from './shared';
 import { defineDocs } from 'fumadocs-mdx/macro';
 import { metaSchema, pageSchema } from 'fumadocs-core/source/schema';
 import { z } from 'zod';
+import { rehypeCode } from 'fumadocs-core/mdx-plugins';
 import { remarkRepoLinks } from './remark-repo-links.mjs';
+import { remarkTermLinks } from './remark-term-links.mjs';
 
 const docs = defineDocs({
   // The site renders the repository's docs/ tree directly — no second
@@ -23,7 +25,23 @@ const docs = defineDocs({
       valueToExport: ['structuredData'],
     },
     mdxOptions: {
-      remarkPlugins: [remarkRepoLinks],
+      remarkPlugins: [remarkRepoLinks, remarkTermLinks],
+      // Syntax highlighting: this macro-mode mdxOptions is plain
+      // ProcessorOptions, so rehypeCode is applied explicitly. The
+      // docs' Pascal fences need the grammar named; themes follow the
+      // site's light/dark toggle.
+      rehypePlugins: [
+        [
+          rehypeCode,
+          {
+            themes: {
+              light: 'github-light',
+              dark: 'github-dark',
+            },
+            langs: ['pascal', 'sh', 'bash', 'json', 'text', 'toml'],
+          },
+        ],
+      ],
     },
   },
   meta: {
@@ -48,6 +66,30 @@ export function pageTitle(page: (typeof source)['$inferPage']): string {
     .split('-')
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(' ');
+}
+
+// Meta description for pages without frontmatter (the docs stay
+// frontmatter-free by design): the page's first prose paragraph from
+// the processed markdown (same source the search index uses), with
+// inline markdown stripped, clipped to meta-description length at a
+// word boundary.
+export async function pageDescription(
+  page: (typeof source)['$inferPage'],
+): Promise<string | undefined> {
+  if (page.data.description) return page.data.description;
+  const processed = await page.data.getText('processed');
+  const firstParagraph = processed
+    .split(/\n\s*\n/)
+    .map((block) => block.trim())
+    .find((block) => block.length > 0 && !/^[#>|`\-*\d]/.test(block));
+  if (!firstParagraph) return undefined;
+  const text = firstParagraph
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1') // links → text
+    .replace(/[`*_]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (text.length <= 160) return text;
+  return text.slice(0, 157).replace(/\s+\S*$/, '') + '…';
 }
 
 export function getPageImageUrl(page: (typeof source)['$inferPage']) {
