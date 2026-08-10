@@ -93,9 +93,10 @@ until `Stop` is called from another thread.
 - **Body size cap.** Inbound bodies are capped at 4 MiB by default
   (`MaxBodyBytes`), the same budget as the stdio line cap.
 - **Modern era only.** This binding turns dual-era support off: it
-  serves `2026-07-28` requests statelessly and rejects a legacy
-  `initialize` with the version diagnostic. Legacy clients keep using
-  stdio.
+  serves `2026-07-28` requests statelessly and rejects an
+  `initialize` handshake with the version diagnostic. Clients that
+  speak the classic handshake (Claude Code and Codex today) keep
+  using stdio.
 
 The runtime contract above still holds otherwise: state is explicit,
 diagnostics go to stderr, and secrets come from the environment.

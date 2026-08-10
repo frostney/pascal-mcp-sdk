@@ -89,7 +89,8 @@ expressions):
 ## Errors
 
 Reading an unregistered URI answers the spec's era-appropriate error:
-`-32602` for modern clients, `-32002` in the legacy dialect. Reader
+`-32602` for stateless-era clients, `-32002` in the classic-handshake
+dialect. Reader
 exceptions become JSON-RPC internal errors, with messages subject to
 [error redaction](configuration.md#redacterrordetails).
 

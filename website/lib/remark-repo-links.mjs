@@ -56,10 +56,40 @@ function mapHref(href, filePath) {
   return `${githubBase}/${kind}/main/${repoRelative}${suffix}`;
 }
 
+// Images under docs/images/ are copied into the site's public/ tree
+// by scripts/sync-docs-assets.mjs (prebuild); the markdown's relative
+// path is rewritten to that served location, basePath included (plain
+// <img> src attributes don't get the Next basePath automatically).
+// Mirrors basePath in lib/shared.ts / next.config.mjs.
+const basePath = '/pascal-mcp-sdk';
+
+function mapImage(src, filePath) {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith('#')) return src;
+  const repoRoot = findRepoRoot(path.dirname(filePath));
+  const resolved = path.resolve(path.dirname(filePath), src);
+  if (!fs.existsSync(resolved)) {
+    throw new Error(
+      `broken image "${src}" in ${path.relative(repoRoot, filePath)}: ` +
+        `${path.relative(repoRoot, resolved)} does not exist`,
+    );
+  }
+  const fromImages = path.relative(path.join(repoRoot, 'docs', 'images'), resolved);
+  if (fromImages.startsWith('..')) {
+    throw new Error(
+      `image "${src}" in ${path.relative(repoRoot, filePath)} ` +
+        'must live under docs/images/ to be served by the site',
+    );
+  }
+  return `${basePath}/docs-images/${fromImages}`;
+}
+
 export function remarkRepoLinks() {
   return (tree, file) => {
     visit(tree, ['link', 'definition'], (node) => {
       node.url = mapHref(node.url, file.path);
+    });
+    visit(tree, 'image', (node) => {
+      node.url = mapImage(node.url, file.path);
     });
   };
 }

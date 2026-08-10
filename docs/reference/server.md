@@ -19,11 +19,11 @@ is created, and later mutation raises `EMCPServer`.
 
 | Property | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `Instructions` | `string` | `''` | Usage guidance surfaced via `server/discover` / legacy `initialize` |
+| `Instructions` | `string` | `''` | Usage guidance surfaced via `server/discover` / classic `initialize` |
 | `CacheTtlMs` | `Integer` | `300000` | SEP-2549 `ttlMs` caching hint on discover/list/read results; must be ≥ 0 |
 | `CacheScope` | `string` | `'private'` | SEP-2549 `cacheScope`; `'private'` or `'public'` |
 | `RedactErrorDetails` | `Boolean` | `False` | `True` replaces exception detail with a correlation reference, logging the full error to stderr |
-| `DualEra` | `Boolean` | `True` | Answer the legacy `initialize` handshake alongside stateless 2026-07-28 requests |
+| `DualEra` | `Boolean` | `True` | Answer the classic `initialize` handshake alongside stateless 2026-07-28 requests |
 | `Name`, `Version` | `string` | — | Read-only, from `Create` |
 
 Semantics and guidance: [Configuration](../guides/configuration.md).

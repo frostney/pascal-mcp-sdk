@@ -14,9 +14,11 @@ agents — no second language runtime, no framework.
   shells around the same sans-I/O server core.
 - **Stateless spec, dual-era by default** — native 2026-07-28
   (per-request `_meta`, mandatory `server/discover`, no session
-  handshake) *and* the legacy `initialize` handshake for today's
-  clients: **Claude Code and Claude Desktop connect out of the box**
-  (verified).
+  handshake) *and* the classic `initialize` handshake current clients
+  still speak: **Claude Code, Claude Desktop, and Codex connect out
+  of the box** (wire-verified 2026-08-10: Claude Code 2.1.226 opens
+  `initialize`/2025-11-25, Codex 0.145.0 opens
+  `initialize`/2025-06-18).
 - **MRTR (`input_required`)** — handlers can ask the client for more
   input mid-call (elicitation, sampling, roots) using the 2026-07-28
   multi-round-trip pattern, without any server-side session state.
@@ -170,7 +172,7 @@ walkthrough lives in [docs/guides/quick-start.md](docs/guides/quick-start.md).
 
 The full `2026-07-28` surface is implemented — tools, resources
 (including RFC 6570 templates), prompts, MRTR, progress/log
-notifications, caching hints, both transports, and the legacy
+notifications, caching hints, both transports, and the classic
 `initialize` era — with `subscriptions/listen` deliberately out while
 registries stay static. The authoritative surface-by-surface table,
 including verification and interop evidence, lives in

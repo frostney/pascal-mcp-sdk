@@ -6,16 +6,23 @@ and prompts** to AI agents over the
 language runtime, no framework, no third-party dependencies beyond
 FPC's own RTL and fpjson.
 
-New here? Start with the [quick start](guides/quick-start.md): install
-the library, write a working server, and register it with an MCP
-client in a few minutes.
+New to AI agents? Start with the
+[introduction](guides/introduction.md) — MCP explained for Pascal
+developers, no AI background assumed. Then the
+[quick start](guides/quick-start.md) gets a working server registered
+with an MCP client in a few minutes.
 
 ## Guides
 
 Task-oriented pages for building and shipping your own MCP server:
 
+- [Introduction](guides/introduction.md) — what AI agents are, what
+  MCP standardizes, and where your Pascal code fits.
 - [Quick start](guides/quick-start.md) — install, write a server,
   serve it over stdio or Streamable HTTP, register it with a client.
+- [Your first conversation](guides/first-conversation.md) — a real
+  captured session: an agent calling a Pascal tool, on screen and on
+  the wire.
 - [Tools](guides/tools.md) — the core registration model: handlers,
   typed argument classes, validation, annotations, MRTR.
 - [Schemas](guides/schemas.md) — the fluent builder, RTTI-derived

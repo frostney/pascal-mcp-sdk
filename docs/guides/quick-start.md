@@ -95,12 +95,15 @@ Key behaviours you get for free:
 - **Handler exceptions** become `isError: true` tool results — the
   in-band error channel models can self-correct against.
 - **`resultType` and `serverInfo`** are stamped on every result.
-- **Legacy clients work out of the box**: the server is dual-era by
-  default, so a client opening with the classic `initialize` handshake
-  (Claude Code, Claude Desktop today) is served the legacy dialect
-  while modern `_meta` requests stay stateless — same registries, same
-  handlers. Set `Server.DualEra := False` for a strict modern-only
-  server that rejects `initialize` naming its supported versions.
+- **Today's clients work out of the box**: the server is dual-era by
+  default, so a client opening with the classic `initialize`
+  handshake — which current releases of Claude Code, Claude Desktop,
+  and Codex all still speak (verified 2026-08-10; see
+  [Your first conversation](first-conversation.md)) — is served that
+  era faithfully, while stateless 2026-07-28 `_meta` requests are
+  served natively — same registries, same handlers. Set
+  `Server.DualEra := False` for a strict modern-only server that
+  rejects `initialize` naming its supported versions.
 - **Mid-call input** (MRTR): return
   `MCPInputRequired(...)` from a tool or prompt handler to ask the
   client for more input (elicitation form/url, sampling, roots); the
@@ -159,9 +162,9 @@ makes the server exit — that is the spec's graceful-shutdown contract.
 
 ## Register the server with an MCP client
 
-Any client that launches stdio servers works — legacy or modern,
-thanks to the dual-era default. With Claude Code it is one command
-(verified against `mcpdemo`):
+Any client that launches stdio servers works — whichever protocol
+revision it speaks, thanks to the dual-era default. With Claude Code
+it is one command (verified against `mcpdemo`):
 
 ```sh
 claude mcp add my-server /absolute/path/to/myserver

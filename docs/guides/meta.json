@@ -2,7 +2,9 @@
   "title": "Guides",
   "defaultOpen": true,
   "pages": [
+    "introduction",
     "quick-start",
+    "first-conversation",
     "tools",
     "schemas",
     "prompts",

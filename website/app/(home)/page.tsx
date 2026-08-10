@@ -30,7 +30,7 @@ const FAQ: { q: string; a: string; extra?: React.ReactNode }[] = [
   },
   {
     q: 'Does Claude Code work with a Pascal MCP server?',
-    a: 'Yes. Servers are dual-era by default: they answer the legacy initialize handshake that Claude Code and Claude Desktop use today alongside the current stateless protocol revision, so both clients connect out of the box (verified with claude mcp add).',
+    a: 'Yes — and so does Codex. Servers are dual-era by default: they answer the classic initialize handshake current clients still speak alongside the newest stateless protocol revision, and pick per connection. Wire-verified 2026-08-10: Claude Code 2.1.226 and Codex 0.145.0 both connect out of the box.',
   },
   {
     q: 'How do I build an MCP server in Pascal?',
@@ -38,7 +38,7 @@ const FAQ: { q: string; a: string; extra?: React.ReactNode }[] = [
   },
   {
     q: 'Which parts of the MCP specification are implemented?',
-    a: 'The full 2026-07-28 surface: tools, resources with RFC 6570 templates, prompts, multi-round-trip input requests (elicitation, sampling, roots), progress and log notifications, caching hints, stdio and Streamable HTTP transports, and the legacy era for older clients.',
+    a: 'The full 2026-07-28 surface: tools, resources with RFC 6570 templates, prompts, multi-round-trip input requests (elicitation, sampling, roots), progress and log notifications, caching hints, stdio and Streamable HTTP transports, plus the classic initialize handshake era that current clients speak.',
   },
 ];
 
@@ -144,8 +144,8 @@ export default async function HomePage() {
             JSON Schema
           </a>{' '}
           before the handler runs, turns exceptions into errors the model
-          can correct against, and speaks both the current stateless
-          protocol revision and the legacy handshake today&apos;s clients
+          can correct against, and speaks both the newest stateless
+          protocol revision and the classic handshake today&apos;s clients
           use.{' '}
           <Link href="/docs/guides/tools" className="underline">
             How tools work →
