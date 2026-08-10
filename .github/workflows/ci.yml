@@ -195,6 +195,10 @@ jobs:
         if: matrix.format-check == true
         run: lwpt agents --check
 
+      - name: reference docs cover the public surface
+        if: matrix.format-check == true
+        run: .github/scripts/check-reference-docs.sh
+
       - name: lwpt build (mcpdemo + mcpsmoke)
         run: lwpt build
 

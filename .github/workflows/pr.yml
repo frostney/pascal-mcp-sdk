@@ -170,6 +170,10 @@ jobs:
         if: matrix.fpc-install == 'apt'   # platform-independent; one runner
         run: lwpt agents --check
 
+      - name: reference docs cover the public surface
+        if: matrix.fpc-install == 'apt'   # platform-independent; one runner
+        run: .github/scripts/check-reference-docs.sh
+
       - name: lwpt build (mcpdemo + mcpsmoke)
         run: lwpt build
 
