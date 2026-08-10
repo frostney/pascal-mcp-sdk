@@ -33,7 +33,9 @@ function normalize(url) {
 }
 
 function collectExistingLinks(node, seen) {
-  if (node.type === 'link' && typeof node.url === 'string') {
+  // Inline links and reference-style link definitions both count as
+  // "this page already links that target".
+  if ((node.type === 'link' || node.type === 'definition') && typeof node.url === 'string') {
     seen.add(normalize(node.url));
   }
   for (const child of node.children ?? []) collectExistingLinks(child, seen);

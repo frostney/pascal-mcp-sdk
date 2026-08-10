@@ -27,9 +27,9 @@ claude mcp list        # → demo: … - ✔ Connected
 
 ## The same session on the wire
 
-Four requests travelled over the server's stdin/stdout. Everything
-below your handler's one line of arithmetic was produced by the
-library.
+Three requests — plus one notification — travelled over the server's
+stdin/stdout. Everything below your handler's one line of arithmetic
+was produced by the library.
 
 **1. The client introduces itself** — the `initialize` handshake
 (this client speaks protocol revision `2025-06-18`; the library
@@ -51,6 +51,13 @@ the text the model reads to learn when to use your server:
   "capabilities":{"tools":{},"resources":{},"prompts":{}},
   "serverInfo":{"name":"pascal-mcp-sdk-demo","version":"0.1.0"},
   "instructions":"Demo server for the pascal-mcp-sdk library. Use \"echo\" to mirror a message, \"add\" to add two numbers; read mcp://pascal-mcp-sdk/greeting for a hello."}}
+```
+
+The client then confirms the handshake with a notification (no
+response expected):
+
+```json
+{"jsonrpc":"2.0","method":"notifications/initialized"}
 ```
 
 **2. Discovery** — the client asks what you offer and hands the
@@ -110,11 +117,12 @@ both open with this):
 
 Different client, different protocol revision (`2025-11-25` vs
 Codex's `2025-06-18`) — same server, zero configuration. That is what
-the dual-era default buys you: the library speaks every current
-client's handshake revision *and* the newest stateless `2026-07-28`
-revision, and picks per connection — so as clients migrate to the
-stateless revision, your server needs no change (see
-[Configuration](configuration.md#dualera)).
+the dual-era default buys you: the library speaks each classic
+handshake revision it supports (`2024-11-05`, `2025-06-18`,
+`2025-11-25` — the revisions current clients use) *and* the newest
+stateless `2026-07-28` revision, and picks per connection — so as
+clients migrate to the stateless revision, your server needs no
+change (see [Configuration](configuration.md#dualera)).
 
 ## The same conversation, stateless style
 
@@ -128,7 +136,8 @@ conversation yourself from a shell:
 EOF
 ```
 
-One line in, one line out — same handler, same result, no session.
+One line in, one line out — same handler, same result, no protocol
+session.
 The [cookbook](cookbook.md#driving-it-all-by-hand) drives the whole
 surface this way.
 

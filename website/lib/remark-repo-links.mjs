@@ -85,7 +85,18 @@ function mapImage(src, filePath) {
 
 export function remarkRepoLinks() {
   return (tree, file) => {
+    // Definitions referenced by reference-style images (`![alt][id]`)
+    // must map as images, not links — their URL becomes the rendered
+    // <img> src.
+    const imageDefinitions = new Set();
+    visit(tree, 'imageReference', (node) => {
+      imageDefinitions.add(node.identifier);
+    });
     visit(tree, ['link', 'definition'], (node) => {
+      if (node.type === 'definition' && imageDefinitions.has(node.identifier)) {
+        node.url = mapImage(node.url, file.path);
+        return;
+      }
       node.url = mapHref(node.url, file.path);
     });
     visit(tree, 'image', (node) => {

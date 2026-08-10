@@ -30,9 +30,9 @@ Semantics and guidance: [Configuration](../guides/configuration.md).
 
 ### Registering tools
 
-Twelve overloads along two axes — how the schema is declared, and
-plain-function vs `of object` method handlers (every pair below
-exists in both handler shapes):
+Fourteen overloads along two axes — the seven schema-declaration
+shapes below, each in plain-function and `of object` method handler
+form:
 
 ```pascal
 // Raw JSON schema string

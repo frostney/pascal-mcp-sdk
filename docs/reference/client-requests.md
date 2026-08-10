@@ -2,7 +2,9 @@
 
 The Multi Round-Trip Request surface: how a `tools/call` or
 `prompts/get` handler asks the client for more input mid-call —
-elicitation, sampling, roots — without server-side session state.
+elicitation, sampling, roots — without the server keeping any
+round-trip state between calls (your `requestState` travels via the
+client; the transport's ordinary protocol session is unaffected).
 The concept walkthrough is in
 [Tools](../guides/tools.md#asking-the-client-for-more-input-mrtr);
 this page is the API.

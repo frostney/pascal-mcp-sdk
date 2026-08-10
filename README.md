@@ -160,11 +160,11 @@ walkthrough lives in [docs/guides/quick-start.md](docs/guides/quick-start.md).
 
 ## Protocol coverage
 
-The full `2026-07-28` surface is implemented — tools, resources
-(including RFC 6570 templates), prompts, MRTR, progress/log
-notifications, caching hints, both transports, and the classic
-`initialize` era — with `subscriptions/listen` deliberately out while
-registries stay static. The authoritative surface-by-surface table,
+Implemented: tools, resources (including RFC 6570 templates),
+prompts, MRTR, progress/log notifications, caching hints, both
+transports, and the classic `initialize` era. Deliberately out:
+`subscriptions/listen` and list-changed notifications — registries
+are static after startup. The authoritative surface-by-surface table,
 including verification and interop evidence, lives in
 [docs/reference/protocol-coverage.md](docs/reference/protocol-coverage.md).
 

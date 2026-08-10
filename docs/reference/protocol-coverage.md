@@ -29,9 +29,13 @@ percent-decoding is not performed.
 ## Verification
 
 Spec facts verified against the official
-[MCP specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio)
+[MCP specification](https://modelcontextprotocol.io/specification/2026-07-28)
 (2026-07-20, re-verified 2026-08-08 against the published final
-2026-07-28 text), and the full surface **interop-tested against both
+2026-07-28 text; the per-surface page links — stdio, tools,
+resources, versioning, `server/discover` — are collected in the
+architecture page's
+[Spec grounding](../internals/architecture.md#spec-grounding)), and
+the implemented surface **interop-tested against both
 official MCP TypeScript clients**: the stable v2 client
 (`@modelcontextprotocol/client` 2.0.0, pinned + auto-probe modes, over
 stdio and Streamable HTTP, including MRTR auto-fulfilment) and the v1

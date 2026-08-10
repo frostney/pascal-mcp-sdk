@@ -8,7 +8,7 @@ export const metadata: Metadata = {
   title: { absolute: 'pascal-mcp-sdk — a FreePascal-native MCP server library' },
   description:
     'Give AI agents tools written in Pascal: a FreePascal-native MCP (Model Context Protocol) server library with zero third-party dependencies, stdio and Streamable HTTP transports, and out-of-the-box Claude Code support.',
-  alternates: { canonical: '/' },
+  alternates: { canonical: `${siteUrl}/` },
 };
 
 const QUICK_START = `Server := TMCPServer.Create('my-server', '1.0.0');
@@ -38,7 +38,7 @@ const FAQ: { q: string; a: string; extra?: React.ReactNode }[] = [
   },
   {
     q: 'Which parts of the MCP specification are implemented?',
-    a: 'The full 2026-07-28 surface: tools, resources with RFC 6570 templates, prompts, multi-round-trip input requests (elicitation, sampling, roots), progress and log notifications, caching hints, stdio and Streamable HTTP transports, plus the classic initialize handshake era that current clients speak.',
+    a: 'Tools, resources with RFC 6570 templates, prompts, multi-round-trip input requests (elicitation, sampling, roots), progress and log notifications, caching hints, stdio and Streamable HTTP transports, plus the classic initialize handshake era that current clients speak. Deliberately out: subscriptions/listen and list-changed notifications, since registries are static after startup.',
   },
 ];
 
@@ -192,9 +192,9 @@ export default async function HomePage() {
           </p>
         </div>
         <p className="mt-3 text-sm text-fd-muted-foreground text-center">
-          The full 2026-07-28 protocol surface is implemented and
-          interop-tested against both official MCP TypeScript clients —
-          see{' '}
+          The 2026-07-28 protocol surface — everything except
+          subscriptions — is implemented and interop-tested against both
+          official MCP TypeScript clients; see{' '}
           <Link href="/docs/reference/protocol-coverage" className="underline">
             protocol coverage
           </Link>

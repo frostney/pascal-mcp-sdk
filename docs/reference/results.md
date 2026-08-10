@@ -1,6 +1,7 @@
 # Results and Content
 
-The helpers handlers build their answers with, all from `MCP.Server`.
+Handlers build their answers with these helpers, all from
+`MCP.Server`.
 
 ## Tool results
 

@@ -25,13 +25,13 @@ Release mode compiles with `-O4 -dPRODUCTION -Xs -CX -XX`. Without
 lwpt, pass the flags to FPC yourself:
 
 ```sh
-fpc -dPRODUCTION -O3 -XX -CX -Fu<units-path> -Fi<units-path> -FEbuild myserver.pas
+fpc -dPRODUCTION -O4 -Xs -CX -XX -Fu<units-path> -Fi<units-path> -FEbuild myserver.pas
 ```
 
 `-dPRODUCTION` flips the library's `Shared.inc` from checked
 (range/overflow/assert on) to optimised (checks off, auto-inlining).
-`-XX -CX` smart-links the binary down. Cross-compilation follows
-standard FPC practice.
+`-Xs -CX -XX` strips and smart-links the binary down.
+Cross-compilation follows standard FPC practice.
 
 ## Runtime contract
 

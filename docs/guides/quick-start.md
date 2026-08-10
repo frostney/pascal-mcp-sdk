@@ -105,8 +105,9 @@ Key behaviours you get for free:
   `Server.DualEra := False` for a strict modern-only server that
   rejects `initialize` naming its supported versions.
 - **Mid-call input** (MRTR): return
-  `MCPInputRequired(...)` from a tool or prompt handler to ask the
-  client for more input (elicitation form/url, sampling, roots); the
+  `MCPInputRequired(...)` from a tool handler — or
+  `MCPPromptInputRequired(...)` from a prompt result handler — to ask
+  the client for more input (elicitation form/url, sampling, roots); the
   client retries the call and your handler re-enters with the
   responses on `ACtx` — see
   [Tools](tools.md#asking-the-client-for-more-input-mrtr) and the
@@ -162,9 +163,10 @@ makes the server exit — that is the spec's graceful-shutdown contract.
 
 ## Register the server with an MCP client
 
-Any client that launches stdio servers works — whichever protocol
-revision it speaks, thanks to the dual-era default. With Claude Code
-it is one command:
+Any client that launches stdio servers and speaks a
+[supported protocol revision](../reference/protocol-coverage.md)
+works, thanks to the dual-era default. With Claude Code it is one
+command:
 
 ```sh
 claude mcp add my-server /absolute/path/to/myserver
