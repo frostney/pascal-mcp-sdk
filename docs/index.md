@@ -45,6 +45,9 @@ The public API surface, page by page:
   return results with.
 - [Client requests](reference/client-requests.md) — MRTR builders and
   accessors: elicitation, sampling, roots.
+- [Protocol coverage](reference/protocol-coverage.md) — the
+  surface-by-surface record of what the library implements, with
+  verification and interop evidence.
 
 ## Contributing
 

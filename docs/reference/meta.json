@@ -1,5 +1,5 @@
 {
   "title": "Reference",
   "defaultOpen": true,
-  "pages": ["server", "results", "client-requests"]
+  "pages": ["server", "results", "client-requests", "protocol-coverage"]
 }
