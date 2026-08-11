@@ -3,7 +3,10 @@ version = 3
 
 [package.testing]
 source = "frostney/lwpt"
-resolvedRef = "0.2.0"
-resolvedURL = "https://github.com/frostney/lwpt/archive/0.2.0.tar.gz"
-computedHash = "sha256:3f70068a26b9ebd58cf6768c052baec8a455407355ece0b4b16cd37376471cc9"
-archiveHash = "sha256:f0cfd07ec5e2bd5f68cb99311f7722ff16505278a141cd95205f7f879b6400d0"
+resolvedRef = "0.5.1"
+resolvedCommit = "ce90e15ea134b0233b638edda19e3bffaa3ba065"
+sourceIdentity = "git|https://github.com/frostney/lwpt.git|exclude=**/*.Test.pas|include=packages/testing/**"
+constraintFingerprint = "sha256:a5b1c9c806945a2f80652587b8cda98d2093fdda2f24aafe45d7d6868f4c7fc2"
+resolvedURL = "https://github.com/frostney/lwpt/archive/ce90e15ea134b0233b638edda19e3bffaa3ba065.tar.gz"
+computedHash = "sha256:b82f55e6c4682754bad86288a7dce4b22983c473f399d68f1c7edbff9530ad5d"
+archiveHash = "sha256:d0473ebb6e60d6e086947100cf27f96c0f6a81cc74827fd99d1d0146918a49dd"
