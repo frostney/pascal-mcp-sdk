@@ -18,9 +18,10 @@ exclude = [".lwpt/**"]
 [dependencies]
 # Dev-time only: the runtime library is RTL + fpjson, zero third-party
 # dependencies (see docs/internals/architecture.md). testing is the co-located
-# *.Test.pas framework; resolved from the lwpt 0.2.0 release tag via an
-# include filter (one filtered fetch per package), mirroring duetto.
-testing = { source = "frostney/lwpt", version = "^0.2.0", include = ["packages/testing/**"], exclude = ["**/*.Test.pas"] }
+# *.Test.pas framework; resolved from the lwpt 0.5.1 release tag via an
+# include filter (one filtered fetch per package), mirroring duetto. 0.5.1 is
+# the floor because it carries lwpt#167 (testing 0.2.0: Run sets ExitCode).
+testing = { source = "frostney/lwpt", version = "^0.5.1", include = ["packages/testing/**"], exclude = ["**/*.Test.pas"] }
 
 [build]
 mcpdemo  = { source = "source/apps/mcpdemo.pas",  output = "build/mcpdemo" }
