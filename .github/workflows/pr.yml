@@ -32,17 +32,25 @@ env:
 
 jobs:
   build-and-test:
+    # matrix.name is the check context the main ruleset requires
+    # ("build-and-test (linux-x64)" etc.). Without it the job name
+    # embeds every matrix value, so any matrix edit renames the job
+    # and strands PRs on "Expected — waiting for status".
+    name: build-and-test (${{ matrix.name }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          - name: linux-x64
+            runner: ubuntu-latest
             lwpt-asset: linux-x64
             fpc-install: apt
-          - runner: macos-latest
+          - name: macos-arm64
+            runner: macos-latest
             lwpt-asset: macos-arm64
             fpc-install: brew
-          - runner: windows-latest
+          - name: win64
+            runner: windows-latest
             lwpt-asset: windows-x64
             lwpt-archive: zip
             fpc-install: choco

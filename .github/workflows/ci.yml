@@ -37,35 +37,45 @@ env:
 
 jobs:
   test:
+    # matrix.name keeps the job name stable across matrix edits,
+    # mirroring pr.yml (where the names double as the ruleset's
+    # required check contexts).
+    name: test (${{ matrix.name }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-linux
+          - name: linux-x64
+            target: x86_64-linux
             runner: ubuntu-latest
             lwpt-asset: linux-x64
             fpc-install: apt
             format-check: true   # one runner runs format-check (platform-independent)
-          - target: aarch64-linux
+          - name: linux-arm64
+            target: aarch64-linux
             runner: ubuntu-24.04-arm
             lwpt-asset: linux-arm64
             fpc-install: apt
-          - target: aarch64-darwin
+          - name: macos-arm64
+            target: aarch64-darwin
             runner: macos-latest
             lwpt-asset: macos-arm64
             fpc-install: brew
-          - target: x86_64-darwin
+          - name: macos-x64
+            target: x86_64-darwin
             runner: macos-15-intel
             lwpt-asset: macos-x64
             fpc-install: brew
-          - target: x86_64-win64
+          - name: win64
+            target: x86_64-win64
             runner: windows-latest
             lwpt-asset: windows-x64
             lwpt-archive: zip
             fpc-install: choco
             fpc-win-target: x86_64-win64
             exe: .exe
-          - target: i386-win32
+          - name: win32
+            target: i386-win32
             runner: windows-latest
             lwpt-asset: windows-x86
             lwpt-archive: zip
