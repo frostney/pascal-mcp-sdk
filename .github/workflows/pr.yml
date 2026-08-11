@@ -56,7 +56,6 @@ jobs:
             fpc-install: choco
             fpc-win-target: x86_64-win64
             exe: .exe
-            frozen-install: skip   # lwpt#168: frozen constraint fingerprint not LF-pinned on Windows
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -160,15 +159,7 @@ jobs:
           echo "$RUNNER_TEMP/${ASSET}" >> "$GITHUB_PATH"
 
       - name: lwpt install --frozen (verify lockfile + committed modules)
-        if: matrix.frozen-install != 'skip'
         run: lwpt install --frozen
-
-      # Windows: lwpt#168 — the frozen verifier's constraint fingerprint
-      # is not LF-pinned (#78's tree-hash half landed in 0.4.0); mirror
-      # lwpt's own Windows CI and install online.
-      - name: lwpt install (Windows)
-        if: matrix.frozen-install == 'skip'
-        run: lwpt install
 
       - name: lwpt format --check (formatting drift?)
         if: matrix.fpc-install == 'apt'   # platform-independent; one runner

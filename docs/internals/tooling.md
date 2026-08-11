@@ -81,9 +81,8 @@ npx markdownlint-cli2 "**/*.md"
 Four workflows (see [.github/workflows/](../../.github/workflows/)):
 
 - **pr.yml** — every PR: Linux + macOS + Windows legs, each doing
-  checksum-verified lwpt release install, `lwpt install --frozen`
-  (online install on Windows — the frozen-install skip tracks
-  lwpt#168), then `build`, `test`, and the `mcpsmoke` E2E battery.
+  checksum-verified lwpt release install, `lwpt install --frozen`,
+  then `build`, `test`, and the `mcpsmoke` E2E battery.
   One leg additionally runs the platform-independent gates:
   `lwpt format --check`, `lwpt agents --check`, and
   `.github/scripts/check-reference-docs.sh` (every public
