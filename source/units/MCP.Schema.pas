@@ -58,7 +58,7 @@ unit MCP.Schema;
 // remain the escape hatch for anything richer ($ref, nested objects,
 // title/annotations).
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 interface
 

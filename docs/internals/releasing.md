@@ -25,7 +25,7 @@ release's entries with `git-cliff --unreleased --strip header` (see
 Consumers build their own binaries — the project publishes no
 compiled artifacts, so a release is a tag plus the changelog. The
 release-mode flag story (`lwpt build --mode release`,
-`-dPRODUCTION` flipping `Shared.inc` from checked to optimised) is
+`-dPRODUCTION` flipping `MCP.inc` from checked to optimised) is
 documented on the consumer side in
 [Shipping your server](../guides/shipping.md); CI builds and tests
 natively on Linux, macOS, and Windows instead of cross-compiling.

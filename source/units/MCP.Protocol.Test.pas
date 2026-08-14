@@ -9,7 +9,7 @@
 
 program MCP.Protocol.Test;
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 uses
   SysUtils,
