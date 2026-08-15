@@ -1,28 +1,26 @@
 name: lwpt weekly bump
 
-# Checks frostney/lwpt for a newer release than the repo's pin and
-# opens a PR carrying the complete bump: LWPT_VERSION in both CI
+# Installs lwpt from the Homebrew tap (frostney/tap/lwpt — the same
+# path the quick start recommends, so a broken tap fails this run)
+# and opens a PR when the tapped version is newer than the repo's
+# pin. The PR carries the complete bump: LWPT_VERSION in both CI
 # workflows, the same-tag testing dependency in lwpt.toml, the
 # regenerated lwpt.cfg/lwpt.lock and committed zero-install trees
 # (.lwpt/modules + .lwpt/archives, stale archives pruned), and the
 # regenerated AGENTS.md command block.
 #
 # Dependabot was evaluated and cannot do this (2026-08-15): it has no
-# custom/regex version managers, cannot track GitHub Releases of an
+# custom/regex version managers, cannot track releases of an
 # arbitrary repository, and — decisively — cannot run `lwpt install`
 # to regenerate the lockfile and committed module trees, without
 # which a version bump is incomplete.
 #
-# Two-job shape on purpose: the bump job downloads and executes the
-# new lwpt release binary (checksum-verified), so it runs with
-# read-only permissions and hands the result over as an artifact;
-# only the publish job holds write permissions and executes nothing
-# fetched. A failing bump job (e.g. a breaking manifest-syntax
-# change, as in 0.5.1 → 0.6.0) is the signal to migrate by hand.
-#
-# Note: PRs opened with the default GITHUB_TOKEN do not trigger
-# pull_request workflows — close/reopen the PR (or push to its
-# branch) to run CI on it.
+# Two-job shape on purpose: the bump job executes the freshly tapped
+# lwpt binary, so it runs with read-only permissions and hands the
+# result over as an artifact; only the publish job holds write
+# permissions and executes nothing fetched. A failing bump job (e.g.
+# a breaking manifest-syntax change, as in 0.5.1 → 0.6.0) is the
+# signal to migrate by hand.
 #
 # Cadence: weekly (Mondays 07:00 UTC). Manual trigger available via
 # workflow_dispatch.
@@ -50,27 +48,14 @@ jobs:
           persist-credentials: false
 
       - id: latest
-        name: Compare latest release against the pin
+        name: Install lwpt from the Homebrew tap and compare the pin
         run: |
-          latest=$(gh api repos/frostney/lwpt/releases/latest --jq .tag_name)
+          brew install frostney/tap/lwpt
+          latest=$(lwpt --version | awk '{print $2}')
           current=$(grep -m1 'LWPT_VERSION:' .github/workflows/pr.yml | sed 's/.*"\(.*\)".*/\1/')
           echo "version=$latest" >> "$GITHUB_OUTPUT"
           echo "current=$current" >> "$GITHUB_OUTPUT"
-          echo "lwpt pin: $current, latest release: $latest"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install the new lwpt release (checksum-verified)
-        if: steps.latest.outputs.version != steps.latest.outputs.current
-        run: |
-          v="${{ steps.latest.outputs.version }}"
-          base="https://github.com/frostney/lwpt/releases/download/$v"
-          curl -fsSLO "$base/lwpt-$v-linux-x64.tar.gz"
-          curl -fsSLO "$base/lwpt-$v-checksums.txt"
-          sha256sum -c <(grep "lwpt-$v-linux-x64.tar.gz" "lwpt-$v-checksums.txt")
-          tar xzf "lwpt-$v-linux-x64.tar.gz"
-          echo "$PWD/lwpt-$v-linux-x64" >> "$GITHUB_PATH"
-          rm "lwpt-$v-linux-x64.tar.gz" "lwpt-$v-checksums.txt"
+          echo "lwpt pin: $current, tapped: $latest"
 
       - name: Apply the bump
         if: steps.latest.outputs.version != steps.latest.outputs.current
@@ -87,14 +72,13 @@ jobs:
           lwpt install
           lwpt install --frozen
           lwpt agents
-          rm -rf "lwpt-$v-linux-x64"
 
       - id: changed
         run: |
           if [ "${{ steps.latest.outputs.version }}" = "${{ steps.latest.outputs.current }}" ] || \
              [ -z "$(git status --porcelain=v1 --untracked-files=all)" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "lwpt already pinned to the latest release; no PR to open."
+            echo "lwpt already pinned to the tapped version; no PR to open."
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
@@ -151,10 +135,11 @@ jobs:
           commit-message: "chore: bump lwpt to ${{ needs.bump.outputs.version }}"
           title: "chore: bump lwpt to ${{ needs.bump.outputs.version }}"
           body: |
-            Automated bump of the lwpt toolchain pin to `${{ needs.bump.outputs.version }}`:
-            `LWPT_VERSION` on both CI workflows, the same-tag `testing` dependency,
-            regenerated `lwpt.cfg`/`lwpt.lock` and committed zero-install trees
-            (stale archives pruned), and the refreshed AGENTS.md command block.
+            Automated bump of the lwpt toolchain pin to `${{ needs.bump.outputs.version }}`
+            (as tapped by `brew install frostney/tap/lwpt`): `LWPT_VERSION` on both CI
+            workflows, the same-tag `testing` dependency, regenerated
+            `lwpt.cfg`/`lwpt.lock` and committed zero-install trees (stale archives
+            pruned), and the refreshed AGENTS.md command block.
 
             `lwpt install --frozen` was verified during the bump; review the
             [release notes](https://github.com/frostney/lwpt/releases/tag/${{ needs.bump.outputs.version }})
