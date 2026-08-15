@@ -91,16 +91,16 @@ wire):
 
 ```json
 {"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"sync started"}}
-{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"sync-1","progress":1.0E+000,"total":3.0E+000,"message":"synced users.csv"}}
+{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"sync-1","progress":1,"total":3,"message":"synced users.csv"}}
 {"jsonrpc":"2.0","method":"notifications/message","params":{"level":"warning","data":"3 rows skipped: bad encoding"}}
-{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"sync-1","progress":2.0E+000,"total":3.0E+000,"message":"synced orders.csv"}}
-{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"sync-1","progress":3.0E+000,"total":3.0E+000,"message":"synced events.csv"}}
+{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"sync-1","progress":2,"total":3,"message":"synced orders.csv"}}
+{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"sync-1","progress":3,"total":3,"message":"synced events.csv"}}
 {"jsonrpc":"2.0","id":5,"result":{"content":[{"type":"text","text":"3 files synced"}],"isError":false, ...}}
 ```
 
-(Progress values are floats, and fpjson serializes them in exponent
-form — shortened here from the full `1.0000000000000000E+000`; valid
-JSON either way, and every client parses it as the number.)
+(Progress numbers serialize compactly — integral values as JSON
+integers, fractional ones as the shortest decimal that round-trips,
+e.g. `0.25` — matching what the official SDKs emit.)
 
 The same call *without* the opt-in keys produces exactly one line —
 the response. The handler didn't change; the no-op helpers absorbed

@@ -153,6 +153,15 @@ function MCPPropIsOptional(AInstance: TObject; AProp: PPropInfo): Boolean;
 // pairs this with SchemaFrom(outputClass).
 function MCPSerialize(AObj: TMCPArgs): TJSONObject;
 
+// Compact JSON number node for wire output. fpjson's default float
+// serialization is full-precision exponent form
+// ('2.5000000000000000E-001'); the official SDKs put plain decimals
+// on the wire. Integral values (within the Double-exact range)
+// become JSON integers, fractional ones the shortest decimal that
+// round-trips to the same Double. Used by MCPSerialize's float
+// properties and the server's progress notifications.
+function MCPWireNumber(AValue: Double): TJSONData;
+
 implementation
 
 constructor TMCPArgs.Create;
@@ -277,6 +286,41 @@ begin
   end;
 end;
 
+type
+  // Float node serializing as the shortest round-trip decimal — see
+  // MCPWireNumber's interface comment.
+  TMCPWireFloat = class(TJSONFloatNumber)
+  protected
+    function GetAsString: TJSONStringType; override;
+  end;
+
+function TMCPWireFloat.GetAsString: TJSONStringType;
+var
+  Digits: Integer;
+  Settings: TFormatSettings;
+begin
+  Settings := DefaultFormatSettings;
+  Settings.DecimalSeparator := '.';
+  Settings.ThousandSeparator := #0;
+  // Shortest ffGeneral form that parses back to the exact value.
+  for Digits := 1 to 17 do
+  begin
+    Result := FloatToStrF(AsFloat, ffGeneral, Digits, 0, Settings);
+    if StrToFloat(Result, Settings) = AsFloat then
+      Exit;
+  end;
+end;
+
+function MCPWireNumber(AValue: Double): TJSONData;
+begin
+  // Doubles represent integers exactly well past this magnitude
+  // bound; beyond it, stay in float form.
+  if (Frac(AValue) = 0) and (Abs(AValue) < 1E15) then
+    Result := TJSONInt64Number.Create(Trunc(AValue))
+  else
+    Result := TMCPWireFloat.Create(AValue);
+end;
+
 function MCPSerialize(AObj: TMCPArgs): TJSONObject;
 var
   Info: PTypeInfo;
@@ -300,7 +344,7 @@ begin
         tkSString, tkLString, tkAString, tkWString, tkUString:
           Result.Add(Prop^.Name, GetStrProp(AObj, Prop));
         tkFloat:
-          Result.Add(Prop^.Name, GetFloatProp(AObj, Prop));
+          Result.Add(Prop^.Name, MCPWireNumber(GetFloatProp(AObj, Prop)));
         tkInteger:
           begin
             TypeData := GetTypeData(Prop^.PropType);
