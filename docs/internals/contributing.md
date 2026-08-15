@@ -118,7 +118,15 @@ lwpt build             # both apps compile
 lwpt test              # unit suites
 lwpt run smoke         # E2E: mcpsmoke drives mcpdemo over pipes
 lwpt format --check    # formatter drift (pre-commit fixes in place)
+lwpt health            # complexity within the manifest ceilings
+lwpt duplication       # token clones within the manifest ceiling
 ```
+
+While iterating, `lwpt test` takes selectors — a path or glob runs
+just the suites you're working on
+(`lwpt test source/units/MCP.Server.Test.pas`), and
+`lwpt test --inventory` lists every registered suite and case as
+JSON without running anything.
 
 Protocol-surface changes should also run the interop battery — the
 official MCP TypeScript clients against `mcpdemo`:
@@ -148,6 +156,7 @@ loopback sockets, and temp files only.
 | `interop` (required) | the official TypeScript clients still talk to `mcpdemo` — a red interop job is a real cross-implementation regression |
 | format / agents `--check` | formatter and AGENTS.md command block have not drifted |
 | `check-reference-docs.sh` | every public symbol is documented in `docs/reference/` |
+| health / duplication | complexity and token-clone ceilings in `lwpt.toml` hold — ratchets set just above the adoption-day baseline, so they shrink but never grow unnoticed |
 | markdownlint | docs follow `.markdownlint-cli2.jsonc` |
 | pages.yml (on `docs/`/`website/` changes) | the website still builds; broken internal doc links fail here |
 
