@@ -6,12 +6,14 @@
     "quick-start",
     "first-conversation",
     "tools",
+    "images",
     "schemas",
     "prompts",
     "resources",
     "configuration",
     "progress-and-logging",
     "shipping",
+    "deployment",
     "troubleshooting",
     "cookbook"
   ]

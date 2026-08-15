@@ -1,20 +1,24 @@
 import { pageTitle, source } from '@/lib/source';
 import { createFromSource } from 'fumadocs-core/search/server';
-import { structure } from 'fumadocs-core/mdx-plugins';
+import type { StructuredData } from 'fumadocs-core/mdx-plugins';
 
 export const revalidate = false;
 
-// The docs are plain markdown rendered straight from the repository's
-// docs/ tree, so the search structure is derived from the processed
-// markdown here instead of a compile-time export.
+// The index consumes the compile-time structuredData export produced
+// by remarkStructure (postprocess.valueToExport in lib/source.ts);
+// only the title needs deriving here because the docs are
+// frontmatter-free.
 export const { staticGET: GET } = createFromSource(source, {
   // https://docs.orama.com/docs/orama-js/supported-languages
   language: 'english',
-  buildIndex: async (page) => ({
+  buildIndex: (page) => ({
     title: pageTitle(page),
     description: page.data.description,
     url: page.url,
     id: page.url,
-    structuredData: structure(await page.data.getText('processed')),
+    structuredData: (page.data as { structuredData?: StructuredData }).structuredData ?? {
+      headings: [],
+      contents: [],
+    },
   }),
 });
