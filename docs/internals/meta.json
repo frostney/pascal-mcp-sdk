@@ -1,4 +1,4 @@
 {
-  "title": "Contributing",
-  "pages": ["architecture", "tooling", "code-style", "releasing"]
+  "title": "Internals",
+  "pages": ["architecture", "contributing", "tooling", "code-style", "releasing"]
 }
