@@ -3,7 +3,13 @@ import { docsContentRoute, docsImageRoute, docsRoute } from './shared';
 import { defineDocs } from 'fumadocs-mdx/macro';
 import { metaSchema, pageSchema } from 'fumadocs-core/source/schema';
 import { z } from 'zod';
-import { rehypeCode } from 'fumadocs-core/mdx-plugins';
+import {
+  rehypeCode,
+  rehypeToc,
+  remarkGfm,
+  remarkHeading,
+  remarkStructure,
+} from 'fumadocs-core/mdx-plugins';
 import { remarkRepoLinks } from './remark-repo-links.mjs';
 import { remarkTermLinks } from './remark-term-links.mjs';
 
@@ -13,6 +19,10 @@ const docs = defineDocs({
   // website/.
   dir: '../docs',
   docs: {
+    // ADRs and other repo-only records under docs/ stay off the
+    // website: the docs tree is the site's content source, but not
+    // everything in it is site content.
+    files: ['**/*.md', '!adr/**'],
     // The rendered docs are plain GitHub markdown without frontmatter
     // (the site adapts to docs/, not the other way around): titles are
     // optional here and derived from the page path when absent — the
@@ -25,11 +35,23 @@ const docs = defineDocs({
       valueToExport: ['structuredData'],
     },
     mdxOptions: {
-      remarkPlugins: [remarkRepoLinks, remarkTermLinks],
-      // Syntax highlighting: this macro-mode mdxOptions is plain
-      // ProcessorOptions, so rehypeCode is applied explicitly. The
-      // docs' Pascal fences need the grammar named; themes follow the
-      // site's light/dark toggle.
+      // Macro-mode mdxOptions is plain ProcessorOptions: it REPLACES
+      // fumadocs' bundler preset instead of extending it, so every
+      // preset plugin the site relies on is re-applied explicitly,
+      // in the preset's own order (see fumadocs-core's
+      // content/mdx/preset-bundler.ts): remarkGfm parses GFM tables,
+      // remarkHeading assigns heading ids (anchors), rehypeToc builds
+      // the per-page TOC, and remarkStructure emits the search-index
+      // structure exported via valueToExport above.
+      remarkPlugins: [
+        remarkGfm,
+        [remarkHeading, { generateToc: false }],
+        remarkRepoLinks,
+        remarkTermLinks,
+        remarkStructure,
+      ],
+      // Syntax highlighting: the docs' Pascal fences need the grammar
+      // named; themes follow the site's light/dark toggle.
       rehypePlugins: [
         [
           rehypeCode,
@@ -41,6 +63,7 @@ const docs = defineDocs({
             langs: ['pascal', 'sh', 'bash', 'json', 'text', 'toml'],
           },
         ],
+        rehypeToc,
       ],
     },
   },
