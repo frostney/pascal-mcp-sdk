@@ -11,6 +11,7 @@
     "predev": "node scripts/sync-docs-assets.mjs"
   },
   "dependencies": {
+    "asciinema-player": "^3.17.0",
     "cnfast": "^0.1.0",
     "fumadocs-core": "^16.14.2",
     "fumadocs-mdx": "^15.2.2",

@@ -82,6 +82,13 @@ by roughly a third on top. Practical guidance:
   and serve the bytes via `resources/read` (`MCPBlobContents`),
   letting the client fetch on demand.
 
+## See it on the wire
+
+A recorded session calling `mcpdemo`'s `pixel` tool — the image
+content block exactly as a client receives it:
+
+[Watch: an image tool call in a terminal](../casts/images.cast)
+
 ## Text and image together
 
 A result's content array can carry both — build the image result and

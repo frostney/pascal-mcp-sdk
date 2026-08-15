@@ -106,6 +106,11 @@ The same call *without* the opt-in keys produces exactly one line —
 the response. The handler didn't change; the no-op helpers absorbed
 every call.
 
+Here is that stream arriving in a real terminal — notifications
+first, response last:
+
+[Watch: a notification stream in a terminal](../casts/progress.cast)
+
 ## Process diagnostics
 
 Anything your server wants to say outside the protocol — startup

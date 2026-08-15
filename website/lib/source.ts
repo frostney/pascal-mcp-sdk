@@ -12,6 +12,7 @@ import {
 } from 'fumadocs-core/mdx-plugins';
 import { remarkRepoLinks } from './remark-repo-links.mjs';
 import { remarkTermLinks } from './remark-term-links.mjs';
+import { remarkCasts } from './remark-casts.mjs';
 import { rehypeMermaidDual } from './rehype-mermaid-dual.mjs';
 import type { PluggableList } from 'unified';
 
@@ -48,6 +49,9 @@ const docs = defineDocs({
       remarkPlugins: [
         remarkGfm,
         [remarkHeading, { generateToc: false }],
+        // Cast links become the terminal player — before
+        // remarkRepoLinks, which would route .cast paths as pages.
+        remarkCasts,
         remarkRepoLinks,
         remarkTermLinks,
         remarkStructure,

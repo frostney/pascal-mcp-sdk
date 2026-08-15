@@ -2,7 +2,8 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import { codeToHtml } from 'shiki';
 import { LogoMark } from '@/components/logo';
-import { gitConfig, siteUrl } from '@/lib/shared';
+import { TerminalCast } from '@/components/terminal-cast';
+import { basePath, gitConfig, siteUrl } from '@/lib/shared';
 
 export const metadata: Metadata = {
   title: { absolute: 'pascal-mcp-sdk — a FreePascal-native MCP server library' },
@@ -137,6 +138,10 @@ export default async function HomePage() {
         <div
           className="landing-code rounded-lg border text-left text-sm overflow-x-auto [&>pre]:p-4 [&>pre]:m-0 [&>pre]:bg-transparent"
           dangerouslySetInnerHTML={{ __html: quickStartHtml }}
+        />
+        <TerminalCast
+          src={`${basePath}/docs-casts/hero.cast`}
+          label="A real session: build the demo server, call a tool"
         />
         <p className="mt-3 text-sm text-fd-muted-foreground text-center">
           The library validates arguments against your{' '}

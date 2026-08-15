@@ -78,6 +78,11 @@ begin
 end.
 ```
 
+This is what the loop feels like in a terminal — a real recorded
+session of building the demo server and speaking the protocol to it:
+
+[Watch: build the server and call a tool](../casts/quick-start.cast)
+
 Prefer typed arguments? Declare a `TMCPArgs` descendant and register
 the class — it expands into the schema, and your handler receives a
 populated, validated instance. See
