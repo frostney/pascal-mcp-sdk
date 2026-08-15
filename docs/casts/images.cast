@@ -1,7 +1,8 @@
-{"version":3,"term":{"cols":80,"rows":24},"timestamp":1786753606,"idle_time_limit":2.0,"command":"bash tools/casts/demo-images.sh","title":"pascal-mcp-sdk: images","env":{"SHELL":"/bin/zsh"}}
-[0.007, "o", "\u001b[2m# the pixel tool returns an image content block (MCPImageResult)\u001b[0m\r\n"]
-[1.208, "o", "\u001b[1;32m❯\u001b[0m printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pixel\",\"arguments\":{},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientInfo\":{\"name\":\"cast-demo\",\"version\":\"1.0.0\"},\"io.modelcontextprotocol/clientCapabilities\":{}}}}\\n' | ./build/mcpdemo | jq .result.content\r\n"]
-[0.921, "o", "mcpdemo: serving MCP 2026-07-28 on stdio (4 tools, 1 resource, 1 prompt)\r\n"]
-[0.001, "o", "\u001b[1;39m[\r\n  \u001b[1;39m{\r\n    \u001b[0m\u001b[1;34m\"type\"\u001b[0m\u001b[1;39m: \u001b[0m\u001b[0;32m\"image\"\u001b[0m\u001b[1;39m,\r\n    \u001b[0m\u001b[1;34m\"data\"\u001b[0m\u001b[1;39m: \u001b[0m\u001b[0;32m\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==\"\u001b[0m\u001b[1;39m,\r\n    \u001b[0m\u001b[1;34m\"mimeType\"\u001b[0m\u001b[1;39m: \u001b[0m\u001b[0;32m\"image/png\"\u001b[0m\u001b[1;39m\r\n  \u001b[1;39m}\u001b[0m\u001b[1;39m\r\n\u001b[1;39m]\u001b[0m\r\n"]
-[1.408, "o", "\u001b[2m# type, base64 data, and the mime type the handler chose\u001b[0m\r\n"]
-[2.217, "x", "0"]
+{"version":3,"term":{"cols":80,"rows":24},"timestamp":1786754847,"idle_time_limit":2.0,"command":"bash tools/casts/demo-images.sh","title":"pascal-mcp-sdk: images","env":{"SHELL":"/bin/zsh"}}
+[0.006, "o", "\u001b[2m# the pixel tool returns an image content block (MCPImageResult)\u001b[0m\r\n"]
+[1.207, "o", "\u001b[1;32m❯\u001b[0m printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pixel\",\"arguments\":{},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientInfo\":{\"name\":\"cast-demo\",\"version\":\"1.0.0\"},\"io.modelcontextprotocol/clientCapabilities\":{}}}}\\n' | ./build/mcpdemo | jq .result.content\r\n"]
+[0.919, "o", "mcpdemo: serving MCP 2026-07-28 on stdio (4 tools, 1 resource, 1 prompt)\r\n"]
+[0.000, "o", "\u001b[1;39m[\r\n  \u001b[1;39m{\r\n    \u001b[0m\u001b[1;34m\"type\"\u001b[0m\u001b[1;39m: \u001b[0m\u001b[0;32m\"image\"\u001b[0m\u001b[1;39m,\r\n    \u001b[0m\u001b[1;34m\"data\"\u001b[0m\u001b[1;39m: \u001b[0m\u001b[0;32m\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==\"\u001b[0m\u001b[1;39m,\r\n    \u001b[0m\u001b[1;34m\"mimeType\"\u001b[0m\u001b[1;39m: \u001b[0m\u001b[0;32m\"image/png\"\u001b[0m\u001b[1;39m\r\n"]
+[0.000, "o", "  \u001b[1;39m}\u001b[0m\u001b[1;39m\r\n\u001b[1;39m]\u001b[0m\r\n"]
+[1.409, "o", "\u001b[2m# type, base64 data, and the mime type the handler chose\u001b[0m\r\n"]
+[2.220, "x", "0"]

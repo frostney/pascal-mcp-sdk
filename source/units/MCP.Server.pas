@@ -1240,9 +1240,12 @@ begin
         ProgressToken.Free;
       end;
     end;
-    Params.Add('progress', AProgress);
+    // Compact number nodes (MCP.Schema's MCPWireNumber): fpjson's
+    // default float serialization is full-precision exponent form;
+    // the official SDKs put plain decimals on the wire.
+    Params.Add('progress', MCPWireNumber(AProgress));
     if ATotal >= 0 then
-      Params.Add('total', ATotal);
+      Params.Add('total', MCPWireNumber(ATotal));
     if AMessage <> '' then
       Params.Add('message', AMessage);
     NotificationParams := Params;
