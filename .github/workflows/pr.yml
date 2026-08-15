@@ -29,7 +29,7 @@ permissions:
 env:
   # Tracks the release the dependency tag stream resolves from; keep in
   # step with the lwpt used locally so format --check cannot disagree.
-  LWPT_VERSION: "0.5.1"
+  LWPT_VERSION: "0.6.0"
 
 jobs:
   build-and-test:
