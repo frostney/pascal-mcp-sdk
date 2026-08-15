@@ -51,6 +51,10 @@ jobs:
         working-directory: website
         run: npm ci
 
+      - name: Install Chromium (build-time Mermaid rendering)
+        working-directory: website
+        run: npx playwright install --with-deps chromium
+
       - name: Build (static export; broken doc links fail here)
         working-directory: website
         run: npm run build

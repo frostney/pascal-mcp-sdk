@@ -12,6 +12,8 @@ import {
 } from 'fumadocs-core/mdx-plugins';
 import { remarkRepoLinks } from './remark-repo-links.mjs';
 import { remarkTermLinks } from './remark-term-links.mjs';
+import { rehypeMermaidDual } from './rehype-mermaid-dual.mjs';
+import type { PluggableList } from 'unified';
 
 const docs = defineDocs({
   // The site renders the repository's docs/ tree directly — no second
@@ -53,6 +55,9 @@ const docs = defineDocs({
       // Syntax highlighting: the docs' Pascal fences need the grammar
       // named; themes follow the site's light/dark toggle.
       rehypePlugins: [
+        // Mermaid fences become themed inline SVGs (light + dark) at
+        // build time — before rehypeCode, so Shiki never sees them.
+        ...(rehypeMermaidDual as PluggableList),
         [
           rehypeCode,
           {
