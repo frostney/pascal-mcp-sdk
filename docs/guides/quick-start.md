@@ -15,7 +15,8 @@ the library itself is covered in
 ## Prerequisites
 
 - **FPC 3.2.2** — `apt install fpc` / `brew install fpc` / the
-  win32+win64 combo installer from freepascal.org.
+  win32+win64 combo installer from
+  [freepascal.org](https://www.freepascal.org/download.html).
 - **lwpt** (optional — for the dependency path) —
   `brew install frostney/tap/lwpt`, or download the release tarball
   for your platform from
@@ -117,7 +118,8 @@ Key behaviours you get for free:
 > These protocol behaviours — MRTR, Streamable HTTP/SSE, the per-request
 > `_meta` model, and the EOF shutdown contract — implement spec revision
 > 2026-07-28. The dated official-spec citations
-> (modelcontextprotocol.io) live in architecture.md's
+> ([modelcontextprotocol.io](https://modelcontextprotocol.io)) live in
+> architecture.md's
 > [Spec grounding](../internals/architecture.md#spec-grounding) section.
 
 ## Serve over Streamable HTTP
@@ -125,7 +127,7 @@ Key behaviours you get for free:
 The same server object serves HTTP with a transport swap (modern era
 only — HTTP clients speak 2026-07-28; the binding validates the
 mirrored `Mcp-*` headers, streams SSE for requests that opt into
-progress/log notifications, and binds 127.0.0.1 by default):
+progress/log notifications, and binds `127.0.0.1` by default):
 
 ```pascal
 uses

@@ -7,7 +7,7 @@ Agentic AI Foundation on 2025-12-09, and the
 lists "Model Context Protocol®" and "MCP™" among its marks. That
 policy categorically prohibits altering a logo or combining it with
 another mark (ruling out an "MCP logo + `.pas`" lockup), and requires
-written permission (trademarks@lfprojects.org) to use even the
+written permission (`trademarks@lfprojects.org`) to use even the
 unaltered logo on a website promoting a product; the open-source
 licenses on the MCP repos expressly do not convey trademark rights.
 
@@ -21,4 +21,4 @@ modelcontextprotocol.io — is available if ever wanted.
 ## Status
 
 accepted — revisit only with written permission from
-trademarks@lfprojects.org.
+`trademarks@lfprojects.org`.

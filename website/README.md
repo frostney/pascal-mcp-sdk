@@ -13,7 +13,7 @@ pnpm dev
 yarn dev
 ```
 
-Open http://localhost:3000 with your browser to see the result.
+Open `http://localhost:3000` with your browser to see the result.
 
 ## Preview the static export
 
@@ -24,13 +24,13 @@ request assets under `/pascal-mcp-sdk/...`. To preview the exported
 ```bash
 npm run build
 npm run start
-# Preview serving out/ at http://localhost:3000/pascal-mcp-sdk/
+# Preview serving out/ at `http://localhost:3000/pascal-mcp-sdk/`
 ```
 
 `npm run start` runs `scripts/preview.mjs`, a tiny dependency-free static
 server that mounts `out/` under `/pascal-mcp-sdk/` (set `PORT`/`HOST` to
 override). A plain root-mounted server would 404 because the pages expect
-the base path. Open http://localhost:3000/pascal-mcp-sdk/.
+the base path. Open `http://localhost:3000/pascal-mcp-sdk/`.
 
 ## Explore
 

@@ -12,7 +12,7 @@
     "MD013": false,   // line-length — our docs intentionally have long sentences
     "MD024": false,   // no-duplicate-heading — docs repeat section headings
     "MD033": false,   // no-inline-html — we use occasional <details> blocks
-    "MD034": false,   // no-bare-urls — legitimate bare https://... lines
+    "MD034": true,    // no-bare-urls — external references are explicit links
     "MD041": false,   // first-line-must-be-h1 — some docs start with their title which IS the H1
     "MD060": false,   // table-column-style — keep the compact separator style
 
