@@ -39,7 +39,7 @@ discovery.
 Without lwpt, vendor the seven files —
 `source/units/MCP.JSONRPC.pas`, `MCP.Protocol.pas`, `MCP.Schema.pas`,
 `MCP.Server.pas`, `MCP.Transport.Stdio.pas`, `MCP.Transport.HTTP.pas`,
-`Shared.inc` — into your unit path and compile with
+`MCP.inc` — into your unit path and compile with
 `-Fu<that-path> -Fi<that-path>`.
 
 ## Write your own server

@@ -4,7 +4,7 @@
 
 ## Executive Summary
 
-FPC 3.2.2, Delphi mode, one shared flags block (`Shared.inc`), `lwpt
+FPC 3.2.2, Delphi mode, one shared flags block (`MCP.inc`), `lwpt
 format` as the only formatting authority. Namespaced units
 (`MCP.*.pas`) with co-located tests, `A`-prefixed parameters,
 `F`-prefixed fields, explicit ownership comments on every fpjson
@@ -12,7 +12,7 @@ boundary, and spec citations next to protocol behaviour.
 
 ## Compiler surface
 
-Every unit and program starts with `{$I Shared.inc}` — Delphi mode,
+Every unit and program starts with `{$I MCP.inc}` — Delphi mode,
 `{$H+}`, `{$M+}`, advanced records, and the PRODUCTION flag block
 (checks on in dev, off with `-dPRODUCTION`). No per-unit compiler
 directives; if a flag is worth setting, it is worth centralising.
