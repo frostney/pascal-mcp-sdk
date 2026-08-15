@@ -215,6 +215,13 @@ export default async function HomePage() {
           ))}
         </div>
       </section>
+
+      <footer className="w-full max-w-2xl border-t pt-6 text-center text-xs text-fd-muted-foreground">
+        pascal-mcp-sdk is a community SDK for the Model Context
+        Protocol and is not affiliated with or endorsed by the MCP
+        project. Model Context Protocol and MCP are trademarks of LF
+        Projects, LLC.
+      </footer>
     </main>
   );
 }
