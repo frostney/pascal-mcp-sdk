@@ -10,9 +10,10 @@ name: agent skills weekly bump
 # the result over as an artifact; only the publish job holds write
 # permissions, and it executes nothing from upstream.
 #
-# Note: PRs opened with the default GITHUB_TOKEN do not trigger
-# pull_request workflows — close/reopen the PR (or push to its
-# branch) to run CI on it.
+# Note: PRs opened with the default GITHUB_TOKEN do not start
+# pull_request workflows on their own. The repo's gates all expose
+# workflow_dispatch — run them against the PR branch from the
+# Actions "Run workflow" button.
 #
 # Cadence: weekly (Mondays 08:00 UTC). Manual trigger available via
 # workflow_dispatch.
