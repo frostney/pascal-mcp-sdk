@@ -29,3 +29,11 @@ release-mode flag story (`lwpt build --mode release`,
 documented on the consumer side in
 [Shipping your server](../guides/shipping.md); CI builds and tests
 natively on Linux, macOS, and Windows instead of cross-compiling.
+
+## Version surfaces
+
+`lwpt.toml`'s `version` is the only hand-maintained copy. The website
+reads it at build time for surfaces that advertise a version (the
+`llms.txt` citation card, via `website/lib/library-version.ts`), so
+bumping the manifest and tagging is the whole release sweep — nothing
+on the site needs a matching edit.

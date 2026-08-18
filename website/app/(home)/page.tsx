@@ -2,13 +2,13 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import { codeToHtml } from 'shiki';
 import { LogoMark } from '@/components/logo';
-import { gitConfig, siteUrl } from '@/lib/shared';
+import { gitConfig, pageUrl, repoUrl } from '@/lib/shared';
 
 export const metadata: Metadata = {
   title: { absolute: 'pascal-mcp-sdk — a FreePascal-native MCP server library' },
   description:
     'Give AI agents tools written in Pascal: a FreePascal-native MCP (Model Context Protocol) server library with zero third-party dependencies, stdio and Streamable HTTP transports, and out-of-the-box Claude Code support.',
-  alternates: { canonical: `${siteUrl}/` },
+  alternates: { canonical: pageUrl('/') },
 };
 
 const QUICK_START = `Server := TMCPServer.Create('my-server', '1.0.0');
@@ -56,12 +56,12 @@ function jsonLd() {
         alternateName: 'FreePascal MCP server library',
         description:
           'A FreePascal-native MCP (Model Context Protocol) server library with zero third-party dependencies.',
-        url: `${siteUrl}/`,
+        url: pageUrl('/'),
         applicationCategory: 'DeveloperApplication',
         operatingSystem: 'Linux, macOS, Windows',
         license: 'https://opensource.org/license/mit',
-        codeRepository: `https://github.com/${gitConfig.user}/${gitConfig.repo}`,
-        sameAs: [`https://github.com/${gitConfig.user}/${gitConfig.repo}`],
+        codeRepository: repoUrl,
+        sameAs: [repoUrl],
         programmingLanguage: 'Pascal',
         offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
       },
@@ -78,7 +78,6 @@ function jsonLd() {
 }
 
 export default async function HomePage() {
-  const github = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;
   const quickStartHtml = await codeToHtml(QUICK_START, {
     lang: 'pascal',
     themes: { light: 'github-light', dark: 'github-dark' },
@@ -131,7 +130,7 @@ export default async function HomePage() {
             Documentation
           </Link>
           <a
-            href={github}
+            href={repoUrl}
             className="rounded-full border px-5 py-2.5 font-medium"
           >
             GitHub
