@@ -32,8 +32,16 @@ natively on Linux, macOS, and Windows instead of cross-compiling.
 
 ## Version surfaces
 
-`lwpt.toml`'s `version` is the only hand-maintained copy. The website
-reads it at build time for surfaces that advertise a version (the
-`llms.txt` citation card, via `website/lib/library-version.ts`), so
-bumping the manifest and tagging is the whole release sweep — nothing
-on the site needs a matching edit.
+`lwpt.toml`'s `version` is the only hand-maintained copy of the
+*exact* version. Surfaces that cite it (the website's `llms.txt`
+citation card, via `website/lib/library-version.ts`) read it at build
+time, so a patch or minor release is the manifest bump plus the tag.
+
+The `@^2.0` **major selectors** in installation instructions are
+authored separately and are part of the major-release checklist —
+update them when the major changes:
+
+- `README.md` (install command)
+- `docs/guides/quick-start.md` and `docs/guides/shipping.md`
+- `website/app/(home)/page.tsx` (install snippet and the "How do I
+  build" FAQ answer)

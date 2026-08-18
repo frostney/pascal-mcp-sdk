@@ -6,22 +6,9 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { visit } from 'unist-util-visit';
+import { findRepoRoot } from './repo-root.mjs';
 
 const githubBase = 'https://github.com/frostney/pascal-mcp-sdk';
-
-// Walk up from the processed file to the repository root (the
-// directory holding lwpt.toml) — bundlers rewrite import.meta paths,
-// so the anchor must come from the file being processed.
-function findRepoRoot(from) {
-  let dir = from;
-  for (;;) {
-    if (fs.existsSync(path.join(dir, 'lwpt.toml'))) return dir;
-    const parent = path.dirname(dir);
-    if (parent === dir)
-      throw new Error(`repository root not found above ${from}`);
-    dir = parent;
-  }
-}
 
 function mapHref(href, filePath) {
   const repoRoot = findRepoRoot(path.dirname(filePath));
