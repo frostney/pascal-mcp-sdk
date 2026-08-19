@@ -56,10 +56,19 @@ export const source = loader({
   plugins: [],
 });
 
-// Display title for pages without frontmatter: 'quick-start' →
+// Title for pages without frontmatter (the docs stay frontmatter-free
+// by design): the page's own H1 — the one title source, so <title>,
+// Open Graph, JSON-LD, search, and the markdown export all agree with
+// the visible heading ('# Shipping Your Server', not 'Shipping'). The
+// H1 is located through the toc (depth) and read from the structured
+// data (plain-text content). Falls back to the slug: 'quick-start' →
 // 'Quick Start'; the docs root is 'Documentation'.
 export function pageTitle(page: (typeof source)['$inferPage']): string {
   if (page.data.title) return page.data.title;
+  const h1 = page.data.toc.find((item) => item.depth === 1);
+  const h1Text =
+    h1 && page.data.structuredData.headings.find((h) => `#${h.id}` === h1.url)?.content;
+  if (h1Text) return h1Text;
   const slug = page.slugs.at(-1);
   if (!slug) return 'Documentation';
   return slug

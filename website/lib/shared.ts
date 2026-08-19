@@ -13,3 +13,13 @@ export const gitConfig = {
   repo: 'pascal-mcp-sdk',
   branch: 'main',
 };
+export const repoUrl = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;
+
+// Canonical absolute URL of a rendered page. next.config.mjs sets
+// trailingSlash, so every page is served at its slash-suffixed path;
+// the sitemap, canonicals, and JSON-LD all go through here so the
+// discovery surfaces publish one URL form. Not for files (llms.txt,
+// content.md, sitemap.xml) — those keep their bare path.
+export function pageUrl(path: string): string {
+  return `${siteUrl}${path.endsWith('/') ? path : `${path}/`}`;
+}

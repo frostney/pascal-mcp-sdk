@@ -15,7 +15,7 @@ import { notFound } from 'next/navigation';
 import { getMDXComponents } from '@/components/mdx';
 import type { Metadata } from 'next';
 import { createRelativeLink } from 'fumadocs-ui/mdx';
-import { basePath, gitConfig, siteUrl } from '@/lib/shared';
+import { basePath, gitConfig, pageUrl } from '@/lib/shared';
 
 export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
   const params = await props.params;
@@ -29,11 +29,11 @@ export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
     '@type': 'TechArticle',
     headline: pageTitle(page),
     description: await pageDescription(page),
-    url: `${siteUrl}${page.url}`,
+    url: pageUrl(page.url),
     isPartOf: {
       '@type': 'WebSite',
       name: 'pascal-mcp-sdk documentation',
-      url: `${siteUrl}/docs`,
+      url: pageUrl('/docs'),
     },
   };
 
@@ -76,7 +76,7 @@ export async function generateMetadata(props: PageProps<'/docs/[[...slug]]'>): P
   return {
     title: pageTitle(page),
     description: await pageDescription(page),
-    alternates: { canonical: `${siteUrl}${page.url}` },
+    alternates: { canonical: pageUrl(page.url) },
     openGraph: {
       images: `${basePath}${getPageImageUrl(page).url}`,
     },
