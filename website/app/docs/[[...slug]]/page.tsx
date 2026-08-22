@@ -15,7 +15,7 @@ import { notFound } from 'next/navigation';
 import { getMDXComponents } from '@/components/mdx';
 import type { Metadata } from 'next';
 import { createRelativeLink } from 'fumadocs-ui/mdx';
-import { basePath, gitConfig, pageUrl, siteUrl } from '@/lib/shared';
+import { gitConfig, pageUrl, resourceUrl } from '@/lib/shared';
 
 export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
   const params = await props.params;
@@ -24,7 +24,7 @@ export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
 
   const MDX = page.data.body;
   const markdownUrl = getPageMarkdownUrl(page).url;
-  const llmsTxtUrl = `${siteUrl}/llms.txt`;
+  const llmsTxtUrl = resourceUrl('/llms.txt');
   const jsonLd = {
     '@context': 'https://schema.org',
     '@type': 'TechArticle',
@@ -86,10 +86,10 @@ export async function generateMetadata(props: PageProps<'/docs/[[...slug]]'>): P
       canonical: pageUrl(page.url),
       // The same page as clean Markdown (the content.md route the
       // copy button serves), discoverable by machine consumers.
-      types: { 'text/markdown': `${siteUrl}${getPageMarkdownUrl(page).url}` },
+      types: { 'text/markdown': resourceUrl(getPageMarkdownUrl(page).url) },
     },
     openGraph: {
-      images: `${basePath}${getPageImageUrl(page).url}`,
+      images: resourceUrl(getPageImageUrl(page).url),
     },
   };
 }

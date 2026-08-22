@@ -1,5 +1,5 @@
 import { getPageMarkdownUrl, pageDescription, pageTitle, source } from '@/lib/source';
-import { appName, pageUrl, repoUrl, siteUrl } from '@/lib/shared';
+import { appName, pageUrl, repoUrl, resourceUrl } from '@/lib/shared';
 
 export const revalidate = false;
 
@@ -13,7 +13,7 @@ export const revalidate = false;
 // stale.
 async function resourceLine(page: (typeof source)['$inferPage']): Promise<string> {
   const description = await pageDescription(page);
-  const link = `[${pageTitle(page)}](${siteUrl}${getPageMarkdownUrl(page).url})`;
+  const link = `[${pageTitle(page)}](${resourceUrl(getPageMarkdownUrl(page).url)})`;
   return description ? `- ${link}: ${description}` : `- ${link}`;
 }
 

@@ -23,3 +23,10 @@ export const repoUrl = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;
 export function pageUrl(path: string): string {
   return `${siteUrl}${path.endsWith('/') ? path : `${path}/`}`;
 }
+
+// Absolute URL of an exported file or route whose name must remain
+// bare. Keep resource construction separate from pageUrl so metadata
+// never adds a trailing slash to llms.txt, content.md, or images.
+export function resourceUrl(path: string): string {
+  return `${siteUrl}${path.startsWith('/') ? path : `/${path}`}`;
+}
