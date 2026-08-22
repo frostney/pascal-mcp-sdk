@@ -15,7 +15,7 @@ import { notFound } from 'next/navigation';
 import { getMDXComponents } from '@/components/mdx';
 import type { Metadata } from 'next';
 import { createRelativeLink } from 'fumadocs-ui/mdx';
-import { basePath, gitConfig, pageUrl } from '@/lib/shared';
+import { basePath, gitConfig, pageUrl, siteUrl } from '@/lib/shared';
 
 export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
   const params = await props.params;
@@ -24,6 +24,7 @@ export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
 
   const MDX = page.data.body;
   const markdownUrl = getPageMarkdownUrl(page).url;
+  const llmsTxtUrl = `${siteUrl}/llms.txt`;
   const jsonLd = {
     '@context': 'https://schema.org',
     '@type': 'TechArticle',
@@ -45,6 +46,11 @@ export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
       />
+      {/* llms.txt publisher guidance: point each rendered page at the
+          site's covering llms.txt. Next's Metadata API has no slot for
+          this relation; React hoists the <link> into <head>. The
+          text/markdown alternate is emitted via generateMetadata. */}
+      <link rel="describedby" type="text/plain" href={llmsTxtUrl} />
       <div className="flex flex-row gap-2 items-center border-b pb-6">
         <MarkdownCopyButton markdownUrl={markdownUrl} />
         <ViewOptionsPopover
@@ -76,7 +82,12 @@ export async function generateMetadata(props: PageProps<'/docs/[[...slug]]'>): P
   return {
     title: pageTitle(page),
     description: await pageDescription(page),
-    alternates: { canonical: pageUrl(page.url) },
+    alternates: {
+      canonical: pageUrl(page.url),
+      // The same page as clean Markdown (the content.md route the
+      // copy button serves), discoverable by machine consumers.
+      types: { 'text/markdown': `${siteUrl}${getPageMarkdownUrl(page).url}` },
+    },
     openGraph: {
       images: `${basePath}${getPageImageUrl(page).url}`,
     },
