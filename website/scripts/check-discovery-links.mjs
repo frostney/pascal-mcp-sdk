@@ -1,3 +1,8 @@
+// Postbuild gate for the discovery surfaces in the static export:
+// every rendered docs page advertises its canonical URL, its Markdown
+// alternate, and the covering llms.txt; every Markdown export carries
+// exactly one H1; and llms.txt lists every exported page exactly once,
+// in the right section, with local links that resolve under out/.
 import { access, readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,15 +38,28 @@ function exactlyOne(links, predicate, description, page) {
   return matches[0];
 }
 
-for (const page of await exportedDocsPages(docsRoot)) {
+// Exported file for a site-local URL: pages are directories with an
+// index.html (trailingSlash export); anything else is a bare file.
+async function assertExported(href, sitePrefix, context) {
+  const relative = href.slice(sitePrefix.length);
+  const file = relative.endsWith('/') ? `${relative}index.html` : relative;
+  try {
+    await access(path.join(outputRoot, file));
+  } catch {
+    throw new Error(`${context}: ${href} does not resolve to an exported file (${file})`);
+  }
+}
+
+const pages = await exportedDocsPages(docsRoot);
+if (pages.length === 0) throw new Error(`${docsRoot}: no exported docs pages found`);
+
+// Markdown alternate → llms.txt section it must appear in.
+const expectedResources = new Map();
+let sitePrefix;
+for (const page of pages) {
   const html = await readFile(page, 'utf8');
   const links = linkAttributes(html);
-  const canonical = exactlyOne(
-    links,
-    (link) => link.rel === 'canonical',
-    'canonical link',
-    page,
-  );
+  const canonical = exactlyOne(links, (link) => link.rel === 'canonical', 'canonical link', page);
   const alternate = exactlyOne(
     links,
     (link) => link.rel === 'alternate' && link.type === 'text/markdown',
@@ -59,19 +77,77 @@ for (const page of await exportedDocsPages(docsRoot)) {
   if (docsMarker < 0) throw new Error(`${page}: canonical URL is outside /docs/`);
   const sitePath = canonicalUrl.pathname.slice(0, docsMarker);
   const docsPath = canonicalUrl.pathname.slice(docsMarker).replace(/\/$/, '');
-  const expectedAlternate = new URL(
-    `${sitePath}/llms.mdx${docsPath}/content.md`,
-    canonicalUrl.origin,
-  ).href;
-  const expectedDescribedBy = new URL(`${sitePath}/llms.txt`, canonicalUrl.origin).href;
+  const prefix = `${canonicalUrl.origin}${sitePath}`;
+  if (sitePrefix && sitePrefix !== prefix) {
+    throw new Error(`${page}: canonical site prefix ${prefix} differs from ${sitePrefix}`);
+  }
+  sitePrefix = prefix;
+  const expectedAlternate = `${prefix}/llms.mdx${docsPath}/content.md`;
+  const expectedDescribedBy = `${prefix}/llms.txt`;
   if (alternate.href !== expectedAlternate) {
     throw new Error(`${page}: Markdown alternate is ${alternate.href}, expected ${expectedAlternate}`);
   }
   if (describedBy.href !== expectedDescribedBy) {
     throw new Error(`${page}: describedby is ${describedBy.href}, expected ${expectedDescribedBy}`);
   }
-  await access(path.join(outputRoot, `llms.mdx${docsPath}`, 'content.md'));
+  await assertExported(alternate.href, sitePrefix, page);
+  const markdownFile = path.join(outputRoot, `llms.mdx${docsPath}`, 'content.md');
+  const markdown = await readFile(markdownFile, 'utf8');
+  const h1Count = markdown.split('\n').filter((line) => /^#\s/.test(line)).length;
+  if (h1Count !== 1) throw new Error(`${markdownFile}: expected exactly one H1, found ${h1Count}`);
+  expectedResources.set(
+    alternate.href,
+    docsPath.startsWith('/docs/internals/') ? 'Optional' : 'Docs',
+  );
 }
 
-await access(path.join(outputRoot, 'llms.txt'));
-console.log('Exported docs advertise valid Markdown alternates and llms.txt coverage.');
+// llms.txt (https://llmstxt.org): H1, blockquote summary, then H2
+// sections whose bullets are Markdown links.
+const llmsTxtPath = path.join(outputRoot, 'llms.txt');
+const llmsTxt = await readFile(llmsTxtPath, 'utf8');
+const lines = llmsTxt.split('\n');
+if (!/^#\s\S/.test(lines[0])) throw new Error(`${llmsTxtPath}: must open with an H1`);
+if (!lines.some((line) => /^>\s\S/.test(line))) {
+  throw new Error(`${llmsTxtPath}: missing the blockquote summary`);
+}
+const sections = new Map();
+let current;
+for (const line of lines) {
+  const heading = /^##\s+(.+?)\s*$/.exec(line);
+  if (heading) {
+    current = heading[1];
+    if (sections.has(current)) throw new Error(`${llmsTxtPath}: duplicate section ${current}`);
+    sections.set(current, []);
+  } else if (current !== undefined) {
+    sections.get(current).push(line);
+  }
+}
+for (const name of ['Docs', 'Optional']) {
+  if (!sections.has(name)) throw new Error(`${llmsTxtPath}: missing "## ${name}" section`);
+}
+
+// href → sections it is linked from (bullets only, one link per bullet).
+const listed = new Map();
+for (const [name, body] of sections) {
+  for (const line of body) {
+    if (!line.startsWith('- ')) continue;
+    const link = /^- \[[^\]]+\]\(([^)\s]+)\)/.exec(line);
+    if (!link) throw new Error(`${llmsTxtPath}: "## ${name}" bullet is not a Markdown link: ${line}`);
+    listed.set(link[1], [...(listed.get(link[1]) ?? []), name]);
+  }
+}
+for (const [href, section] of expectedResources) {
+  const where = listed.get(href) ?? [];
+  if (where.length !== 1 || where[0] !== section) {
+    throw new Error(
+      `${llmsTxtPath}: ${href} expected exactly once under "## ${section}", found under [${where.join(', ')}]`,
+    );
+  }
+}
+for (const href of listed.keys()) {
+  if (href.startsWith(`${sitePrefix}/`)) await assertExported(href, sitePrefix, llmsTxtPath);
+}
+
+console.log(
+  `Exported docs (${pages.length} pages) advertise valid Markdown alternates; llms.txt lists each once with resolving links.`,
+);
