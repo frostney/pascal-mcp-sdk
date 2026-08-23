@@ -1,8 +1,9 @@
 // Postbuild gate for the discovery surfaces in the static export:
-// every rendered docs page advertises its canonical URL, its Markdown
-// alternate, and the covering llms.txt; every Markdown export carries
-// exactly one H1; and llms.txt lists every exported page exactly once,
-// in the right section, with local links that resolve under out/.
+// every rendered docs page advertises its own canonical URL, its
+// Markdown alternate, and the covering llms.txt; every Markdown export
+// carries exactly one H1; and llms.txt lists every exported page
+// exactly once, in the right section, with local links that resolve
+// under out/.
 import { access, readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,6 +31,11 @@ function linkAttributes(html) {
   );
 }
 
+// HTML rel is a case-insensitive, whitespace-separated token set.
+function hasRel(link, token) {
+  return (link.rel ?? '').toLowerCase().split(/\s+/).includes(token);
+}
+
 function exactlyOne(links, predicate, description, page) {
   const matches = links.filter(predicate);
   if (matches.length !== 1) {
@@ -38,15 +44,26 @@ function exactlyOne(links, predicate, description, page) {
   return matches[0];
 }
 
-// Exported file for a site-local URL: pages are directories with an
-// index.html (trailingSlash export); anything else is a bare file.
-async function assertExported(href, sitePrefix, context) {
-  const relative = href.slice(sitePrefix.length);
-  const file = relative.endsWith('/') ? `${relative}index.html` : relative;
+// Site-local URL → exported file, or null when the URL is not local.
+// Resolves relative hrefs against `base`, lets URL normalize dot
+// segments, and proves the filesystem target stays under out/.
+function localTarget(href, base, site) {
+  const url = new URL(href, base);
+  if (url.origin !== site.origin || !url.pathname.startsWith(`${site.path}/`)) return null;
+  const relative = decodeURIComponent(url.pathname.slice(site.path.length + 1));
+  const file = relative === '' || relative.endsWith('/') ? `${relative}index.html` : relative;
+  const target = path.resolve(outputRoot, file);
+  if (target !== outputRoot && !target.startsWith(`${outputRoot}${path.sep}`)) {
+    throw new Error(`${href} resolves outside the export root (${target})`);
+  }
+  return { href: url.href, target };
+}
+
+async function assertExported(resolved, context) {
   try {
-    await access(path.join(outputRoot, file));
+    await access(resolved.target);
   } catch {
-    throw new Error(`${context}: ${href} does not resolve to an exported file (${file})`);
+    throw new Error(`${context}: ${resolved.href} does not resolve to an exported file (${resolved.target})`);
   }
 }
 
@@ -59,23 +76,23 @@ if (pages.length === 0) throw new Error(`${docsRoot}: no exported docs pages fou
 // cannot make two pages collapse onto one resource.
 const expectedResources = new Map();
 const seenCanonicals = new Set();
-let sitePrefix;
+let site;
 for (const page of pages) {
   // out/docs/guides/tools/index.html → /docs/guides/tools/ ; out/docs/index.html → /docs/
   const route = `/docs/${path.relative(docsRoot, path.dirname(page)).split(path.sep).filter(Boolean).join('/')}`;
   const expectedRoute = route.endsWith('/') ? route : `${route}/`;
   const html = await readFile(page, 'utf8');
   const links = linkAttributes(html);
-  const canonical = exactlyOne(links, (link) => link.rel === 'canonical', 'canonical link', page);
+  const canonical = exactlyOne(links, (link) => hasRel(link, 'canonical'), 'canonical link', page);
   const alternate = exactlyOne(
     links,
-    (link) => link.rel === 'alternate' && link.type === 'text/markdown',
+    (link) => hasRel(link, 'alternate') && link.type === 'text/markdown',
     'text/markdown alternate link',
     page,
   );
   const describedBy = exactlyOne(
     links,
-    (link) => link.rel === 'describedby' && link.type === 'text/plain',
+    (link) => hasRel(link, 'describedby') && link.type === 'text/plain',
     'text/plain describedby link',
     page,
   );
@@ -90,12 +107,12 @@ for (const page of pages) {
     throw new Error(`${page}: canonical ${canonical.href} is already claimed by another page`);
   }
   seenCanonicals.add(canonical.href);
-  const docsPath = expectedRoute.replace(/\/$/, '');
   const prefix = `${canonicalUrl.origin}${sitePath}`;
-  if (sitePrefix && sitePrefix !== prefix) {
-    throw new Error(`${page}: canonical site prefix ${prefix} differs from ${sitePrefix}`);
+  if (site && `${site.origin}${site.path}` !== prefix) {
+    throw new Error(`${page}: canonical site prefix ${prefix} differs from ${site.origin}${site.path}`);
   }
-  sitePrefix = prefix;
+  site = { origin: canonicalUrl.origin, path: sitePath };
+  const docsPath = expectedRoute.replace(/\/$/, '');
   const expectedAlternate = `${prefix}/llms.mdx${docsPath}/content.md`;
   const expectedDescribedBy = `${prefix}/llms.txt`;
   if (alternate.href !== expectedAlternate) {
@@ -104,11 +121,11 @@ for (const page of pages) {
   if (describedBy.href !== expectedDescribedBy) {
     throw new Error(`${page}: describedby is ${describedBy.href}, expected ${expectedDescribedBy}`);
   }
-  await assertExported(alternate.href, sitePrefix, page);
-  const markdownFile = path.join(outputRoot, `llms.mdx${docsPath}`, 'content.md');
-  const markdown = await readFile(markdownFile, 'utf8');
-  const h1Count = markdown.split('\n').filter((line) => /^#\s/.test(line)).length;
-  if (h1Count !== 1) throw new Error(`${markdownFile}: expected exactly one H1, found ${h1Count}`);
+  const markdown = localTarget(alternate.href, canonical.href, site);
+  await assertExported(markdown, page);
+  const text = await readFile(markdown.target, 'utf8');
+  const h1Count = text.split('\n').filter((line) => /^#\s/.test(line)).length;
+  if (h1Count !== 1) throw new Error(`${markdown.target}: expected exactly one H1, found ${h1Count}`);
   if (expectedResources.has(alternate.href)) {
     throw new Error(`${page}: Markdown alternate ${alternate.href} is already claimed by another page`);
   }
@@ -122,39 +139,48 @@ if (expectedResources.size !== pages.length) {
 }
 
 // llms.txt (https://llmstxt.org): H1, blockquote summary, then H2
-// sections whose bullets are Markdown links.
+// sections whose bullets are single Markdown links. Every bullet in the
+// file is validated: bullets outside the recognized sections and extra
+// links on a bullet are errors, and links are resolved against the
+// deployed llms.txt URL so relative spellings and aliases are
+// normalized before the exact-once and resolution checks.
 const llmsTxtPath = path.join(outputRoot, 'llms.txt');
+const llmsTxtUrl = `${site.origin}${site.path}/llms.txt`;
 const llmsTxt = await readFile(llmsTxtPath, 'utf8');
 const lines = llmsTxt.split('\n');
 if (!/^#\s\S/.test(lines[0])) throw new Error(`${llmsTxtPath}: must open with an H1`);
 if (!lines.some((line) => /^>\s\S/.test(line))) {
   throw new Error(`${llmsTxtPath}: missing the blockquote summary`);
 }
-const sections = new Map();
+const RECOGNIZED_SECTIONS = new Set(['Docs', 'Source', 'Optional']);
+const sections = new Set();
+// normalized href → sections it is linked from
+const listed = new Map();
 let current;
 for (const line of lines) {
   const heading = /^##\s+(.+?)\s*$/.exec(line);
   if (heading) {
     current = heading[1];
-    if (sections.has(current)) throw new Error(`${llmsTxtPath}: duplicate section ${current}`);
-    sections.set(current, []);
-  } else if (current !== undefined) {
-    sections.get(current).push(line);
+    if (sections.has(current)) throw new Error(`${llmsTxtPath}: duplicate section "## ${current}"`);
+    if (!RECOGNIZED_SECTIONS.has(current)) {
+      throw new Error(`${llmsTxtPath}: unrecognized section "## ${current}"`);
+    }
+    sections.add(current);
+    continue;
   }
+  if (!line.startsWith('- ')) continue;
+  if (current === undefined) {
+    throw new Error(`${llmsTxtPath}: resource bullet before the first section: ${line}`);
+  }
+  const links = [...line.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/g)].map((m) => m[1]);
+  if (links.length !== 1 || !/^- \[[^\]]+\]\(/.test(line)) {
+    throw new Error(`${llmsTxtPath}: "## ${current}" bullet must be exactly one Markdown link: ${line}`);
+  }
+  const href = new URL(links[0], llmsTxtUrl).href;
+  listed.set(href, [...(listed.get(href) ?? []), current]);
 }
 for (const name of ['Docs', 'Optional']) {
   if (!sections.has(name)) throw new Error(`${llmsTxtPath}: missing "## ${name}" section`);
-}
-
-// href → sections it is linked from (bullets only, one link per bullet).
-const listed = new Map();
-for (const [name, body] of sections) {
-  for (const line of body) {
-    if (!line.startsWith('- ')) continue;
-    const link = /^- \[[^\]]+\]\(([^)\s]+)\)/.exec(line);
-    if (!link) throw new Error(`${llmsTxtPath}: "## ${name}" bullet is not a Markdown link: ${line}`);
-    listed.set(link[1], [...(listed.get(link[1]) ?? []), name]);
-  }
 }
 for (const [href, section] of expectedResources) {
   const where = listed.get(href) ?? [];
@@ -165,7 +191,8 @@ for (const [href, section] of expectedResources) {
   }
 }
 for (const href of listed.keys()) {
-  if (href.startsWith(`${sitePrefix}/`)) await assertExported(href, sitePrefix, llmsTxtPath);
+  const resolved = localTarget(href, llmsTxtUrl, site);
+  if (resolved) await assertExported(resolved, llmsTxtPath);
 }
 
 console.log(
