@@ -1,5 +1,5 @@
 import { loader } from 'fumadocs-core/source';
-import { docsContentRoute, docsImageRoute, docsRoute } from './shared';
+import { docsContentRoute, docsImageRoute, docsRoute, pageUrl } from './shared';
 import { defineDocs } from 'fumadocs-mdx/macro';
 import { metaSchema, pageSchema } from 'fumadocs-core/source/schema';
 import { z } from 'zod';
@@ -56,10 +56,19 @@ export const source = loader({
   plugins: [],
 });
 
-// Display title for pages without frontmatter: 'quick-start' →
+// Title for pages without frontmatter (the docs stay frontmatter-free
+// by design): the page's own H1 — the one title source, so <title>,
+// Open Graph, JSON-LD, search, and the markdown export all agree with
+// the visible heading ('# Shipping Your Server', not 'Shipping'). The
+// H1 is located through the toc (depth) and read from the structured
+// data (plain-text content). Falls back to the slug: 'quick-start' →
 // 'Quick Start'; the docs root is 'Documentation'.
 export function pageTitle(page: (typeof source)['$inferPage']): string {
   if (page.data.title) return page.data.title;
+  const h1 = page.data.toc.find((item) => item.depth === 1);
+  const h1Text =
+    h1 && page.data.structuredData.headings.find((h) => `#${h.id}` === h1.url)?.content;
+  if (h1Text) return h1Text;
   const slug = page.slugs.at(-1);
   if (!slug) return 'Documentation';
   return slug
@@ -110,10 +119,17 @@ export function getPageMarkdownUrl(page: (typeof source)['$inferPage']) {
   };
 }
 
+// Per-page Markdown export (content.md, llms-full.txt). Exactly one H1:
+// the body's own heading is the title (pageTitle reads it), so it is
+// lifted rather than duplicated, and the page's canonical URL follows
+// as plain metadata instead of a second heading.
 export async function getLLMText(page: (typeof source)['$inferPage']) {
   const processed = await page.data.getText('processed');
+  const body = processed.replace(/^#\s[^\n]*\n+/, '');
 
-  return `# ${pageTitle(page)} (${page.url})
+  return `# ${pageTitle(page)}
 
-${processed}`;
+Source: ${pageUrl(page.url)}
+
+${body}`;
 }
