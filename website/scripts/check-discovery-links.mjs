@@ -53,10 +53,17 @@ async function assertExported(href, sitePrefix, context) {
 const pages = await exportedDocsPages(docsRoot);
 if (pages.length === 0) throw new Error(`${docsRoot}: no exported docs pages found`);
 
-// Markdown alternate → llms.txt section it must appear in.
+// Markdown alternate → llms.txt section it must appear in. Keyed per
+// rendered page, and a page must advertise *its own* canonical (the
+// route its index.html was exported at), so miswired or copied metadata
+// cannot make two pages collapse onto one resource.
 const expectedResources = new Map();
+const seenCanonicals = new Set();
 let sitePrefix;
 for (const page of pages) {
+  // out/docs/guides/tools/index.html → /docs/guides/tools/ ; out/docs/index.html → /docs/
+  const route = `/docs/${path.relative(docsRoot, path.dirname(page)).split(path.sep).filter(Boolean).join('/')}`;
+  const expectedRoute = route.endsWith('/') ? route : `${route}/`;
   const html = await readFile(page, 'utf8');
   const links = linkAttributes(html);
   const canonical = exactlyOne(links, (link) => link.rel === 'canonical', 'canonical link', page);
@@ -76,7 +83,14 @@ for (const page of pages) {
   const docsMarker = canonicalUrl.pathname.indexOf('/docs/');
   if (docsMarker < 0) throw new Error(`${page}: canonical URL is outside /docs/`);
   const sitePath = canonicalUrl.pathname.slice(0, docsMarker);
-  const docsPath = canonicalUrl.pathname.slice(docsMarker).replace(/\/$/, '');
+  if (canonicalUrl.pathname.slice(docsMarker) !== expectedRoute) {
+    throw new Error(`${page}: canonical ${canonical.href} does not match its exported route ${expectedRoute}`);
+  }
+  if (seenCanonicals.has(canonical.href)) {
+    throw new Error(`${page}: canonical ${canonical.href} is already claimed by another page`);
+  }
+  seenCanonicals.add(canonical.href);
+  const docsPath = expectedRoute.replace(/\/$/, '');
   const prefix = `${canonicalUrl.origin}${sitePath}`;
   if (sitePrefix && sitePrefix !== prefix) {
     throw new Error(`${page}: canonical site prefix ${prefix} differs from ${sitePrefix}`);
@@ -95,10 +109,16 @@ for (const page of pages) {
   const markdown = await readFile(markdownFile, 'utf8');
   const h1Count = markdown.split('\n').filter((line) => /^#\s/.test(line)).length;
   if (h1Count !== 1) throw new Error(`${markdownFile}: expected exactly one H1, found ${h1Count}`);
+  if (expectedResources.has(alternate.href)) {
+    throw new Error(`${page}: Markdown alternate ${alternate.href} is already claimed by another page`);
+  }
   expectedResources.set(
     alternate.href,
     docsPath.startsWith('/docs/internals/') ? 'Optional' : 'Docs',
   );
+}
+if (expectedResources.size !== pages.length) {
+  throw new Error(`expected one discovery resource per rendered page: ${expectedResources.size} resources for ${pages.length} pages`);
 }
 
 // llms.txt (https://llmstxt.org): H1, blockquote summary, then H2
