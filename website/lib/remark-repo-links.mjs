@@ -6,22 +6,8 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { visit } from 'unist-util-visit';
-
-const githubBase = 'https://github.com/frostney/pascal-mcp-sdk';
-
-// Walk up from the processed file to the repository root (the
-// directory holding lwpt.toml) — bundlers rewrite import.meta paths,
-// so the anchor must come from the file being processed.
-function findRepoRoot(from) {
-  let dir = from;
-  for (;;) {
-    if (fs.existsSync(path.join(dir, 'lwpt.toml'))) return dir;
-    const parent = path.dirname(dir);
-    if (parent === dir)
-      throw new Error(`repository root not found above ${from}`);
-    dir = parent;
-  }
-}
+import { findRepoRoot } from './repo-root.mjs';
+import { basePath, gitConfig, repoUrl } from './site-identity.mjs';
 
 function mapHref(href, filePath) {
   const repoRoot = findRepoRoot(path.dirname(filePath));
@@ -53,15 +39,15 @@ function mapHref(href, filePath) {
   // Leaves the rendered set: GitHub URL.
   const repoRelative = path.relative(repoRoot, resolved);
   const kind = fs.statSync(resolved).isDirectory() ? 'tree' : 'blob';
-  return `${githubBase}/${kind}/main/${repoRelative}${suffix}`;
+  return `${repoUrl}/${kind}/${gitConfig.branch}/${repoRelative}${suffix}`;
 }
 
 // Images under docs/images/ are copied into the site's public/ tree
 // by scripts/sync-docs-assets.mjs (prebuild); the markdown's relative
 // path is rewritten to that served location, basePath included (plain
 // <img> src attributes don't get the Next basePath automatically).
-// Mirrors basePath in lib/shared.ts / next.config.mjs.
-const basePath = '/pascal-mcp-sdk';
+// basePath comes from site-identity.mjs (same module as shared.ts
+// and next.config.mjs).
 
 function mapImage(src, filePath) {
   if (/^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith('#')) return src;

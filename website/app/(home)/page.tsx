@@ -2,13 +2,13 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import { codeToHtml } from 'shiki';
 import { LogoMark } from '@/components/logo';
-import { gitConfig, siteUrl } from '@/lib/shared';
+import { gitConfig, pageUrl, repoUrl } from '@/lib/shared';
 
 export const metadata: Metadata = {
   title: { absolute: 'pascal-mcp-sdk — a FreePascal-native MCP server library' },
   description:
     'Give AI agents tools written in Pascal: a FreePascal-native MCP (Model Context Protocol) server library with zero third-party dependencies, stdio and Streamable HTTP transports, and out-of-the-box Claude Code support.',
-  alternates: { canonical: `${siteUrl}/` },
+  alternates: { canonical: pageUrl('/') },
 };
 
 const QUICK_START = `Server := TMCPServer.Create('my-server', '1.0.0');
@@ -40,6 +40,10 @@ const FAQ: { q: string; a: string; extra?: React.ReactNode }[] = [
     q: 'Which parts of the MCP specification are implemented?',
     a: 'Tools, resources with RFC 6570 templates, prompts, multi-round-trip input requests (elicitation, sampling, roots), progress and log notifications, caching hints, stdio and Streamable HTTP transports, plus the classic initialize handshake era that current clients speak. Deliberately out: subscriptions/listen and list-changed notifications, since registries are static after startup.',
   },
+  {
+    q: 'Is this the same as claude-pascal-mcp or @pascal-app/mcp?',
+    a: 'No. pascal-mcp-sdk is a FreePascal library for writing MCP servers in Pascal. tina4stack/claude-pascal-mcp is a Python MCP server that compiles Pascal. @pascal-app/mcp is the MCP for a 3D editor. Same word, different products.',
+  },
 ];
 
 function jsonLd() {
@@ -49,13 +53,15 @@ function jsonLd() {
       {
         '@type': 'SoftwareApplication',
         name: 'pascal-mcp-sdk',
+        alternateName: 'FreePascal MCP server library',
         description:
           'A FreePascal-native MCP (Model Context Protocol) server library with zero third-party dependencies.',
-        url: siteUrl,
+        url: pageUrl('/'),
         applicationCategory: 'DeveloperApplication',
         operatingSystem: 'Linux, macOS, Windows',
         license: 'https://opensource.org/license/mit',
-        codeRepository: `https://github.com/${gitConfig.user}/${gitConfig.repo}`,
+        codeRepository: repoUrl,
+        sameAs: [repoUrl],
         programmingLanguage: 'Pascal',
         offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
       },
@@ -72,7 +78,6 @@ function jsonLd() {
 }
 
 export default async function HomePage() {
-  const github = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;
   const quickStartHtml = await codeToHtml(QUICK_START, {
     lang: 'pascal',
     themes: { light: 'github-light', dark: 'github-dark' },
@@ -88,7 +93,10 @@ export default async function HomePage() {
         <div className="text-fd-primary">
           <LogoMark size={72} />
         </div>
-        <h1 className="text-4xl font-bold">pascal-mcp-sdk</h1>
+        <h1 className="text-4xl font-bold">
+          FreePascal-native MCP server library
+        </h1>
+        <p className="text-sm text-fd-muted-foreground">pascal-mcp-sdk</p>
         <p className="text-lg text-fd-muted-foreground">
           Give AI agents tools written in Pascal. pascal-mcp-sdk turns any{' '}
           <a href="https://www.freepascal.org" className="underline">
@@ -122,7 +130,7 @@ export default async function HomePage() {
             Documentation
           </Link>
           <a
-            href={github}
+            href={repoUrl}
             className="rounded-full border px-5 py-2.5 font-medium"
           >
             GitHub

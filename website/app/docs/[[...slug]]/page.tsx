@@ -15,7 +15,7 @@ import { notFound } from 'next/navigation';
 import { getMDXComponents } from '@/components/mdx';
 import type { Metadata } from 'next';
 import { createRelativeLink } from 'fumadocs-ui/mdx';
-import { basePath, gitConfig, siteUrl } from '@/lib/shared';
+import { appName, basePath, docsRoute, gitConfig, pageUrl, repoUrl } from '@/lib/shared';
 
 export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
   const params = await props.params;
@@ -29,11 +29,11 @@ export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
     '@type': 'TechArticle',
     headline: pageTitle(page),
     description: await pageDescription(page),
-    url: `${siteUrl}${page.url}`,
+    url: pageUrl(page.url),
     isPartOf: {
       '@type': 'WebSite',
-      name: 'pascal-mcp-sdk documentation',
-      url: `${siteUrl}/docs`,
+      name: `${appName} documentation`,
+      url: pageUrl(docsRoute),
     },
   };
 
@@ -49,7 +49,7 @@ export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
         <MarkdownCopyButton markdownUrl={markdownUrl} />
         <ViewOptionsPopover
           markdownUrl={markdownUrl}
-          githubUrl={`https://github.com/${gitConfig.user}/${gitConfig.repo}/blob/${gitConfig.branch}/docs/${page.path}`}
+          githubUrl={`${repoUrl}/blob/${gitConfig.branch}/docs/${page.path}`}
         />
       </div>
       <DocsBody>
@@ -76,7 +76,7 @@ export async function generateMetadata(props: PageProps<'/docs/[[...slug]]'>): P
   return {
     title: pageTitle(page),
     description: await pageDescription(page),
-    alternates: { canonical: `${siteUrl}${page.url}` },
+    alternates: { canonical: pageUrl(page.url) },
     openGraph: {
       images: `${basePath}${getPageImageUrl(page).url}`,
     },

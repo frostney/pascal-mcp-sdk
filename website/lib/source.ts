@@ -1,5 +1,8 @@
 import { loader } from 'fumadocs-core/source';
+import fs from 'node:fs';
+import path from 'node:path';
 import { docsContentRoute, docsImageRoute, docsRoute } from './shared';
+import { findRepoRoot } from './repo-root.mjs';
 import { defineDocs } from 'fumadocs-mdx/macro';
 import { metaSchema, pageSchema } from 'fumadocs-core/source/schema';
 import { z } from 'zod';
@@ -56,16 +59,36 @@ export const source = loader({
   plugins: [],
 });
 
-// Display title for pages without frontmatter: 'quick-start' →
-// 'Quick Start'; the docs root is 'Documentation'.
+// Display title for pages without frontmatter: prefer the document
+// H1 (the visible article title) so metadata, JSON-LD, search, and
+// generated LLM text stay aligned with the page. Slug title-case is
+// the fallback when a page has no H1.
 export function pageTitle(page: (typeof source)['$inferPage']): string {
   if (page.data.title) return page.data.title;
+  const fromHeading = headingFromPage(page);
+  if (fromHeading) return fromHeading;
   const slug = page.slugs.at(-1);
   if (!slug) return 'Documentation';
   return slug
     .split('-')
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(' ');
+}
+
+function headingFromPage(page: (typeof source)['$inferPage']): string | undefined {
+  const toc = page.data.toc;
+  if (Array.isArray(toc)) {
+    const h1 = toc.find((item) => item.depth === 1 && typeof item.title === 'string');
+    if (h1 && typeof h1.title === 'string' && h1.title.trim()) return h1.title.trim();
+  }
+  try {
+    const file = path.join(findRepoRoot(process.cwd()), 'docs', page.path);
+    const match = /^#\s+(.+?)\s*$/m.exec(fs.readFileSync(file, 'utf8'));
+    if (match) return match[1].trim();
+  } catch {
+    // slug fallback
+  }
+  return undefined;
 }
 
 // Meta description for pages without frontmatter (the docs stay

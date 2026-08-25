@@ -29,3 +29,23 @@ release-mode flag story (`lwpt build --mode release`,
 documented on the consumer side in
 [Shipping your server](../guides/shipping.md); CI builds and tests
 natively on Linux, macOS, and Windows instead of cross-compiling.
+
+## Version surfaces
+
+`lwpt.toml`'s `version` is the only hand-maintained copy of the
+*exact* version. Surfaces that cite it (the website's `llms.txt`
+citation card, via `website/lib/library-version.ts`) read it at build
+time, so a patch or minor release is the manifest bump plus the tag.
+The card is baked when the site is exported. A version bump that
+should refresh the public citation must also rebuild the site, or
+include a website or docs path in the same commit. website build
+asserts the exported card contains the manifest version.
+
+The `@^2.0` **major selectors** in installation instructions are
+authored separately and are part of the major-release checklist —
+update them when the major changes:
+
+- `README.md` (install command)
+- `docs/guides/quick-start.md` and `docs/guides/shipping.md`
+- `website/app/(home)/page.tsx` (install snippet and the "How do I
+  build" FAQ answer)
