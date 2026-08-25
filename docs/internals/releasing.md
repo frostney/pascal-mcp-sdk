@@ -36,6 +36,10 @@ natively on Linux, macOS, and Windows instead of cross-compiling.
 *exact* version. Surfaces that cite it (the website's `llms.txt`
 citation card, via `website/lib/library-version.ts`) read it at build
 time, so a patch or minor release is the manifest bump plus the tag.
+The card is baked when the site is exported. A version bump that
+should refresh the public citation must also rebuild the site, or
+include a website or docs path in the same commit. website build
+asserts the exported card contains the manifest version.
 
 The `@^2.0` **major selectors** in installation instructions are
 authored separately and are part of the major-release checklist —

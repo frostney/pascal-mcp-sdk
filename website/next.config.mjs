@@ -1,4 +1,5 @@
 import { createMDX } from 'fumadocs-mdx/next';
+import { basePath } from './lib/site-identity.mjs';
 
 const withMDX = createMDX();
 
@@ -6,7 +7,7 @@ const withMDX = createMDX();
 const config = {
   output: 'export',
   // Served at https://frostney.github.io/pascal-mcp-sdk/
-  basePath: '/pascal-mcp-sdk',
+  basePath,
   trailingSlash: true,
   reactStrictMode: true,
   // The docs content lives outside website/ (the site renders the

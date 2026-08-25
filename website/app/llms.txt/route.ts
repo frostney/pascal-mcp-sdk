@@ -1,13 +1,29 @@
-import { appName, docsRoute, pageUrl, repoUrl, siteUrl } from '@/lib/shared';
-import { libraryVersion } from '@/lib/library-version';
+import { appName, docsMarkdownUrl, repoUrl, siteUrl } from "@/lib/shared";
+import { libraryVersion } from "@/lib/library-version";
+import { getPageMarkdownUrl, source } from "@/lib/source";
 
 export const revalidate = false;
+
+function curatedMarkdownUrl(slugs: string[]): string {
+  const page = source.getPage(slugs);
+  if (!page) {
+    throw new Error(`llms.txt docs page missing: ${slugs.join("/") || "(docs root)"}`);
+  }
+  const { url } = getPageMarkdownUrl(page);
+  const expected = docsMarkdownUrl(slugs.join("/"));
+  const actual = `${siteUrl}${url}`;
+  if (actual !== expected) {
+    throw new Error(`llms.txt markdown URL drift: ${actual} !== ${expected}`);
+  }
+  return actual;
+}
 
 // Authored citation card in the llmstxt.org shape: H1, blockquote
 // summary, prose, then H2 sections of `- [name](url): note` links.
 // llms-full.txt stays the generated full-text dump. Identity, URLs,
 // and the version come from their single sources so a release or
-// repository move can't leave this surface stale.
+// repository move can not leave this surface stale. Curated Docs
+// entries point at the existing per-page Markdown exports.
 function card(): string {
   return `# ${appName}
 
@@ -19,9 +35,9 @@ This is not tina4stack/claude-pascal-mcp (a Python MCP that compiles Pascal) and
 
 ## Docs
 
-- [Documentation](${pageUrl(docsRoute)}): guides and public API reference
-- [Introduction](${pageUrl('/docs/guides/introduction')}): what the library is and is not
-- [Quick start](${pageUrl('/docs/guides/quick-start')}): a complete server in a few minutes
+- [Documentation](${curatedMarkdownUrl([])}): guides and public API reference
+- [Introduction](${curatedMarkdownUrl(["guides", "introduction"])}): what the library is and is not
+- [Quick start](${curatedMarkdownUrl(["guides", "quick-start"])}): a complete server in a few minutes
 - [Full text](${siteUrl}/llms-full.txt): every documentation page as one markdown file
 
 ## Source
@@ -32,6 +48,6 @@ This is not tina4stack/claude-pascal-mcp (a Python MCP that compiles Pascal) and
 
 export function GET() {
   return new Response(card(), {
-    headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
   });
 }
