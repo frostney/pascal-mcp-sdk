@@ -11,14 +11,15 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { basePath as configuredBasePath } from '../lib/site-identity.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const outDir = path.join(here, '..', 'out');
 // Source of truth for the mount prefix is `basePath` in
-// ../next.config.mjs (mirrored by `basePath` in ../lib/shared.ts) —
-// the export in out/ is built for that prefix, so this preview must
-// serve under the same one. BASE_PATH overrides for experiments.
-const basePath = process.env.BASE_PATH ?? '/pascal-mcp-sdk';
+// site-identity.mjs (also consumed by next.config.mjs). The export
+// in out/ is built for that prefix, so this preview must serve
+// under the same one. BASE_PATH overrides for experiments.
+const basePath = process.env.BASE_PATH ?? configuredBasePath;
 const port = Number(process.env.PORT ?? 3000);
 const host = process.env.HOST ?? 'localhost';
 

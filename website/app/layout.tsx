@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import { Provider } from '@/components/provider';
-import { appName } from '@/lib/shared';
+import { appName, siteUrl } from '@/lib/shared';
 import './global.css';
 
 const inter = Inter({
@@ -11,7 +11,7 @@ const inter = Inter({
 export const metadata: Metadata = {
   // Origin only — page-level URLs (canonical, OG images) carry the
   // GitHub Pages basePath themselves, so resolution keeps it intact.
-  metadataBase: new URL('https://frostney.github.io'),
+  metadataBase: new URL(new URL(siteUrl).origin),
   title: {
     template: `%s | ${appName}`,
     default: appName,
