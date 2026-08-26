@@ -13,3 +13,5 @@ export const gitConfig = {
   repo: 'pascal-mcp-sdk',
   branch: 'main',
 };
+
+export const repoUrl = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;

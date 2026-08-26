@@ -3,9 +3,11 @@ name: Pages
 # Landing page + rendered docs at
 # https://frostney.github.io/pascal-mcp-sdk/ (issue #6). The site
 # renders the repository's docs/ tree directly, so both website/ and
-# docs/ changes rebuild it. PRs touching those paths build the site
-# (catching breakage — the link mapper fails the build on broken
-# internal links) without deploying; pushes to main deploy.
+# docs/ changes rebuild it, and the llms.txt citation card reads the
+# release version from lwpt.toml, so version bumps rebuild it too. PRs
+# touching those paths build the site (catching breakage — the link
+# mapper fails the build on broken internal links) without deploying;
+# pushes to main deploy.
 
 on:
   push:
@@ -14,12 +16,14 @@ on:
     paths:
       - "website/**"
       - "docs/**"
+      - "lwpt.toml"
   pull_request:
     branches:
       - main
     paths:
       - "website/**"
       - "docs/**"
+      - "lwpt.toml"
   workflow_dispatch:
 
 permissions:
