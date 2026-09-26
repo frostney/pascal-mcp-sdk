@@ -94,6 +94,19 @@ Four workflows (see [.github/workflows/](../../.github/workflows/)):
   titles become the changelog).
 - **pages.yml** — website build/deploy; see the Website section.
 
+## Code review (CodeRabbit)
+
+CodeRabbit reads `.coderabbit.config.ts`, which inherits the central
+`frostney/coderabbit` settings and the web-UI settings (`inheritance:
+true`) and excludes the vendored Agent Skills from review, using the
+shared `excludeVendoredSkills` function from `frostney/coderabbit`.
+Every skill listed in `skills-lock.json` is installed from upstream by
+the skills CLI, so findings on it belong upstream. A skill under
+`.agents/skills` that the lock does not list is project-authored and is
+reviewed like any other file. The config reads the lock through
+`skills-lock.yaml`, a symlink, because the config sandbox imports
+`.yaml` but not `.json`.
+
 ## Cross-implementation check — tools/interop-ts
 
 The official stable MCP TypeScript clients run against
