@@ -127,7 +127,7 @@ marks a raw schema as handler-validated (above).
 
 Everything above in one worked example — typed arguments, structured
 output, annotations, and what actually crosses the wire. The tool
-counts words and characters; its argument and result classes *are*
+counts words and UTF-8 bytes; its argument and result classes *are*
 its schemas:
 
 ```pascal
@@ -142,10 +142,10 @@ type
   TCountResult = class(TMCPArgs)
   private
     FWords: Integer;
-    FChars: Integer;
+    FBytes: Integer;
   published
     property words: Integer read FWords write FWords;
-    property chars: Integer read FChars write FChars;
+    property bytes: Integer read FBytes write FBytes;
   end;
 
 function CountHandler(AArgs: TMCPArgs;
@@ -157,14 +157,15 @@ begin
   with AArgs as TCountArgs do
   begin
     Counts.words := CountWords(text); // your domain logic
-    Counts.chars := Length(text);
+    // Strings arrive as UTF-8: Length counts bytes, not characters.
+    Counts.bytes := Length(text);
   end;
   Result := MCPStructuredResult(
-    Format('%d words, %d characters', [Counts.words, Counts.chars]),
+    Format('%d words, %d bytes', [Counts.words, Counts.bytes]),
     Counts); // serializes the published properties, then frees Counts
 end;
 
-Server.RegisterTool('count_text', 'Count words and characters in text',
+Server.RegisterTool('count_text', 'Count words and UTF-8 bytes in text',
   TCountArgs, TCountResult, CountHandler)
   .Title('Text Counter').ReadOnlyHint.IdempotentHint;
 ```
@@ -177,7 +178,7 @@ JSON-RPC envelope on one line):
 ```json
 {
   "name": "count_text",
-  "description": "Count words and characters in text",
+  "description": "Count words and UTF-8 bytes in text",
   "inputSchema": {
     "type": "object",
     "properties": { "text": { "type": "string" } },
@@ -187,25 +188,45 @@ JSON-RPC envelope on one line):
     "type": "object",
     "properties": {
       "words": { "type": "integer" },
-      "chars": { "type": "integer" }
+      "bytes": { "type": "integer" }
     },
-    "required": ["words", "chars"]
+    "required": ["words", "bytes"]
   },
   "title": "Text Counter",
   "annotations": { "readOnlyHint": true, "idempotentHint": true }
 }
 ```
 
-A call answers with both the text content and the structured form:
+A `tools/call` request (`_meta` as every modern request carries it):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "count_text",
+    "arguments": { "text": "Grüße from Pascal MCP" },
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities": {}
+    }
+  }
+}
+```
+
+answers with both the text content and the structured form — 23
+bytes for 21 characters, since `ü` and `ß` take two bytes each in
+UTF-8:
 
 ```json
 {
   "jsonrpc": "2.0",
   "id": 2,
   "result": {
-    "content": [{ "type": "text", "text": "4 words, 19 characters" }],
+    "content": [{ "type": "text", "text": "4 words, 23 bytes" }],
     "isError": false,
-    "structuredContent": { "words": 4, "chars": 19 },
+    "structuredContent": { "words": 4, "bytes": 23 },
     "resultType": "complete",
     "_meta": {
       "io.modelcontextprotocol/serverInfo": {

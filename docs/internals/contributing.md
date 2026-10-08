@@ -9,9 +9,9 @@
 
 A change lands here by proving itself: a failing test first, the
 implementation in the one unit that owns the rule, the local gate
-(`lwpt build` + `test` + `mcpsmoke` + `format --check`) green, and a
-Conventional-Commit-titled PR through CI's cross-platform and
-cross-implementation batteries. Features and fixes walk the same
+(`lwpt build`, `lwpt test`, `lwpt run smoke`, `lwpt format --check`)
+green, and a Conventional-Commit-titled PR through CI's
+cross-platform and cross-implementation batteries. Features and fixes walk the same
 path — a feature starts with a test specifying the behaviour, a fix
 with a regression test that reproduces the bug.
 
@@ -106,9 +106,12 @@ the ADRs under
 - **Zero third-party runtime dependencies** — FPC-shipped packages
   only: RTL, fpjson, fcl-base (`base64`), and fcl-web confined to
   `MCP.Transport.HTTP`.
-- **Public API changes update the reference docs** — every public
-  `MCP*`/`Register*` symbol must appear in `docs/reference/`;
-  `.github/scripts/check-reference-docs.sh` fails CI otherwise.
+- **Public API changes update the reference docs** —
+  `.github/scripts/check-reference-docs.sh` fails CI when an
+  `MCP*`/`Register*` function or procedure declared in the interface
+  of `MCP.Server.pas` is missing from `docs/reference/`. Public API in
+  other units (and types, constants, properties) is not gated —
+  document it by hand.
 
 ## Run the gate locally
 
@@ -147,7 +150,7 @@ sockets, and temp files only. Dependency *installation* is separate:
 | `fpc @lwpt.cfg` leg | the zero-install path still works |
 | `interop` (required) | the official TypeScript clients still talk to `mcpdemo` — a red interop job is a real cross-implementation regression |
 | format / agents `--check` | formatter and AGENTS.md command block have not drifted |
-| `check-reference-docs.sh` | every public symbol is documented in `docs/reference/` |
+| `check-reference-docs.sh` | every `MCP*`/`Register*` routine in `MCP.Server`'s interface is documented in `docs/reference/` |
 | markdownlint | docs follow `.markdownlint-cli2.jsonc` |
 | pages.yml (on `docs/`/`website/` changes) | the website still builds; broken internal doc links fail here |
 

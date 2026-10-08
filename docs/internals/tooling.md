@@ -43,9 +43,11 @@ lwpt agents --check    # CI gate: fail when that block is stale
 
 ## Dependency policy
 
-Runtime: **RTL + fpjson. Nothing else.** This is a hard constraint
-(AGENTS.md); it is what makes the library trivially vendorable and the
-no-lwpt path a one-liner. Dev-time: lwpt's `testing` package only.
+Runtime: **FPC-shipped packages only — RTL, fpjson, fcl-base
+(`base64`), and fcl-web confined to `MCP.Transport.HTTP`. Nothing
+else** ([ADR-0003](https://github.com/frostney/pascal-mcp-sdk/blob/main/docs/adr/0003-zero-third-party-runtime-dependencies.md)).
+This is a hard constraint (AGENTS.md); it is what makes the library
+trivially vendorable and the no-lwpt path a one-liner. Dev-time: lwpt's `testing` package only.
 duetto's `cli` package joins only if an app grows real flag parsing —
 `mcpdemo`/`mcpsmoke` deliberately have none.
 
@@ -85,8 +87,9 @@ Four workflows (see [.github/workflows/](../../.github/workflows/)):
   then `build`, `test`, and the `mcpsmoke` E2E battery.
   One leg additionally runs the platform-independent gates:
   `lwpt format --check`, `lwpt agents --check`, and
-  `.github/scripts/check-reference-docs.sh` (every public
-  `MCP*`/`Register*` symbol must appear in `docs/reference/`). Plus
+  `.github/scripts/check-reference-docs.sh` (every
+  `MCP*`/`Register*` function or procedure in `MCP.Server`'s
+  interface must appear in `docs/reference/`). Plus
   a blocking markdownlint job and the required `interop` job (below).
 - **ci.yml** — push to main: the same battery as the post-merge
   confirmation signal.
@@ -151,6 +154,6 @@ record: landing page + docs site in one deployment, `basePath`
   instead of shipping silently.
 - The Node toolchain is contributor/CI tooling only (precedent:
   `tools/interop-ts`) and never touches the shipped library or its
-  RTL + fpjson dependency policy. **Node pin: 24**
+  FPC-shipped runtime dependency policy. **Node pin: 24**
   (`actions/setup-node` — both pages.yml and the interop job in
   pr.yml).
