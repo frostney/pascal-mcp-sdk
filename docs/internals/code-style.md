@@ -12,10 +12,16 @@ boundary, and spec citations next to protocol behaviour.
 
 ## Compiler surface
 
-Every unit and program starts with `{$I MCP.inc}` — Delphi mode,
-`{$H+}`, `{$M+}`, advanced records, and the PRODUCTION flag block
-(checks on in dev, off with `-dPRODUCTION`). No per-unit compiler
-directives; if a flag is worth setting, it is worth centralising.
+Every unit, test, and program under `source/` starts with
+`{$I MCP.inc}` — `{$mode delphi}` (which already implies `{$H+}` and
+advanced records, so neither is restated), `{$M+}`, and the PRODUCTION
+flag block (checks on in dev, off with `-dPRODUCTION`). The `scripts/`
+run-script wrappers are the exception: InstantFPC runs them without
+project include paths, so they stay self-contained and set their own
+mode. No per-unit compiler defaults; if a flag is worth setting, it is
+worth centralising. The one scoped override is the `{$M+}`/`{$M-}`
+pair around `TMCPArgs` in `MCP.Schema.pas`, which keeps that class's
+published-property RTTI explicit at its declaration.
 
 ## FPC pitfalls
 
