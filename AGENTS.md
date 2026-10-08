@@ -55,7 +55,7 @@ the way a real client does).
 | `source/apps/` | Programs: `mcpdemo` (example stdio server), `mcpsmoke` (subprocess E2E battery) |
 | `scripts/` | Self-contained `lwpt run` wrappers (currently `smoke.pas` → runs the built `mcpsmoke`) |
 | `tools/` | Cross-implementation checks: `interop-ts/` (official MCP TypeScript clients vs `mcpdemo` over stdio, the legacy era, and Streamable HTTP) |
-| `docs/` | Consumer-first tree rendered by the website: `guides/` (quick start, tools, schemas, prompts, resources, configuration, notifications, shipping, troubleshooting, cookbook), `reference/` (public API, gated by `.github/scripts/check-reference-docs.sh`), `internals/` (architecture, tooling, code style, releasing — contributor pages) |
+| `docs/` | Consumer-first tree rendered by the website: `guides/` (quick start, tools, images, schemas, prompts, resources, configuration, notifications, shipping, deployment, troubleshooting, cookbook), `reference/` (public API, gated by `.github/scripts/check-reference-docs.sh`), `internals/` (architecture, contributing, tooling, code style, releasing — contributor pages), `adr/` (decision records, repo-only — excluded from the website), `casts/` (committed terminal recordings served by the site) |
 | `website/` | GitHub Pages site: Fumadocs static export rendering `docs/` directly — contributor/CI tooling, not part of the library |
 
 Layering is strictly bottom-up: `MCP.JSONRPC` → `MCP.Protocol` →

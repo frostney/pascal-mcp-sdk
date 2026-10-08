@@ -43,9 +43,11 @@ lwpt agents --check    # CI gate: fail when that block is stale
 
 ## Dependency policy
 
-Runtime: **RTL + fpjson. Nothing else.** This is a hard constraint
-(AGENTS.md); it is what makes the library trivially vendorable and the
-no-lwpt path a one-liner. Dev-time: lwpt's `testing` package only.
+Runtime: **FPC-shipped packages only — RTL, fpjson, fcl-base
+(`base64`), and fcl-web confined to `MCP.Transport.HTTP`. Nothing
+else** ([ADR-0003](https://github.com/frostney/pascal-mcp-sdk/blob/main/docs/adr/0003-zero-third-party-runtime-dependencies.md)).
+This is a hard constraint (AGENTS.md); it is what makes the library
+trivially vendorable and the no-lwpt path a one-liner. Dev-time: lwpt's `testing` package only.
 duetto's `cli` package joins only if an app grows real flag parsing —
 `mcpdemo`/`mcpsmoke` deliberately have none.
 
@@ -69,7 +71,7 @@ CHANGELOG.md is generated — do not hand-edit entries.
 
 `.markdownlint-cli2.jsonc` mirrors the sibling repos: ATX headings,
 2-space list indent, fenced code blocks with language tags; long lines
-and bare URLs allowed. CI runs it via
+allowed, bare URLs not (MD034 — write explicit links). CI runs it via
 `DavidAnson/markdownlint-cli2-action`; locally:
 
 ```sh
@@ -85,8 +87,9 @@ Four workflows (see [.github/workflows/](../../.github/workflows/)):
   then `build`, `test`, and the `mcpsmoke` E2E battery.
   One leg additionally runs the platform-independent gates:
   `lwpt format --check`, `lwpt agents --check`, and
-  `.github/scripts/check-reference-docs.sh` (every public
-  `MCP*`/`Register*` symbol must appear in `docs/reference/`). Plus
+  `.github/scripts/check-reference-docs.sh` (every
+  `MCP*`/`Register*` function or procedure in `MCP.Server`'s
+  interface must appear in `docs/reference/`). Plus
   a blocking markdownlint job and the required `interop` job (below).
 - **ci.yml** — push to main: the same battery as the post-merge
   confirmation signal.
@@ -112,24 +115,45 @@ The project site (<https://frostney.github.io/pascal-mcp-sdk/>) is a
 [Fumadocs](https://fumadocs.dev) (Next.js) static export under
 `website/`, adopted wholesale from the frostney/lwpt#90 decision
 record: landing page + docs site in one deployment, `basePath`
-`/pascal-mcp-sdk`, built-in search, **no analytics**. The site
-renders the repository's `docs/` tree **directly** — no curated
-second copy; only landing-page content and glue live under
-`website/`. Two remark plugins process the markdown:
-`remark-repo-links` maps repo-relative links (links within `docs/`
-become site routes, links leaving the rendered set resolve to their
-GitHub URLs, images under `docs/images/` map to the synced
-`public/docs-images/` copy, and a broken mapping **fails the
-build**), and `remark-term-links` auto-links the first occurrence
-per page of well-known tooling terms. A `prebuild`/`predev` script
-syncs `docs/images/` into `public/`; the app also emits the SEO/AEO
-surfaces (sitemap, robots, per-page OG images, `llms.txt` /
-`llms-full.txt`, JSON-LD).
-Deployment is `.github/workflows/pages.yml` (official
-`configure-pages` / `upload-pages-artifact` / `deploy-pages`
-actions): pushes to `main` touching `website/**` or `docs/**` deploy;
-PRs touching those paths build without deploying. The Node toolchain
-is contributor/CI tooling only (precedent: `tools/interop-ts`) and
-never touches the shipped library or its RTL + fpjson dependency
-policy. **Node pin: 24** (`actions/setup-node` — both pages.yml and the
-interop job in pr.yml).
+`/pascal-mcp-sdk`, built-in search, **no analytics**.
+
+- **The site renders the repository's `docs/` tree directly** — no
+  curated second copy; only landing-page content and glue live under
+  `website/`. Repo-only records under `docs/` (the ADRs) are excluded
+  in `website/lib/source.ts`.
+- **Markdown pipeline** (`website/lib/source.ts`): the fumadocs
+  preset plugins are re-applied explicitly (macro-mode `mdxOptions`
+  replaces the preset — tables, heading anchors, TOC, and the search
+  structure all depend on them), plus three site plugins:
+  - `remark-repo-links` maps repo-relative links — links within
+    `docs/` become site routes, links leaving the rendered set
+    resolve to their GitHub URLs, images under `docs/images/` map to
+    the synced `public/docs-images/` copy, and a broken mapping
+    **fails the build**.
+  - `remark-term-links` auto-links the first occurrence per page of
+    well-known tooling terms.
+  - `rehype-mermaid-dual` renders ```` ```mermaid ```` fences to
+    themed inline SVGs at build time (light + dark, toggled by the
+    site theme; headless Chromium via playwright). No mermaid JS
+    ships to the client, and the same fences render natively on
+    GitHub.
+- **Terminal recordings**: `.cast` files under `docs/casts/` play
+  through a self-hosted asciinema-player wrapper (no CDN); the
+  recordings are real captures of the built binaries — see
+  `tools/casts/`.
+- A `prebuild`/`predev` script syncs `docs/images/` into `public/`;
+  the app also emits the SEO/AEO surfaces (sitemap, robots, per-page
+  OG images, `llms.txt` / `llms-full.txt`, JSON-LD).
+- **Deployment** is `.github/workflows/pages.yml` (official
+  `configure-pages` / `upload-pages-artifact` / `deploy-pages`
+  actions): pushes to `main` touching `website/**` or `docs/**`
+  deploy; PRs touching those paths build without deploying. A
+  post-build check asserts the rendered output (tables, heading
+  anchors, TOC links, search-index body text, Mermaid SVGs, cast
+  assets) so pipeline regressions fail the build
+  instead of shipping silently.
+- The Node toolchain is contributor/CI tooling only (precedent:
+  `tools/interop-ts`) and never touches the shipped library or its
+  FPC-shipped runtime dependency policy. **Node pin: 24**
+  (`actions/setup-node` — both pages.yml and the interop job in
+  pr.yml).

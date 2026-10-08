@@ -123,6 +123,130 @@ Server.RegisterTool('add', 'Add two numbers and return the sum',
 annotations clients may surface or act on. `ApplicationValidated`
 marks a raw schema as handler-validated (above).
 
+## A complete tool, end to end
+
+Everything above in one worked example — typed arguments, structured
+output, annotations, and what actually crosses the wire. The tool
+counts words and UTF-8 bytes; its argument and result classes *are*
+its schemas:
+
+```pascal
+type
+  TCountArgs = class(TMCPArgs)
+  private
+    FText: string;
+  published
+    property text: string read FText write FText;
+  end;
+
+  TCountResult = class(TMCPArgs)
+  private
+    FWords: Integer;
+    FBytes: Integer;
+  published
+    property words: Integer read FWords write FWords;
+    property bytes: Integer read FBytes write FBytes;
+  end;
+
+function CountHandler(AArgs: TMCPArgs;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Counts: TCountResult;
+begin
+  Counts := TCountResult.Create;
+  with AArgs as TCountArgs do
+  begin
+    Counts.words := CountWords(text); // your domain logic
+    // Strings arrive as UTF-8: Length counts bytes, not characters.
+    Counts.bytes := Length(text);
+  end;
+  Result := MCPStructuredResult(
+    Format('%d words, %d bytes', [Counts.words, Counts.bytes]),
+    Counts); // serializes the published properties, then frees Counts
+end;
+
+Server.RegisterTool('count_text', 'Count words and UTF-8 bytes in text',
+  TCountArgs, TCountResult, CountHandler)
+  .Title('Text Counter').ReadOnlyHint.IdempotentHint;
+```
+
+`tools/list` then advertises the derived schemas and annotations —
+this is the tool's entry from the library's actual `result.tools`
+array (formatted for reading; the full response wraps it in the
+JSON-RPC envelope on one line):
+
+```json
+{
+  "name": "count_text",
+  "description": "Count words and UTF-8 bytes in text",
+  "inputSchema": {
+    "type": "object",
+    "properties": { "text": { "type": "string" } },
+    "required": ["text"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "words": { "type": "integer" },
+      "bytes": { "type": "integer" }
+    },
+    "required": ["words", "bytes"]
+  },
+  "title": "Text Counter",
+  "annotations": { "readOnlyHint": true, "idempotentHint": true }
+}
+```
+
+A `tools/call` request (`_meta` as every modern request carries it):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "count_text",
+    "arguments": { "text": "Grüße from Pascal MCP" },
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities": {}
+    }
+  }
+}
+```
+
+answers with both the text content and the structured form — 23
+bytes for 21 characters, since `ü` and `ß` take two bytes each in
+UTF-8:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "content": [{ "type": "text", "text": "4 words, 23 bytes" }],
+    "isError": false,
+    "structuredContent": { "words": 4, "bytes": 23 },
+    "resultType": "complete",
+    "_meta": {
+      "io.modelcontextprotocol/serverInfo": {
+        "name": "example-server", "version": "1.0.0"
+      }
+    }
+  }
+}
+```
+
+And a mistyped argument (`"text": 42`) never reaches the handler —
+the server answers in-band, in a shape the model can correct against:
+
+```json
+{
+  "content": [{ "type": "text", "text": "Argument \"text\" must be a string" }],
+  "isError": true
+}
+```
+
 ## Asking the client for more input (MRTR)
 
 A handler that needs more input mid-call — a missing value, a user
