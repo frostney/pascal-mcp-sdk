@@ -16,9 +16,10 @@ transport shell (`MCP.Transport.Stdio` or `MCP.Transport.HTTP`) — and
 consumes. The core performs no I/O: `CreateSession` binds connection
 state and `HandleMessage` maps one inbound line to at most one
 response line, so both transports wrap the same tested core without
-touching it. The runtime dependency set is FPC's RTL + fpjson (plus
-fcl-web, shipped inside FPC, confined to the HTTP transport unit),
-nothing else.
+touching it. The runtime dependency set is packages that ship inside
+FPC — the RTL, fcl-json (fpjson), fcl-base (`base64`), and fcl-web
+confined to the HTTP transport unit — nothing else
+([ADR-0003](https://github.com/frostney/pascal-mcp-sdk/blob/main/docs/adr/0003-zero-third-party-runtime-dependencies.md)).
 
 ## Layering
 
@@ -30,7 +31,7 @@ flowchart TB
     SERVER["MCP.Server<br/>frozen registries + sessions<br/>HandleMessage(session, line) → line"]
     PROTOCOL["MCP.Protocol<br/>_meta validation, version<br/>negotiation, result stamping"]
     JSONRPC["MCP.JSONRPC<br/>JSON-RPC 2.0 parse/build<br/>MCP profile + error codes"]
-    RTL["RTL + fpjson<br/>the only runtime dependencies"]
+    RTL["RTL + fpjson + fcl-base<br/>(fcl-web for HTTP only)<br/>FPC-shipped runtime dependencies"]
     STDIO --> SERVER
     HTTP --> SERVER
     SCHEMA -. "consumed by,<br/>off the request chain" .-> SERVER

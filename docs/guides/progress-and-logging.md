@@ -85,9 +85,10 @@ end;
 
 Called with `"progressToken": "sync-1"` and
 `"io.modelcontextprotocol/logLevel": "info"` in `_meta`, the server
-emits this exact stream — five notifications in handler order, then
-the response (captured from `HandleMessage`; each is one line on the
-wire):
+emits this stream — five notifications in handler order, then the
+response (captured from `HandleMessage`, each one line on the wire;
+abridged: the response's trailing fields are elided as `...` and the
+progress floats shortened, see below):
 
 ```json
 {"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"sync started"}}

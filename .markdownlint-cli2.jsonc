@@ -4,9 +4,9 @@
 // (DavidAnson/markdownlint-cli2-action@v19). The job is blocking — any
 // failure rejects the PR. Mirrors duetto's / lwpt's config.
 //
-// Disabled rules below are deliberate: they're either incompatible
-// with our documentation style (long-form prose) or with legitimate
-// bare-URL one-liners.
+// Disabled rules below are deliberate: they're incompatible with our
+// documentation style (long-form prose). Bare URLs are rejected
+// (MD034): external references are explicit links.
 {
   "config": {
     "MD013": false,   // line-length — our docs intentionally have long sentences

@@ -170,8 +170,9 @@ Server.RegisterTool('count_text', 'Count words and characters in text',
 ```
 
 `tools/list` then advertises the derived schemas and annotations —
-this is the library's actual response (formatted for reading; the
-wire is one line):
+this is the tool's entry from the library's actual `result.tools`
+array (formatted for reading; the full response wraps it in the
+JSON-RPC envelope on one line):
 
 ```json
 {

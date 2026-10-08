@@ -69,7 +69,7 @@ CHANGELOG.md is generated — do not hand-edit entries.
 
 `.markdownlint-cli2.jsonc` mirrors the sibling repos: ATX headings,
 2-space list indent, fenced code blocks with language tags; long lines
-and bare URLs allowed. CI runs it via
+allowed, bare URLs not (MD034 — write explicit links). CI runs it via
 `DavidAnson/markdownlint-cli2-action`; locally:
 
 ```sh
