@@ -20,8 +20,8 @@ proxy or the platform's edge terminates TLS in front of you.
 The HTTP binding is a few lines around the same registrations a stdio
 server uses. For containers, two details matter: bind `0.0.0.0` (the
 platform routes into the container), and read the port from the
-environment (`PORT` is the convention Vercel and most container hosts
-use):
+environment (`PORT` is the convention most container hosts use; on
+Vercel it is an opt-in override, see below):
 
 ```pascal
 program myserver;
@@ -104,9 +104,11 @@ allowlist).
 
 Since June 2026, Vercel runs arbitrary Docker images as functions:
 name the file `Dockerfile.vercel` and deploy — Vercel builds the
-image, and routes traffic to the container, which must listen on the
-port in `$PORT`
+image, and routes traffic to the container on port 80 by default;
+setting `PORT` in the project settings overrides it
 ([Container Images](https://vercel.com/docs/functions/container-images)).
+The program above falls back to 8080 when `PORT` is unset, so set
+`PORT=8080` in the project settings (or change the fallback to 80).
 The stateless binding fits the model, but know what the model is:
 
 - **Scale-to-zero, not always-on.** Instances stop after idle
@@ -143,7 +145,8 @@ that is the operator's job by design
 practice:
 
 - On Vercel/Fly/Railway, the platform edge terminates TLS; the
-  container speaks plain HTTP on `$PORT`.
+  container speaks plain HTTP on the port the platform routes to
+  (`$PORT`; on Vercel, 80 unless `PORT` is set).
 - On a VPS, put nginx/Caddy in front: terminate TLS, forward to
   `127.0.0.1:<port>`, and **disable response buffering for the
   endpoint** (SSE needs the proxy to stream, e.g.
