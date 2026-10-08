@@ -22,11 +22,14 @@ lwpt install           # resolve deps → lwpt.cfg + lwpt.lock + .lwpt/modules
 lwpt install --frozen  # CI: verify lockfile + committed modules, no network
 lwpt build             # every [build] target in lwpt.toml → build/
 lwpt test              # discovers source/units/*.Test.pas
+lwpt test <path|glob>  # just the selected suites; --inventory lists them
 lwpt run smoke         # the built mcpsmoke E2E battery (scripts/smoke.pas)
 lwpt format            # rewrite in place (pre-commit does this)
 lwpt format --check    # CI gate: fail on drift
 lwpt agents            # refresh the AGENTS.md command-reference block
 lwpt agents --check    # CI gate: fail when that block is stale
+lwpt health            # CI gate: complexity vs the [health] ceilings
+lwpt duplication       # CI gate: clones vs the [duplication] ceiling
 ```
 
 - `lwpt.toml` is the **manifest you edit**: package metadata, the

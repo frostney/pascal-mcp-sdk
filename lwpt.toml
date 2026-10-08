@@ -34,3 +34,20 @@ mcpsmoke = { source = "source/apps/mcpsmoke.pas", output = "build/mcpsmoke" }
 [smoke]
 command = "instantfpc"
 args = ["scripts/smoke.pas"]
+
+# Complexity ceilings enforced by `lwpt health` (CI gate). Ratchet
+# values: set just above the 2026-08-15 baseline (worst routine
+# validatesubsetarguments at cyclomatic 26 / cognitive 85; worst file
+# MCP.Server.pas at 541/600) so the numbers can shrink but not grow
+# unnoticed. Hotspot scoring needs full git history, which CI's
+# shallow checkout lacks — deliberately not limited.
+[health]
+max-routine-cyclomatic = 30
+max-routine-cognitive = 90
+max-file-cyclomatic = 600
+max-file-cognitive = 650
+
+# Token-clone ceiling for `lwpt duplication` (CI gate); baseline
+# 1.59% across 6 clone groups.
+[duplication]
+maximum-percent = 3
