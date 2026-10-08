@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const out = path.resolve(here, '../out');
+const docsSource = path.resolve(here, '../../docs');
 const failures = [];
 
 function page(rel) {
@@ -33,8 +34,12 @@ for (const rel of ['docs/reference/protocol-coverage', 'docs/reference/server'])
 }
 
 // Heading anchors (remarkHeading) + populated TOCs (rehypeToc) on
-// every exported docs page: each <h2> needs an id, and the page's TOC
-// (the #nd-toc column, rendered after the article) must link to it.
+// every exported docs page: every <h2> needs an id, and the page's TOC
+// (the #nd-toc column, rendered after the article) must link to each.
+// Build-time Mermaid on the same walk: every ```mermaid fence in the
+// page's source renders to exactly one light and one dark SVG, and no
+// raw fence survives.
+const exportedDocs = [];
 const docsRoot = path.join(out, 'docs');
 const walk = (dir) =>
   fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
@@ -42,17 +47,37 @@ const walk = (dir) =>
   ).concat(fs.existsSync(path.join(dir, 'index.html')) ? [dir] : []);
 for (const dir of walk(docsRoot)) {
   const rel = path.relative(out, dir);
-  if (rel === 'docs') continue; // the docs index page has no h2 sections
   const html = fs.readFileSync(path.join(dir, 'index.html'), 'utf8');
+  const slug = rel.replace(/^docs\/?/, '');
+  const sourceFile = (slug ? [`${slug}.md`, path.join(slug, 'index.md')] : ['index.md'])
+    .map((candidate) => path.join(docsSource, candidate))
+    .find((candidate) => fs.existsSync(candidate));
+  if (sourceFile) {
+    exportedDocs.push(`/${rel}`);
+    const fences = (fs.readFileSync(sourceFile, 'utf8').match(/^```mermaid\s*$/gm) ?? []).length;
+    const light = (html.match(/id="mermaid-light-\d+"/g) ?? []).length;
+    const dark = (html.match(/id="mermaid-dark-\d+"/g) ?? []).length;
+    assert(
+      light === fences && dark === fences,
+      `${rel}: ${fences} mermaid fence(s) but ${light} light / ${dark} dark SVGs`,
+    );
+    assert(!html.includes('language-mermaid'), `${rel}: unrendered mermaid fence`);
+  }
+  if (rel === 'docs') continue; // the docs index page has no h2 sections
   if (!html.includes('<h2')) continue;
-  assert(/<h2 id="/.test(html), `${rel}: <h2> without id — remarkHeading missing?`);
   const tocStart = html.indexOf('id="nd-toc"');
   if (tocStart < 0) {
     failures.push(`${rel}: no TOC column rendered`);
     continue;
   }
   const toc = html.slice(tocStart);
-  const ids = [...html.slice(0, tocStart).matchAll(/<h2 id="([^"]+)"/g)].map((m) => m[1]);
+  const article = html.slice(0, tocStart);
+  const h2s = (article.match(/<h2[\s>]/g) ?? []).length;
+  const ids = [...article.matchAll(/<h2 id="([^"]+)"/g)].map((m) => m[1]);
+  assert(
+    ids.length === h2s,
+    `${rel}: ${h2s - ids.length} of ${h2s} <h2> without id — remarkHeading missing?`,
+  );
   const missing = ids.filter((id) => !toc.includes(`href="#${id}"`));
   assert(
     missing.length === 0,
@@ -70,21 +95,21 @@ if (!fs.existsSync(searchFile)) {
   const pages = new Set(indexed.filter((doc) => doc.type === 'page').map((doc) => doc.page_id));
   const withText = new Set(indexed.filter((doc) => doc.type === 'text').map((doc) => doc.page_id));
   const bare = [...pages].filter((id) => !withText.has(id));
+  const unindexed = exportedDocs.filter((route) => !pages.has(route));
   assert(pages.size > 0, 'api/search: no pages indexed');
+  assert(unindexed.length === 0, `api/search: exported pages missing from the index: ${unindexed.join(', ')}`);
   assert(bare.length === 0, `api/search: no body text indexed for ${bare.join(', ')}`);
 }
 
 // Repo-only records stay off the site.
 assert(!fs.existsSync(path.join(out, 'docs/adr')), 'docs/adr rendered — loader exclusion lost');
 
-// Build-time Mermaid: the architecture page renders every fence
-// twice (light + dark), nothing left as a raw fence.
-const architecture = page('docs/internals/architecture');
-const lightSvgs = (architecture.match(/id="mermaid-light-\d+"/g) ?? []).length;
-const darkSvgs = (architecture.match(/id="mermaid-dark-\d+"/g) ?? []).length;
-assert(lightSvgs > 0, 'architecture: no light Mermaid SVGs rendered');
-assert(lightSvgs === darkSvgs, `architecture: ${lightSvgs} light vs ${darkSvgs} dark Mermaid SVGs`);
-assert(!architecture.includes('language-mermaid'), 'architecture: unrendered mermaid fence');
+// Build-time Mermaid is checked per page in the walk above; make sure
+// the walk actually saw the diagram-heavy architecture page.
+assert(
+  exportedDocs.includes('/docs/internals/architecture'),
+  'architecture: page not matched to its docs/ source — mermaid check skipped',
+);
 
 // Terminal recordings: every page that embeds a cast has the player
 // figure, and the referenced .cast files were synced into the export.
