@@ -18,10 +18,11 @@ advanced records, so neither is restated), `{$M+}`, and the PRODUCTION
 flag block (checks on in dev, off with `-dPRODUCTION`). The `scripts/`
 run-script wrappers are the exception: InstantFPC runs them without
 project include paths, so they stay self-contained and set their own
-mode. No per-unit compiler defaults; if a flag is worth setting, it is
-worth centralising. The one scoped override is the `{$M+}`/`{$M-}`
-pair around `TMCPArgs` in `MCP.Schema.pas`, which keeps that class's
-published-property RTTI explicit at its declaration.
+mode. There are no per-unit compiler overrides; if a flag is worth
+setting, it is worth centralising. That includes RTTI: the
+published-property type info `MCP.Schema`'s argument classes rely on
+comes from the global `{$M+}`, not from a directive at the
+declaration.
 
 ## FPC pitfalls
 
