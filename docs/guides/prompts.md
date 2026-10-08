@@ -51,6 +51,69 @@ messages. Build them with the helpers:
 As with tools, both plain-function and `of object` method handlers
 are supported, and registration must happen before serving starts.
 
+## A fuller prompt, end to end
+
+A prompt that turns a diff into a commit-message request — one
+required argument, one optional with a default, and a two-message
+result separating the instruction from the material:
+
+```pascal
+function CommitMessagePrompt(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+var
+  Style: string;
+begin
+  Style := AArguments.Get('style', 'a conventional commit');
+  Result := MCPMessages([
+    MCPUserMessage('Write ' + Style + ' subject line for this diff, ' +
+      'imperative mood, under 72 characters:'),
+    MCPUserMessage(AArguments.Get('diff', ''))]);
+end;
+
+Server.RegisterPrompt('commit-message', 'Draft a commit subject for a diff',
+  PromptArguments
+    .Add('diff', 'The diff to describe')
+    .Add('style', 'Commit style to use', False),
+  CommitMessagePrompt);
+```
+
+When the user invokes it, `prompts/get` answers with the messages the
+client feeds to its model — the library's actual response (formatted
+for reading; the wire is one line):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "result": {
+    "description": "Draft a commit subject for a diff",
+    "messages": [
+      {
+        "role": "user",
+        "content": {
+          "type": "text",
+          "text": "Write a conventional commit subject line for this diff, imperative mood, under 72 characters:"
+        }
+      },
+      {
+        "role": "user",
+        "content": { "type": "text", "text": "- retries: 3\n+ retries: 5" }
+      }
+    ],
+    "resultType": "complete",
+    "_meta": {
+      "io.modelcontextprotocol/serverInfo": {
+        "name": "example-server", "version": "1.0.0"
+      }
+    }
+  }
+}
+```
+
+(The omitted optional `style` argument fell back to the handler's
+default — the server enforces only *required* arguments before the
+handler runs.)
+
 ## Error behaviour
 
 Prompts have no in-band `isError` channel — that is a tools concept.

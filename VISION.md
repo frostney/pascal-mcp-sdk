@@ -13,15 +13,12 @@ cleanly rather than port it.
 
 ## Product direction
 
-One transport-agnostic core (`MCP.Server` over `MCP.Protocol` and
-`MCP.JSONRPC`) owns protocol semantics and performs no I/O. Transports
-are thin bindings around it: **stdio** (newline-delimited JSON-RPC, pure
-RTL — v1, complete) and **Streamable HTTP** (`MCP.Transport.HTTP`,
-fcl-web's fphttpserver confined to the transport unit). A transport owns
-only its own wire profile — framing, status and header mapping,
-connection lifecycle — and never re-decides a protocol rule. The same
-tested core sits behind every binding unchanged — the sans-I/O
-discipline proven in duetto.
+One transport-agnostic core owns protocol semantics and performs no
+I/O; transports are thin bindings around it — **stdio** (pure RTL —
+v1, complete) and **Streamable HTTP** (fcl-web confined to the
+transport unit). The architectural reasoning is recorded in
+[ADR-0001 (sans-I/O core)](docs/adr/0001-sans-io-core.md) and
+[ADR-0003 (zero third-party runtime dependencies)](docs/adr/0003-zero-third-party-runtime-dependencies.md).
 
 Cross-platform coverage (Linux, macOS, Windows) and embeddability (a
 library that compiles into the host binary via lwpt, with zero
@@ -37,23 +34,15 @@ lantaarn is its first named consumer, mirroring duetto → lantaarn.
 
 - **No MCP client.** v1 is a server library; a client (for Pascal
   programs that drive other MCP servers) is a separate decision.
-- **Legacy is compatibility, not a second implementation.** The server
-  is dual-era by default — the initialize handshake (2025-11-25 and
-  earlier) is answered so today's clients (Claude Code, Claude
-  Desktop) work — but legacy support stays a thin dialect layer over
-  the one modern core: the same registries, handlers, and dispatch,
-  with era-specific stamps and error codes at the edges. Legacy-only
-  features that the modern revision removed (server-initiated
-  requests, subscriptions, setLevel) are not implemented, and the
-  legacy dialect sunsets when the ecosystem's clients finish
-  migrating.
-- **No general JSON-Schema validation engine.** The schema subset the
-  library itself emits is server-enforced on every tool call (#23);
-  handlers own deeper semantic validation and report problems as
-  in-band `isError` results. Arbitrary/foreign schema dialects stay
-  out of scope for a dependency-light library — the
-  `.ApplicationValidated` escape hatch hands validation back to the
-  handler for those.
+- **Legacy is compatibility, not a second implementation.** The
+  server is dual-era by default so today's clients work, but legacy
+  support stays a thin dialect layer over the one modern core and
+  sunsets when the ecosystem's clients finish migrating — see
+  [ADR-0002](docs/adr/0002-dual-era-legacy-as-thin-dialect.md).
+- **No general JSON-Schema validation engine.** The subset the
+  library emits is server-enforced; `.ApplicationValidated` hands
+  deeper validation back to the handler — see
+  [ADR-0004](docs/adr/0004-schema-validation-boundary.md).
 - **No framework ambitions.** pascal-mcp-sdk registers tools and moves
   messages; logging policy, auth, and application state belong to the
   host program.

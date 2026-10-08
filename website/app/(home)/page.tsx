@@ -2,7 +2,8 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import { codeToHtml } from 'shiki';
 import { LogoMark } from '@/components/logo';
-import { gitConfig, siteUrl } from '@/lib/shared';
+import { TerminalCast } from '@/components/terminal-cast';
+import { basePath, gitConfig, siteUrl } from '@/lib/shared';
 
 export const metadata: Metadata = {
   title: { absolute: 'pascal-mcp-sdk — a FreePascal-native MCP server library' },
@@ -138,6 +139,10 @@ export default async function HomePage() {
           className="landing-code rounded-lg border text-left text-sm overflow-x-auto [&>pre]:p-4 [&>pre]:m-0 [&>pre]:bg-transparent"
           dangerouslySetInnerHTML={{ __html: quickStartHtml }}
         />
+        <TerminalCast
+          src={`${basePath}/docs-casts/hero.cast`}
+          label="A real session: build the demo server, call a tool"
+        />
         <p className="mt-3 text-sm text-fd-muted-foreground text-center">
           The library validates arguments against your{' '}
           <a href="https://json-schema.org" className="underline">
@@ -215,6 +220,13 @@ export default async function HomePage() {
           ))}
         </div>
       </section>
+
+      <footer className="w-full max-w-2xl border-t pt-6 text-center text-xs text-fd-muted-foreground">
+        pascal-mcp-sdk is a community SDK for the Model Context
+        Protocol and is not affiliated with or endorsed by the MCP
+        project. Model Context Protocol and MCP are trademarks of LF
+        Projects, LLC.
+      </footer>
     </main>
   );
 }
