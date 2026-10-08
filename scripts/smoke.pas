@@ -4,7 +4,7 @@ program smoke;
 //
 // Run-scripts execute via InstantFPC from a cache directory (no project
 // include paths), so this wrapper stays self-contained — it cannot
-// `{$I Shared.inc}` and must not use MCP.* units. It only locates the
+// `{$I MCP.inc}` and must not use MCP.* units. It only locates the
 // binary `lwpt build` produced and propagates its exit code.
 
 {$mode delphi}{$H+}

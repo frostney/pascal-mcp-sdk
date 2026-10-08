@@ -21,7 +21,7 @@ unit MCP.Protocol;
 //       https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation
 //     (verified 2026-07-21)
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 interface
 

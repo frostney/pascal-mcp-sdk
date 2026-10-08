@@ -12,7 +12,7 @@
 
 program MCP.Transport.HTTP.Test;
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 uses
   // The threaded listener needs the Unix thread driver, and it must

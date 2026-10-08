@@ -6,7 +6,7 @@
 
 program MCP.Schema.Test;
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 uses
   SysUtils,

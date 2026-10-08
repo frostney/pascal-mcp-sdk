@@ -16,7 +16,7 @@ program mcpdemo;
 //   {"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
 //   EOF
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 uses
   // Thread driver for the HTTP listener; must be first (Unix).

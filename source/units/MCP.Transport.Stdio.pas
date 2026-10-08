@@ -44,7 +44,7 @@ unit MCP.Transport.Stdio;
 // MCP.Transport.HTTP is the second binding (Streamable HTTP); it
 // wraps the same TMCPServer without changes here.
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 interface
 

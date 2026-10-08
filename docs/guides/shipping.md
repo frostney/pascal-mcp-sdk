@@ -28,7 +28,7 @@ lwpt, pass the flags to FPC yourself:
 fpc -dPRODUCTION -O4 -Xs -CX -XX -Fu<units-path> -Fi<units-path> -FEbuild myserver.pas
 ```
 
-`-dPRODUCTION` flips the library's `Shared.inc` from checked
+`-dPRODUCTION` flips the library's `MCP.inc` from checked
 (range/overflow/assert on) to optimised (checks off, auto-inlining).
 `-Xs -CX -XX` strips and smart-links the binary down.
 Cross-compilation follows standard FPC practice.

@@ -11,7 +11,7 @@ program mcpsmoke;
 //
 // Usage: mcpsmoke [path-to-mcpdemo]   (default: ./build/mcpdemo)
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 uses
   SysUtils,

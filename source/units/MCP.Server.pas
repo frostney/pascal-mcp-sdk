@@ -86,7 +86,7 @@ unit MCP.Server;
 // 2026-07-21 against:
 // https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 interface
 
