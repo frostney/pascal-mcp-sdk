@@ -115,7 +115,10 @@ The stateless binding fits the model, but know what the model is:
 - **A duration ceiling applies to every request** — including the
   streamed SSE response of a long tool call (300 s by default, more
   on paid plans). Long-running tools need an always-on host instead.
-- **State never survives** between invocations — which the stateless
+- **Process memory is not durable state.** A warm instance can keep
+  globals across requests (and serve concurrent requests from one
+  process), but nothing survives scale-to-zero or is shared across
+  instances — correctness must not depend on it, which the stateless
   binding already assumes.
 
 ## Always-on hosts
@@ -150,7 +153,10 @@ practice:
   leave everything else rejected — it is the spec's DNS-rebinding
   defense, not a CORS convenience.
 - Graceful shutdown: platforms stop containers with SIGTERM. `Stop`
-  is safe to call from a signal handler or another thread; wire it up
+  is meant to be called from another thread, not from inside a signal
+  handler — it deactivates the FCL listener, which is not documented
+  as async-signal-safe. Have the handler only set a flag that an
+  ordinary thread polls, call `Stop` from that thread, and wire it up
   so in-flight requests finish inside the grace period.
 
 ## Registering the deployed server

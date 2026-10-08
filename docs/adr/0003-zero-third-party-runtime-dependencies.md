@@ -1,12 +1,14 @@
 # Zero third-party runtime dependencies
 
-The runtime dependency set is FPC's RTL + fpjson, nothing else.
-Packages that ship inside FPC 3.2.2 are not third-party: fcl-web is
-admitted on the same footing as fcl-json, confined to
-`MCP.Transport.HTTP`. This is what makes the library trivially
-vendorable, embeddable into any host binary via lwpt, and buildable
-with plain `fpc @lwpt.cfg` — the alternative (adopting a JSON or HTTP
-library) would hand every consumer our supply chain.
+The runtime dependency set is packages that ship inside FPC 3.2.2,
+nothing else: the RTL, fcl-json (fpjson), and fcl-base (`base64`, for
+image results and the HTTP header sentinel). Packages that ship
+inside FPC are not third-party: fcl-web is admitted on the same
+footing as fcl-json, confined to `MCP.Transport.HTTP`. This is what
+makes the library trivially vendorable, embeddable into any host
+binary via lwpt, and buildable with plain `fpc @lwpt.cfg` — the
+alternative (adopting a JSON or HTTP library) would hand every
+consumer our supply chain.
 
 ## Consequences
 

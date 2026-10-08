@@ -129,8 +129,9 @@ npm ci
 npm run interop
 ```
 
-Nothing in the test stack touches the external network: pipes,
-loopback sockets, and temp files only.
+Test *execution* touches no external network — pipes, loopback
+sockets, and temp files only. Dependency *installation* is separate:
+`npm ci` for the interop harness may reach the npm registry.
 
 ## Open the PR
 

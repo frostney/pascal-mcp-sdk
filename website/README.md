@@ -3,6 +3,16 @@ This is a Next.js application generated with
 
 It is a Next.js app with [Static Export](https://nextjs.org/docs/app/guides/static-exports) configured.
 
+Install dependencies first — `npm ci`, plus the headless Chromium
+that build-time Mermaid rendering drives (CI does the same in
+`.github/workflows/pages.yml`; add `--with-deps` on a fresh Linux
+host that lacks the browser's system libraries):
+
+```bash
+npm ci
+npx playwright install chromium
+```
+
 Run development server:
 
 ```bash

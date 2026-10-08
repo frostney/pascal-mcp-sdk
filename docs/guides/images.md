@@ -8,8 +8,10 @@ A tool can answer with an image instead of (or alongside) text:
 same result envelope `MCPTextResult` uses. Hand it raw bytes and it
 base64-encodes them for you, or hand it data that is already base64;
 either way the client receives one image content block it can render
-or pass to the model. Mind the transport budget: base64 inflates data
-by a third, and both transports cap a message at 4 MiB by default.
+or pass to the model. Mind the budget: base64 inflates data by a
+third, and while the library does not cap what you return, both
+transports cap *inbound* messages at 4 MiB by default and clients
+apply their own limits.
 
 ## From raw bytes
 

@@ -96,9 +96,9 @@ Handlers emit request-scoped notifications (`MCPReportProgress`,
 — exactly the stream the spec describes for both stdio and Streamable
 HTTP (where the same sink becomes SSE events on the POST response).
 Emission is strictly opt-in per request (`_meta.progressToken` for
-progress; the `logLevel` key for log messages, severity-filtered per
-RFC 5424), and both helpers are no-ops without a sink, so the core
-stays testable without I/O.
+progress; `_meta["io.modelcontextprotocol/logLevel"]` for log
+messages, severity-filtered per RFC 5424), and both helpers are
+no-ops without a sink, so the core stays testable without I/O.
 
 ### Statelessness, sessions, and cancellation
 
@@ -314,9 +314,10 @@ sequenceDiagram
 The binding's rules, all transport-owned:
 
 - Requests that opt into request-scoped notifications
-  (`_meta.progressToken` / `logLevel`) on handler-backed methods are
-  answered as SSE streams — events first, final response last, stream
-  closed after; notifications answer `202`.
+  (`_meta.progressToken` /
+  `_meta["io.modelcontextprotocol/logLevel"]`) on handler-backed
+  methods are answered as SSE streams — events first, final response
+  last, stream closed after; notifications answer `202`.
 - The mirrored metadata headers (`MCP-Protocol-Version`, `Mcp-Method`,
   `Mcp-Name` with the base64 sentinel) are validated against the body
   before dispatch (`-32020` on mismatch).
