@@ -146,7 +146,8 @@ record: landing page + docs site in one deployment, `basePath`
   actions): pushes to `main` touching `website/**` or `docs/**`
   deploy; PRs touching those paths build without deploying. A
   post-build check asserts the rendered output (tables, heading
-  anchors, cast assets) so pipeline regressions fail the build
+  anchors, TOC links, search-index body text, Mermaid SVGs, cast
+  assets) so pipeline regressions fail the build
   instead of shipping silently.
 - The Node toolchain is contributor/CI tooling only (precedent:
   `tools/interop-ts`) and never touches the shipped library or its

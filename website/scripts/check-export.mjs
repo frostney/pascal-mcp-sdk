@@ -33,7 +33,8 @@ for (const rel of ['docs/reference/protocol-coverage', 'docs/reference/server'])
 }
 
 // Heading anchors (remarkHeading) + populated TOCs (rehypeToc) on
-// every exported docs page.
+// every exported docs page: each <h2> needs an id, and the page's TOC
+// (the #nd-toc column, rendered after the article) must link to it.
 const docsRoot = path.join(out, 'docs');
 const walk = (dir) =>
   fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
@@ -45,6 +46,32 @@ for (const dir of walk(docsRoot)) {
   const html = fs.readFileSync(path.join(dir, 'index.html'), 'utf8');
   if (!html.includes('<h2')) continue;
   assert(/<h2 id="/.test(html), `${rel}: <h2> without id — remarkHeading missing?`);
+  const tocStart = html.indexOf('id="nd-toc"');
+  if (tocStart < 0) {
+    failures.push(`${rel}: no TOC column rendered`);
+    continue;
+  }
+  const toc = html.slice(tocStart);
+  const ids = [...html.slice(0, tocStart).matchAll(/<h2 id="([^"]+)"/g)].map((m) => m[1]);
+  const missing = ids.filter((id) => !toc.includes(`href="#${id}"`));
+  assert(
+    missing.length === 0,
+    `${rel}: TOC lacks links to ${missing.join(', ')} — rehypeToc missing?`,
+  );
+}
+
+// Search index (remarkStructure → structuredData): every docs page in
+// the static Orama export carries body text, not just its title.
+const searchFile = path.join(out, 'api/search');
+if (!fs.existsSync(searchFile)) {
+  failures.push('api/search: static search index missing from export');
+} else {
+  const indexed = Object.values(JSON.parse(fs.readFileSync(searchFile, 'utf8')).docs.docs);
+  const pages = new Set(indexed.filter((doc) => doc.type === 'page').map((doc) => doc.page_id));
+  const withText = new Set(indexed.filter((doc) => doc.type === 'text').map((doc) => doc.page_id));
+  const bare = [...pages].filter((id) => !withText.has(id));
+  assert(pages.size > 0, 'api/search: no pages indexed');
+  assert(bare.length === 0, `api/search: no body text indexed for ${bare.join(', ')}`);
 }
 
 // Repo-only records stay off the site.
@@ -76,4 +103,4 @@ if (failures.length > 0) {
   for (const failure of failures) console.error(`  - ${failure}`);
   process.exit(1);
 }
-console.log('check-export: rendered output OK (tables, anchors, mermaid, casts)');
+console.log('check-export: rendered output OK (tables, anchors, TOCs, search, mermaid, casts)');
