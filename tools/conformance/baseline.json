@@ -1,7 +1,7 @@
 {
   "suite": "@modelcontextprotocol/conformance",
   "version": "0.1.16",
-  "note": "Expected per-scenario results at the pinned suite version. run.mjs fails only when a run differs from this file. Update it together with the version pin.",
+  "note": "Expected per-scenario results at the pinned suite version. passingChecks lists check ids that must keep passing inside a scenario. run.mjs fails only when a run differs from this file. Update it together with the version pin.",
   "scenarios": {
     "completion-complete": {
       "expected": "fail",
@@ -9,7 +9,10 @@
     },
     "dns-rebinding-protection": {
       "expected": "fail",
-      "issue": 70
+      "issue": 70,
+      "passingChecks": [
+        "localhost-host-rebinding-rejected"
+      ]
     },
     "elicitation-sep1034-defaults": {
       "expected": "fail",

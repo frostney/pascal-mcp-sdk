@@ -123,19 +123,31 @@ The run is judged against the committed baseline,
 `tools/conformance/baseline.json`. It records the pinned suite version
 and the expected outcome (`pass` or `fail`) of every scenario, each
 known failure with its tracking issue. A scenario fails when any of its
-checks fails. Once results exist, `run.mjs` exits 1 when the run
+checks fails. A scenario may also list `passingChecks`: check ids that
+must keep passing even though the scenario as a whole is expected to
+fail. Once results exist, `run.mjs` exits 1 when the run
 differs from the baseline, and the suite's own exit code is not used:
 
 - **Regression**: a scenario fails that the baseline expects to pass,
-  or that the baseline does not list.
+  or that the baseline does not list, or a check in `passingChecks` no
+  longer passes.
 - **Stale baseline**: a scenario the baseline expects to fail now
-  passes. Update `baseline.json` in the same PR.
+  passes, or a check not in `passingChecks` now passes. Update
+  `baseline.json` in the same PR.
 - **Added or removed**: the suite ran a scenario the baseline does not
-  list, or skipped one it does. This check is skipped when
-  `--scenario`, `--suite` or `--spec-version` narrows the run, in either
-  `--opt value` or `--opt=value` form.
-- **Unreadable**: a scenario's `checks.json` is missing or malformed.
-  This fails the run instead of counting as an expected failure.
+  list, or skipped one it does.
+- **Unreadable**: a scenario's `checks.json` is missing, malformed, an
+  empty array, or has an entry without an id or with a status other
+  than `SUCCESS`, `FAILURE`, `WARNING` or `INFO`. This fails the run
+  instead of counting as an outcome.
+
+When `--scenario`, `--suite` or `--spec-version` narrows the run (in
+either `--opt value` or `--opt=value` form), nothing counts as added or
+removed. Scenarios the baseline does not list are printed as not judged.
+
+The rules live in `tools/conformance/compare.mjs`, covered by
+broken-input tests: `node --test tools/conformance/compare.test.mjs`.
+The CI job runs them before the suite.
 
 Operational errors also exit non-zero before any comparison: 2 for a
 missing mcpdemo argument, a non-zero exit when no results were produced,

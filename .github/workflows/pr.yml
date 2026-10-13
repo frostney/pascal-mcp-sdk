@@ -292,6 +292,9 @@ jobs:
         with:
           node-version: 24
 
+      - name: conformance comparator tests (broken-input fixtures)
+        run: node --test tools/conformance/compare.test.mjs
+
       - name: conformance suite (server mode, mcpdemo --http)
         run: node tools/conformance/run.mjs build/mcpdemo
 
