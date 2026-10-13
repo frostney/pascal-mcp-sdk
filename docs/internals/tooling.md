@@ -119,13 +119,37 @@ suite from the npm registry). Per-scenario `checks.json` files land in
 `build/conformance/results/`, and extra arguments pass through to the
 suite, for example `lwpt run conformance --scenario ping`.
 
+The run is judged against the committed baseline,
+`tools/conformance/baseline.json`. It records the pinned suite version
+and the expected outcome (`pass` or `fail`) of every scenario, each
+known failure with its tracking issue. A scenario fails when any of its
+checks fails. `run.mjs` exits non-zero only when the run differs from
+the baseline:
+
+- **Regression**: a scenario fails that the baseline expects to pass,
+  or that the baseline does not list.
+- **Stale baseline**: a scenario the baseline expects to fail now
+  passes. Update `baseline.json` in the same PR.
+- **Added or removed**: the suite ran a scenario the baseline does not
+  list, or skipped one it does. This check is skipped when `--scenario`
+  or `--suite` narrows the run.
+
+It prints a summary of every difference. Bumping the suite version
+means updating the baseline in the same change.
+
+Current state at 0.1.16: 1 of 31 checks passes, and all 30 scenarios
+are expected failures, tracked in
+[#70](https://github.com/frostney/pascal-mcp-sdk/issues/70). The
+release only knows spec versions up to 2025-11-25 and opens every
+scenario with the `initialize` handshake, which the stateless
+2026-07-28 HTTP binding rejects with `-32601`. The one passing check is
+`localhost-host-rebinding-rejected`.
+
 CI runs it as the **non-blocking** `conformance` job on every PR and
-uploads the results as the `conformance-results` artifact. It is not
-a required check. The 0.1.16 release only knows the 2025-xx spec
-versions and opens every scenario with the `initialize` handshake,
-which the stateless 2026-07-28 HTTP binding rejects with `-32601`. So
-the job stays red until the suite ships 2026-07-28 scenarios. Only the
-suite covers HTTP: the stdio binding is not exercised here.
+uploads the results as the `conformance-results` artifact. It is not a
+required check, and it is green while the run matches the baseline.
+Only the HTTP binding is covered: the stdio binding is not exercised
+here.
 
 ## Website — website/
 

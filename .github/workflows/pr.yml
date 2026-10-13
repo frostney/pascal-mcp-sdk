@@ -244,12 +244,13 @@ jobs:
           npm run interop
 
   # Official MCP conformance suite (modelcontextprotocol/conformance,
-  # exact npm pin in tools/conformance/run.mjs) against mcpdemo's
-  # Streamable HTTP binding. NON-BLOCKING and not a required context:
-  # the 0.1.16 release tests the 2025-xx stateful lifecycle (initialize
-  # handshake), which the stateless 2026-07-28 HTTP binding rejects, so
-  # the job is expected red until the suite ships 2026-07-28 scenarios.
-  # Results (checks.json per scenario) upload as an artifact.
+  # exact npm pin in tools/conformance/baseline.json) against mcpdemo's
+  # Streamable HTTP binding. NON-BLOCKING and not a required context.
+  # run.mjs compares each scenario with the committed baseline and fails
+  # only on a difference: a regression, a stale expected failure, or a
+  # scenario added or removed. At 0.1.16 every scenario is a known
+  # failure (#70: the suite only speaks the stateful initialize
+  # lifecycle). Results (checks.json per scenario) upload as an artifact.
   conformance:
     runs-on: ubuntu-latest
     timeout-minutes: 10

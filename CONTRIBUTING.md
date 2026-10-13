@@ -69,8 +69,13 @@ trees under `.lwpt/modules/` and `.lwpt/archives/` are deliberate
    ```
 
 4. **Conformance** (`tools/conformance/`): the official MCP
-   conformance suite against `mcpdemo --http`. It is non-blocking
-   and needs Node 22 or later. See
+   conformance suite against `mcpdemo --http`, judged against the
+   committed `tools/conformance/baseline.json`. It fails only when
+   results differ from the baseline (a regression, a stale expected
+   failure, or a scenario added or removed). At 0.1.16, 1 of 31
+   checks passes and all 30 scenarios are known failures
+   ([#70](https://github.com/frostney/pascal-mcp-sdk/issues/70)).
+   The CI job is non-blocking. Needs Node 22 or later. See
    [docs/internals/tooling.md](docs/internals/tooling.md).
 
    ```sh
