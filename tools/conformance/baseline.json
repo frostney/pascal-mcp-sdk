@@ -1,0 +1,130 @@
+{
+  "suite": "@modelcontextprotocol/conformance",
+  "version": "0.1.16",
+  "note": "Expected per-scenario results at the pinned suite version. passingChecks lists check ids that must keep passing inside a scenario. run.mjs fails only when a run differs from this file. Update it together with the version pin.",
+  "scenarios": {
+    "completion-complete": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "dns-rebinding-protection": {
+      "expected": "fail",
+      "issue": 70,
+      "passingChecks": [
+        "localhost-host-rebinding-rejected"
+      ]
+    },
+    "elicitation-sep1034-defaults": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "elicitation-sep1330-enums": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "logging-set-level": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "ping": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "prompts-get-embedded-resource": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "prompts-get-simple": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "prompts-get-with-args": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "prompts-get-with-image": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "prompts-list": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "resources-list": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "resources-read-binary": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "resources-read-text": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "resources-subscribe": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "resources-templates-read": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "resources-unsubscribe": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "server-initialize": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "server-sse-multiple-streams": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "tools-call-audio": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "tools-call-elicitation": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "tools-call-embedded-resource": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "tools-call-error": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "tools-call-image": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "tools-call-mixed-content": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "tools-call-sampling": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "tools-call-simple-text": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "tools-call-with-logging": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "tools-call-with-progress": {
+      "expected": "fail",
+      "issue": 70
+    },
+    "tools-list": {
+      "expected": "fail",
+      "issue": 70
+    }
+  }
+}
