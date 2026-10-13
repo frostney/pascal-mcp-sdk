@@ -8,10 +8,15 @@
 //   e.g. node run.mjs ../../build/mcpdemo --scenario server-initialize
 //
 // Results land in <repo>/build/conformance/results/ (checks.json per
-// scenario). The exit code is non-zero ONLY when the run differs from
-// the baseline: an unlisted failure (regression), a listed failure that
-// now passes (stale baseline), or a scenario added or removed. Passing
-// --scenario/--suite narrows the run, so the added/removed check is
+// scenario). Once results exist, the exit code is 1 when the run differs
+// from the baseline: an unlisted failure (regression), a listed failure
+// that now passes (stale baseline), a scenario added or removed, or a
+// scenario whose checks.json is missing or unreadable. The suite's own
+// exit code is not used then. Before that, operational errors exit
+// non-zero too: 2 for usage, 1 or the suite's code when no results were
+// produced, and an uncaught error if mcpdemo fails to start. Passing
+// --scenario, --suite or --spec-version (in either `--opt value` or
+// `--opt=value` form) narrows the run, so the added/removed check is
 // skipped then. Needs Node >= 22 (the 0.1.16 CLI uses fs.globSync).
 
 import { spawn } from 'node:child_process';
@@ -61,20 +66,28 @@ server.kill();
 
 // One directory per scenario: server-<scenario>-<ISO timestamp>.
 const actual = new Map();
+const unreadable = [];
 for (const entry of readdirSync(resultsDir)) {
   const match = /^server-(.+)-\d{4}-\d{2}-\d{2}T.*$/.exec(entry);
   if (!match) continue;
+  // A missing or malformed checks.json is a broken run, never an
+  // ordinary failure: it would otherwise match an expected `fail`.
   let checks;
   try {
     checks = JSON.parse(readFileSync(join(resultsDir, entry, 'checks.json'), 'utf8'));
-  } catch {
-    checks = null;
+  } catch (error) {
+    unreadable.push(`${match[1]} (${error.message})`);
+    continue;
   }
-  const failed = !Array.isArray(checks) || checks.some((c) => c.status === 'FAILURE');
+  if (!Array.isArray(checks)) {
+    unreadable.push(`${match[1]} (checks.json is not an array)`);
+    continue;
+  }
+  const failed = checks.some((c) => c.status === 'FAILURE');
   actual.set(match[1], failed ? 'fail' : 'pass');
 }
 
-if (actual.size === 0) {
+if (actual.size === 0 && unreadable.length === 0) {
   console.error(`conformance: no scenario results found (suite exit ${suiteCode})`);
   process.exit(suiteCode || 1);
 }
@@ -82,7 +95,9 @@ if (actual.size === 0) {
 const expected = new Map(
   Object.entries(baseline.scenarios).map(([name, s]) => [name, s.expected]),
 );
-const narrowed = extra.some((a) => a === '--scenario' || a === '--suite');
+// Commander accepts `--opt value` and `--opt=value`; each of these can
+// shrink the scenario set.
+const narrowed = extra.some((a) => /^--(scenario|suite|spec-version)(=|$)/.test(a));
 const regressions = [];
 const stale = [];
 const added = [];
@@ -98,7 +113,9 @@ for (const [name, outcome] of actual) {
   }
 }
 if (!narrowed)
-  for (const name of expected.keys()) if (!actual.has(name)) removed.push(name);
+  for (const name of expected.keys())
+    if (!actual.has(name) && !unreadable.some((u) => u.startsWith(`${name} (`)))
+      removed.push(name);
 
 const passing = [...actual.values()].filter((o) => o === 'pass').length;
 console.log(
@@ -106,6 +123,7 @@ console.log(
     `${passing} passing, ${actual.size - passing} failing`,
 );
 const sections = [
+  ['UNREADABLE: checks.json missing or malformed', unreadable],
   ['REGRESSION: failing, not expected to fail', regressions],
   ['STALE BASELINE: expected to fail, now passing (update baseline.json)', stale],
   ['ADDED: scenario not in baseline.json', added],

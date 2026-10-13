@@ -123,16 +123,23 @@ The run is judged against the committed baseline,
 `tools/conformance/baseline.json`. It records the pinned suite version
 and the expected outcome (`pass` or `fail`) of every scenario, each
 known failure with its tracking issue. A scenario fails when any of its
-checks fails. `run.mjs` exits non-zero only when the run differs from
-the baseline:
+checks fails. Once results exist, `run.mjs` exits 1 when the run
+differs from the baseline, and the suite's own exit code is not used:
 
 - **Regression**: a scenario fails that the baseline expects to pass,
   or that the baseline does not list.
 - **Stale baseline**: a scenario the baseline expects to fail now
   passes. Update `baseline.json` in the same PR.
 - **Added or removed**: the suite ran a scenario the baseline does not
-  list, or skipped one it does. This check is skipped when `--scenario`
-  or `--suite` narrows the run.
+  list, or skipped one it does. This check is skipped when
+  `--scenario`, `--suite` or `--spec-version` narrows the run, in either
+  `--opt value` or `--opt=value` form.
+- **Unreadable**: a scenario's `checks.json` is missing or malformed.
+  This fails the run instead of counting as an expected failure.
+
+Operational errors also exit non-zero before any comparison: 2 for a
+missing mcpdemo argument, a non-zero exit when no results were produced,
+and an error if mcpdemo fails to start.
 
 It prints a summary of every difference. Bumping the suite version
 means updating the baseline in the same change.

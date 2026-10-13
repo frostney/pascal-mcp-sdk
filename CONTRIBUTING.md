@@ -70,9 +70,11 @@ trees under `.lwpt/modules/` and `.lwpt/archives/` are deliberate
 
 4. **Conformance** (`tools/conformance/`): the official MCP
    conformance suite against `mcpdemo --http`, judged against the
-   committed `tools/conformance/baseline.json`. It fails only when
-   results differ from the baseline (a regression, a stale expected
-   failure, or a scenario added or removed). At 0.1.16, 1 of 31
+   committed `tools/conformance/baseline.json`. Once results exist, it
+   fails when they differ from the baseline (a regression, a stale
+   expected failure, a scenario added or removed, or an unreadable
+   result). Operational errors such as a failed start also exit
+   non-zero. At 0.1.16, 1 of 31
    checks passes and all 30 scenarios are known failures
    ([#70](https://github.com/frostney/pascal-mcp-sdk/issues/70)).
    The CI job is non-blocking. Needs Node 22 or later. See
@@ -84,9 +86,11 @@ trees under `.lwpt/modules/` and `.lwpt/archives/` are deliberate
    ```
 
 Test *execution* touches no network — everything runs against local
-pipes, sockets on 127.0.0.1, and temp files. Dependency *installation*
-is separate: `npm ci` for the interop harness and `npx` for the
-conformance suite may reach the npm registry.
+pipes, sockets on 127.0.0.1, and temp files. The one exception is the
+conformance command: `lwpt run conformance` invokes `npx`, which fetches
+the pinned suite from the npm registry unless it is already cached.
+Dependency *installation* is separate: `npm ci` for the interop harness
+may reach the npm registry.
 
 ## CI expectations
 
