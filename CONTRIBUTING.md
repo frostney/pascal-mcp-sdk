@@ -68,9 +68,20 @@ trees under `.lwpt/modules/` and `.lwpt/archives/` are deliberate
    npm run interop
    ```
 
+4. **Conformance** (`tools/conformance/`): the official MCP
+   conformance suite against `mcpdemo --http`. It is non-blocking
+   and needs Node 22 or later. See
+   [docs/internals/tooling.md](docs/internals/tooling.md).
+
+   ```sh
+   lwpt build
+   lwpt run conformance
+   ```
+
 Test *execution* touches no network — everything runs against local
 pipes, sockets on 127.0.0.1, and temp files. Dependency *installation*
-is separate: `npm ci` for the interop harness may reach the npm registry.
+is separate: `npm ci` for the interop harness and `npx` for the
+conformance suite may reach the npm registry.
 
 ## CI expectations
 
@@ -88,7 +99,7 @@ workflow cannot read — so whichever it picks has been validated.
 `install --frozen` + format check + build + test + mcpsmoke on Linux,
 macOS, and Windows, the zero-install `fpc @lwpt.cfg` path, a Markdown
 lint, and the **required** `interop` job (the three official-SDK
-batteries). `ci.yml` runs the wider per-arch matrix post-merge on
+batteries), and the non-blocking `conformance` job. `ci.yml` runs the wider per-arch matrix post-merge on
 `main`.
 
 ## Ground rules

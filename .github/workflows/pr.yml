@@ -243,6 +243,65 @@ jobs:
           npm ci
           npm run interop
 
+  # Official MCP conformance suite (modelcontextprotocol/conformance,
+  # exact npm pin in tools/conformance/run.mjs) against mcpdemo's
+  # Streamable HTTP binding. NON-BLOCKING and not a required context:
+  # the 0.1.16 release tests the 2025-xx stateful lifecycle (initialize
+  # handshake), which the stateless 2026-07-28 HTTP binding rejects, so
+  # the job is expected red until the suite ships 2026-07-28 scenarios.
+  # Results (checks.json per scenario) upload as an artifact.
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install FPC (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fpc
+          fpc -iV
+
+      - name: Install lwpt (release binary, checksum-verified)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          ASSET="lwpt-${LWPT_VERSION}-linux-x64"
+          BASE="https://github.com/frostney/lwpt/releases/download/${LWPT_VERSION}"
+          curl -fsSLO "${BASE}/${ASSET}.tar.gz"
+          curl -fsSLO "${BASE}/lwpt-${LWPT_VERSION}-checksums.txt"
+          sha256sum -c <(grep "${ASSET}.tar.gz" "lwpt-${LWPT_VERSION}-checksums.txt")
+          tar xzf "${ASSET}.tar.gz"
+          echo "$RUNNER_TEMP/${ASSET}" >> "$GITHUB_PATH"
+
+      - name: lwpt install --frozen (verify lockfile + committed modules)
+        run: lwpt install --frozen
+
+      - name: lwpt build (mcpdemo)
+        run: lwpt build
+
+      # The 0.1.16 CLI needs Node >= 22 (fs.globSync).
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: conformance suite (server mode, mcpdemo --http)
+        run: node tools/conformance/run.mjs build/mcpdemo
+
+      - name: Upload conformance results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-results
+          path: build/conformance/results/
+          if-no-files-found: warn
+
   docs:
     runs-on: ubuntu-latest
     steps:

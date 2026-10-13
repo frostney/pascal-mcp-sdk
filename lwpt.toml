@@ -32,3 +32,9 @@ mcpsmoke = { source = "source/apps/mcpsmoke.pas", output = "build/mcpsmoke" }
 # paths, so the script is a self-contained wrapper, not mcpsmoke itself.
 [smoke]
 script = "scripts/smoke.pas"
+
+# `lwpt run conformance` — the official MCP conformance suite (pinned
+# npm release) against `build/mcpdemo --http`. Needs Node >= 22 and
+# npm registry access; results land in build/conformance/.
+[conformance]
+script = "scripts/conformance.pas"

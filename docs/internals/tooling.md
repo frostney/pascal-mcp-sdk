@@ -87,7 +87,8 @@ Four workflows (see [.github/workflows/](../../.github/workflows/)):
   `lwpt format --check`, `lwpt agents --check`, and
   `.github/scripts/check-reference-docs.sh` (every public
   `MCP*`/`Register*` symbol must appear in `docs/reference/`). Plus
-  a blocking markdownlint job and the required `interop` job (below).
+  a blocking markdownlint job, the required `interop` job, and the
+  non-blocking `conformance` job (both below).
 - **ci.yml** — push to main: the same battery as the post-merge
   confirmation signal.
 - **pr-title.yml** — Conventional Commit PR-title gate (squash-merge
@@ -105,6 +106,26 @@ CI as the **required** `interop` job on every PR: a red interop job
 is a real cross-implementation regression. Each battery prints the
 resolved versions at startup. Still worth running locally whenever
 the protocol surface changes.
+
+## Official conformance suite — tools/conformance
+
+`tools/conformance/run.mjs` starts `build/mcpdemo --http` on a free
+localhost port and runs the official
+[MCP conformance suite](https://github.com/modelcontextprotocol/conformance)
+in server mode against it, pinned to the npm release
+`@modelcontextprotocol/conformance@0.1.16`. Run it locally with
+`lwpt build && lwpt run conformance` (Node 22 or later; npx fetches the
+suite from the npm registry). Per-scenario `checks.json` files land in
+`build/conformance/results/`, and extra arguments pass through to the
+suite, for example `lwpt run conformance --scenario ping`.
+
+CI runs it as the **non-blocking** `conformance` job on every PR and
+uploads the results as the `conformance-results` artifact. It is not
+a required check. The 0.1.16 release only knows the 2025-xx spec
+versions and opens every scenario with the `initialize` handshake,
+which the stateless 2026-07-28 HTTP binding rejects with `-32601`. So
+the job stays red until the suite ships 2026-07-28 scenarios. Only the
+suite covers HTTP: the stdio binding is not exercised here.
 
 ## Website — website/
 
