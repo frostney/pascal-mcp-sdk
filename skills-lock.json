@@ -77,7 +77,7 @@
       "source": "frostney/known-good-route",
       "sourceType": "github",
       "skillPath": "project-structure/SKILL.md",
-      "computedHash": "fd37d4c0d0f0d37e9bce9125a231db3622046ad3f891a1ada825643e97f24832"
+      "computedHash": "93e683bf987fa15c67057d4bdbb0380c8624385cc7f455e44bd819cfc85a704e"
     },
     "review-pr": {
       "source": "frostney/known-good-route",
