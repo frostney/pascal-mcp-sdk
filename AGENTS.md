@@ -87,7 +87,7 @@ sans-I/O discipline. See
   `.lwpt/modules/` and `.lwpt/archives/` are deliberate (zero-install)
   — do not gitignore them.
 - Do not push or open PRs without explicit maintainer go-ahead.
-- Edit `AGENTS.md` only — `CLAUDE.md` is a symlink to it.
+- Edit shared instructions in `AGENTS.md`; `CLAUDE.md` contains only `@AGENTS.md`.
 
 <!-- lwpt:agents:begin -->
 
