@@ -3,7 +3,7 @@
 ## Hard Constraints
 
 - **FreePascal only.** FPC 3.2.2, Delphi mode, flags centralised in
-  `source/units/Shared.inc`. Do not introduce another compiled language or
+  `source/units/MCP.inc`. Do not introduce another compiled language or
   repeat compiler directives per unit.
 - **Zero third-party runtime dependencies.** The library is RTL + fpjson
   only. Packages that ship inside FPC 3.2.2 are not third-party: fcl-web
@@ -23,7 +23,7 @@
 - **Layout is fixed:** library units in `source/units/` (namespaced
   `MCP.*.pas`, tests co-located as `MCP.*.Test.pas`), program entry points
   in `source/apps/`, self-contained run-script wrappers in `scripts/`
-  (InstantFPC-executed, so no `Shared.inc` and no `MCP.*` units there).
+  (InstantFPC-executed, so no `MCP.inc` and no `MCP.*` units there).
 - **`build/` is generated** — never commit it.
 - **`MCP.Server` owns the protocol surface.** Dispatch rules, error codes,
   and result shapes must not leak into transports; transports move lines

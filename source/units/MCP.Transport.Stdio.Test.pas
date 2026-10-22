@@ -6,7 +6,7 @@
 
 program MCP.Transport.Stdio.Test;
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 uses
   Classes,

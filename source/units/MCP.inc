@@ -1,4 +1,4 @@
-{$mode delphi} {$H+}
+{$mode delphi}
 {$M+}
 {$IFDEF PRODUCTION}
   {$optimization autoInline}
@@ -14,4 +14,3 @@
   {$OBJECTCHECKS ON}
   {$C+}
 {$ENDIF}
-{$modeswitch advancedrecords}

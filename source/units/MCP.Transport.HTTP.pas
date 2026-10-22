@@ -81,7 +81,7 @@ unit MCP.Transport.HTTP;
 // program must list cthreads first in its uses clause (the standard
 // FPC thread-driver contract) — see mcpdemo.
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 interface
 

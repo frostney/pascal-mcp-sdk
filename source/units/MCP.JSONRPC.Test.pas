@@ -8,7 +8,7 @@
 
 program MCP.JSONRPC.Test;
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 uses
   SysUtils,

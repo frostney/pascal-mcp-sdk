@@ -10,7 +10,7 @@
 
 program MCP.Server.Test;
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 uses
   Classes,
