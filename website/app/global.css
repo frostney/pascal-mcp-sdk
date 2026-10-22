@@ -19,6 +19,59 @@ html {
   color: var(--shiki-dark);
 }
 
+/* Build-time Mermaid diagrams are rendered twice (light/dark inline
+   SVG, see lib/rehype-mermaid-dual.mjs); show the copy matching the
+   theme class next-themes stamps on <html>. */
+.mermaid-diagram {
+  margin: 1.5rem 0;
+  overflow-x: auto;
+}
+.mermaid-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+.mermaid-dark {
+  display: none;
+}
+.dark .mermaid-light {
+  display: none;
+}
+.dark .mermaid-dark {
+  display: block;
+}
+
+/* Terminal recordings (asciinema-player, self-hosted): one dark
+   terminal look in both site themes — recordings are of a real
+   terminal, and code-on-dark reads as one. Colors follow the site's
+   indigo accent + neutral grays. */
+.terminal-cast {
+  margin: 1.5rem 0;
+}
+.terminal-cast .ap-player {
+  border-radius: 0.5rem;
+  font-size: 13px;
+}
+.asciinema-player-theme-pascal-mcp-sdk {
+  --term-color-foreground: #e5e5e5;
+  --term-color-background: #171717;
+  --term-color-0: #262626;
+  --term-color-1: #f87171;
+  --term-color-2: #4ade80;
+  --term-color-3: #facc15;
+  --term-color-4: #818cf8;
+  --term-color-5: #c084fc;
+  --term-color-6: #22d3ee;
+  --term-color-7: #d4d4d4;
+  --term-color-8: #525252;
+  --term-color-9: #fca5a5;
+  --term-color-10: #86efac;
+  --term-color-11: #fde047;
+  --term-color-12: #a5b4fc;
+  --term-color-13: #d8b4fe;
+  --term-color-14: #67e8f9;
+  --term-color-15: #fafafa;
+}
+
 html > body[data-scroll-locked] {
   margin-right: 0px !important;
   --removed-body-scroll-bar-size: 0px !important;

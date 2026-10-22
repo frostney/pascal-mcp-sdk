@@ -24,3 +24,6 @@ yarn-error.log*
 .env*.local
 .vercel
 next-env.d.ts
+# synced from docs/ by scripts/sync-docs-assets.mjs (prebuild/predev)
+/public/docs-images/
+/public/docs-casts/
