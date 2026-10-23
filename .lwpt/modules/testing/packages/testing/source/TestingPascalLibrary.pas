@@ -6,7 +6,9 @@ interface
 
 uses
   Generics.Collections,
-  SysUtils;
+  SysUtils,
+
+  TestingPascalLibrary.Protocol;
 
 type
   // Forward declarations
@@ -100,6 +102,7 @@ type
 
     procedure AddSuite(const ASuiteClass: TTestSuiteClass); overload;
     procedure AddSuite(const ASuite: TTestSuite); overload;
+    function InventoryLine: string;
     procedure Run;
 
     property Results: TList<TTestResult> read FResults;
@@ -120,10 +123,67 @@ implementation
 uses
   DateUtils,
   Generics.Defaults,
-  TypInfo;
+  TypInfo
+  {$IFDEF MSWINDOWS}
+  , Windows
+  {$ENDIF}
+  ;
+
+{$IFDEF DARWIN}
+function Pthread_setname_np(const AName: PChar): Integer; cdecl;
+  external 'c' name 'pthread_setname_np';
+{$ENDIF}
 
 var
   CurrentDescribeSuite: TTestSuite;
+
+{$IFDEF MSWINDOWS}
+const
+  MOVEFILE_WRITE_THROUGH_TESTING = $00000008;
+{$ENDIF}
+
+function ReplaceActiveTestCaseFile(const ATemporaryPath,
+  ATargetPath: string): Boolean;
+{$IFDEF MSWINDOWS}
+var
+  TargetPath, TemporaryPath: UnicodeString;
+{$ENDIF}
+begin
+  {$IFDEF MSWINDOWS}
+  TemporaryPath := UnicodeString(ATemporaryPath);
+  TargetPath := UnicodeString(ATargetPath);
+  Result := Windows.MoveFileExW(PWideChar(TemporaryPath), PWideChar(TargetPath),
+    MOVEFILE_REPLACE_EXISTING or MOVEFILE_WRITE_THROUGH_TESTING);
+  {$ELSE}
+  Result := RenameFile(ATemporaryPath, ATargetPath);
+  {$ENDIF}
+end;
+
+procedure PublishActiveTestCase(const APath, ASuiteName,
+  ATestName: string);
+var
+  MarkerFile: TextFile;
+  TemporaryPath: string;
+begin
+  if APath = '' then Exit;
+  TemporaryPath := APath + '.tmp-' + IntToStr(GetProcessID);
+  try
+    AssignFile(MarkerFile, TemporaryPath);
+    Rewrite(MarkerFile);
+    try
+      WriteLn(MarkerFile, ASuiteName + ' > ' + ATestName);
+      Flush(MarkerFile);
+    finally
+      CloseFile(MarkerFile);
+    end;
+    if not ReplaceActiveTestCaseFile(TemporaryPath, APath) then
+      raise Exception.CreateFmt('failed to publish active test case at %s',
+        [APath]);
+  except
+    SysUtils.DeleteFile(TemporaryPath);
+    raise;
+  end;
+end;
 
 function TestResultToExitCode: Integer;
 var
@@ -332,10 +392,20 @@ end;
 
 procedure TTestRunner.Run;
 var
+  ActiveTestCaseFile: string;
+  InventoryMode: string;
   Suite: TTestSuite;
   Test: TTestRegistration;
   TestResult: TTestResult;
+  {$IFDEF DARWIN}
+  DiagnosticThreadName: string;
+  {$ENDIF}
 begin
+  InventoryMode := ConsumeCurrentTestInventoryMode;
+  if InventoryMode <> '' then WriteLn(InventoryLine);
+  if InventoryMode = TEST_INVENTORY_MODE_ONLY then Halt(0);
+  ActiveTestCaseFile := ConsumeActiveTestCaseFile;
+
   WriteLn;
   WriteLn('Running tests...');
   WriteLn;
@@ -351,6 +421,11 @@ begin
       for Test in Suite.Tests do
       begin
         Suite.FCurrentTestName := Test.Name;
+        {$IFDEF DARWIN}
+        DiagnosticThreadName := Copy('test: ' + Test.Name, 1, 63);
+        Pthread_setname_np(PChar(DiagnosticThreadName));
+        {$ENDIF}
+        PublishActiveTestCase(ActiveTestCaseFile, Suite.Name, Test.Name);
         RunTest(Suite, Test);
       end;
 
@@ -380,6 +455,17 @@ begin
         ExitCode := 1;
       Break;
     end;
+end;
+
+function TTestRunner.InventoryLine: string;
+var
+  Suite: TTestSuite;
+  TestCount: Integer;
+begin
+  TestCount := 0;
+  for Suite in FSuites do Inc(TestCount, Suite.Tests.Count);
+  Result := TEST_INVENTORY_PREFIX + IntToStr(FSuites.Count) + #9
+    + IntToStr(TestCount);
 end;
 
 procedure TTestRunner.PrintResults;
