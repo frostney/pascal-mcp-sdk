@@ -636,11 +636,29 @@ end;
 
 function TMCPWireFloat.GetAsString: TJSONStringType;
 var
+  Value: Double;
   Digits: string;
   Exponent: Integer;
 begin
-  ShortestDigits(Abs(AsFloat), Digits, Exponent);
-  Result := JSNumberText(AsFloat < 0, Digits, Exponent);
+  // The node stays an ordinary, assignable fpjson float, so the value
+  // is checked here as well as at creation.
+  Value := AsFloat;
+  if IsNan(Value) or IsInfinite(Value) then
+    raise EMCPSchema.Create('NaN and infinite numbers have no JSON form');
+  if Value = 0 then
+    Exit('0');
+  ShortestDigits(Abs(Value), Digits, Exponent);
+  Result := JSNumberText(Value < 0, Digits, Exponent);
+end;
+
+// A float node that writes its value as MCPWireNumber does, for a
+// typed float property: it stays a float node however integral the
+// value, so assigning a fraction to it later keeps the fraction.
+function WireFloatNode(AValue: Double): TJSONData;
+begin
+  if IsNan(AValue) or IsInfinite(AValue) then
+    raise EMCPSchema.Create('NaN and infinite numbers have no JSON form');
+  Result := TMCPWireFloat.Create(AValue);
 end;
 
 function MCPWireNumber(AValue: Double): TJSONData;
@@ -680,7 +698,7 @@ begin
           tkSString, tkLString, tkAString, tkWString, tkUString:
             Result.Add(Prop^.Name, GetStrProp(AObj, Prop));
           tkFloat:
-            Result.Add(Prop^.Name, MCPWireNumber(GetFloatProp(AObj, Prop)));
+            Result.Add(Prop^.Name, WireFloatNode(GetFloatProp(AObj, Prop)));
           tkInteger:
             begin
               TypeData := GetTypeData(Prop^.PropType);

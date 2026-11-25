@@ -54,10 +54,12 @@ unit MCP.Transport.HTTP;
 //     X-Accel-Buffering: no) are deferred until the first event, the
 //     notifications follow as data: events, and the final response
 //     event terminates the stream. An opted-in request that emits no
-//     notification — every protocol error does, since errors are
-//     decided before a handler runs — is answered as a single
-//     application/json object under the status mapping above, so the
-//     status a client sees never depends on the streaming opt-in. All
+//     notification — every error decided before a handler runs among
+//     them — is answered as a single application/json object under
+//     the status mapping above. Once a stream has opened, its status
+//     is 200, so an error the core decides after the handler emitted
+//     (e.g. -32021 for an input request the client did not declare)
+//     is the stream's final event, not a mapped status (#84). All
 //     other requests get a single application/json object. (The spec
 //     lets the server choose per request; this is the policy.)
 //   - closing the SSE response stream is the cancellation signal:

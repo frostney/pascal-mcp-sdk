@@ -102,6 +102,8 @@ type
     procedure TestJavaScriptForms;
     procedure TestNonFiniteRaises;
     procedure TestSerializeNaNRaises;
+    procedure TestSerializedFloatStaysFloat;
+    procedure TestAssignedFloatNodeStaysValid;
   end;
 
 // The wire text of MCPWireNumber(AValue).
@@ -586,6 +588,52 @@ begin
   end;
 end;
 
+procedure TWireNumber.TestSerializedFloatStaysFloat;
+var
+  Obj: TProbeArgs;
+  Json: TJSONObject;
+begin
+  Obj := TProbeArgs.Create;
+  try
+    Obj.ratio := 1.0;
+    Json := MCPSerialize(Obj);
+    try
+      // Integral text on the wire, still a float node underneath: a
+      // fraction assigned later is kept.
+      Expect<string>(Json.Find('ratio').AsJSON).ToBe('1');
+      Json.Find('ratio').AsFloat := 1.5;
+      Expect<string>(Json.Find('ratio').AsJSON).ToBe('1.5');
+    finally
+      Json.Free;
+    end;
+  finally
+    Obj.Free;
+  end;
+end;
+
+procedure TWireNumber.TestAssignedFloatNodeStaysValid;
+var
+  Node: TJSONData;
+  Raised: Boolean;
+begin
+  Node := MCPWireNumber(0.25);
+  try
+    Node.AsFloat := 0;
+    Expect<string>(Node.AsJSON).ToBe('0');
+    Node.AsFloat := NaN;
+    Raised := False;
+    try
+      Node.AsJSON;
+    except
+      on EMCPSchema do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+  finally
+    Node.Free;
+  end;
+end;
+
 procedure TWireNumber.SetupTests;
 begin
   Test('numbers are written as JavaScript writes them',
@@ -593,6 +641,10 @@ begin
   Test('NaN and infinities raise EMCPSchema', TestNonFiniteRaises);
   Test('MCPSerialize raises on a NaN float property',
     TestSerializeNaNRaises);
+  Test('a serialized integral float stays a float node',
+    TestSerializedFloatStaysFloat);
+  Test('a wire float assigned zero or NaN writes 0 or raises',
+    TestAssignedFloatNodeStaysValid);
 end;
 
 begin
