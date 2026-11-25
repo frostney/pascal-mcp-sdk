@@ -12,6 +12,10 @@ program conformance;
 uses
   SysUtils;
 
+const
+  // ExeSearch matches the file name literally.
+  NodeName = {$IFDEF MSWINDOWS}'node.exe'{$ELSE}'node'{$ENDIF};
+
 var
   Bin: string;
   i: Integer;
@@ -35,7 +39,7 @@ begin
     Args[i + 1] := ParamStr(i);
 
   try
-    Halt(ExecuteProcess(ExeSearch('node', GetEnvironmentVariable('PATH')), Args));
+    Halt(ExecuteProcess(ExeSearch(NodeName, GetEnvironmentVariable('PATH')), Args));
   except
     on E: EOSError do
     begin

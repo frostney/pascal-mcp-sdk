@@ -1,16 +1,31 @@
 // Stand-in for the conformance CLI in run.test.mjs. Records its
-// arguments in FAKE_SUITE_ARGS, writes one checks.json per scenario of
-// FAKE_SUITE_RESULTS ({ scenario: checks }) into --output-dir the way
-// the suite names them, and exits with FAKE_SUITE_EXIT (default 0).
+// arguments in FAKE_SUITE_ARGS and writes one checks.json per scenario
+// of FAKE_SUITE_RESULTS ({ scenario: checks }) into --output-dir the
+// way the suite names them; with --scenario NAME (either form) only
+// that scenario. FAKE_SUITE_DUPLICATE names a scenario to write twice;
+// FAKE_SUITE_SIGNAL ends the process with that signal after writing;
+// otherwise it exits with FAKE_SUITE_EXIT (default 0).
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const args = process.argv.slice(2);
 writeFileSync(process.env.FAKE_SUITE_ARGS, JSON.stringify(args));
-const outputDir = args[args.indexOf('--output-dir') + 1];
-for (const [scenario, checks] of Object.entries(JSON.parse(process.env.FAKE_SUITE_RESULTS ?? '{}'))) {
-  const dir = join(outputDir, `server-${scenario}-2026-07-28T00-00-00-000Z`);
+const value = (name) => {
+  const i = args.indexOf(`--${name}`);
+  if (i >= 0) return args[i + 1];
+  return args.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3);
+};
+const outputDir = value('output-dir');
+const only = value('scenario');
+const write = (scenario, checks, stamp) => {
+  const dir = join(outputDir, `server-${scenario}-2026-07-28T00-00-0${stamp}-000Z`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'checks.json'), typeof checks === 'string' ? checks : JSON.stringify(checks));
+};
+for (const [scenario, checks] of Object.entries(JSON.parse(process.env.FAKE_SUITE_RESULTS ?? '{}'))) {
+  if (only && scenario !== only) continue;
+  write(scenario, checks, 0);
+  if (scenario === process.env.FAKE_SUITE_DUPLICATE) write(scenario, checks, 1);
 }
-process.exit(Number(process.env.FAKE_SUITE_EXIT ?? 0));
+if (process.env.FAKE_SUITE_SIGNAL) process.kill(process.pid, process.env.FAKE_SUITE_SIGNAL);
+else process.exit(Number(process.env.FAKE_SUITE_EXIT ?? 0));

@@ -121,6 +121,7 @@ test('a malformed baseline is rejected before any comparison', () => {
     ['misspelled expectation', withScenario({ expected: 'fial', issue: 70 })],
     ['null expectation', withScenario({ expected: null })],
     ['expected failure without issue', withScenario({ expected: 'fail' })],
+    ['expected skip without issue', withScenario({ expected: 'skip' })],
     ['expected pass with issue', withScenario({ expected: 'pass', issue: 70 })],
     ['passingChecks not a list', withScenario({ expected: 'fail', issue: 70, passingChecks: 'a' })],
     ['passingChecks on a pass', withScenario({ expected: 'pass', passingChecks: ['a'] })],
@@ -128,4 +129,49 @@ test('a malformed baseline is rejected before any comparison', () => {
   ]) {
     assert.notDeepEqual(validateBaseline(baselineValue), [], label);
   }
+});
+
+test('a scenario whose checks were all skipped is a skip, and a lost pass is a regression', () => {
+  assert.equal(classifyChecks([{ id: 'x', status: 'SKIPPED' }, { id: 'y', status: 'INFO' }]).outcome, 'skip');
+  const base = { scenarios: { 'tools-list': { expected: 'pass' } } };
+  const r = compare(base, new Map([['tools-list', classifyChecks([{ id: 'tools-list', status: 'SKIPPED' }])]]), false);
+  assert.equal(r.regressions.length, 1);
+  assert.equal(differs(r), true);
+});
+
+test('an expected skip that passes is stale, one that fails is a regression', () => {
+  const base = { scenarios: { s: { expected: 'skip', issue: 82 } } };
+  const passed = compare(base, new Map([['s', classifyChecks([ok('s')])]]), false);
+  assert.equal(passed.stale.length, 1);
+  const failed = compare(base, new Map([['s', classifyChecks([bad('s')])]]), false);
+  assert.equal(failed.regressions.length, 1);
+});
+
+test('distinct probes under one check id are not contradictory; any failing probe fails the id', () => {
+  const probes = [
+    { id: 'hdr', name: 'Missing', status: 'SUCCESS' },
+    { id: 'hdr', name: 'Mismatched', status: 'FAILURE' },
+  ];
+  const r = classifyChecks(probes);
+  assert.equal(r.error, undefined);
+  assert.equal(r.outcome, 'fail');
+  assert.equal(r.passing.has('hdr'), false);
+  const same = classifyChecks([
+    { id: 'hdr', name: 'Missing', status: 'SUCCESS' },
+    { id: 'hdr', name: 'Missing', status: 'FAILURE' },
+  ]);
+  assert.match(same.error, /both SUCCESS and FAILURE/);
+});
+
+test('a floating suite version is rejected, an exact pre-release accepted', () => {
+  for (const version of ['latest', '^0.2.0', '0.2', '0.2.0-'])
+    assert.notDeepEqual(validateBaseline({ ...valid, version }), [], version);
+  assert.deepEqual(validateBaseline({ ...valid, version: '0.2.0-alpha.12' }), []);
+});
+
+test('a scenario named like an Object property is reported, not ignored', () => {
+  const full = compare(baseline, new Map([...Object.entries(current).map(([k, v]) => [k, classifyChecks(v)]), ['constructor', classifyChecks([ok('c')])]]), false);
+  assert.equal(full.added.length, 1);
+  const narrowed = compare(baseline, new Map([['constructor', classifyChecks([ok('c')])]]), true);
+  assert.equal(narrowed.unjudged.length, 1);
 });

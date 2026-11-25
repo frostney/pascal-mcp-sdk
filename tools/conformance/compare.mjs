@@ -6,7 +6,12 @@
 // fails a scenario.
 export const KNOWN_STATUSES = new Set(['SUCCESS', 'FAILURE', 'WARNING', 'INFO', 'SKIPPED']);
 
-const EXPECTED = new Set(['pass', 'fail']);
+// pass: at least one check succeeded and none failed; fail: a check
+// failed; skip: the suite ran the scenario but every check was skipped
+// or informational, so it proved nothing either way.
+const EXPECTED = new Set(['pass', 'fail', 'skip']);
+// An exact npm version, pre-releases included: the pin cannot float.
+const EXACT_VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/;
 
 // Checks the shape of a parsed baseline.json and returns the list of
 // problems, empty when it is usable. A malformed expectation would
@@ -18,6 +23,8 @@ export function validateBaseline(baseline) {
   for (const key of ['suite', 'version', 'requirements'])
     if (typeof baseline[key] !== 'string' || baseline[key] === '')
       problems.push(`"${key}" is not a non-empty string`);
+  if (typeof baseline.version === 'string' && baseline.version !== '' && !EXACT_VERSION.test(baseline.version))
+    problems.push(`"version" ${JSON.stringify(baseline.version)} is not an exact version`);
   const scenarios = baseline.scenarios;
   if (scenarios === null || typeof scenarios !== 'object' || Array.isArray(scenarios)) {
     problems.push('"scenarios" is not an object');
@@ -30,9 +37,9 @@ export function validateBaseline(baseline) {
       continue;
     }
     if (!EXPECTED.has(want.expected))
-      problems.push(`${name}: expected is ${JSON.stringify(want.expected)}, not "pass" or "fail"`);
-    if (want.expected === 'fail' && !(Number.isInteger(want.issue) && want.issue > 0))
-      problems.push(`${name}: an expected failure needs its tracking issue number`);
+      problems.push(`${name}: expected is ${JSON.stringify(want.expected)}, not "pass", "fail" or "skip"`);
+    if (want.expected !== 'pass' && !(Number.isInteger(want.issue) && want.issue > 0))
+      problems.push(`${name}: an expected failure or skip needs its tracking issue number`);
     if (want.expected === 'pass' && want.issue !== undefined)
       problems.push(`${name}: an expected pass has no tracking issue`);
     if (want.passingChecks !== undefined) {
@@ -50,15 +57,17 @@ export function validateBaseline(baseline) {
 }
 
 // Turns one parsed checks.json into { outcome, passing } or { error }.
-// An empty array, a non-object entry, a missing or empty id, an unknown
-// status, or one id reported both as SUCCESS and as FAILURE is invalid
-// evidence, never a pass or an expected fail. (The suite may report a
-// check id several times, once per probe; that is fine while every
-// report agrees on passing or failing.)
+// The suite can report several probes under one check id, telling them
+// apart by name; a check id passes only when every probe under it
+// succeeded, and fails when any failed. An empty array, a non-object
+// entry, a missing or empty id, an unknown status, or one probe (same
+// id and name) reported both as SUCCESS and as FAILURE is invalid
+// evidence, never an outcome.
 export function classifyChecks(checks) {
   if (!Array.isArray(checks)) return { error: 'checks.json is not an array' };
   if (checks.length === 0) return { error: 'checks.json is empty' };
-  const passed = new Set();
+  const probes = new Map();
+  const succeeded = new Set();
   const failed = new Set();
   for (const [i, c] of checks.entries()) {
     if (c === null || typeof c !== 'object' || Array.isArray(c))
@@ -67,13 +76,18 @@ export function classifyChecks(checks) {
       return { error: `check ${i} has no id` };
     if (!KNOWN_STATUSES.has(c.status))
       return { error: `check ${c.id} has unknown status ${JSON.stringify(c.status)}` };
-    if (c.status === 'SUCCESS') passed.add(c.id);
+    const probe = `${c.id}\u0000${typeof c.name === 'string' ? c.name : ''}`;
+    const statuses = probes.get(probe) ?? new Set();
+    statuses.add(c.status);
+    probes.set(probe, statuses);
+    if (statuses.has('SUCCESS') && statuses.has('FAILURE'))
+      return { error: `check ${c.id}${c.name ? ` (${c.name})` : ''} reported as both SUCCESS and FAILURE` };
+    if (c.status === 'SUCCESS') succeeded.add(c.id);
     if (c.status === 'FAILURE') failed.add(c.id);
   }
-  const contradictory = [...passed].filter((id) => failed.has(id));
-  if (contradictory.length > 0)
-    return { error: `check ${contradictory.join(', ')} reported as both SUCCESS and FAILURE` };
-  return { outcome: failed.size > 0 ? 'fail' : 'pass', passing: passed };
+  const passing = new Set([...succeeded].filter((id) => !failed.has(id)));
+  const outcome = failed.size > 0 ? 'fail' : succeeded.size > 0 ? 'pass' : 'skip';
+  return { outcome, passing };
 }
 
 // actual: Map<scenario, { outcome, passing } | { error }>.
@@ -88,23 +102,27 @@ export function compare(baseline, actual, narrowed) {
       r.unreadable.push(`${name} (${result.error})`);
       continue;
     }
-    const want = baseline.scenarios[name];
+    const want = Object.hasOwn(baseline.scenarios, name) ? baseline.scenarios[name] : undefined;
     if (!want) {
       if (narrowed) {
         r.unjudged.push(`${name} (${result.outcome})`);
         continue;
       }
       r.added.push(`${name} (${result.outcome})`);
-      if (result.outcome === 'fail') r.regressions.push(`${name} (not in baseline)`);
+      if (result.outcome !== 'pass') r.regressions.push(`${name} (${result.outcome}, not in baseline)`);
       continue;
     }
-    if (result.outcome === 'fail' && want.expected === 'pass') r.regressions.push(name);
+    // A scenario that now passes where the baseline expects a failure
+    // or a skip is stale; any other change of outcome loses coverage
+    // or adds a failure, so it is a regression.
+    if (result.outcome !== want.expected && result.outcome !== 'pass')
+      r.regressions.push(`${name} (${result.outcome}, expected ${want.expected})`);
     // Check-level: a recorded passing check must still pass, even when
     // its scenario is an expected failure.
     const recorded = new Set(want.passingChecks ?? []);
     for (const id of recorded)
       if (!result.passing.has(id)) r.regressions.push(`${name}: check ${id} no longer passes`);
-    if (want.expected === 'fail') {
+    if (want.expected !== 'pass') {
       if (result.outcome === 'pass') {
         // The whole scenario recovered: one entry says so; listing each
         // newly passing check as well would only repeat it.

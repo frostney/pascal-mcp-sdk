@@ -2,7 +2,7 @@
   "suite": "@modelcontextprotocol/conformance",
   "version": "0.2.0-alpha.12",
   "requirements": "2026-07-28",
-  "note": "Expected per-scenario results for the pinned suite version run with --requirements at the named spec revision. passingChecks lists check ids that must keep passing inside an expected failure. run.mjs fails only when a run differs from this file. Update it together with the version pin.",
+  "note": "Expected per-scenario results for the pinned suite version, run with --requirements at the named spec revision: pass (a check succeeded, none failed), fail (a check failed) or skip (only skipped or informational checks), each failure or skip with its tracking issue. passingChecks lists check ids that must keep passing inside an expected failure. Once results exist, run.mjs fails when a run differs from this file or a result is unreadable; usage errors, an invalid baseline and a run that produced no results fail it too. Update it together with the version pin.",
   "scenarios": {
     "caching": {
       "expected": "pass"
@@ -261,7 +261,8 @@
       ]
     },
     "tasks-status-notifications": {
-      "expected": "pass"
+      "expected": "skip",
+      "issue": 82
     },
     "tasks-wire-fields": {
       "expected": "fail",

@@ -31,13 +31,14 @@ const matching = {
   'completion-complete': [bad('completion-complete'), ok('wire-schema-valid')],
 };
 
-function runConformance({ results = matching, baselineValue = baseline, demoMode, extra = [] } = {}) {
+function runConformance({ results = matching, baselineValue = baseline, demoMode, extra = [], env = {}, lockedBy } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'conformance-run-'));
   try {
     const baselineFile = join(dir, 'baseline.json');
     writeFileSync(baselineFile, JSON.stringify(baselineValue));
     const argsFile = join(dir, 'suite-args.json');
     const pidFile = join(dir, 'demo.pid');
+    if (lockedBy !== undefined) writeFileSync(`${join(dir, 'results')}.lock`, String(lockedBy));
     const child = spawnSync(process.execPath, [join(here, 'run.mjs'), fakeDemo, ...extra], {
       encoding: 'utf8',
       timeout: 30000,
@@ -50,6 +51,7 @@ function runConformance({ results = matching, baselineValue = baseline, demoMode
         FAKE_SUITE_RESULTS: JSON.stringify(results),
         FAKE_DEMO_PID: pidFile,
         ...(demoMode ? { FAKE_DEMO_MODE: demoMode } : {}),
+        ...env,
       },
     });
     const read = (file) => {
@@ -124,14 +126,68 @@ test('an invalid baseline exits 2 before the suite runs', () => {
   assert.equal(r.suiteArgs, undefined, 'the suite ran despite an invalid baseline');
 });
 
-test('a scenario selection replaces the requirement set and judges no additions', () => {
-  const r = runConformance({
-    results: { ping: [ok('ping')] },
-    extra: ['--scenario', 'ping'],
+for (const extra of [['--scenario', 'tools-list'], ['--scenario=tools-list']]) {
+  test(`a scenario selection (${extra.join(' ')}) runs at the baseline's revision`, () => {
+    const r = runConformance({ extra });
+    assert.equal(r.code, 0, r.output);
+    assert.equal(r.suiteArgs.includes('--requirements'), false);
+    const at = r.suiteArgs.indexOf('--spec-version');
+    assert.equal(r.suiteArgs[at + 1], '2026-07-28');
+    assert.ok(extra.every((a) => r.suiteArgs.includes(a)), 'the selector was not forwarded');
+    assert.match(r.output, /1 scenarios run/);
   });
+}
+
+test('a scenario outside the baseline is listed as not judged in a narrowed run', () => {
+  const r = runConformance({ results: { ping: [ok('ping')] }, extra: ['--scenario', 'ping'] });
   assert.equal(r.code, 0, r.output);
-  assert.equal(r.suiteArgs.includes('--requirements'), false);
   assert.match(r.output, /NOT JUDGED[\s\S]*ping/);
+});
+
+for (const extra of [['--spec-version', '2025-11-25'], ['--requirements=2025-11-25']]) {
+  test(`another revision (${extra.join(' ')}) is refused before the suite runs`, () => {
+    const r = runConformance({ extra });
+    assert.equal(r.code, 2, r.output);
+    assert.equal(r.suiteArgs, undefined);
+  });
+}
+
+for (const extra of [['--url', 'http://elsewhere/mcp'], ['--output-dir=/tmp/x'], ['-o', 'x']]) {
+  test(`a runner-owned option (${extra[0]}) is refused`, () => {
+    const r = runConformance({ extra });
+    assert.equal(r.code, 2, r.output);
+    assert.equal(r.suiteArgs, undefined);
+  });
+}
+
+test('two result directories for one scenario are unreadable', () => {
+  const r = runConformance({ env: { FAKE_SUITE_DUPLICATE: 'tools-list' } });
+  assert.equal(r.code, 1, r.output);
+  assert.match(r.output, /UNREADABLE[\s\S]*tools-list \(more than one result directory/);
+});
+
+test('a suite ended by a signal fails the run even when its results match', () => {
+  const r = runConformance({ env: { FAKE_SUITE_SIGNAL: 'SIGTERM' } });
+  assert.equal(r.code, 1, r.output);
+  assert.match(r.output, /ended by SIGTERM/);
+  assert.equal(alive(r.demoPid), false, 'mcpdemo left running');
+});
+
+test('an invalid suite command is refused before mcpdemo starts', () => {
+  const r = runConformance({ env: { CONFORMANCE_SUITE_COMMAND: '[]' } });
+  assert.equal(r.code, 2, r.output);
+  assert.ok(!(r.demoPid > 0), 'mcpdemo was started');
+});
+
+test('a results directory held by a running process is refused', () => {
+  const r = runConformance({ lockedBy: process.pid });
+  assert.equal(r.code, 2, r.output);
+  assert.match(r.output, /another run is using/);
+});
+
+test("a lock left by a process that has exited is taken over", () => {
+  const r = runConformance({ lockedBy: 2147483646 });
+  assert.equal(r.code, 0, r.output);
 });
 
 test('mcpdemo that never listens fails the run and is stopped', () => {
