@@ -11,11 +11,14 @@ export const KNOWN_STATUSES = new Set(['SUCCESS', 'FAILURE', 'WARNING', 'INFO', 
 // or informational, so it proved nothing either way.
 const EXPECTED = new Set(['pass', 'fail', 'skip']);
 // An exact SemVer version, pre-releases included, as npm reads one:
-// numeric parts without leading zeros and within Number.MAX_SAFE_INTEGER
-// (npm treats anything else as a dist-tag, which can float).
+// numeric parts without leading zeros and within Number.MAX_SAFE_INTEGER,
+// at most 256 characters (npm treats anything else as a dist-tag, which
+// can float).
 const EXACT_VERSION =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-(0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?$/;
 function isExactVersion(version) {
+  // npm reads a longer string as a tag, whatever its shape.
+  if (version.length > 256) return false;
   const match = EXACT_VERSION.exec(version);
   return match !== null && match.slice(1, 4).every((part) => Number(part) <= Number.MAX_SAFE_INTEGER);
 }

@@ -265,3 +265,49 @@ test('a runner interrupted while the suite runs stops the suite and mcpdemo', as
     rmSync(files.dir, { recursive: true, force: true });
   }
 });
+
+// Sends SIGTERM to a runner once `ready` exists, then returns its exit
+// code and the stand-ins' pids.
+async function interruptWhen(files, ready) {
+  const child = spawn(process.execPath, [join(here, 'run.mjs'), fakeDemo], { env: files.env, stdio: 'ignore' });
+  const deadline = Date.now() + 15000;
+  while (!existsSync(ready) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(existsSync(ready), `${ready} never appeared`);
+  const exited = new Promise((resolve) => child.on('exit', (code) => resolve(code)));
+  child.kill('SIGTERM');
+  return {
+    code: await exited,
+    demoPid: Number(read(files.demoPid) ?? 0),
+    suitePid: Number(read(files.suitePid) ?? 0),
+  };
+}
+
+test('a runner interrupted before mcpdemo is ready stops it', async () => {
+  const files = setUp({ demoMode: 'never-listen' });
+  try {
+    const r = await interruptWhen(files, files.demoPid);
+    assert.equal(r.code, 143);
+    assert.ok(r.demoPid > 0);
+    assert.equal(alive(r.demoPid), false, 'mcpdemo left running');
+  } finally {
+    rmSync(files.dir, { recursive: true, force: true });
+  }
+});
+
+test('a runner interrupted while a wrapper runs the suite stops the suite behind it', async () => {
+  // A shell between the runner and the suite, as npx puts one there.
+  const wrapper = JSON.stringify(['/bin/sh', '-c', `"${process.execPath}" "${fakeSuite}" "$@"; true`, 'sh']);
+  const files = setUp({ env: { FAKE_SUITE_SLEEP: '20000', CONFORMANCE_SUITE_COMMAND: wrapper } });
+  try {
+    const r = await interruptWhen(files, files.suitePid);
+    assert.equal(r.code, 143);
+    assert.ok(r.suitePid > 0 && r.demoPid > 0);
+    // The group is signalled at once; give the suite its moment to exit.
+    const deadline = Date.now() + 5000;
+    while (alive(r.suitePid) && Date.now() < deadline) await new Promise((res) => setTimeout(res, 50));
+    assert.equal(alive(r.suitePid), false, 'the suite behind the wrapper left running');
+    assert.equal(alive(r.demoPid), false, 'mcpdemo left running');
+  } finally {
+    rmSync(files.dir, { recursive: true, force: true });
+  }
+});

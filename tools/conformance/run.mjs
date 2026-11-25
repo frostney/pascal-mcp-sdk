@@ -44,7 +44,7 @@
 // exist yet, and CONFORMANCE_SUITE_COMMAND, a JSON array, replaces the
 // `npx --yes <suite>@<version>` prefix of the suite command.
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -150,6 +150,44 @@ try {
 let server;
 let suite;
 let stopping = false;
+
+// The suite runs in a process group of its own (POSIX), so stopping it
+// reaches whatever it launched (npx starts the suite's binary through a
+// shell, and a wrapper may add more): SIGTERM to the group, SIGKILL to
+// the group if the leader has not exited after two seconds. On Windows,
+// taskkill stops the tree.
+function stopSuite(child) {
+  return new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      if (process.platform !== 'win32') {
+        try {
+          process.kill(-child.pid, 'SIGTERM');
+        } catch {
+          // the group is already gone
+        }
+      }
+      resolve();
+      return;
+    }
+    const signalGroup = (signal) => {
+      if (process.platform === 'win32') {
+        spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+        return;
+      }
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        child.kill(signal);
+      }
+    };
+    const force = setTimeout(() => signalGroup('SIGKILL'), 2000);
+    child.once('exit', () => {
+      clearTimeout(force);
+      resolve();
+    });
+    signalGroup('SIGTERM');
+  });
+}
 // Interrupted: stop the suite and mcpdemo, then exit with the signal's
 // conventional status.
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
@@ -157,15 +195,20 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     if (stopping) return;
     stopping = true;
     console.error(`conformance: interrupted by ${signal}; stopping the suite and mcpdemo`);
-    await Promise.all([suite, server].filter(Boolean).map((child) => stopChild(child)));
+    await Promise.all([suite && stopSuite(suite), server && stopChild(server)].filter(Boolean));
     process.exit(128 + constants.signals[signal]);
   });
 }
 
 const port = await freePort();
 try {
-  server = await startDemo(demo, port);
+  server = await startDemo(demo, port, 10000, (child) => {
+    server = child;
+  });
 } catch (error) {
+  // An interrupt during startup stops mcpdemo, which rejects here too;
+  // the signal handler owns that exit.
+  if (stopping) await new Promise(() => {});
   console.error(`conformance: ${error.message}`);
   process.exit(1);
 }
@@ -179,7 +222,10 @@ let suiteSignal = null;
 try {
   suiteCode = await new Promise((done) => {
     const [command, ...prefixArgs] = suitePrefix;
-    suite = spawn(command, [...prefixArgs, ...suiteArgs], { stdio: 'inherit' });
+    suite = spawn(command, [...prefixArgs, ...suiteArgs], {
+      stdio: 'inherit',
+      detached: process.platform !== 'win32',
+    });
     suite.on('exit', (exitCode, signal) => {
       suiteSignal = signal;
       done(exitCode);
@@ -192,7 +238,12 @@ try {
 } finally {
   // startDemo's own exit listener is inert once it has settled; the
   // signal handler may be waiting on another, so none is removed.
-  if (!stopping) await stopChild(server);
+  // After a normal finish, the suite's group is signalled too, so
+  // nothing it launched outlives the run.
+  if (!stopping) {
+    if (suite) await stopSuite(suite);
+    await stopChild(server);
+  }
 }
 if (stopping) await new Promise(() => {}); // the signal handler exits
 // 0 and 1 are the suite's ordinary results (all passed, some failed);

@@ -171,6 +171,9 @@ test('a floating suite version is rejected, an exact pre-release accepted', () =
   for (const version of ['latest', '^0.2.0', '0.2', '0.2.0-', '01.2.3', '9007199254740992.0.0', '0.2.0-01'])
     assert.notDeepEqual(validateBaseline({ ...valid, version }), [], version);
   assert.deepEqual(validateBaseline({ ...valid, version: '0.2.0-alpha.12' }), []);
+  // npm's 256-character limit, on both sides of the boundary.
+  assert.deepEqual(validateBaseline({ ...valid, version: `0.2.0-${'a'.repeat(250)}` }), []);
+  assert.notDeepEqual(validateBaseline({ ...valid, version: `0.2.0-${'a'.repeat(251)}` }), []);
 });
 
 test('a scenario named like an Object property is reported, not ignored', () => {

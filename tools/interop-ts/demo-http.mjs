@@ -65,11 +65,14 @@ export function stopChild(child, graceMs = 2000) {
 // failure (timeout, early exit, never listening) the child is stopped,
 // and has exited, before the promise rejects, so a failed start never
 // leaves mcpdemo running.
-export function startDemo(demo, port, timeoutMs = 10000) {
+// onSpawn receives the child as soon as it exists, before it is
+// ready, so a caller interrupted during startup can stop it too.
+export function startDemo(demo, port, timeoutMs = 10000, onSpawn = () => {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(demo, ['--http', String(port)], {
       stdio: ['ignore', 'ignore', 'pipe'],
     });
+    onSpawn(child);
     let settled = false;
     const fail = (error) => {
       if (settled) return;
