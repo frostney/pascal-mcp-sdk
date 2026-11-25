@@ -1,10 +1,10 @@
 import { loader } from 'fumadocs-core/source';
-import { basePath, docsContentRoute, docsImageRoute, docsRoute, siteUrl } from './shared';
+import { docsContentRoute, docsImageRoute, docsRoute, siteUrl } from './shared';
 import { defineDocs } from 'fumadocs-mdx/macro';
 import { applyMdxPreset } from 'fumadocs-mdx/config';
 import { metaSchema, pageSchema } from 'fumadocs-core/source/schema';
 import { z } from 'zod';
-import { remarkRepoLinks } from './remark-repo-links.mjs';
+import { remarkRepoLinks, stringifyAbsoluteLinks } from './remark-repo-links.mjs';
 import { remarkTermLinks } from './remark-term-links.mjs';
 
 const docs = defineDocs({
@@ -21,17 +21,21 @@ const docs = defineDocs({
     postprocess: {
       // The Markdown of each page, for llms-full.txt, the Markdown
       // copies, page descriptions and the search index: plain GitHub
-      // Markdown, so without fumadocs' `[#id]` after each heading.
-      includeProcessedMarkdown: { headingIds: false },
+      // Markdown, so without fumadocs' `[#id]` after each heading, and
+      // with absolute URLs, as it is read outside the site.
+      includeProcessedMarkdown: { headingIds: false, stringify: stringifyAbsoluteLinks },
     },
     // fumadocs-mdx's own preset: GitHub Markdown (tables), heading ids
-    // and the per-page table of contents, the search structure, and
-    // syntax highlighting. The macro takes plain processor options
-    // otherwise, which leaves all of that out (issue #74).
+    // and the per-page table of contents, and syntax highlighting. The
+    // macro takes plain processor options otherwise, which leaves all
+    // of that out (issue #74).
     mdxOptions: applyMdxPreset({
       remarkPlugins: [remarkRepoLinks, remarkTermLinks],
       // remarkRepoLinks maps images to the site's copy of docs/images/.
       remarkImageOptions: false,
+      // app/api/search/route.ts builds the search structure from the
+      // processed Markdown, so no page exports one of its own.
+      remarkStructureOptions: false,
       rehypeCodeOptions: {
         // Themes follow the site's light/dark toggle; the docs' Pascal
         // fences need the grammar named.
@@ -109,9 +113,9 @@ export function getPageMarkdownUrl(page: (typeof source)['$inferPage']) {
   };
 }
 
-// Absolute URLs: llms.txt, llms-full.txt and the Markdown copies are
-// read outside the site, where a path without the origin and the
-// basePath leads nowhere (issue #75).
+// Absolute URLs: llms.txt and the Markdown copies are read outside the
+// site, where a path without the origin and the basePath leads nowhere
+// (issue #75).
 export function absoluteUrl(path: string): string {
   return `${siteUrl}${path}`;
 }
@@ -122,60 +126,14 @@ export function canonicalUrl(page: (typeof source)['$inferPage']): string {
   return `${absoluteUrl(page.url)}/`;
 }
 
-// remark-repo-links writes site paths for the HTML: a page as
-// /docs/..., which Next prefixes with the basePath, and an image as
-// /pascal-mcp-sdk/docs-images/.... Read outside the site, a page needs
-// the origin and the basePath, an image the origin, and a link to a
-// section of the same page (#section) the page's own URL.
-const siteOrigin = new URL(siteUrl).origin;
-
-function absoluteSitePath(target: string, pageUrl: string): string {
-  if (target.startsWith('#')) return `${pageUrl}${target}`;
-  if (target.startsWith(`${basePath}/`)) return `${siteOrigin}${target}`;
-  if (target === docsRoute || target.startsWith(`${docsRoute}/`) || target.startsWith(`${docsRoute}#`)) {
-    return absoluteUrl(target);
-  }
-  return target;
-}
-
-// Rewrites the targets of inline links, images and link definitions;
-// fenced code blocks are left as they are.
-export function absoluteLinks(markdown: string, pageUrl: string): string {
-  const fence = /^ {0,3}(`{3,}|~{3,})/;
-  let open: string | undefined;
-  return markdown
-    .split('\n')
-    .map((line) => {
-      const marker = fence.exec(line)?.[1];
-      if (open) {
-        if (marker && marker[0] === open[0] && marker.length >= open.length) open = undefined;
-        return line;
-      }
-      if (marker) {
-        open = marker;
-        return line;
-      }
-      return line
-        .replace(
-          /(\]\(\s*<?)([/#][^\s)>]*)/g,
-          (_, before: string, target: string) => before + absoluteSitePath(target, pageUrl),
-        )
-        .replace(
-          /^(\s*\[[^\]]+\]:\s*<?)([/#]\S*?)(>?)$/,
-          (_, before: string, target: string, after: string) =>
-            before + absoluteSitePath(target, pageUrl) + after,
-        );
-    })
-    .join('\n');
-}
-
 // A page's Markdown copy, for llms-full.txt and /llms.mdx/: its URL,
-// then its own Markdown (which carries the page's H1).
+// then its own Markdown, which carries the page's H1 and whose links
+// stringifyAbsoluteLinks made absolute.
 export async function getLLMText(page: (typeof source)['$inferPage']) {
   const processed = await page.data.getText('processed');
   const url = canonicalUrl(page);
 
   return `URL: ${url}
 
-${absoluteLinks(processed.trimStart(), url)}`;
+${processed.trimStart()}`;
 }

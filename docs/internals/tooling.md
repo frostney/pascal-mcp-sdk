@@ -128,11 +128,12 @@ surfaces (sitemap, robots, per-page OG images, `llms.txt` /
 in fumadocs-mdx's `applyMdxPreset`: the docs macro applies no preset
 by itself, and without it tables, heading ids and the table of
 contents are lost. A `postbuild` script, `scripts/check-export.mjs`,
-fails the build unless the export renders each page's tables, gives
-every heading an id and a table-of-contents entry, serves every
-in-site link and anchor, and names only absolute URLs that resolve
-on the site in `llms.txt`, `llms-full.txt`, the Markdown copies, the
-sitemap and the JSON-LD.
+fails the build unless each page's output matches its `docs/`
+source: its tables render, every heading has an id and its table of
+contents lists the h2 and h3 headings, every in-site link, anchor and
+search result is served, and its page actions, JSON-LD, sitemap
+entry, `llms.txt` entry and Markdown copy name its own URL, with
+only absolute URLs in `llms.txt`, `llms-full.txt` and the copies.
 Deployment is `.github/workflows/pages.yml` (official
 `configure-pages` / `upload-pages-artifact` / `deploy-pages`
 actions): pushes to `main` touching `website/**` or `docs/**` deploy;
