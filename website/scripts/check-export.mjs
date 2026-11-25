@@ -268,8 +268,13 @@ for (const page of pages) {
   }
 
   // llmstxt.org's link relations: the page's Markdown copy as its
-  // text/markdown alternate, and the llms.txt that describes it.
-  const links = [...html.matchAll(/<link\s[^>]*>/g)].map((m) => m[0]);
+  // text/markdown alternate, and the llms.txt that describes it, as
+  // live <link> elements of the head (not in the body, not commented
+  // out).
+  const headStart = html.indexOf('<head');
+  const headEnd = html.indexOf('</head>');
+  const head = headStart < 0 || headEnd < headStart ? '' : html.slice(headStart, headEnd).replace(/<!--[\s\S]*?-->/g, '');
+  const links = [...head.matchAll(/<link\s[^>]*>/g)].map((m) => m[0]);
   const hrefsOf = (test) => links.filter(test).map((tag) => decode(attribute(tag, 'href') ?? ''));
   const alternates = hrefsOf((tag) => attribute(tag, 'rel') === 'alternate' && attribute(tag, 'type') === 'text/markdown');
   const copyUrl = `${siteOrigin}${page.copyPath}`;

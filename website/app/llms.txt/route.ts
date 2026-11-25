@@ -47,7 +47,7 @@ export async function GET() {
     '',
     `> ${description}`,
     '',
-    `${appName} lets a FreePascal program expose tools, resources and prompts to AI agents over stdio or Streamable HTTP. It uses only packages that ship with FPC (the RTL, fpjson and fcl-base, plus fcl-web for HTTP), and Claude Code, Claude Desktop and Codex connect to it as they are.`,
+    `${appName} lets a FreePascal program expose tools, resources and prompts to AI agents. It uses only packages that ship with FPC (the RTL, fpjson and fcl-base, plus fcl-web for HTTP). Over stdio it serves both protocol eras, so Claude Code, Claude Desktop and Codex connect to it as they are; its Streamable HTTP binding speaks only the stateless 2026-07-28 protocol, for clients that send per-request _meta instead of opening with initialize.`,
     '',
     'It is not tina4stack/pascal-mcp (formerly claude-pascal-mcp, a Python MCP server that compiles and runs Pascal programs) and not @pascal-app/mcp (the MCP server of the Pascal 3D editor).',
     '',
