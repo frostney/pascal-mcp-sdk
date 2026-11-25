@@ -6,6 +6,6 @@ source tools/casts/lib.sh
 
 say 'the pixel tool returns an image content block (MCPImageResult)'
 run 'printf '\''{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"pixel","arguments":{},'"$META"'}}\n'\'' | ./build/mcpdemo | jq .result.content'
-expect '.[0][0].type == "image" and (.[0][0].data | length > 0)'
+expect 'last | .result.isError == false and .result.content[0].type == "image" and (.result.content[0].data | length > 0)'
 say 'type, base64 data, and the mime type the handler chose'
 sleep 1

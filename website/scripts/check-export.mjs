@@ -76,7 +76,7 @@ function title(markdown) {
 function recordings(html) {
   return [...html.matchAll(/<figure class="terminal-cast"[\s\S]*?<\/figure>/g)].map((m) => {
     const hrefs = [...m[0].matchAll(/<a\s[^>]*href="([^"]+)"/g)].map((a) => decode(a[1]));
-    if (!hrefs.includes(`${basePath}/licenses/asciinema-player.txt`)) return '(no licence link)';
+    if (!hrefs.includes(`${basePath}/licenses/terminal-player.txt`)) return '(no licence link)';
     return hrefs[0] ? new URL(hrefs[0], `${siteOrigin}/`).href : '(no link)';
   });
 }
@@ -162,12 +162,14 @@ const leaked = walk(out).filter((file) =>
 );
 if (leaked.length > 0) fail(`repo-only docs reached the export: ${leaked.map((file) => rel(out, file)).join(', ')}`);
 
-// asciinema-player ships in the site's JavaScript under Apache-2.0,
-// so the export carries its licence, and each player links it (the
-// link itself is checked with every other href in step 1).
-const playerLicense = path.join(out, 'licenses', 'asciinema-player.txt');
-if (!fs.existsSync(playerLicense) || !read(playerLicense).includes('Apache License')) {
-  fail('licenses/asciinema-player.txt: the player licence is missing from the export');
+// asciinema-player (Apache-2.0) and the Solid runtime it bundles
+// (MIT) ship in the site's JavaScript, so the export carries both
+// licences, and each player links them (the link itself is checked
+// with every other href in step 1).
+const playerLicense = path.join(out, 'licenses', 'terminal-player.txt');
+const notices = fs.existsSync(playerLicense) ? read(playerLicense) : '';
+if (!notices.includes('Apache License') || !/MIT License[\s\S]*Ryan Carniato/.test(notices)) {
+  fail('licenses/terminal-player.txt: the asciinema-player or Solid licence is missing from the export');
 }
 
 // The home page plays the hero recording.

@@ -17,24 +17,25 @@ say() {
 # child shell fails on any failing pipeline stage, so a failing mcpdemo
 # behind a successful jq stops the demo (the demo scripts run under
 # `set -e`) instead of being recorded as a working example.
-# Its output is also kept for `expect`.
-CAST_LAST=$(mktemp)
-trap 'rm -f "$CAST_LAST"' EXIT
+# The command is kept for `expect`.
 run() {
+  CAST_LAST_COMMAND="$*"
   printf '\033[1;32m❯\033[0m %s\n' "$*"
   sleep 0.9
-  bash -o pipefail -c "$*" | tee "$CAST_LAST"
+  bash -o pipefail -c "$*"
   sleep 1.4
 }
 
-# Fail the demo unless the last command's output (its JSON values,
-# slurped into one array) satisfies a jq filter. A JSON-RPC error
-# exits 0 and prints null through `jq .result...`, so the exit status
-# alone does not show that the demo worked. Prints nothing on success,
-# so it adds nothing to the recording.
+# Fail the demo unless the server's raw response to the last command
+# satisfies a jq filter over its JSON-RPC lines (slurped into one
+# array). It runs that command again without its display projection
+# (the trailing `| jq ...`), because a JSON-RPC error or an isError
+# result exits 0 and the projection hides it. Prints nothing on
+# success, so it adds nothing to the recording.
 expect() {
-  if ! jq -e -s "$1" "$CAST_LAST" >/dev/null; then
-    echo "cast demo: the output does not satisfy: $1" >&2
+  local raw="${CAST_LAST_COMMAND%| jq*}"
+  if ! bash -o pipefail -c "$raw" | jq -e -s "$1" >/dev/null; then
+    echo "cast demo: the response does not satisfy: $1" >&2
     exit 1
   fi
 }

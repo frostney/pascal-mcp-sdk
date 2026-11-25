@@ -10,9 +10,9 @@ import { useEffect, useRef } from 'react';
 import 'asciinema-player/dist/bundle/asciinema-player.css';
 import { basePath } from '@/lib/shared';
 
-// The player's licence, copied into the export by
-// scripts/sync-docs-assets.mjs.
-const playerLicense = `${basePath}/licenses/asciinema-player.txt`;
+// The player's licences (asciinema-player and the Solid runtime it
+// bundles), written into the export by scripts/sync-docs-assets.mjs.
+const playerLicense = `${basePath}/licenses/terminal-player.txt`;
 
 export function TerminalCast({ src, label }: { src: string; label?: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -50,7 +50,7 @@ export function TerminalCast({ src, label }: { src: string; label?: string }) {
           </a>
           {' · '}
           <a href={playerLicense} className="underline">
-            player licence (Apache-2.0)
+            player licences
           </a>
         </figcaption>
       ) : null}

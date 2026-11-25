@@ -44,6 +44,10 @@ concurrency:
 
 jobs:
   bump:
+    # A manual run from another branch would base the bump on that
+    # branch and push it to the shared chore/lwpt-bump head; only the
+    # default branch bumps.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     permissions:
       contents: read
