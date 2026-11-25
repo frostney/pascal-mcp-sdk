@@ -14,9 +14,8 @@ name: CI
 # every leg runs the identical battery: unit suites + the mcpsmoke
 # subprocess E2E battery. mcpsmoke plus the spec-cited unit tests are
 # the net here. The official MCP conformance suite runs only in pr.yml,
-# as a non-blocking job against mcpdemo --http: its pinned npm release
-# (0.1.16) predates the 2026-07-28 stateless lifecycle, so it cannot
-# yet gate the HTTP binding.
+# as a non-blocking job against mcpdemo --http, judged against the
+# baseline in tools/conformance/baseline.json.
 #
 # The lwpt toolchain comes from its published release (checksum-
 # verified per-platform tarball, no sibling checkout, no bootstrap);

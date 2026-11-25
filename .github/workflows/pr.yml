@@ -248,9 +248,9 @@ jobs:
   # Streamable HTTP binding. NON-BLOCKING and not a required context.
   # run.mjs compares each scenario with the committed baseline and fails
   # only on a difference: a regression, a stale expected failure, or a
-  # scenario added or removed. At 0.1.16 every scenario is a known
-  # failure (#70: the suite only speaks the stateful initialize
-  # lifecycle). Results (checks.json per scenario) upload as an artifact.
+  # scenario added or removed. It runs the suite's 2026-07-28
+  # requirement set; each known failure names its issue in the baseline.
+  # Results (checks.json per scenario) upload as an artifact.
   conformance:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -287,13 +287,13 @@ jobs:
       - name: lwpt build (mcpdemo)
         run: lwpt build
 
-      # The 0.1.16 CLI needs Node >= 22 (fs.globSync).
+      # The suite's CLI needs Node >= 22 (fs.globSync).
       - uses: actions/setup-node@v7
         with:
           node-version: 24
 
-      - name: conformance comparator tests (broken-input fixtures)
-        run: node --test tools/conformance/compare.test.mjs
+      - name: conformance runner and comparator tests
+        run: node --test tools/conformance/compare.test.mjs tools/conformance/run.test.mjs
 
       - name: conformance suite (server mode, mcpdemo --http)
         run: node tools/conformance/run.mjs build/mcpdemo

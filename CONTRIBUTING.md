@@ -74,10 +74,9 @@ trees under `.lwpt/modules/` and `.lwpt/archives/` are deliberate
    fails when they differ from the baseline (a regression, a stale
    expected failure, a scenario added or removed, or an unreadable
    result). Operational errors such as a failed start also exit
-   non-zero. At 0.1.16, 1 of 31
-   checks passes and all 30 scenarios are known failures
-   ([#70](https://github.com/frostney/pascal-mcp-sdk/issues/70)).
-   The CI job is non-blocking. Needs Node 22 or later. See
+   non-zero. It runs the suite's 2026-07-28 requirement set; the
+   known failures each name their issue in the baseline. The CI job is
+   non-blocking. Needs Node 22 or later. See
    [docs/internals/tooling.md](docs/internals/tooling.md).
 
    ```sh

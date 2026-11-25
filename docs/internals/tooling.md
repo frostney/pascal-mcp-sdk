@@ -112,17 +112,24 @@ the protocol surface changes.
 `tools/conformance/run.mjs` starts `build/mcpdemo --http` on a free
 localhost port and runs the official
 [MCP conformance suite](https://github.com/modelcontextprotocol/conformance)
-in server mode against it, pinned to the npm release
-`@modelcontextprotocol/conformance@0.1.16`. Run it locally with
+in server mode against it, pinned exactly to the npm pre-release
+`@modelcontextprotocol/conformance@0.2.0-alpha.12`: the latest stable
+release (0.1.16) predates the 2026-07-28 stateless lifecycle and cannot
+reach the binding at all. It runs the suite's requirement set for
+2026-07-28 (`--requirements 2026-07-28`): the scenarios that revision
+requires, at its stateless wire, plus the extension and pending
+scenarios the suite runs without scoring. Run it locally with
 `lwpt build && lwpt run conformance` (Node 22 or later; npx fetches the
 suite from the npm registry). Per-scenario `checks.json` files land in
 `build/conformance/results/`, and extra arguments pass through to the
-suite, for example `lwpt run conformance --scenario ping`.
+suite, for example `lwpt run conformance --scenario tools-list`.
 
 The run is judged against the committed baseline,
-`tools/conformance/baseline.json`. It records the pinned suite version
-and the expected outcome (`pass` or `fail`) of every scenario, each
-known failure with its tracking issue. A scenario fails when any of its
+`tools/conformance/baseline.json`. It records the pinned suite version,
+the requirement set, and the expected outcome (`pass` or `fail`) of
+every scenario, each known failure with its tracking issue. A
+malformed baseline (an unknown expectation, a failure without an
+issue) stops the run before the suite starts. A scenario fails when any of its
 checks fails. A scenario may also list `passingChecks`: check ids that
 must keep passing even though the scenario as a whole is expected to
 fail. Once results exist, `run.mjs` exits 1 when the run
@@ -137,32 +144,46 @@ differs from the baseline, and the suite's own exit code is not used:
 - **Added or removed**: the suite ran a scenario the baseline does not
   list, or skipped one it does.
 - **Unreadable**: a scenario's `checks.json` is missing, malformed, an
-  empty array, or has an entry without an id or with a status other
-  than `SUCCESS`, `FAILURE`, `WARNING` or `INFO`. This fails the run
-  instead of counting as an outcome.
+  empty array, has an entry without an id or with a status other than
+  `SUCCESS`, `FAILURE`, `WARNING`, `INFO` or `SKIPPED`, or reports one
+  check as both `SUCCESS` and `FAILURE`. This fails the run instead of
+  counting as an outcome.
 
-When `--scenario`, `--suite` or `--spec-version` narrows the run (in
-either `--opt value` or `--opt=value` form), nothing counts as added or
-removed. Scenarios the baseline does not list are printed as not judged.
+When `--scenario`, `--suite`, `--spec-version` or `--requirements`
+selects the scenarios (in either `--opt value` or `--opt=value` form),
+it replaces the baseline's requirement set, and nothing counts as added
+or removed. Scenarios the baseline does not list are printed as not
+judged.
 
 The rules live in `tools/conformance/compare.mjs`, covered by
-broken-input tests: `node --test tools/conformance/compare.test.mjs`.
-The CI job runs them before the suite.
+broken-input tests (`compare.test.mjs`); `run.test.mjs` drives
+`run.mjs` end to end with a stand-in mcpdemo and suite. The CI job runs
+both before the suite: `node --test tools/conformance/compare.test.mjs
+tools/conformance/run.test.mjs`.
 
 Operational errors also exit non-zero before any comparison: 2 for a
-missing mcpdemo argument, a non-zero exit when no results were produced,
-and an error if mcpdemo fails to start.
+missing mcpdemo argument or an invalid baseline, 1 if mcpdemo does not
+start (it is stopped first), and a non-zero exit when no results were
+produced.
 
 It prints a summary of every difference. Bumping the suite version
 means updating the baseline in the same change.
 
-Current state at 0.1.16: 1 of 31 checks passes, and all 30 scenarios
-are expected failures, tracked in
-[#70](https://github.com/frostney/pascal-mcp-sdk/issues/70). The
-release only knows spec versions up to 2025-11-25 and opens every
-scenario with the `initialize` handshake, which the stateless
-2026-07-28 HTTP binding rejects with `-32601`. The one passing check is
-`localhost-host-rebinding-rejected`.
+Current state: of 50 scenarios, 13 pass and 37 are expected failures,
+each with its issue:
+
+- [#80](https://github.com/frostney/pascal-mcp-sdk/issues/80) (26
+  scenarios): the suite drives tools, prompts and resources with fixed
+  names its reference fixture registers, which `mcpdemo` does not have,
+  so they fail before reaching the behaviour they test.
+- [#79](https://github.com/frostney/pascal-mcp-sdk/issues/79)
+  (`server-stateless`): a request missing required `_meta` answers 200
+  instead of 400.
+- [#81](https://github.com/frostney/pascal-mcp-sdk/issues/81)
+  (`completion-complete`): `completion/complete` is not implemented.
+- [#82](https://github.com/frostney/pascal-mcp-sdk/issues/82) (nine
+  `tasks-*` scenarios): the Tasks extension is not implemented; the
+  suite runs these for visibility without scoring them.
 
 CI runs it as the **non-blocking** `conformance` job on every PR and
 uploads the results as the `conformance-results` artifact. It is not a
