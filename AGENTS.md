@@ -94,6 +94,9 @@ sans-I/O discipline. See
 - Do not push or open PRs without explicit maintainer go-ahead.
 - Edit shared instructions in `AGENTS.md`; `CLAUDE.md` contains only `@AGENTS.md`.
 
+<!-- The block below is written by `lwpt agents` and quotes default URLs
+     verbatim, so bare-URL linting is off inside it. -->
+<!-- markdownlint-disable MD034 -->
 <!-- lwpt:agents:begin -->
 
 ## `lwpt` command reference
@@ -289,3 +292,4 @@ Generated from the same immutable structural registry used by manifest validatio
   - `script`: retired; optional; invalid values are errors. Retired; use command and args.
 
 <!-- lwpt:agents:end -->
+<!-- markdownlint-enable MD034 -->
