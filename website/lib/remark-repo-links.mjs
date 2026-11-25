@@ -147,6 +147,8 @@ export function remarkRepoLinks() {
 // copies and llms-full.txt): writes each link, image and definition
 // with the absolute URL remarkRepoLinks recorded, so the copies work
 // outside the site while the HTML keeps its site routes (issue #75).
+// A terminal player (remark-casts.mjs) is written as the link to its
+// recording that the docs/ source has.
 export function stringifyAbsoluteLinks(node, parent, state, info) {
   const url = node.data?.absoluteUrl;
   if (!url) return undefined;
@@ -155,6 +157,13 @@ export function stringifyAbsoluteLinks(node, parent, state, info) {
     case 'image':
     case 'definition':
       return defaultHandlers[node.type]({ ...node, url }, parent, state, info);
+    case 'mdxJsxFlowElement':
+      return defaultHandlers.paragraph(
+        { type: 'paragraph', children: [{ type: 'link', url, children: [{ type: 'text', value: node.data.label }] }] },
+        parent,
+        state,
+        info,
+      );
   }
   return undefined;
 }
