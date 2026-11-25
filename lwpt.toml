@@ -19,7 +19,7 @@ exclude = [".lwpt/**"]
 # Dev-time only: the runtime library uses FPC-shipped packages only
 # (RTL, fpjson, fcl-base; fcl-web for the HTTP transport), zero third-party
 # dependencies (see docs/internals/architecture.md). testing is the co-located
-# *.Test.pas framework; resolved from the lwpt 0.10.0 release tag via an
+# *.Test.pas framework; resolved from the lwpt release tag pinned below via an
 # include filter (one filtered fetch per package), mirroring duetto.
 # This exact version is also the toolchain pin: CI installs the lwpt
 # release of the same tag (.github/scripts/lwpt-version.sh reads it

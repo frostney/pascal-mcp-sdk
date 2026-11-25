@@ -136,7 +136,7 @@ While iterating, `lwpt test` takes selectors — a path or glob runs
 just the suites you're working on
 (`lwpt test source/units/MCP.Server.Test.pas`), and
 `lwpt test --inventory` prints JSON with each selected test program's
-tier and its number of suites and cases. It compiles and starts every
+path and its number of suites and cases. It compiles and starts every
 program to count what it registers, but runs no test bodies.
 
 Protocol-surface changes should also run the interop battery — the
