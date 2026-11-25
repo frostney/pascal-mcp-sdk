@@ -9,6 +9,7 @@ program MCP.Schema.Test;
 {$I MCP.inc}
 
 uses
+  Math,
   SysUtils,
 
   fpjson,
@@ -93,6 +94,59 @@ type
     procedure TestSerializeRoundTrip;
     procedure TestSerializeQWord;
   end;
+
+  // MCPWireNumber: the number text the wire carries.
+  TWireNumber = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestJavaScriptForms;
+    procedure TestEveryFormParsesBack;
+    procedure TestNonFiniteRaises;
+    procedure TestSerializeNaNRaises;
+  end;
+
+// The wire text of MCPWireNumber(AValue).
+function WireText(AValue: Double): string;
+var
+  Node: TJSONData;
+begin
+  Node := MCPWireNumber(AValue);
+  try
+    Result := Node.AsJSON;
+  finally
+    Node.Free;
+  end;
+end;
+
+// Doubles that exercise each branch: the shortest decimal needs 1, 15,
+// 16 or 17 digits; plain and exponent notation on both sides of
+// JavaScript's thresholds (1e-7 and 1e21); subnormal, largest finite,
+// negative zero, and the 2^53 integer-node bound. Expected texts are
+// what JSON.stringify writes for the same Double.
+const
+  WIRE_CASES: array[0..17] of record
+    Value: Double;
+    Text: string;
+  end = (
+    (Value: 0.25; Text: '0.25'),
+    (Value: 0.1; Text: '0.1'),
+    (Value: -0.5; Text: '-0.5'),
+    (Value: 123.456; Text: '123.456'),
+    (Value: 1 / 3; Text: '0.3333333333333333'),
+    (Value: 1.0000000000000002; Text: '1.0000000000000002'),
+    (Value: 0.30000000000000004; Text: '0.30000000000000004'),
+    (Value: 5E-324; Text: '5e-324'),
+    (Value: 1.7976931348623157E308; Text: '1.7976931348623157e+308'),
+    (Value: 1E-7; Text: '1e-7'),
+    (Value: 0.000001; Text: '0.000001'),
+    (Value: 2.5E-10; Text: '2.5e-10'),
+    (Value: 1E15; Text: '1000000000000000'),
+    (Value: 9007199254740992.0; Text: '9007199254740992'),
+    (Value: 1.2345678901234568E20; Text: '123456789012345680000'),
+    (Value: 1E21; Text: '1e+21'),
+    (Value: 100; Text: '100'),
+    (Value: -0.0; Text: '0')
+  );
 
 procedure TSchemaBuilder.TestObjectEnvelope;
 var
@@ -469,9 +523,82 @@ begin
   Obj.Free;
 end;
 
+procedure TWireNumber.TestJavaScriptForms;
+var
+  I: Integer;
+begin
+  for I := Low(WIRE_CASES) to High(WIRE_CASES) do
+    Expect<string>(WireText(WIRE_CASES[I].Value)).ToBe(WIRE_CASES[I].Text);
+end;
+
+procedure TWireNumber.TestEveryFormParsesBack;
+var
+  I, Code: Integer;
+  Back: Double;
+begin
+  for I := Low(WIRE_CASES) to High(WIRE_CASES) do
+  begin
+    Val(WireText(WIRE_CASES[I].Value), Back, Code);
+    Expect<Integer>(Code).ToBe(0);
+    Expect<Boolean>(Back = WIRE_CASES[I].Value).ToBe(True);
+  end;
+end;
+
+procedure TWireNumber.TestNonFiniteRaises;
+var
+  Raised, I: Integer;
+  Values: array[0..2] of Double;
+begin
+  Values[0] := NaN;
+  Values[1] := Infinity;
+  Values[2] := NegInfinity;
+  Raised := 0;
+  for I := Low(Values) to High(Values) do
+    try
+      MCPWireNumber(Values[I]).Free;
+    except
+      on EMCPSchema do
+        Inc(Raised);
+    end;
+  Expect<Integer>(Raised).ToBe(3);
+end;
+
+procedure TWireNumber.TestSerializeNaNRaises;
+var
+  Obj: TProbeArgs;
+  Raised: Boolean;
+begin
+  Obj := TProbeArgs.Create;
+  try
+    Obj.ratio := NaN;
+    Raised := False;
+    try
+      MCPSerialize(Obj).Free;
+    except
+      on EMCPSchema do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+  finally
+    Obj.Free;
+  end;
+end;
+
+procedure TWireNumber.SetupTests;
+begin
+  Test('numbers are written as JavaScript writes them',
+    TestJavaScriptForms);
+  Test('every written number parses back to the same Double',
+    TestEveryFormParsesBack);
+  Test('NaN and infinities raise EMCPSchema', TestNonFiniteRaises);
+  Test('MCPSerialize raises on a NaN float property',
+    TestSerializeNaNRaises);
+end;
+
 begin
   TestRunnerProgram.AddSuite(TSchemaBuilder.Create('Schema: fluent builder'));
   TestRunnerProgram.AddSuite(
     TSchemaFromClass.Create('Schema: derived from classes'));
+  TestRunnerProgram.AddSuite(TWireNumber.Create('Schema: wire numbers'));
   TestRunnerProgram.Run;
 end.

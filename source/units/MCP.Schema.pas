@@ -155,13 +155,20 @@ function MCPSerialize(AObj: TMCPArgs): TJSONObject;
 // Compact JSON number node for wire output. fpjson's default float
 // serialization is full-precision exponent form
 // ('2.5000000000000000E-001'); the official SDKs put plain decimals
-// on the wire. Integral values (within the Double-exact range)
-// become JSON integers, fractional ones the shortest decimal that
-// round-trips to the same Double. Used by MCPSerialize's float
+// on the wire. A value is written as the shortest decimal that parses
+// back to the same Double, in the form JavaScript's Number#toString
+// (and so JSON.stringify) gives it: 0.25, 1000000000000000, 1e+21,
+// 5e-324. Integers of magnitude below 2^53 become integer nodes;
+// negative zero is 0. NaN and infinities have no JSON form and raise
+// EMCPSchema. The caller owns the returned node (add it to a JSON
+// object or array, which then frees it). Used by MCPSerialize's float
 // properties and the server's progress notifications.
 function MCPWireNumber(AValue: Double): TJSONData;
 
 implementation
+
+uses
+  Math;
 
 constructor TMCPArgs.Create;
 begin
@@ -293,28 +300,130 @@ type
     function GetAsString: TJSONStringType; override;
   end;
 
-function TMCPWireFloat.GetAsString: TJSONStringType;
+// The decimal ADigits x 10^(AExponent - Length(ADigits) + 1), i.e.
+// d.ddd x 10^AExponent, written as JavaScript's Number#toString
+// writes a finite number (ECMA-262, Number::toString): plain notation
+// for exponents from -7 to 20, exponent notation (1e+21, 5e-324)
+// outside. ADigits has no trailing zeros.
+function JSNumberText(ANegative: Boolean; const ADigits: string;
+  AExponent: Integer): string;
 var
-  Digits: Integer;
-  Settings: TFormatSettings;
+  K, N: Integer;
 begin
-  Settings := DefaultFormatSettings;
-  Settings.DecimalSeparator := '.';
-  Settings.ThousandSeparator := #0;
-  // Shortest ffGeneral form that parses back to the exact value.
-  for Digits := 1 to 17 do
+  K := Length(ADigits);
+  N := AExponent + 1;
+  if (K <= N) and (N <= 21) then
+    Result := ADigits + StringOfChar('0', N - K)
+  else if (0 < N) and (N <= 21) then
+    Result := Copy(ADigits, 1, N) + '.' + Copy(ADigits, N + 1, K - N)
+  else if (-6 < N) and (N <= 0) then
+    Result := '0.' + StringOfChar('0', -N) + ADigits
+  else
   begin
-    Result := FloatToStrF(AsFloat, ffGeneral, Digits, 0, Settings);
-    if StrToFloat(Result, Settings) = AsFloat then
-      Exit;
+    Result := ADigits[1];
+    if K > 1 then
+      Result := Result + '.' + Copy(ADigits, 2, K - 1);
+    if N - 1 >= 0 then
+      Result := Result + 'e+' + IntToStr(N - 1)
+    else
+      Result := Result + 'e-' + IntToStr(1 - N);
   end;
+  if ANegative then
+    Result := '-' + Result;
+end;
+
+// Shortest decimal for a finite, non-zero AValue that parses back to
+// the same Double, as JSNumberText writes it; '' when none does.
+// System.Str gives 17 significant digits of a Double on every target
+// (FloatToStrF stops at 15 where Extended is Double, as on Win64 and
+// AArch64); each shorter candidate is that decimal rounded to fewer
+// digits, and only a candidate that Val parses back into a Double
+// equal to AValue is returned. (Where Val parses through Extended, a
+// shorter candidate lying within 2^-64 of a halfway point between two
+// Doubles could be rounded twice; the 17-digit candidate is too close
+// to AValue for that.)
+function ShortestRoundTrip(AValue: Double): string;
+var
+  S, Mantissa, Candidate: string;
+  Negative: Boolean;
+  EPos, Exponent, Count, I, Code: Integer;
+  Digits: array[1..17] of Byte;
+  Back: Double;
+begin
+  Result := '';
+  // ' d.dddddddddddddddE+ddd' (one sign position, 17 digits).
+  Str(AValue:24, S);
+  S := Trim(S);
+  Negative := (S <> '') and (S[1] = '-');
+  if Negative then
+    Delete(S, 1, 1);
+  EPos := Pos('E', S);
+  if (EPos <> 19) or (S[2] <> '.') then
+    Exit;
+  Mantissa := S[1] + Copy(S, 3, 16);
+  Val(Copy(S, EPos + 1, MaxInt), Exponent, Code);
+  if Code <> 0 then
+    Exit;
+  for Count := 1 to 17 do
+  begin
+    for I := 1 to 17 do
+      Digits[I] := Ord(Mantissa[I]) - Ord('0');
+    // Round the 17-digit decimal half up at Count digits; a carry out
+    // of the first digit becomes 1 x 10^(Exponent + 1).
+    Candidate := '';
+    if (Count < 17) and (Digits[Count + 1] >= 5) then
+    begin
+      I := Count;
+      while (I >= 1) and (Digits[I] = 9) do
+      begin
+        Digits[I] := 0;
+        Dec(I);
+      end;
+      if I >= 1 then
+        Inc(Digits[I])
+      else
+        Candidate := '1';
+    end;
+    if Candidate = '1' then
+      Candidate := JSNumberText(Negative, '1', Exponent + 1)
+    else
+    begin
+      for I := 1 to Count do
+        Candidate := Candidate + Chr(Ord('0') + Digits[I]);
+      while (Length(Candidate) > 1) and (Candidate[Length(Candidate)] = '0') do
+        Delete(Candidate, Length(Candidate), 1);
+      Candidate := JSNumberText(Negative, Candidate, Exponent);
+    end;
+    // A candidate rounded past the largest Double overflows on the way
+    // back: it does not round-trip, so try the next length.
+    try
+      Val(Candidate, Back, Code);
+    except
+      on EMathError do
+        Code := -1;
+    end;
+    if (Code = 0) and (Back = AValue) then
+      Exit(Candidate);
+  end;
+end;
+
+function TMCPWireFloat.GetAsString: TJSONStringType;
+begin
+  Result := ShortestRoundTrip(AsFloat);
+  // No candidate parsed back exactly (a parser that does not round
+  // correctly): fpjson's full-precision form, never an unchecked one.
+  if Result = '' then
+    Result := inherited GetAsString;
 end;
 
 function MCPWireNumber(AValue: Double): TJSONData;
 begin
-  // Doubles represent integers exactly well past this magnitude
-  // bound; beyond it, stay in float form.
-  if (Frac(AValue) = 0) and (Abs(AValue) < 1E15) then
+  if IsNan(AValue) or IsInfinite(AValue) then
+    raise EMCPSchema.Create('NaN and infinite numbers have no JSON form');
+  // Every integer below 2^53 is an exact Double and fits an Int64;
+  // integral values beyond it keep the float node, which writes them
+  // the way JavaScript does.
+  if (Frac(AValue) = 0) and (Abs(AValue) < 9007199254740992.0) then
     Result := TJSONInt64Number.Create(Trunc(AValue))
   else
     Result := TMCPWireFloat.Create(AValue);
@@ -335,39 +444,43 @@ begin
     Exit;
   GetMem(Props, Count * SizeOf(Pointer));
   try
-    GetPropInfos(Info, Props);
-    for I := 0 to Count - 1 do
-    begin
-      Prop := Props^[I];
-      case Prop^.PropType^.Kind of
-        tkSString, tkLString, tkAString, tkWString, tkUString:
-          Result.Add(Prop^.Name, GetStrProp(AObj, Prop));
-        tkFloat:
-          Result.Add(Prop^.Name, MCPWireNumber(GetFloatProp(AObj, Prop)));
-        tkInteger:
-          begin
-            TypeData := GetTypeData(Prop^.PropType);
-            if TypeData^.OrdType in [otUByte, otUWord, otULong] then
-              Result.Add(Prop^.Name, GetUnsignedOrdProperty(AObj, Prop))
-            else
-              Result.Add(Prop^.Name, GetOrdProp(AObj, Prop));
-          end;
-        tkInt64:
-          Result.Add(Prop^.Name, GetInt64Prop(AObj, Prop));
-        tkQWord:
-          Result.Add(Prop^.Name, GetQWordProperty(AObj, Prop));
-        tkBool:
-          Result.Add(Prop^.Name, GetOrdProp(AObj, Prop) <> 0);
-        tkEnumeration:
-          Result.Add(Prop^.Name, GetEnumProp(AObj, Prop));
-      else
-        begin
-          Result.Free;
+    try
+      GetPropInfos(Info, Props);
+      for I := 0 to Count - 1 do
+      begin
+        Prop := Props^[I];
+        case Prop^.PropType^.Kind of
+          tkSString, tkLString, tkAString, tkWString, tkUString:
+            Result.Add(Prop^.Name, GetStrProp(AObj, Prop));
+          tkFloat:
+            Result.Add(Prop^.Name, MCPWireNumber(GetFloatProp(AObj, Prop)));
+          tkInteger:
+            begin
+              TypeData := GetTypeData(Prop^.PropType);
+              if TypeData^.OrdType in [otUByte, otUWord, otULong] then
+                Result.Add(Prop^.Name, GetUnsignedOrdProperty(AObj, Prop))
+              else
+                Result.Add(Prop^.Name, GetOrdProp(AObj, Prop));
+            end;
+          tkInt64:
+            Result.Add(Prop^.Name, GetInt64Prop(AObj, Prop));
+          tkQWord:
+            Result.Add(Prop^.Name, GetQWordProperty(AObj, Prop));
+          tkBool:
+            Result.Add(Prop^.Name, GetOrdProp(AObj, Prop) <> 0);
+          tkEnumeration:
+            Result.Add(Prop^.Name, GetEnumProp(AObj, Prop));
+        else
           raise EMCPSchema.CreateFmt(
             'Property "%s" of %s has no JSON mapping',
             [Prop^.Name, AObj.ClassName]);
         end;
       end;
+    except
+      // An unmappable property or a value with no JSON form (a NaN
+      // float): free the partial object, then let the error through.
+      Result.Free;
+      raise;
     end;
   finally
     FreeMem(Props);
