@@ -1,10 +1,10 @@
 import { loader } from 'fumadocs-core/source';
-import { docsContentRoute, docsImageRoute, docsRoute } from './shared';
+import { docsContentRoute, docsImageRoute, docsRoute, siteUrl } from './shared';
 import { defineDocs } from 'fumadocs-mdx/macro';
+import { applyMdxPreset } from 'fumadocs-mdx/config';
 import { metaSchema, pageSchema } from 'fumadocs-core/source/schema';
 import { z } from 'zod';
-import { rehypeCode } from 'fumadocs-core/mdx-plugins';
-import { remarkRepoLinks } from './remark-repo-links.mjs';
+import { remarkRepoLinks, stringifyAbsoluteLinks } from './remark-repo-links.mjs';
 import { remarkTermLinks } from './remark-term-links.mjs';
 
 const docs = defineDocs({
@@ -19,30 +19,33 @@ const docs = defineDocs({
     // page body keeps its own H1.
     schema: pageSchema.extend({ title: z.string().optional() }),
     postprocess: {
-      includeProcessedMarkdown: true,
-      // Export the search-index structure remarkStructure produces so
-      // the static Orama index can be built.
-      valueToExport: ['structuredData'],
+      // The Markdown of each page, for llms-full.txt, the Markdown
+      // copies, page descriptions and the search index: plain GitHub
+      // Markdown, so without fumadocs' `[#id]` after each heading, and
+      // with absolute URLs, as it is read outside the site.
+      includeProcessedMarkdown: { headingIds: false, stringify: stringifyAbsoluteLinks },
     },
-    mdxOptions: {
+    // fumadocs-mdx's own preset: GitHub Markdown (tables), heading ids
+    // and the per-page table of contents, and syntax highlighting. The
+    // macro takes plain processor options otherwise, which leaves all
+    // of that out (issue #74).
+    mdxOptions: applyMdxPreset({
       remarkPlugins: [remarkRepoLinks, remarkTermLinks],
-      // Syntax highlighting: this macro-mode mdxOptions is plain
-      // ProcessorOptions, so rehypeCode is applied explicitly. The
-      // docs' Pascal fences need the grammar named; themes follow the
-      // site's light/dark toggle.
-      rehypePlugins: [
-        [
-          rehypeCode,
-          {
-            themes: {
-              light: 'github-light',
-              dark: 'github-dark',
-            },
-            langs: ['pascal', 'sh', 'bash', 'json', 'text', 'toml'],
-          },
-        ],
-      ],
-    },
+      // remarkRepoLinks maps images to the site's copy of docs/images/.
+      remarkImageOptions: false,
+      // app/api/search/route.ts builds the search structure from the
+      // processed Markdown, so no page exports one of its own.
+      remarkStructureOptions: false,
+      rehypeCodeOptions: {
+        // Themes follow the site's light/dark toggle; the docs' Pascal
+        // fences need the grammar named.
+        themes: {
+          light: 'github-light',
+          dark: 'github-dark',
+        },
+        langs: ['pascal', 'sh', 'bash', 'json', 'toml'],
+      },
+    }),
   },
   meta: {
     schema: metaSchema,
@@ -110,10 +113,27 @@ export function getPageMarkdownUrl(page: (typeof source)['$inferPage']) {
   };
 }
 
+// Absolute URLs: llms.txt and the Markdown copies are read outside the
+// site, where a path without the origin and the basePath leads nowhere
+// (issue #75).
+export function absoluteUrl(path: string): string {
+  return `${siteUrl}${path}`;
+}
+
+// The URL a page is served at: the export has trailingSlash, so the
+// path without the slash is a redirect (issue #77).
+export function canonicalUrl(page: (typeof source)['$inferPage']): string {
+  return `${absoluteUrl(page.url)}/`;
+}
+
+// A page's Markdown copy, for llms-full.txt and /llms.mdx/: its URL,
+// then its own Markdown, which carries the page's H1 and whose links
+// stringifyAbsoluteLinks made absolute.
 export async function getLLMText(page: (typeof source)['$inferPage']) {
   const processed = await page.data.getText('processed');
+  const url = canonicalUrl(page);
 
-  return `# ${pageTitle(page)} (${page.url})
+  return `URL: ${url}
 
-${processed}`;
+${processed.trimStart()}`;
 }
