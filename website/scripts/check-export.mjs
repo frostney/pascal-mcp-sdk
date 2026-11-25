@@ -267,6 +267,20 @@ for (const page of pages) {
     fail(`${where}: canonical ${canonicals.join(', ') || '(none)'}, expected ${page.url}`);
   }
 
+  // llmstxt.org's link relations: the page's Markdown copy as its
+  // text/markdown alternate, and the llms.txt that describes it.
+  const links = [...html.matchAll(/<link\s[^>]*>/g)].map((m) => m[0]);
+  const hrefsOf = (test) => links.filter(test).map((tag) => decode(attribute(tag, 'href') ?? ''));
+  const alternates = hrefsOf((tag) => attribute(tag, 'rel') === 'alternate' && attribute(tag, 'type') === 'text/markdown');
+  const copyUrl = `${siteOrigin}${page.copyPath}`;
+  if (alternates.length !== 1 || alternates[0] !== copyUrl) {
+    fail(`${where}: text/markdown alternate ${alternates.join(', ') || '(none)'}, expected ${copyUrl}`);
+  }
+  const describedBy = hrefsOf((tag) => attribute(tag, 'rel') === 'describedby');
+  if (describedBy.length !== 1 || describedBy[0] !== `${siteUrl}/llms.txt`) {
+    fail(`${where}: describedby ${describedBy.join(', ') || '(none)'}, expected ${siteUrl}/llms.txt`);
+  }
+
   // 4. Both page actions, Copy Markdown and View Options, name this
   // page's own Markdown copy, under the basePath: fumadocs-ui adds it
   // only under Vite.

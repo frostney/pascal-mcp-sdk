@@ -29,3 +29,13 @@ release-mode flag story (`lwpt build --mode release`,
 documented on the consumer side in
 [Shipping your server](../guides/shipping.md); CI builds and tests
 natively on Linux, macOS, and Windows instead of cross-compiling.
+
+## Major-version selectors
+
+The `@^2.0` selectors in the installation instructions are written by
+hand, so a major release updates each of them:
+
+- `README.md` (install command)
+- `docs/guides/quick-start.md` and `docs/guides/shipping.md`
+- `website/app/(home)/page.tsx` (install snippet and the "How do I
+  build" FAQ answer)

@@ -1,6 +1,6 @@
-# Introduction
+# MCP for Pascal developers
 
-**MCP for Pascal developers.** You know Pascal; you keep hearing
+You know Pascal; you keep hearing
 about AI agents; this page connects the two. No AI background
 assumed.
 

@@ -9,7 +9,8 @@ export const revalidate = false;
 // and its first sentences. fumadocs' own llms() index writes site
 // paths without the basePath, which lead nowhere on a GitHub Pages
 // project site (issue #75). Every link sits under an H2, where the
-// format's file lists are.
+// format's file lists are; the prose before the first H2 says what the
+// library is and which similarly named projects it is not.
 
 // A Markdown link, its label's brackets and its URL's parentheses
 // escaped, as fumadocs' own index writes it.
@@ -45,6 +46,10 @@ export async function GET() {
     `# ${appName}`,
     '',
     `> ${description}`,
+    '',
+    `${appName} lets a FreePascal program expose tools, resources and prompts to AI agents over stdio or Streamable HTTP. It uses only packages that ship with FPC (the RTL, fpjson and fcl-base, plus fcl-web for HTTP), and Claude Code, Claude Desktop and Codex connect to it as they are.`,
+    '',
+    'It is not tina4stack/pascal-mcp (formerly claude-pascal-mcp, a Python MCP server that compiles and runs Pascal programs) and not @pascal-app/mcp (the MCP server of the Pascal 3D editor).',
     '',
     `## ${String(tree.name)}`,
     '',

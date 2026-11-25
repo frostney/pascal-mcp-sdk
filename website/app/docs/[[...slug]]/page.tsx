@@ -1,4 +1,5 @@
 import {
+  absoluteUrl,
   canonicalUrl,
   getPageImageUrl,
   getPageMarkdownUrl,
@@ -48,6 +49,11 @@ export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
       />
+      {/* llmstxt.org's link relations: describedby names the llms.txt
+          that covers this page (the text/markdown alternate is in
+          generateMetadata). The Metadata API has no slot for it; React
+          places the <link> in <head>. */}
+      <link rel="describedby" type="text/plain" href={absoluteUrl('/llms.txt')} />
       <div className="flex flex-row gap-2 items-center border-b pb-6">
         <MarkdownCopyButton markdownUrl={markdownUrl} />
         <ViewOptionsPopover
@@ -79,7 +85,11 @@ export async function generateMetadata(props: PageProps<'/docs/[[...slug]]'>): P
   return {
     title: pageTitle(page),
     description: await pageDescription(page),
-    alternates: { canonical: canonicalUrl(page) },
+    alternates: {
+      canonical: canonicalUrl(page),
+      // The page's Markdown copy, for machine readers (llmstxt.org).
+      types: { 'text/markdown': absoluteUrl(getPageMarkdownUrl(page).url) },
+    },
     openGraph: {
       images: `${basePath}${getPageImageUrl(page).url}`,
     },
