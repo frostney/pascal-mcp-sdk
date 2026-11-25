@@ -32,8 +32,9 @@ natively on Linux, macOS, and Windows instead of cross-compiling.
 
 ## Major-version selectors
 
-The `@^2.0` selectors in the installation instructions are written by
-hand, so a major release updates each of them:
+The major-version selectors in the installation instructions
+(`@^<major>.0`) are written by hand, so a major release updates each
+of them:
 
 - `README.md` (install command)
 - `docs/guides/quick-start.md` and `docs/guides/shipping.md`

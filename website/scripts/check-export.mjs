@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { fromHtml } from 'hast-util-from-html';
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import { gfmFromMarkdown } from 'mdast-util-gfm';
 import { gfm } from 'micromark-extension-gfm';
@@ -269,19 +270,21 @@ for (const page of pages) {
 
   // llmstxt.org's link relations: the page's Markdown copy as its
   // text/markdown alternate, and the llms.txt that describes it, as
-  // live <link> elements of the head (not in the body, not commented
-  // out).
-  const headStart = html.indexOf('<head');
-  const headEnd = html.indexOf('</head>');
-  const head = headStart < 0 || headEnd < headStart ? '' : html.slice(headStart, headEnd).replace(/<!--[\s\S]*?-->/g, '');
-  const links = [...head.matchAll(/<link\s[^>]*>/g)].map((m) => m[0]);
-  const hrefsOf = (test) => links.filter(test).map((tag) => decode(attribute(tag, 'href') ?? ''));
-  const alternates = hrefsOf((tag) => attribute(tag, 'rel') === 'alternate' && attribute(tag, 'type') === 'text/markdown');
+  // <link> elements of the head the HTML parser builds: a link in the
+  // body, in a <template>, commented out, or pushed out of the head by
+  // other markup does not count.
+  const document = fromHtml(html);
+  const element = (nodes, name) => nodes.find((n) => n.type === 'element' && n.tagName === name);
+  const head = element(element(document.children, 'html')?.children ?? [], 'head');
+  const links = (head?.children ?? []).filter((n) => n.type === 'element' && n.tagName === 'link');
+  const relOf = (link) => [].concat(link.properties.rel ?? []);
+  const hrefsOf = (test) => links.filter(test).map((link) => String(link.properties.href ?? ''));
+  const alternates = hrefsOf((link) => relOf(link).includes('alternate') && link.properties.type === 'text/markdown');
   const copyUrl = `${siteOrigin}${page.copyPath}`;
   if (alternates.length !== 1 || alternates[0] !== copyUrl) {
     fail(`${where}: text/markdown alternate ${alternates.join(', ') || '(none)'}, expected ${copyUrl}`);
   }
-  const describedBy = hrefsOf((tag) => attribute(tag, 'rel') === 'describedby');
+  const describedBy = hrefsOf((link) => relOf(link).includes('describedby'));
   if (describedBy.length !== 1 || describedBy[0] !== `${siteUrl}/llms.txt`) {
     fail(`${where}: describedby ${describedBy.join(', ') || '(none)'}, expected ${siteUrl}/llms.txt`);
   }
