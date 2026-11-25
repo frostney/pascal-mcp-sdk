@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { fromHtml } from 'hast-util-from-html';
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import { gfmFromMarkdown } from 'mdast-util-gfm';
 import { gfm } from 'micromark-extension-gfm';
@@ -265,6 +266,34 @@ for (const page of pages) {
     .map((tag) => decode(attribute(tag, 'href') ?? ''));
   if (canonicals.length !== 1 || canonicals[0] !== page.url) {
     fail(`${where}: canonical ${canonicals.join(', ') || '(none)'}, expected ${page.url}`);
+  }
+
+  // llmstxt.org's link relations: the page's Markdown copy as its
+  // text/markdown alternate, and the llms.txt that describes it, as
+  // <link> elements of the head the HTML parser builds: a link in the
+  // body, in a <template>, commented out, or pushed out of the head by
+  // other markup does not count.
+  // The parser runs without scripting, so it recovers markup from an
+  // invalid <noscript> in the head into the head; a browser with
+  // scripting would not. Such a head fails.
+  const parseErrors = [];
+  const document = fromHtml(html, { onerror: (error) => parseErrors.push(error.ruleId ?? error.reason) });
+  if (parseErrors.some((id) => String(id).includes('disallowed-content-in-noscript-in-head'))) {
+    fail(`${where}: the head has markup a <noscript> may not contain, which hides what follows it`);
+  }
+  const element = (nodes, name) => nodes.find((n) => n.type === 'element' && n.tagName === name);
+  const head = element(element(document.children, 'html')?.children ?? [], 'head');
+  const links = (head?.children ?? []).filter((n) => n.type === 'element' && n.tagName === 'link');
+  const relOf = (link) => [].concat(link.properties.rel ?? []);
+  const hrefsOf = (test) => links.filter(test).map((link) => String(link.properties.href ?? ''));
+  const alternates = hrefsOf((link) => relOf(link).includes('alternate') && link.properties.type === 'text/markdown');
+  const copyUrl = `${siteOrigin}${page.copyPath}`;
+  if (alternates.length !== 1 || alternates[0] !== copyUrl) {
+    fail(`${where}: text/markdown alternate ${alternates.join(', ') || '(none)'}, expected ${copyUrl}`);
+  }
+  const describedBy = hrefsOf((link) => relOf(link).includes('describedby'));
+  if (describedBy.length !== 1 || describedBy[0] !== `${siteUrl}/llms.txt`) {
+    fail(`${where}: describedby ${describedBy.join(', ') || '(none)'}, expected ${siteUrl}/llms.txt`);
   }
 
   // 4. Both page actions, Copy Markdown and View Options, name this

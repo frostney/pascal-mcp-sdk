@@ -28,6 +28,15 @@ agents — no second language runtime, no framework.
 <https://frostney.github.io/pascal-mcp-sdk/> — rendered from
 [docs/](docs/).
 
+## Not these projects
+
+This is a FreePascal library for writing MCP servers. It is not
+[tina4stack/pascal-mcp](https://github.com/tina4stack/pascal-mcp)
+(formerly claude-pascal-mcp; a Python MCP server that compiles and runs
+Pascal programs) and not
+[@pascal-app/mcp](https://www.npmjs.com/package/@pascal-app/mcp)
+(the MCP server of the Pascal 3D editor).
+
 ## Install
 
 **As an [lwpt](https://github.com/frostney/lwpt) dependency:**
