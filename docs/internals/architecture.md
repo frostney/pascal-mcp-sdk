@@ -303,12 +303,17 @@ sequenceDiagram
     else plain request
         T->>Core: HandleMessage(session, line)
         Core->>T: response line
-        T-->>C: 200 application/json<br/>(status mapped from outcome)
+        T-->>C: application/json, status<br/>mapped from the outcome
     else request opted into notifications
         T->>Core: HandleMessage(session, line, SSE sink)
-        Core--)C: SSE events (progress / log)
-        Core->>T: final response
-        T-->>C: SSE: final response, stream closed
+        alt a notification is emitted
+            Core--)C: 200 text/event-stream, opened by the first<br/>event (progress / log)
+            Core->>T: final response (result or error)
+            T-->>C: SSE: final response, stream closed
+        else none is emitted
+            Core->>T: response line
+            T-->>C: application/json, status<br/>mapped from the outcome
+        end
     end
 ```
 
@@ -317,8 +322,15 @@ The binding's rules, all transport-owned:
 - Requests that opt into request-scoped notifications
   (`_meta.progressToken` /
   `_meta["io.modelcontextprotocol/logLevel"]`) on handler-backed
-  methods are answered as SSE streams — events first, final response
-  last, stream closed after; notifications answer `202`.
+  methods become SSE streams once the first notification is emitted —
+  events first, final response last, stream closed after. The stream
+  has already sent `200`, so a final response that is an error (for
+  example a `-32021` the core decides after the handler ran) arrives
+  as the last event, not as its mapped status. An opted-in request
+  that emits none, every error decided before the handler runs among
+  them, is answered as a single `application/json` object with the
+  mapped status, so clients handle both response types.
+  Notifications answer `202`.
 - The mirrored metadata headers (`MCP-Protocol-Version`, `Mcp-Method`,
   `Mcp-Name` with the base64 sentinel) are validated against the body
   before dispatch (`-32020` on mismatch).

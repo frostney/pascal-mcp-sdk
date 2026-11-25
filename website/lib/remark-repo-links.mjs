@@ -12,6 +12,16 @@ import { defaultHandlers } from 'mdast-util-to-markdown';
 
 const githubBase = 'https://github.com/frostney/pascal-mcp-sdk';
 
+// Folders under docs/ that are repository records, not site pages:
+// lib/source.ts leaves them out of the site, so a link to one of their
+// files resolves to GitHub like any other file outside the rendered set.
+export const repoOnlyDocDirs = ['adr'];
+
+// Whether a docs/-relative path (with / separators) is repo-only.
+export function isRepoOnlyDoc(relativePath) {
+  return repoOnlyDocDirs.some((dir) => relativePath === dir || relativePath.startsWith(`${dir}/`));
+}
+
 // Walk up from the processed file to the repository root (the
 // directory holding lwpt.toml) — bundlers rewrite import.meta paths,
 // so the anchor must come from the file being processed.
@@ -39,6 +49,9 @@ function pageRoute(file, docsRoot) {
 }
 
 function mapHref(href, filePath) {
+  // A network-path reference (//host/path) names another site: link
+  // it over HTTPS, as the Markdown copies need an absolute URL.
+  if (href.startsWith('//')) return `https:${href}`;
   const repoRoot = findRepoRoot(path.dirname(filePath));
   const docsRoot = path.join(repoRoot, 'docs');
   if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('#')) {
@@ -59,8 +72,8 @@ function mapHref(href, filePath) {
         'leaves the repository',
     );
   }
-  const fromDocs = path.relative(docsRoot, resolved);
-  if (!fromDocs.startsWith('..') && resolved.endsWith('.md')) {
+  const fromDocs = path.relative(docsRoot, resolved).split(path.sep).join('/');
+  if (!fromDocs.startsWith('..') && resolved.endsWith('.md') && !isRepoOnlyDoc(fromDocs)) {
     // Stays inside the rendered set: site route.
     return `${pageRoute(resolved, docsRoot)}${suffix}`;
   }
@@ -100,6 +113,7 @@ function recordAbsoluteUrl(node, filePath) {
 }
 
 function mapImage(src, filePath) {
+  if (src.startsWith('//')) return `https:${src}`;
   if (/^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith('#')) return src;
   const repoRoot = findRepoRoot(path.dirname(filePath));
   const resolved = path.resolve(path.dirname(filePath), src);

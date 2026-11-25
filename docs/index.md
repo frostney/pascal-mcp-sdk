@@ -4,7 +4,8 @@ pascal-mcp-sdk lets any FreePascal program expose **tools, resources,
 and prompts** to AI agents over the
 [Model Context Protocol](https://modelcontextprotocol.io) — no second
 language runtime, no framework, no third-party dependencies beyond
-FPC's own RTL and fpjson.
+packages that ship with FPC (the RTL, fpjson, fcl-base, and fcl-web
+for the HTTP transport).
 
 New to AI agents? Start with the
 [introduction](guides/introduction.md) — MCP explained for Pascal

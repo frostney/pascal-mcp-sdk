@@ -9,8 +9,8 @@
 
 A change lands here by proving itself: a failing test first, the
 implementation in the one unit that owns the rule, the local gate
-(`lwpt build`, `lwpt test`, `lwpt run smoke`, `lwpt format --check`)
-green, and a Conventional-Commit-titled PR through CI's
+(`lwpt install --frozen`, `lwpt build`, `lwpt test`, `lwpt run smoke`,
+`lwpt format --check`) green, and a Conventional-Commit-titled PR through CI's
 cross-platform and cross-implementation batteries. Features and fixes walk the same
 path — a feature starts with a test specifying the behaviour, a fix
 with a regression test that reproduces the bug.
@@ -20,7 +20,7 @@ flowchart LR
     IDEA["Feature idea<br/>or bug report"]
     TEST["Failing test first<br/>(co-located *.Test.pas,<br/>or mcpsmoke for E2E)"]
     OWN["Implement in the<br/>unit that owns the rule"]
-    GATE["Local gate:<br/>lwpt build · test ·<br/>run smoke · format --check"]
+    GATE["Local gate:<br/>lwpt install --frozen · build ·<br/>test · run smoke · format --check"]
     PR["PR with Conventional<br/>Commit title"]
     CI["CI: 3-platform battery,<br/>interop, docs + format gates"]
     MERGE["Squash merge —<br/>title becomes the<br/>changelog entry"]
@@ -32,27 +32,33 @@ flowchart LR
 - **FPC 3.2.2** — `apt install fpc` / `brew install fpc` / the
   win32+win64 combo installer from
   [freepascal.org](https://www.freepascal.org/download.html). The
-  version must be **exactly 3.2.2**: compiler flags are pinned in
-  `source/units/MCP.inc` and CI pins 3.2.2 (`fpc -iV` prints yours).
-- **lwpt** — the canonical build/test/format entry point. Download
-  the release tarball for your platform from
+  library targets **exactly 3.2.2**, with its compiler flags in
+  `source/units/MCP.inc` (`fpc -iV` prints yours). CI's Windows leg
+  installs 3.2.2 itself; the Linux and macOS legs take the package
+  manager's FPC and print its version.
+- **lwpt** — the canonical build/test/format entry point, at the
+  release this repository pins: the exact `testing` version in
+  `lwpt.toml` (`bash .github/scripts/lwpt-version.sh` prints it; a
+  newer lwpt can refuse the committed lockfile). Download that
+  release's tarball for your platform from
   [lwpt's releases](https://github.com/frostney/lwpt/releases),
   verify the checksum, put `lwpt` on PATH. Do not invoke `fpc`
   directly except as `fpc @lwpt.cfg`.
 - **lefthook** — `lefthook install` once per clone wires the
   formatting pre-commit hook.
-- **Node ≥ 20** — only for the interop harness (`tools/interop-ts/`)
-  and the website (`website/`).
+- **Node 24** — what CI uses; only for the interop harness
+  (`tools/interop-ts/`) and the website (`website/`, whose Next.js
+  needs at least 20.9).
 
 Then:
 
 ```sh
 git clone https://github.com/frostney/pascal-mcp-sdk
 cd pascal-mcp-sdk
-lwpt install     # resolve deps, regenerate lwpt.cfg + lwpt.lock
-lwpt build       # build/mcpdemo + build/mcpsmoke
-lwpt test        # co-located unit suites
-lwpt run smoke   # E2E battery: spawns mcpdemo, drives the protocol
+lwpt install --frozen  # verify lwpt.lock and the committed modules
+lwpt build             # build/mcpdemo + build/mcpsmoke
+lwpt test              # co-located unit suites
+lwpt run smoke         # E2E battery: spawns mcpdemo, drives the protocol
 ```
 
 `lwpt install --frozen` is the CI mode: verify the lockfile and the
@@ -116,6 +122,7 @@ the ADRs under
 ## Run the gate locally
 
 ```sh
+lwpt install --frozen  # lockfile and committed modules agree
 lwpt build             # both apps compile
 lwpt test              # unit suites
 lwpt run smoke         # E2E: mcpsmoke drives mcpdemo over pipes
@@ -127,8 +134,9 @@ lwpt duplication       # token clones within the manifest ceiling
 While iterating, `lwpt test` takes selectors — a path or glob runs
 just the suites you're working on
 (`lwpt test source/units/MCP.Server.Test.pas`), and
-`lwpt test --inventory` lists every registered suite and case as
-JSON without running anything.
+`lwpt test --inventory` prints JSON with each selected test program's
+tier and its number of suites and cases. It compiles and starts every
+program to count what it registers, but runs no test bodies.
 
 Protocol-surface changes should also run the interop battery — the
 official MCP TypeScript clients against `mcpdemo`:

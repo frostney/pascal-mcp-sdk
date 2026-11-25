@@ -26,8 +26,12 @@ on:
 permissions:
   contents: read
 
+# One group per PR for PR builds, and one shared group for main's
+# deployments: GitHub replaces a pending run when another joins its
+# group, so a shared group would let a stack's layers cancel each
+# other's checks or displace a queued deployment.
 concurrency:
-  group: pages
+  group: pages-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'deploy' }}
   cancel-in-progress: false
 
 jobs:

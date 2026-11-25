@@ -8,4 +8,5 @@ say 'a real MCP server, compiled from Pascal'
 run 'lwpt build'
 say 'speak the protocol to it — one JSON-RPC line in, one out'
 run 'printf '\''{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"message":"hello from Pascal"},'"$META"'}}\n'\'' | ./build/mcpdemo | jq .result.content'
+expect 'last | .result.isError == false and (.result.content[0].text | test("hello from Pascal"))'
 sleep 1

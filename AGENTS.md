@@ -5,10 +5,11 @@
 - **FreePascal only.** FPC 3.2.2, Delphi mode, flags centralised in
   `source/units/MCP.inc`. Do not introduce another compiled language or
   repeat compiler directives per unit.
-- **Zero third-party runtime dependencies.** The library is RTL + fpjson
-  only. Packages that ship inside FPC 3.2.2 are not third-party: fcl-web
-  is admitted on the same footing as fcl-json (fpjson), and stays
-  confined to `MCP.Transport.HTTP`. lwpt's `testing` package is dev-time;
+- **Zero third-party runtime dependencies.** The library uses only
+  packages that ship inside FPC 3.2.2: the RTL, fcl-json (fpjson) and
+  fcl-base (`base64`), plus fcl-web, admitted on the same footing and
+  confined to `MCP.Transport.HTTP` (ADR-0003 is the authoritative
+  list). lwpt's `testing` package is dev-time;
   anything beyond that needs explicit maintainer approval with a recorded
   justification.
 - **lwpt is the only toolchain entry point** — install, build, test, format
@@ -38,7 +39,9 @@
 
 lwpt is the **released binary on PATH** (checksum-verified tarball from
 lwpt's GitHub releases — see `docs/guides/quick-start.md`); no sibling
-checkout, no bootstrap. Dependencies resolve from the same release tag.
+checkout, no bootstrap. Dependencies resolve from the same release tag:
+the exact `testing` version in `lwpt.toml` is the one pin, and CI
+installs that lwpt release (`.github/scripts/lwpt-version.sh`).
 The command surface itself is documented in the machine-written
 `lwpt agents` block at the end of this file — repo-specific context the
 generator can't know: `lwpt install --frozen` is the CI mode (verify

@@ -16,6 +16,8 @@ import { fromMarkdown } from 'mdast-util-from-markdown';
 import { gfmFromMarkdown } from 'mdast-util-gfm';
 import { gfm } from 'micromark-extension-gfm';
 import { visit } from 'unist-util-visit';
+import { isLocalCast } from '../lib/remark-casts.mjs';
+import { isRepoOnlyDoc, repoOnlyDocDirs } from '../lib/remark-repo-links.mjs';
 
 // Mirrors basePath, siteUrl and docsContentRoute in lib/shared.ts.
 const basePath = '/pascal-mcp-sdk';
@@ -65,6 +67,18 @@ const flatten = (node) =>
 function title(markdown) {
   const h1 = parse(markdown).children.find((node) => node.type === 'heading' && node.depth === 1);
   return h1 ? flatten(h1) : undefined;
+}
+// The recordings the terminal players in some HTML play, in order, as
+// absolute URLs: each player's caption links the file it plays
+// (components/terminal-cast.tsx).
+// A player that does not link the player's licence reads as
+// '(no licence link)'.
+function recordings(html) {
+  return [...html.matchAll(/<figure class="terminal-cast"[\s\S]*?<\/figure>/g)].map((m) => {
+    const hrefs = [...m[0].matchAll(/<a\s[^>]*href="([^"]+)"/g)].map((a) => decode(a[1]));
+    if (!hrefs.includes(`${basePath}/licenses/terminal-player.txt`)) return '(no licence link)';
+    return hrefs[0] ? new URL(hrefs[0], `${siteOrigin}/`).href : '(no link)';
+  });
 }
 const sameSet = (where, actual, expected) => {
   const missing = [...expected].filter((url) => !actual.has(url));
@@ -121,11 +135,10 @@ for (const file of htmlFiles) {
 
 // The docs pages: every Markdown file under docs/ is one, at the route
 // its path gives (docs/guides/tools.md is /docs/guides/tools/), except
-// the repo-only records under docs/adr/, which lib/source.ts leaves
-// off the site.
-const repoOnly = (file) => rel(docsSource, file).startsWith('adr/');
+// the repo-only records (docs/adr/), which lib/source.ts leaves off
+// the site.
 const pages = walk(docsSource)
-  .filter((file) => file.endsWith('.md') && !repoOnly(file))
+  .filter((file) => file.endsWith('.md') && !isRepoOnlyDoc(rel(docsSource, file)))
   .map((source) => {
     const slug = rel(docsSource, source)
       .replace(/\.md$/, '')
@@ -142,13 +155,29 @@ const pages = walk(docsSource)
 if (pages.length === 0) fail(`no Markdown files under ${docsSource}`);
 
 // The repo-only records reach no page, Markdown copy or other file.
-const leaked = walk(out).filter((file) => /(^|\/)adr(\/|$)/.test(rel(out, path.dirname(file))));
-if (leaked.length > 0) fail(`docs/adr is repo-only, but the export has ${leaked.map((file) => rel(out, file)).join(', ')}`);
+const leaked = walk(out).filter((file) =>
+  rel(out, path.dirname(file))
+    .split('/')
+    .some((part) => repoOnlyDocDirs.includes(part)),
+);
+if (leaked.length > 0) fail(`repo-only docs reached the export: ${leaked.map((file) => rel(out, file)).join(', ')}`);
+
+// asciinema-player (Apache-2.0) and the Solid runtime it bundles
+// (MIT) ship in the site's JavaScript, so the export carries both
+// licences, and each player links them (the link itself is checked
+// with every other href in step 1).
+const playerLicense = path.join(out, 'licenses', 'terminal-player.txt');
+const notices = fs.existsSync(playerLicense) ? read(playerLicense) : '';
+if (!notices.includes('Apache License') || !/MIT License[\s\S]*Ryan Carniato/.test(notices)) {
+  fail('licenses/terminal-player.txt: the asciinema-player or Solid licence is missing from the export');
+}
 
 // The home page plays the hero recording.
 const home = path.join(out, 'index.html');
-if (!fs.existsSync(home) || !read(home).includes('<figure class="terminal-cast"')) {
-  fail('index.html: no terminal player for the hero recording');
+const heroUrl = `${siteUrl}/docs-casts/hero.cast`;
+const homePlayers = fs.existsSync(home) ? recordings(read(home)) : [];
+if (homePlayers.join(' ') !== heroUrl) {
+  fail(`index.html: plays ${homePlayers.join(', ') || 'no recording'}, expected ${heroUrl}`);
 }
 
 // The llms.txt section a page is listed under: the title in the
@@ -188,11 +217,14 @@ for (const page of pages) {
   // terminal player (lib/remark-casts.mjs); the player's link to the
   // recording is checked with every other href in step 1.
   let fences = 0;
-  let casts = 0;
+  page.castUrls = [];
   visit(parse(read(page.source)), ['code', 'paragraph'], (node) => {
     if (node.type === 'code' && node.lang === 'mermaid') fences += 1;
     const [only] = node.type === 'paragraph' && node.children.length === 1 ? node.children : [];
-    if (only?.type === 'link' && only.url.endsWith('.cast')) casts += 1;
+    if (only?.type === 'link' && isLocalCast(only.url)) {
+      const recording = rel(path.join(docsSource, 'casts'), path.resolve(path.dirname(page.source), only.url));
+      page.castUrls.push(`${siteUrl}/docs-casts/${recording}`);
+    }
   });
   const light = (article.match(/\sid="mermaid-light-\d+"/g) ?? []).length;
   const dark = (article.match(/\sid="mermaid-dark-\d+"/g) ?? []).length;
@@ -200,8 +232,12 @@ for (const page of pages) {
     fail(`${where}: ${fences} Mermaid fence(s) in its source, ${light} light and ${dark} dark SVG(s) rendered`);
   }
   if (article.includes('language-mermaid')) fail(`${where}: a Mermaid fence rendered as code`);
-  const players = (article.match(/<figure class="terminal-cast"/g) ?? []).length;
-  if (players !== casts) fail(`${where}: ${casts} cast(s) in its source, ${players} player(s) rendered`);
+  const sized = (article.match(/<svg\s[^>]*id="mermaid-(?:light|dark)-\d+"[^>]*--mermaid-width:[0-9.]+px/g) ?? []).length;
+  if (sized !== 2 * fences) fail(`${where}: ${2 * fences - sized} diagram(s) without --mermaid-width (lib/rehype-mermaid-dual.mjs)`);
+  const players = recordings(article);
+  if (players.join(' ') !== page.castUrls.join(' ')) {
+    fail(`${where}: its source plays ${page.castUrls.join(', ') || 'no recording'}, its players ${players.join(', ') || 'none'}`);
+  }
 
   // 3. Every heading has an id, and the table of contents lists every
   // h2 and h3 and links only to the article's headings.
@@ -259,6 +295,10 @@ for (const page of pages) {
     }
     const copyTitle = title(page.copyText.slice(page.copyText.indexOf('\n') + 1));
     if (copyTitle !== page.title) fail(`${rel(out, page.copy)}: H1 "${copyTitle}", its source's is "${page.title}"`);
+    // Each recording the source plays is a link in the copy.
+    const copyUrls = new Set(markdownUrls(page.copyText));
+    const lost = page.castUrls.filter((url) => !copyUrls.has(url));
+    if (lost.length > 0) fail(`${rel(out, page.copy)}: lacks the recording link ${lost.join(', ')}`);
   }
 }
 

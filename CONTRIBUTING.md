@@ -33,7 +33,7 @@ The 30-second version:
 ```sh
 git clone https://github.com/frostney/pascal-mcp-sdk
 cd pascal-mcp-sdk
-lwpt install           # resolve deps (lwpt release binary on PATH)
+lwpt install --frozen  # verify deps (the pinned lwpt release on PATH)
 lwpt build             # build/mcpdemo + build/mcpsmoke
 lwpt test              # co-located unit suites
 lwpt run smoke         # E2E battery
@@ -43,7 +43,8 @@ lwpt format --check    # formatter gate
 Ground rules (the load-bearing ones — reasoning in `docs/adr/`):
 FreePascal only (FPC 3.2.2, flags centralised in
 `source/units/MCP.inc`); zero third-party runtime dependencies
-(RTL + fpjson); `MCP.Server` owns the protocol surface, transports
+(FPC-shipped packages only: RTL, fpjson, fcl-base, and fcl-web for
+the HTTP transport); `MCP.Server` owns the protocol surface, transports
 move lines only; spec facts are verified against
 [modelcontextprotocol.io](https://modelcontextprotocol.io), never
 recalled.

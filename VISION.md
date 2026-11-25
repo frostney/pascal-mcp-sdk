@@ -22,7 +22,7 @@ transport unit). The architectural reasoning is recorded in
 
 Cross-platform coverage (Linux, macOS, Windows) and embeddability (a
 library that compiles into the host binary via lwpt, with zero
-third-party runtime dependencies — RTL + fpjson only) are givens of
+third-party runtime dependencies — FPC-shipped packages only) are givens of
 being a serious library, not goals.
 
 pascal-mcp-sdk is a member of the lwpt ecosystem: built, tested, formatted,

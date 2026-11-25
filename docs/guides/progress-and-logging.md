@@ -53,8 +53,11 @@ notifications are sent at all.
 
 Request-scoped notifications are written **before** the response, on
 the same channel: under stdio they are lines preceding the response
-line; over Streamable HTTP a request that opted in is answered as an
-SSE stream — notification events first, the final response last.
+line; over Streamable HTTP a request that opted in becomes an SSE
+stream once its first notification is emitted — notification events
+first, the final response last. An opted-in request that emits none
+is answered as a single `application/json` object, so a client
+handles both.
 
 ## A worked example — what the client sees
 
@@ -87,8 +90,7 @@ Called with `"progressToken": "sync-1"` and
 `"io.modelcontextprotocol/logLevel": "info"` in `_meta`, the server
 emits this stream — five notifications in handler order, then the
 response (captured from `HandleMessage`, each one line on the wire;
-abridged: the response's trailing fields are elided as `...` and the
-progress floats shortened, see below):
+abridged: the response's trailing fields are elided as `...`):
 
 ```json
 {"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"sync started"}}
@@ -99,16 +101,18 @@ progress floats shortened, see below):
 {"jsonrpc":"2.0","id":5,"result":{"content":[{"type":"text","text":"3 files synced"}],"isError":false, ...}}
 ```
 
-(Progress numbers serialize compactly — integral values as JSON
-integers, fractional ones as the shortest decimal that round-trips,
-e.g. `0.25` — matching what the official SDKs emit.)
+(Progress numbers go on the wire as the shortest decimal that
+round-trips, written as JavaScript writes them — `1`, `0.25` — the
+way the official SDKs emit them; see
+[Numbers on the wire](../reference/results.md#numbers-on-the-wire).)
 
 The same call *without* the opt-in keys produces exactly one line —
 the response. The handler didn't change; the no-op helpers absorbed
 every call.
 
-Here is that stream arriving in a real terminal — notifications
-first, response last:
+The same shape in a real terminal, from the demo server's `echo`
+tool, which reports two progress steps and logs one message:
+notifications first, response last.
 
 [Watch: a notification stream in a terminal](../casts/progress.cast)
 

@@ -151,17 +151,21 @@ type
 function CountHandler(AArgs: TMCPArgs;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 var
+  Words, Bytes: Integer;
   Counts: TCountResult;
 begin
-  Counts := TCountResult.Create;
+  // Compute first: if the domain logic raises, nothing is allocated yet.
   with AArgs as TCountArgs do
   begin
-    Counts.words := CountWords(text); // your domain logic
+    Words := CountWords(text); // your domain logic
     // Strings arrive as UTF-8: Length counts bytes, not characters.
-    Counts.bytes := Length(text);
+    Bytes := Length(text);
   end;
+  Counts := TCountResult.Create;
+  Counts.words := Words;
+  Counts.bytes := Bytes;
   Result := MCPStructuredResult(
-    Format('%d words, %d bytes', [Counts.words, Counts.bytes]),
+    Format('%d words, %d bytes', [Words, Bytes]),
     Counts); // serializes the published properties, then frees Counts
 end;
 

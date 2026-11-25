@@ -27,7 +27,11 @@ html {
   overflow-x: auto;
 }
 .mermaid-diagram svg {
-  max-width: 100%;
+  /* At least three quarters of the diagram's natural size (labels stay
+     about 10px or more); the wrapper scrolls when that is wider than
+     the column. The SVG's inline max-width keeps small diagrams at
+     their natural size. */
+  width: max(100%, calc(var(--mermaid-width, 0px) * 0.75));
   height: auto;
 }
 .mermaid-dark {

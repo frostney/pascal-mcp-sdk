@@ -3,11 +3,13 @@ name: lwpt weekly bump
 # Installs lwpt from the Homebrew tap (frostney/tap/lwpt — the same
 # path the quick start recommends, so a broken tap fails this run)
 # and opens a PR when the tapped version is newer than the repo's
-# pin. The PR carries the complete bump: LWPT_VERSION in both CI
-# workflows, the same-tag testing dependency in lwpt.toml, the
-# regenerated lwpt.cfg/lwpt.lock and committed zero-install trees
+# pin: the exact version of the `testing` dependency in lwpt.toml,
+# which CI also installs (.github/scripts/lwpt-version.sh). The PR
+# carries the complete bump: that version, the regenerated
+# lwpt.cfg/lwpt.lock and committed zero-install trees
 # (.lwpt/modules + .lwpt/archives, stale archives pruned), and the
-# regenerated AGENTS.md command block.
+# regenerated AGENTS.md command block. No workflow file changes, so
+# the job's GITHUB_TOKEN can push it.
 #
 # Dependabot was evaluated and cannot do this (2026-08-15): it has no
 # custom/regex version managers, cannot track releases of an
@@ -18,16 +20,22 @@ name: lwpt weekly bump
 # Two-job shape on purpose: the bump job executes the freshly tapped
 # lwpt binary, so it runs with read-only permissions and hands the
 # result over as an artifact; only the publish job holds write
-# permissions and executes nothing fetched. A failing bump job (e.g.
-# a breaking manifest-syntax change, as in 0.5.1 → 0.6.0) is the
-# signal to migrate by hand.
+# permissions. It executes nothing fetched, accepts only regular files
+# and directories at the bump's own paths from the artifact, and
+# stages exactly those paths. A failing bump job (e.g. a release that
+# needs a migration, as 0.5.1 → 0.6.0 and 0.8.0's lockfile v4 did) is
+# the signal to migrate by hand.
 #
-# Cadence: weekly (Mondays 07:00 UTC). Manual trigger available via
-# workflow_dispatch.
+# The pull_request runs of a PR opened or updated with GITHUB_TOKEN
+# wait for approval: a maintainer starts the PR's CI with "Approve
+# workflows to run" in its merge box.
+#
+# Cadence: weekly (Mondays 07:17 UTC; GitHub delays or drops scheduled
+# runs queued at :00). Manual trigger available via workflow_dispatch.
 
 on:
   schedule:
-    - cron: '0 7 * * 1'
+    - cron: '17 7 * * 1'
   workflow_dispatch:
 
 concurrency:
@@ -36,6 +44,10 @@ concurrency:
 
 jobs:
   bump:
+    # A manual run from another branch would base the bump on that
+    # branch and push it to the shared chore/lwpt-bump head; only the
+    # default branch bumps.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -50,22 +62,44 @@ jobs:
       - id: latest
         name: Install lwpt from the Homebrew tap and compare the pin
         run: |
+          set -euo pipefail
+          # Homebrew is installed on the Ubuntu image but not on PATH.
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          echo "$HOMEBREW_PREFIX/bin" >> "$GITHUB_PATH"
           brew install frostney/tap/lwpt
-          latest=$(lwpt --version | awk '{print $2}')
-          current=$(grep -m1 'LWPT_VERSION:' .github/workflows/pr.yml | sed 's/.*"\(.*\)".*/\1/')
-          echo "version=$latest" >> "$GITHUB_OUTPUT"
-          echo "current=$current" >> "$GITHUB_OUTPUT"
-          echo "lwpt pin: $current, tapped: $latest"
+          reported=$(lwpt --version)
+          current=$(bash .github/scripts/lwpt-version.sh)
+          # Exactly one line, "lwpt MAJOR.MINOR.PATCH", or stop: the value
+          # goes into GITHUB_OUTPUT and lwpt.toml.
+          if [[ ! "$reported" =~ ^lwpt\ ([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::the tap's lwpt reports an unexpected version: '$reported'"
+            exit 1
+          fi
+          latest=${BASH_REMATCH[1]}
+          # Bump only to a strictly newer release (SemVer precedence of
+          # plain MAJOR.MINOR.PATCH is version-sort order).
+          newest=$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n 1)
+          if [ "$latest" != "$current" ] && [ "$newest" = "$latest" ]; then
+            bump=true
+          else
+            bump=false
+          fi
+          {
+            echo "version=$latest"
+            echo "bump=$bump"
+          } >> "$GITHUB_OUTPUT"
+          echo "lwpt pin: $current, tapped: $latest, bump: $bump"
 
       - name: Apply the bump
-        if: steps.latest.outputs.version != steps.latest.outputs.current
+        if: steps.latest.outputs.bump == 'true'
+        env:
+          VERSION: ${{ steps.latest.outputs.version }}
         run: |
-          v="${{ steps.latest.outputs.version }}"
-          sed -i "s/LWPT_VERSION: \"[^\"]*\"/LWPT_VERSION: \"$v\"/" \
-            .github/workflows/pr.yml .github/workflows/ci.yml
-          # testing resolves from the same release tag as the
-          # toolchain (AGENTS.md rule).
-          sed -i "s/\(testing = { source = \"frostney\/lwpt\", version = \"\^\)[^\"]*\"/\1$v\"/" lwpt.toml
+          set -euo pipefail
+          # The exact testing version is the pin (same tag as the
+          # toolchain, AGENTS.md).
+          sed -i "s/^\(testing = { source = \"frostney\/lwpt\", version = \"\)[^\"]*\"/\1$VERSION\"/" lwpt.toml
+          test "$(bash .github/scripts/lwpt-version.sh)" = "$VERSION"
           # Stale archives are not pruned by install; drop them so the
           # committed zero-install tree carries exactly the new tag.
           rm -f .lwpt/archives/*.tar.gz
@@ -74,20 +108,21 @@ jobs:
           lwpt agents
 
       - id: changed
+        env:
+          BUMP: ${{ steps.latest.outputs.bump }}
         run: |
-          if [ "${{ steps.latest.outputs.version }}" = "${{ steps.latest.outputs.current }}" ] || \
-             [ -z "$(git status --porcelain=v1 --untracked-files=all)" ]; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "lwpt already pinned to the tapped version; no PR to open."
-          else
+          if [ "$BUMP" = 'true' ] && \
+             [ -n "$(git status --porcelain=v1 --untracked-files=all)" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "lwpt is already pinned to the tapped version or newer; no PR to open."
           fi
 
       - name: Package the bump
         if: steps.changed.outputs.changed == 'true'
         run: |
           tar -cf lwpt-bump.tar \
-            .github/workflows/pr.yml .github/workflows/ci.yml \
             lwpt.toml lwpt.cfg lwpt.lock .lwpt/modules .lwpt/archives \
             AGENTS.md
 
@@ -117,14 +152,38 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: lwpt-bump
+          path: ${{ runner.temp }}/bump-artifact
 
-      - name: Apply the bump
+      - name: Check and apply the bump
+        env:
+          VERSION: ${{ needs.bump.outputs.version }}
+          ARTIFACT: ${{ runner.temp }}/bump-artifact/lwpt-bump.tar
+          UNPACKED: ${{ runner.temp }}/bump-unpacked
         run: |
+          set -euo pipefail
+          # Only regular files and directories, only at the bump's own
+          # paths, no absolute or parent-relative names.
+          tar -tvf "$ARTIFACT" | awk '{print substr($1, 1, 1)}' | sort -u > "$RUNNER_TEMP/types"
+          if grep -qv '^[-d]$' "$RUNNER_TEMP/types"; then
+            echo "::error::the artifact holds entries other than files and directories"
+            exit 1
+          fi
+          while IFS= read -r entry; do
+            case "$entry" in
+              /*|*..*) echo "::error::unsafe path in the artifact: $entry"; exit 1 ;;
+              lwpt.toml|lwpt.cfg|lwpt.lock|AGENTS.md) ;;
+              .lwpt/modules|.lwpt/modules/*|.lwpt/archives|.lwpt/archives/*) ;;
+              *) echo "::error::unexpected path in the artifact: $entry"; exit 1 ;;
+            esac
+          done < <(tar -tf "$ARTIFACT")
+          mkdir -p "$UNPACKED"
+          tar -xf "$ARTIFACT" -C "$UNPACKED" --no-same-owner --no-same-permissions
           rm -rf .lwpt/modules .lwpt/archives
-          tar -xf lwpt-bump.tar
-          rm lwpt-bump.tar
+          cp -R "$UNPACKED/.lwpt/modules" "$UNPACKED/.lwpt/archives" .lwpt/
+          cp "$UNPACKED/lwpt.toml" "$UNPACKED/lwpt.cfg" "$UNPACKED/lwpt.lock" "$UNPACKED/AGENTS.md" .
+          test "$(bash .github/scripts/lwpt-version.sh)" = "$VERSION"
           if [ -z "$(git status --porcelain=v1 --untracked-files=all)" ]; then
-            echo "Bump artifact contains no repository changes."
+            echo "::error::the bump artifact contains no repository changes"
             exit 1
           fi
 
@@ -132,18 +191,27 @@ jobs:
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           branch: chore/lwpt-bump
+          add-paths: |
+            lwpt.toml
+            lwpt.cfg
+            lwpt.lock
+            AGENTS.md
+            .lwpt/modules
+            .lwpt/archives
           commit-message: "chore: bump lwpt to ${{ needs.bump.outputs.version }}"
           title: "chore: bump lwpt to ${{ needs.bump.outputs.version }}"
           body: |
-            Automated bump of the lwpt toolchain pin to `${{ needs.bump.outputs.version }}`
-            (as tapped by `brew install frostney/tap/lwpt`): `LWPT_VERSION` on both CI
-            workflows, the same-tag `testing` dependency, regenerated
-            `lwpt.cfg`/`lwpt.lock` and committed zero-install trees (stale archives
-            pruned), and the refreshed AGENTS.md command block.
+            Automated bump of the lwpt pin to `${{ needs.bump.outputs.version }}`
+            (as tapped by `brew install frostney/tap/lwpt`): the exact `testing`
+            version in `lwpt.toml`, which CI installs, the regenerated
+            `lwpt.cfg`/`lwpt.lock` and committed zero-install trees (stale
+            archives pruned), and the refreshed AGENTS.md command block.
 
-            `lwpt install --frozen` was verified during the bump; review the
-            [release notes](https://github.com/frostney/lwpt/releases/tag/${{ needs.bump.outputs.version }})
-            and let CI run the full gate before merging.
+            `lwpt install --frozen` was verified during the bump. CI on a PR
+            this workflow opens waits for approval: start it with **Approve
+            workflows to run** in the merge box, review the
+            [release notes](https://github.com/frostney/lwpt/releases/tag/${{ needs.bump.outputs.version }}),
+            and merge only once the full gate passes.
 
-            Cron: weekly, Mondays 07:00 UTC. See `.github/workflows/lwpt-bump.yml`.
+            Cron: weekly, Mondays 07:17 UTC. See `.github/workflows/lwpt-bump.yml`.
           labels: automated

@@ -18,7 +18,12 @@ const docs = defineDocs({
   docs: {
     // ADRs and other repo-only records under docs/ stay off the
     // website: the docs tree is the site's content source, but not
-    // everything in it is site content.
+    // everything in it is site content. The macro takes literal
+    // strings only, so this list mirrors repoOnlyDocDirs in
+    // remark-repo-links.mjs, which sends links to those files to
+    // GitHub; scripts/check-export.mjs fails the build when the two
+    // disagree (a repo-only page in the export, or a link to a page
+    // the export lacks).
     files: ['**/*.md', '!adr/**'],
     // The rendered docs are plain GitHub markdown without frontmatter
     // (the site adapts to docs/, not the other way around): titles are

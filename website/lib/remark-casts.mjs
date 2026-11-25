@@ -1,5 +1,5 @@
 // Terminal recordings in the docs: a paragraph consisting of a single
-// link to a `.cast` file under docs/casts/ becomes the self-hosted
+// relative link to a `.cast` file under docs/casts/ becomes the self-hosted
 // asciinema player on the site, while GitHub renders the same
 // markdown as an ordinary link to the recording file.
 //
@@ -30,13 +30,23 @@ function findRepoRoot(dir) {
   return current;
 }
 
+// A link that names a scheme or a host is not a recording in this
+// repository: it stays an ordinary link.
+export function isLocalCast(url) {
+  return url.endsWith('.cast') && !/^[a-z][a-z0-9+.-]*:/i.test(url) && !url.startsWith('//');
+}
+
+// The text of a link label, emphasis and code included.
+const labelText = (node) =>
+  'value' in node ? node.value : (node.children ?? []).map(labelText).join('');
+
 export function remarkCasts() {
   return (tree, file) => {
     visit(tree, 'paragraph', (node, index, parent) => {
       if (!parent || index === undefined) return;
       if (node.children.length !== 1) return;
       const [link] = node.children;
-      if (link.type !== 'link' || !link.url.endsWith('.cast')) return;
+      if (link.type !== 'link' || !isLocalCast(link.url)) return;
 
       const filePath = file.path ?? file.history[0];
       const repoRoot = findRepoRoot(path.dirname(filePath));
@@ -55,7 +65,7 @@ export function remarkCasts() {
         );
       }
 
-      const label = node.children[0].children?.[0]?.value ?? 'Terminal session';
+      const label = labelText(link) || 'Terminal session';
       const src = `${basePath}/docs-casts/${fromCasts.split(path.sep).join('/')}`;
       parent.children[index] = {
         type: 'mdxJsxFlowElement',

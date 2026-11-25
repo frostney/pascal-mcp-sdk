@@ -7,5 +7,6 @@ source tools/casts/lib.sh
 
 say 'opt in with progressToken + logLevel, and the response is a stream'
 run 'printf '\''{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"message":"noisy hello"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"cast-demo","version":"1.0.0"},"io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/logLevel":"info","progressToken":"demo-1"}}}\n'\'' | ./build/mcpdemo | jq -c "{method: (.method // \"response\"), params: (.params // .result.content[0])}"'
+expect '(map(select(.method == "notifications/progress")) | length > 0) and (last | .result.isError == false)'
 say 'progress and log notifications first, the response last — same order over SSE'
 sleep 1

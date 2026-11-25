@@ -27,7 +27,7 @@ end;`;
 const FAQ: { q: string; a: string; extra?: React.ReactNode }[] = [
   {
     q: 'What is pascal-mcp-sdk?',
-    a: 'A FreePascal-native library for building MCP (Model Context Protocol) servers: expose tools, resources, and prompts from any Pascal program to AI agents. It has zero third-party runtime dependencies — just FPC’s RTL and fpjson — and runs on Linux, macOS, and Windows.',
+    a: 'A FreePascal-native library for building MCP (Model Context Protocol) servers: expose tools, resources, and prompts from any Pascal program to AI agents. It has zero third-party runtime dependencies — only packages that ship with FPC — and runs on Linux, macOS, and Windows.',
   },
   {
     q: 'Does Claude Code work with a Pascal MCP server?',
@@ -181,13 +181,13 @@ export default async function HomePage() {
             <code className="rounded bg-fd-muted px-1.5 py-0.5">
               source/units/
             </code>{' '}
-            into your unit path — RTL + fpjson only, nothing to fetch.
+            into your unit path — FPC-shipped packages only, nothing to fetch.
           </p>
           <p>
             <strong>Just trying it out?</strong> Clone the repo and build
             the demo server with plain FPC —{' '}
             <code className="rounded bg-fd-muted px-1.5 py-0.5">
-              fpc @lwpt.cfg -FEbuild source/apps/mcpdemo.pas
+              mkdir -p build && fpc @lwpt.cfg -FEbuild source/apps/mcpdemo.pas
             </code>{' '}
             — then wire{' '}
             <code className="rounded bg-fd-muted px-1.5 py-0.5">

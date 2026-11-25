@@ -22,7 +22,8 @@ lwpt install           # resolve deps → lwpt.cfg + lwpt.lock + .lwpt/modules
 lwpt install --frozen  # CI: verify lockfile + committed modules, no network
 lwpt build             # every [build] target in lwpt.toml → build/
 lwpt test              # discovers source/units/*.Test.pas
-lwpt test <path|glob>  # just the selected suites; --inventory lists them
+lwpt test source/units/MCP.Server.Test.pas  # one test file (paths and globs select)
+lwpt test --inventory  # each test program's suite and case counts
 lwpt run smoke         # the built mcpsmoke E2E battery (scripts/smoke.pas)
 lwpt format            # rewrite in place (pre-commit does this)
 lwpt format --check    # CI gate: fail on drift
@@ -51,8 +52,9 @@ Runtime: **FPC-shipped packages only — RTL, fpjson, fcl-base
 else** ([ADR-0003](https://github.com/frostney/pascal-mcp-sdk/blob/main/docs/adr/0003-zero-third-party-runtime-dependencies.md)).
 This is a hard constraint (AGENTS.md); it is what makes the library
 trivially vendorable and the no-lwpt path a one-liner. Dev-time: lwpt's `testing` package only.
-duetto's `cli` package joins only if an app grows real flag parsing —
-`mcpdemo`/`mcpsmoke` deliberately have none.
+Any other dev-time package, such as duetto's `cli` should an app ever
+need real flag parsing (`mcpdemo`/`mcpsmoke` deliberately have none),
+is a future decision: it needs maintainer approval and an ADR first.
 
 ## Hooks — lefthook
 
@@ -83,7 +85,7 @@ npx markdownlint-cli2 "**/*.md"
 
 ## CI
 
-Four workflows (see [.github/workflows/](../../.github/workflows/)):
+Six workflows (see [.github/workflows/](../../.github/workflows/)):
 
 - **pr.yml** — every PR: Linux + macOS + Windows legs, each doing
   checksum-verified lwpt release install, `lwpt install --frozen`,
@@ -99,6 +101,23 @@ Four workflows (see [.github/workflows/](../../.github/workflows/)):
 - **pr-title.yml** — Conventional Commit PR-title gate (squash-merge
   titles become the changelog).
 - **pages.yml** — website build/deploy; see the Website section.
+- **lwpt-bump.yml** — weekly (Mondays) and on demand: opens a PR
+  when the Homebrew tap's lwpt is newer than the pin, carrying the
+  complete bump (the pin, the regenerated lockfile, zero-install trees
+  and AGENTS.md command block). A failing run means the new release
+  needs a migration by hand. CI on the PR it opens waits for a
+  maintainer's **Approve workflows to run**.
+- **update-project-skills.yml** — weekly (Mondays) and on demand: a
+  thin caller of known-good-route's reusable workflow that refreshes
+  the skills `skills-lock.json` lists and opens a draft PR when they
+  changed. A skill deleted or renamed upstream stops the run until it
+  is migrated by hand. As with the lwpt bump, CI on that PR waits for
+  **Approve workflows to run**.
+
+The lwpt pin is the exact version of the `testing` dependency in
+`lwpt.toml`: the test framework comes from the same lwpt release tag
+as the toolchain, and every workflow installs that release
+(`.github/scripts/lwpt-version.sh` reads it).
 
 ## Cross-implementation check — tools/interop-ts
 

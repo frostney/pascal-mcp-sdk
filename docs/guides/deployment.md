@@ -78,7 +78,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends fpc \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-RUN fpc @lwpt.cfg -O4 -dPRODUCTION -Xs -CX -XX -FEbuild source/apps/myserver.pas
+# build/ is not committed, and fpc needs -FE's directory to exist.
+RUN mkdir -p build \
+    && fpc @lwpt.cfg -O4 -dPRODUCTION -Xs -CX -XX -FEbuild source/apps/myserver.pas
 
 FROM debian:bookworm-slim
 COPY --from=build /src/build/myserver /usr/local/bin/myserver
@@ -91,7 +93,9 @@ Build and smoke it locally:
 
 ```sh
 docker build -t my-mcp-server .
-docker run --rm -p 8080:8080 -e PORT=8080 my-mcp-server
+# Published on the host's loopback only: the server has no
+# authentication of its own.
+docker run --rm -p 127.0.0.1:8080:8080 -e PORT=8080 my-mcp-server
 ```
 
 Then exercise the endpoint the way a client will — POST a
@@ -154,7 +158,12 @@ practice:
 - The Origin allowlist stays on regardless of proxy: add your web
   client's origin as an exact-match string via `AllowedOrigins`, and
   leave everything else rejected — it is the spec's DNS-rebinding
-  defense, not a CORS convenience.
+  defense, not a CORS convenience or access control. Requests
+  without an `Origin` header (non-browser clients) and loopback
+  origins are always accepted, so authentication belongs at the edge.
+  The binding answers only `POST` (an `OPTIONS` preflight gets
+  `405`), so a browser client on another origin needs CORS handled
+  at the edge or a same-origin proxy.
 - Graceful shutdown: platforms stop containers with SIGTERM. `Stop`
   is meant to be called from another thread, not from inside a signal
   handler — it deactivates the FCL listener, which is not documented
@@ -164,14 +173,14 @@ practice:
 
 ## Registering the deployed server
 
-Clients that speak Streamable HTTP take the endpoint URL directly —
-for Claude Code:
-
-```sh
-claude mcp add --transport http my-server https://my-server.example.com/mcp
-```
-
-Legacy-handshake clients keep using stdio ([the binding is
-modern-era only](shipping.md#deploying-the-http-binding)); nothing
-stops one binary from serving stdio locally and HTTP remotely — the
-registrations are the same.
+The HTTP binding speaks only the stateless 2026-07-28 protocol
+([modern-era only](shipping.md#deploying-the-http-binding)), so a
+client connects to it over Streamable HTTP when it sends per-request
+`_meta` instead of opening with `initialize` — for example the
+official TypeScript client (v2), which
+[tools/interop-ts/http-interop.mjs](../../tools/interop-ts/http-interop.mjs)
+drives against `mcpdemo --http`. Clients that open with the classic
+`initialize` handshake, which current releases of Claude Code, Claude
+Desktop and Codex do, register the same binary over stdio instead
+([Quick Start](quick-start.md)); nothing stops one binary from
+serving stdio locally and HTTP remotely.
