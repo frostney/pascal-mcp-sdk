@@ -1,5 +1,6 @@
-// The pictorial mark (Pascal's triangle as six connected nodes),
-// inline so it inherits currentColor in the navbar and hero.
+// The pictorial mark (Pascal's triangle: three edges, three vertex
+// nodes, and the fainter first node of the next row), inline so it
+// inherits currentColor in the navbar and hero.
 export function LogoMark({ size = 24 }: { size?: number }) {
   return (
     <svg

@@ -1,5 +1,5 @@
 import type { MetadataRoute } from 'next';
-import { resourceUrl } from '@/lib/shared';
+import { siteUrl } from '@/lib/shared';
 
 // Static export: generated once at build time. Note: on the
 // github.io project site this lands under the basePath, where
@@ -10,6 +10,6 @@ export const dynamic = 'force-static';
 export default function robots(): MetadataRoute.Robots {
   return {
     rules: { userAgent: '*', allow: '/' },
-    sitemap: resourceUrl('/sitemap.xml'),
+    sitemap: `${siteUrl}/sitemap.xml`,
   };
 }

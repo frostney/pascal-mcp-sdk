@@ -1,0 +1,40 @@
+name: Linux FPC + lwpt build
+description: >-
+  Installs FPC from apt and the lwpt release lwpt.toml pins (checksum-
+  verified), verifies the lockfile and committed modules, and builds
+  mcpdemo and mcpsmoke. Shared by the Linux jobs that need the built
+  demo server (interop, conformance); the cross-platform matrix has its
+  own per-OS setup.
+runs:
+  using: composite
+  steps:
+    - name: Install FPC (apt)
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y fpc
+        fpc -iV
+
+    # The release lwpt.toml's exact testing version pins (same tag as the
+    # toolchain).
+    - name: Install lwpt (release binary, checksum-verified)
+      shell: bash
+      run: |
+        set -euo pipefail
+        LWPT_VERSION=$(bash .github/scripts/lwpt-version.sh)
+        cd "$RUNNER_TEMP"
+        ASSET="lwpt-${LWPT_VERSION}-linux-x64"
+        BASE="https://github.com/frostney/lwpt/releases/download/${LWPT_VERSION}"
+        curl -fsSLO "${BASE}/${ASSET}.tar.gz"
+        curl -fsSLO "${BASE}/lwpt-${LWPT_VERSION}-checksums.txt"
+        sha256sum -c <(grep "${ASSET}.tar.gz" "lwpt-${LWPT_VERSION}-checksums.txt")
+        tar xzf "${ASSET}.tar.gz"
+        echo "$RUNNER_TEMP/${ASSET}" >> "$GITHUB_PATH"
+
+    - name: lwpt install --frozen (verify lockfile + committed modules)
+      shell: bash
+      run: lwpt install --frozen
+
+    - name: lwpt build (mcpdemo, mcpsmoke)
+      shell: bash
+      run: lwpt build

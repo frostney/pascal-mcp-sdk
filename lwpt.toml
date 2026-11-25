@@ -16,12 +16,16 @@ units = ["source/units"]
 exclude = [".lwpt/**"]
 
 [dependencies]
-# Dev-time only: the runtime library is RTL + fpjson, zero third-party
+# Dev-time only: the runtime library uses FPC-shipped packages only
+# (RTL, fpjson, fcl-base; fcl-web for the HTTP transport), zero third-party
 # dependencies (see docs/internals/architecture.md). testing is the co-located
-# *.Test.pas framework; resolved from the lwpt 0.5.1 release tag via an
-# include filter (one filtered fetch per package), mirroring duetto. 0.5.1 is
-# the floor because it carries lwpt#167 (testing 0.2.0: Run sets ExitCode).
-testing = { source = "frostney/lwpt", version = "^0.5.1", include = ["packages/testing/**"], exclude = ["**/*.Test.pas"] }
+# *.Test.pas framework; resolved from the lwpt release tag pinned below via an
+# include filter (one filtered fetch per package), mirroring duetto.
+# This exact version is also the toolchain pin: CI installs the lwpt
+# release of the same tag (.github/scripts/lwpt-version.sh reads it
+# from here). A range would let a fresh resolve select a later tag
+# than the binary.
+testing = { source = "frostney/lwpt", version = "0.10.0", include = ["packages/testing/**"], exclude = ["**/*.Test.pas"] }
 
 [build]
 mcpdemo  = { source = "source/apps/mcpdemo.pas",  output = "build/mcpdemo" }
@@ -30,5 +34,32 @@ mcpsmoke = { source = "source/apps/mcpsmoke.pas", output = "build/mcpsmoke" }
 # `lwpt run smoke` — the E2E battery against the binaries `lwpt build`
 # produced. Run-scripts execute via InstantFPC without project include
 # paths, so the script is a self-contained wrapper, not mcpsmoke itself.
+# (lwpt 0.6.0 syntax: explicit command + args replaced `script = ...`.)
 [smoke]
-script = "scripts/smoke.pas"
+command = "instantfpc"
+args = ["scripts/smoke.pas"]
+
+# Complexity ceilings enforced by `lwpt health` (CI gate). Ratchet
+# values: set just above the 2026-08-15 baseline (worst routine
+# validatesubsetarguments at cyclomatic 26 / cognitive 85; worst file
+# MCP.Server.pas at 541/600) so the numbers can shrink but not grow
+# unnoticed. Hotspot scoring needs full git history, which CI's
+# shallow checkout lacks — deliberately not limited.
+[health]
+max-routine-cyclomatic = 30
+max-routine-cognitive = 90
+max-file-cyclomatic = 600
+max-file-cognitive = 650
+
+# Token-clone ceiling for `lwpt duplication` (CI gate); baseline
+# 1.59% across 6 clone groups.
+[duplication]
+maximum-percent = 3
+
+# `lwpt run conformance` — the official MCP conformance suite (pinned
+# npm release) against `build/mcpdemo --http`. Needs Node >= 22 and
+# npm registry access; each run's results land in a new directory
+# under build/conformance/.
+[conformance]
+command = "instantfpc"
+args = ["scripts/conformance.pas"]

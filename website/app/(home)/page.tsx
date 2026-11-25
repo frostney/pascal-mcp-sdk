@@ -2,7 +2,8 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import { codeToHtml } from 'shiki';
 import { LogoMark } from '@/components/logo';
-import { gitConfig, siteUrl } from '@/lib/shared';
+import { TerminalCast } from '@/components/terminal-cast';
+import { basePath, gitConfig, siteUrl } from '@/lib/shared';
 
 export const metadata: Metadata = {
   title: { absolute: 'pascal-mcp-sdk — a FreePascal-native MCP server library' },
@@ -26,7 +27,7 @@ end;`;
 const FAQ: { q: string; a: string; extra?: React.ReactNode }[] = [
   {
     q: 'What is pascal-mcp-sdk?',
-    a: 'A FreePascal-native library for building MCP (Model Context Protocol) servers: expose tools, resources, and prompts from any Pascal program to AI agents. It has zero third-party runtime dependencies — just FPC’s RTL and fpjson — and runs on Linux, macOS, and Windows.',
+    a: 'A FreePascal-native library for building MCP (Model Context Protocol) servers: expose tools, resources, and prompts from any Pascal program to AI agents. It has zero third-party runtime dependencies — only packages that ship with FPC — and runs on Linux, macOS, and Windows.',
   },
   {
     q: 'Does Claude Code work with a Pascal MCP server?',
@@ -40,10 +41,6 @@ const FAQ: { q: string; a: string; extra?: React.ReactNode }[] = [
     q: 'Which parts of the MCP specification are implemented?',
     a: 'Tools, resources with RFC 6570 templates, prompts, multi-round-trip input requests (elicitation, sampling, roots), progress and log notifications, caching hints, stdio and Streamable HTTP transports, plus the classic initialize handshake era that current clients speak. Deliberately out: subscriptions/listen and list-changed notifications, since registries are static after startup.',
   },
-  {
-    q: 'Is this the same as claude-pascal-mcp or @pascal-app/mcp?',
-    a: 'No. pascal-mcp-sdk is a FreePascal library for writing MCP servers in Pascal. tina4stack/claude-pascal-mcp is a Python MCP server that compiles Pascal. @pascal-app/mcp is the MCP for a 3D editor. Same word, different products.',
-  },
 ];
 
 function jsonLd() {
@@ -53,15 +50,13 @@ function jsonLd() {
       {
         '@type': 'SoftwareApplication',
         name: 'pascal-mcp-sdk',
-        alternateName: 'FreePascal MCP server library',
         description:
           'A FreePascal-native MCP (Model Context Protocol) server library with zero third-party dependencies.',
-        url: `${siteUrl}/`,
+        url: siteUrl,
         applicationCategory: 'DeveloperApplication',
         operatingSystem: 'Linux, macOS, Windows',
         license: 'https://opensource.org/license/mit',
         codeRepository: `https://github.com/${gitConfig.user}/${gitConfig.repo}`,
-        sameAs: [`https://github.com/${gitConfig.user}/${gitConfig.repo}`],
         programmingLanguage: 'Pascal',
         offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
       },
@@ -94,10 +89,7 @@ export default async function HomePage() {
         <div className="text-fd-primary">
           <LogoMark size={72} />
         </div>
-        <h1 className="text-4xl font-bold">
-          FreePascal-native MCP server library
-        </h1>
-        <p className="text-sm text-fd-muted-foreground">pascal-mcp-sdk</p>
+        <h1 className="text-4xl font-bold">pascal-mcp-sdk</h1>
         <p className="text-lg text-fd-muted-foreground">
           Give AI agents tools written in Pascal. pascal-mcp-sdk turns any{' '}
           <a href="https://www.freepascal.org" className="underline">
@@ -147,6 +139,10 @@ export default async function HomePage() {
           className="landing-code rounded-lg border text-left text-sm overflow-x-auto [&>pre]:p-4 [&>pre]:m-0 [&>pre]:bg-transparent"
           dangerouslySetInnerHTML={{ __html: quickStartHtml }}
         />
+        <TerminalCast
+          src={`${basePath}/docs-casts/hero.cast`}
+          label="A real session: build the demo server, call a tool"
+        />
         <p className="mt-3 text-sm text-fd-muted-foreground text-center">
           The library validates arguments against your{' '}
           <a href="https://json-schema.org" className="underline">
@@ -185,13 +181,13 @@ export default async function HomePage() {
             <code className="rounded bg-fd-muted px-1.5 py-0.5">
               source/units/
             </code>{' '}
-            into your unit path — RTL + fpjson only, nothing to fetch.
+            into your unit path — FPC-shipped packages only, nothing to fetch.
           </p>
           <p>
             <strong>Just trying it out?</strong> Clone the repo and build
             the demo server with plain FPC —{' '}
             <code className="rounded bg-fd-muted px-1.5 py-0.5">
-              fpc @lwpt.cfg -FEbuild source/apps/mcpdemo.pas
+              mkdir -p build && fpc @lwpt.cfg -FEbuild source/apps/mcpdemo.pas
             </code>{' '}
             — then wire{' '}
             <code className="rounded bg-fd-muted px-1.5 py-0.5">
@@ -224,6 +220,13 @@ export default async function HomePage() {
           ))}
         </div>
       </section>
+
+      <footer className="w-full max-w-2xl border-t pt-6 text-center text-xs text-fd-muted-foreground">
+        pascal-mcp-sdk is a community SDK for the Model Context
+        Protocol and is not affiliated with or endorsed by the MCP
+        project. Model Context Protocol and MCP are trademarks of LF
+        Projects, LLC.
+      </footer>
     </main>
   );
 }

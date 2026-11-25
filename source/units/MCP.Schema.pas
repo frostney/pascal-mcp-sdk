@@ -58,7 +58,7 @@ unit MCP.Schema;
 // remain the escape hatch for anything richer ($ref, nested objects,
 // title/annotations).
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 interface
 
@@ -71,15 +71,14 @@ uses
 type
   EMCPSchema = class(Exception);
 
-  // Base class for argument types: {$M+} turns on published-property
-  // RTTI for every descendant. Constructor kept virtual so the server
-  // can instantiate argument objects from a class reference.
-  {$M+}
+  // Base class for argument types. Published-property RTTI for every
+  // descendant comes from MCP.inc's global {$M+} (no per-unit
+  // override). Constructor kept virtual so the server can instantiate
+  // argument objects from a class reference.
   TMCPArgs = class(TObject)
   public
     constructor Create; virtual;
   end;
-  {$M-}
 
   TMCPArgsClass = class of TMCPArgs;
 
@@ -153,7 +152,23 @@ function MCPPropIsOptional(AInstance: TObject; AProp: PPropInfo): Boolean;
 // pairs this with SchemaFrom(outputClass).
 function MCPSerialize(AObj: TMCPArgs): TJSONObject;
 
+// Compact JSON number node for wire output. fpjson's default float
+// serialization is full-precision exponent form
+// ('2.5000000000000000E-001'); the official SDKs put plain decimals
+// on the wire. A value is written as the shortest decimal that parses
+// back to the same Double, in the form JavaScript's Number#toString
+// (and so JSON.stringify) gives it: 0.25, 1000000000000000, 1e+21,
+// 5e-324. Integers of magnitude below 2^53 become integer nodes;
+// negative zero is 0. NaN and infinities have no JSON form and raise
+// EMCPSchema. The caller owns the returned node (add it to a JSON
+// object or array, which then frees it). Used by MCPSerialize's float
+// properties and the server's progress notifications.
+function MCPWireNumber(AValue: Double): TJSONData;
+
 implementation
+
+uses
+  Math;
 
 constructor TMCPArgs.Create;
 begin
@@ -277,6 +292,388 @@ begin
   end;
 end;
 
+type
+  // Float node serializing as the shortest round-trip decimal — see
+  // MCPWireNumber's interface comment.
+  TMCPWireFloat = class(TJSONFloatNumber)
+  protected
+    function GetAsString: TJSONStringType; override;
+  end;
+
+// The decimal ADigits x 10^(AExponent - Length(ADigits) + 1), i.e.
+// d.ddd x 10^AExponent, written as JavaScript's Number#toString
+// writes a finite number (ECMA-262, Number::toString): plain notation
+// for exponents from -7 to 20, exponent notation (1e+21, 5e-324)
+// outside. ADigits has no trailing zeros.
+function JSNumberText(ANegative: Boolean; const ADigits: string;
+  AExponent: Integer): string;
+var
+  K, N: Integer;
+begin
+  K := Length(ADigits);
+  N := AExponent + 1;
+  if (K <= N) and (N <= 21) then
+    Result := ADigits + StringOfChar('0', N - K)
+  else if (0 < N) and (N <= 21) then
+    Result := Copy(ADigits, 1, N) + '.' + Copy(ADigits, N + 1, K - N)
+  else if (-6 < N) and (N <= 0) then
+    Result := '0.' + StringOfChar('0', -N) + ADigits
+  else
+  begin
+    Result := ADigits[1];
+    if K > 1 then
+      Result := Result + '.' + Copy(ADigits, 2, K - 1);
+    if N - 1 >= 0 then
+      Result := Result + 'e+' + IntToStr(N - 1)
+    else
+      Result := Result + 'e-' + IntToStr(1 - N);
+  end;
+  if ANegative then
+    Result := '-' + Result;
+end;
+
+// Unsigned big integer for exact decimal conversion: 32-bit limbs,
+// least significant first, no leading zero limbs (zero is empty).
+type
+  TWireBig = array of LongWord;
+
+procedure BigTrim(var A: TWireBig);
+var
+  N: Integer;
+begin
+  N := Length(A);
+  while (N > 0) and (A[N - 1] = 0) do
+    Dec(N);
+  SetLength(A, N);
+end;
+
+function BigFrom(AValue: QWord): TWireBig;
+begin
+  SetLength(Result, 2);
+  Result[0] := LongWord(AValue and $FFFFFFFF);
+  Result[1] := LongWord(AValue shr 32);
+  BigTrim(Result);
+end;
+
+procedure BigMulSmall(var A: TWireBig; AFactor: LongWord);
+var
+  I: Integer;
+  Carry: QWord;
+begin
+  Carry := 0;
+  for I := 0 to High(A) do
+  begin
+    Carry := QWord(A[I]) * AFactor + Carry;
+    A[I] := LongWord(Carry and $FFFFFFFF);
+    Carry := Carry shr 32;
+  end;
+  if Carry <> 0 then
+  begin
+    SetLength(A, Length(A) + 1);
+    A[High(A)] := LongWord(Carry);
+  end;
+end;
+
+procedure BigShl(var A: TWireBig; ABits: Integer);
+var
+  Words, Bits, I: Integer;
+  Old: TWireBig;
+begin
+  if (Length(A) = 0) or (ABits = 0) then
+    Exit;
+  Words := ABits div 32;
+  Bits := ABits mod 32;
+  Old := Copy(A);
+  SetLength(A, Length(Old) + Words + 1);
+  for I := 0 to High(A) do
+    A[I] := 0;
+  for I := 0 to High(Old) do
+  begin
+    A[I + Words] := A[I + Words] or (Old[I] shl Bits);
+    if Bits > 0 then
+      A[I + Words + 1] := Old[I] shr (32 - Bits);
+  end;
+  BigTrim(A);
+end;
+
+procedure BigMulPow10(var A: TWireBig; APower: Integer);
+begin
+  while APower >= 9 do
+  begin
+    BigMulSmall(A, 1000000000);
+    Dec(APower, 9);
+  end;
+  while APower > 0 do
+  begin
+    BigMulSmall(A, 10);
+    Dec(APower);
+  end;
+end;
+
+function BigCompare(const A, B: TWireBig): Integer;
+var
+  I: Integer;
+begin
+  if Length(A) <> Length(B) then
+    Exit(Ord(Length(A) > Length(B)) * 2 - 1);
+  for I := High(A) downto 0 do
+    if A[I] <> B[I] then
+      Exit(Ord(A[I] > B[I]) * 2 - 1);
+  Result := 0;
+end;
+
+function BigAdd(const A, B: TWireBig): TWireBig;
+var
+  I: Integer;
+  Carry: QWord;
+begin
+  SetLength(Result, Max(Length(A), Length(B)) + 1);
+  Carry := 0;
+  for I := 0 to High(Result) do
+  begin
+    if I < Length(A) then
+      Carry := Carry + A[I];
+    if I < Length(B) then
+      Carry := Carry + B[I];
+    Result[I] := LongWord(Carry and $FFFFFFFF);
+    Carry := Carry shr 32;
+  end;
+  BigTrim(Result);
+end;
+
+// A := A - B, for A >= B.
+procedure BigSub(var A: TWireBig; const B: TWireBig);
+var
+  I: Integer;
+  Borrow, Diff: Int64;
+begin
+  Borrow := 0;
+  for I := 0 to High(A) do
+  begin
+    Diff := Int64(A[I]) - Borrow;
+    if I < Length(B) then
+      Diff := Diff - B[I];
+    if Diff < 0 then
+    begin
+      Inc(Diff, Int64(1) shl 32);
+      Borrow := 1;
+    end
+    else
+      Borrow := 0;
+    A[I] := LongWord(Diff);
+  end;
+  BigTrim(A);
+end;
+
+// Burger and Dybvig's free-format algorithm ("Printing
+// Floating-Point Numbers Quickly and Accurately", 1996) in exact
+// integer arithmetic. R/S is the value; MPlus/S and MMinus/S are the
+// distances to the upper and lower ends of its rounding interval. A
+// decimal on an end of the interval reads back as the value only when
+// its significand is even (round-half-even), so Even says whether the
+// ends belong to it.
+type
+  TWireDigits = record
+    R, S, MPlus, MMinus: TWireBig;
+    Even: Boolean;
+    K: Integer; // the value is 0.ddd x 10^K
+  end;
+
+// R, S, MPlus and MMinus for a finite AValue > 0, all scaled by 2 so
+// the half-gaps stay integral. The gap below a power of two is half
+// the gap above it.
+procedure WireInterval(AValue: Double; var AState: TWireDigits);
+var
+  Bits, F: QWord;
+  BiasedExp, E: Integer;
+  PowerOfTwo: Boolean;
+begin
+  Move(AValue, Bits, SizeOf(Bits));
+  BiasedExp := Integer((Bits shr 52) and $7FF);
+  F := Bits and QWord($FFFFFFFFFFFFF);
+  if BiasedExp = 0 then
+    E := -1074
+  else
+  begin
+    F := F or (QWord(1) shl 52);
+    E := BiasedExp - 1075;
+  end;
+  AState.Even := not Odd(F);
+  PowerOfTwo := (F = QWord(1) shl 52) and (E > -1074);
+  AState.R := BigFrom(F);
+  BigShl(AState.R, 1 + Max(E, 0));
+  AState.S := BigFrom(2);
+  BigShl(AState.S, Max(-E, 0));
+  AState.MPlus := BigFrom(1);
+  BigShl(AState.MPlus, Max(E, 0));
+  AState.MMinus := Copy(AState.MPlus);
+  if PowerOfTwo then
+  begin
+    BigShl(AState.R, 1);
+    BigShl(AState.S, 1);
+    BigShl(AState.MPlus, 1);
+  end;
+end;
+
+// K: the smallest power of ten above the interval's top. Starts from
+// an estimate and corrects it exactly.
+procedure WireScale(AValue: Double; var AState: TWireDigits);
+var
+  Cmp: Integer;
+  Top: TWireBig;
+begin
+  AState.K := Ceil(Log10(AValue) - 1E-10);
+  if AState.K >= 0 then
+    BigMulPow10(AState.S, AState.K)
+  else
+  begin
+    BigMulPow10(AState.R, -AState.K);
+    BigMulPow10(AState.MPlus, -AState.K);
+    BigMulPow10(AState.MMinus, -AState.K);
+  end;
+  repeat
+    Top := BigAdd(AState.R, AState.MPlus);
+    Cmp := BigCompare(Top, AState.S);
+    if (Cmp > 0) or (AState.Even and (Cmp = 0)) then
+    begin
+      BigMulSmall(AState.S, 10);
+      Inc(AState.K);
+      Continue;
+    end;
+    BigMulSmall(Top, 10);
+    Cmp := BigCompare(Top, AState.S);
+    if (Cmp < 0) or (not AState.Even and (Cmp = 0)) then
+    begin
+      BigMulSmall(AState.R, 10);
+      BigMulSmall(AState.MPlus, 10);
+      BigMulSmall(AState.MMinus, 10);
+      Dec(AState.K);
+      Continue;
+    end;
+    Break;
+  until False;
+end;
+
+// The last digit D, once the remaining R is within the interval below
+// (ALow), above (AHigh) or both: the nearer of D and D + 1, the even
+// one on a tie, as JavaScript's Number#toString picks (ECMA-262,
+// Number::toString).
+function WireLastDigit(const AState: TWireDigits; D: Integer;
+  ALow, AHigh: Boolean): Integer;
+var
+  Twice: TWireBig;
+  Cmp: Integer;
+begin
+  Result := D;
+  if ALow and AHigh then
+  begin
+    Twice := Copy(AState.R);
+    BigShl(Twice, 1);
+    Cmp := BigCompare(Twice, AState.S);
+    if (Cmp > 0) or ((Cmp = 0) and Odd(D)) then
+      Result := D + 1;
+  end
+  else if AHigh then
+    Result := D + 1;
+end;
+
+// Appends the final digit, carrying a 10 into the digits before it;
+// the positions the carry leaves are trailing zeros.
+procedure WireAppendLast(var ADigits: string; D: Integer; var AK: Integer);
+begin
+  while (D = 10) and (ADigits <> '') do
+  begin
+    D := Ord(ADigits[Length(ADigits)]) - Ord('0') + 1;
+    Delete(ADigits, Length(ADigits), 1);
+  end;
+  if D = 10 then
+  begin
+    // 0.99...9 rounded up: 0.1 x 10^(K + 1).
+    ADigits := '1';
+    Inc(AK);
+  end
+  else
+    ADigits := ADigits + Chr(Ord('0') + D);
+end;
+
+// The shortest decimal digits and exponent E (d.ddd x 10^E) that read
+// back as a finite AValue > 0.
+procedure ShortestDigits(AValue: Double; out ADigits: string;
+  out AExponent: Integer);
+var
+  State: TWireDigits;
+  D, Cmp: Integer;
+  Low, High: Boolean;
+begin
+  WireInterval(AValue, State);
+  WireScale(AValue, State);
+  ADigits := '';
+  repeat
+    BigMulSmall(State.R, 10);
+    BigMulSmall(State.MPlus, 10);
+    BigMulSmall(State.MMinus, 10);
+    D := 0;
+    while BigCompare(State.R, State.S) >= 0 do
+    begin
+      BigSub(State.R, State.S);
+      Inc(D);
+    end;
+    Cmp := BigCompare(State.R, State.MMinus);
+    Low := (Cmp < 0) or (State.Even and (Cmp = 0));
+    Cmp := BigCompare(BigAdd(State.R, State.MPlus), State.S);
+    High := (Cmp > 0) or (State.Even and (Cmp = 0));
+    if Low or High then
+    begin
+      WireAppendLast(ADigits, WireLastDigit(State, D, Low, High), State.K);
+      Break;
+    end;
+    ADigits := ADigits + Chr(Ord('0') + D);
+  until False;
+  while (Length(ADigits) > 1) and (ADigits[Length(ADigits)] = '0') do
+    Delete(ADigits, Length(ADigits), 1);
+  AExponent := State.K - 1;
+end;
+
+function TMCPWireFloat.GetAsString: TJSONStringType;
+var
+  Value: Double;
+  Digits: string;
+  Exponent: Integer;
+begin
+  // The node stays an ordinary, assignable fpjson float, so the value
+  // is checked here as well as at creation.
+  Value := AsFloat;
+  if IsNan(Value) or IsInfinite(Value) then
+    raise EMCPSchema.Create('NaN and infinite numbers have no JSON form');
+  if Value = 0 then
+    Exit('0');
+  ShortestDigits(Abs(Value), Digits, Exponent);
+  Result := JSNumberText(Value < 0, Digits, Exponent);
+end;
+
+// A float node that writes its value as MCPWireNumber does, for a
+// typed float property: it stays a float node however integral the
+// value, so assigning a fraction to it later keeps the fraction.
+function WireFloatNode(AValue: Double): TJSONData;
+begin
+  if IsNan(AValue) or IsInfinite(AValue) then
+    raise EMCPSchema.Create('NaN and infinite numbers have no JSON form');
+  Result := TMCPWireFloat.Create(AValue);
+end;
+
+function MCPWireNumber(AValue: Double): TJSONData;
+begin
+  if IsNan(AValue) or IsInfinite(AValue) then
+    raise EMCPSchema.Create('NaN and infinite numbers have no JSON form');
+  // Every integer below 2^53 is an exact Double and fits an Int64;
+  // integral values beyond it keep the float node, which writes them
+  // the way JavaScript does.
+  if (Frac(AValue) = 0) and (Abs(AValue) < 9007199254740992.0) then
+    Result := TJSONInt64Number.Create(Trunc(AValue))
+  else
+    Result := TMCPWireFloat.Create(AValue);
+end;
+
 function MCPSerialize(AObj: TMCPArgs): TJSONObject;
 var
   Info: PTypeInfo;
@@ -292,39 +689,43 @@ begin
     Exit;
   GetMem(Props, Count * SizeOf(Pointer));
   try
-    GetPropInfos(Info, Props);
-    for I := 0 to Count - 1 do
-    begin
-      Prop := Props^[I];
-      case Prop^.PropType^.Kind of
-        tkSString, tkLString, tkAString, tkWString, tkUString:
-          Result.Add(Prop^.Name, GetStrProp(AObj, Prop));
-        tkFloat:
-          Result.Add(Prop^.Name, GetFloatProp(AObj, Prop));
-        tkInteger:
-          begin
-            TypeData := GetTypeData(Prop^.PropType);
-            if TypeData^.OrdType in [otUByte, otUWord, otULong] then
-              Result.Add(Prop^.Name, GetUnsignedOrdProperty(AObj, Prop))
-            else
-              Result.Add(Prop^.Name, GetOrdProp(AObj, Prop));
-          end;
-        tkInt64:
-          Result.Add(Prop^.Name, GetInt64Prop(AObj, Prop));
-        tkQWord:
-          Result.Add(Prop^.Name, GetQWordProperty(AObj, Prop));
-        tkBool:
-          Result.Add(Prop^.Name, GetOrdProp(AObj, Prop) <> 0);
-        tkEnumeration:
-          Result.Add(Prop^.Name, GetEnumProp(AObj, Prop));
-      else
-        begin
-          Result.Free;
+    try
+      GetPropInfos(Info, Props);
+      for I := 0 to Count - 1 do
+      begin
+        Prop := Props^[I];
+        case Prop^.PropType^.Kind of
+          tkSString, tkLString, tkAString, tkWString, tkUString:
+            Result.Add(Prop^.Name, GetStrProp(AObj, Prop));
+          tkFloat:
+            Result.Add(Prop^.Name, WireFloatNode(GetFloatProp(AObj, Prop)));
+          tkInteger:
+            begin
+              TypeData := GetTypeData(Prop^.PropType);
+              if TypeData^.OrdType in [otUByte, otUWord, otULong] then
+                Result.Add(Prop^.Name, GetUnsignedOrdProperty(AObj, Prop))
+              else
+                Result.Add(Prop^.Name, GetOrdProp(AObj, Prop));
+            end;
+          tkInt64:
+            Result.Add(Prop^.Name, GetInt64Prop(AObj, Prop));
+          tkQWord:
+            Result.Add(Prop^.Name, GetQWordProperty(AObj, Prop));
+          tkBool:
+            Result.Add(Prop^.Name, GetOrdProp(AObj, Prop) <> 0);
+          tkEnumeration:
+            Result.Add(Prop^.Name, GetEnumProp(AObj, Prop));
+        else
           raise EMCPSchema.CreateFmt(
             'Property "%s" of %s has no JSON mapping',
             [Prop^.Name, AObj.ClassName]);
         end;
       end;
+    except
+      // An unmappable property or a value with no JSON form (a NaN
+      // float): free the partial object, then let the error through.
+      Result.Free;
+      raise;
     end;
   finally
     FreeMem(Props);

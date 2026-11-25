@@ -1,0 +1,38 @@
+name: Update project Agent Skills
+
+# Thin caller of known-good-route's reusable workflow, which owns the
+# refresh, validation and publishing. It refreshes the skills that
+# skills-lock.json lists (.agents/skills; .claude/skills is a symlink
+# into that tree), regenerates the AGENTS.md skills block when an
+# installed skill declares one, and opens or updates one draft pull
+# request when something changed; it never merges. An upstream
+# deletion or rename stops the run for a person to migrate (see the
+# maintain-project-skills runbook in known-good-route).
+#
+# The reusable workflow is pinned by full commit SHA. To upgrade, read
+# the known-good-route diff between the old and new pin and change only
+# the SHA and the inputs that diff justifies.
+
+on:
+  schedule:
+    # Mondays, off the hour: GitHub delays or drops scheduled runs
+    # queued at :00.
+    - cron: "17 8 * * 1"
+  workflow_dispatch:
+
+# The maximum the called workflow may use: it narrows its refresh job to
+# contents: read, and only its publish job reads the artifact and writes
+# the branch and the pull request.
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    uses: frostney/known-good-route/.github/workflows/update-project-skills.yml@70d1b117e5fd56219ce148e3987fbec20c8acff3
+    with:
+      skills-root: "."
+      skills-cli-version: "1.5.23"
+      pr-branch: "chore/agent-skills-bump"
+      pr-title: "chore(skills): sync provisioned skills"

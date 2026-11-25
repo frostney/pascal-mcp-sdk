@@ -8,18 +8,21 @@
     "start": "node scripts/preview.mjs",
     "types:check": "next typegen && tsc --noEmit",
     "prebuild": "node scripts/sync-docs-assets.mjs",
-    "postbuild": "node scripts/check-discovery-links.mjs",
-    "predev": "node scripts/sync-docs-assets.mjs"
+    "predev": "node scripts/sync-docs-assets.mjs",
+    "postbuild": "node scripts/check-export.mjs"
   },
   "dependencies": {
+    "asciinema-player": "^3.17.0",
     "cnfast": "^0.1.0",
     "fumadocs-core": "^16.14.2",
     "fumadocs-mdx": "^15.2.2",
     "fumadocs-ui": "^16.14.2",
     "lucide-react": "^1.28.0",
+    "mdast-util-to-markdown": "^2.1.2",
     "next": "16.3.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "rehype-mermaid": "^3.0.0",
     "unist-util-visit": "^5.1.0"
   },
   "devDependencies": {
@@ -28,6 +31,10 @@
     "@types/node": "^26.1.2",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
+    "mdast-util-from-markdown": "^2.0.3",
+    "mdast-util-gfm": "^3.1.0",
+    "micromark-extension-gfm": "^3.0.0",
+    "playwright": "^1.62.1",
     "postcss": "^8.5.25",
     "serve": "^14.2.6",
     "tailwindcss": "^4.3.3",
