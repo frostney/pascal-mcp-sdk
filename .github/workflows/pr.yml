@@ -17,9 +17,10 @@ name: PR
 # committed lockfile + .lwpt/modules tree via install --frozen.
 
 on:
+  # No base-branch filter on pull_request: stacked PRs target the
+  # branch below them, and every layer needs the same gates it will
+  # need after retargeting to main.
   pull_request:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
