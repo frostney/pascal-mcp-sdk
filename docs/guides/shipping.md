@@ -25,6 +25,7 @@ Release mode compiles with `-O4 -dPRODUCTION -Xs -CX -XX`. Without
 lwpt, pass the flags to FPC yourself:
 
 ```sh
+mkdir -p build
 fpc -dPRODUCTION -O4 -Xs -CX -XX -Fu<units-path> -Fi<units-path> -FEbuild myserver.pas
 ```
 

@@ -16,6 +16,8 @@ import { fromMarkdown } from 'mdast-util-from-markdown';
 import { gfmFromMarkdown } from 'mdast-util-gfm';
 import { gfm } from 'micromark-extension-gfm';
 import { visit } from 'unist-util-visit';
+import { isLocalCast } from '../lib/remark-casts.mjs';
+import { isRepoOnlyDoc, repoOnlyDocDirs } from '../lib/remark-repo-links.mjs';
 
 // Mirrors basePath, siteUrl and docsContentRoute in lib/shared.ts.
 const basePath = '/pascal-mcp-sdk';
@@ -121,11 +123,10 @@ for (const file of htmlFiles) {
 
 // The docs pages: every Markdown file under docs/ is one, at the route
 // its path gives (docs/guides/tools.md is /docs/guides/tools/), except
-// the repo-only records under docs/adr/, which lib/source.ts leaves
-// off the site.
-const repoOnly = (file) => rel(docsSource, file).startsWith('adr/');
+// the repo-only records (docs/adr/), which lib/source.ts leaves off
+// the site.
 const pages = walk(docsSource)
-  .filter((file) => file.endsWith('.md') && !repoOnly(file))
+  .filter((file) => file.endsWith('.md') && !isRepoOnlyDoc(rel(docsSource, file)))
   .map((source) => {
     const slug = rel(docsSource, source)
       .replace(/\.md$/, '')
@@ -142,8 +143,12 @@ const pages = walk(docsSource)
 if (pages.length === 0) fail(`no Markdown files under ${docsSource}`);
 
 // The repo-only records reach no page, Markdown copy or other file.
-const leaked = walk(out).filter((file) => /(^|\/)adr(\/|$)/.test(rel(out, path.dirname(file))));
-if (leaked.length > 0) fail(`docs/adr is repo-only, but the export has ${leaked.map((file) => rel(out, file)).join(', ')}`);
+const leaked = walk(out).filter((file) =>
+  rel(out, path.dirname(file))
+    .split('/')
+    .some((part) => repoOnlyDocDirs.includes(part)),
+);
+if (leaked.length > 0) fail(`repo-only docs reached the export: ${leaked.map((file) => rel(out, file)).join(', ')}`);
 
 // The home page plays the hero recording.
 const home = path.join(out, 'index.html');
@@ -188,12 +193,16 @@ for (const page of pages) {
   // terminal player (lib/remark-casts.mjs); the player's link to the
   // recording is checked with every other href in step 1.
   let fences = 0;
-  let casts = 0;
+  page.castUrls = [];
   visit(parse(read(page.source)), ['code', 'paragraph'], (node) => {
     if (node.type === 'code' && node.lang === 'mermaid') fences += 1;
     const [only] = node.type === 'paragraph' && node.children.length === 1 ? node.children : [];
-    if (only?.type === 'link' && only.url.endsWith('.cast')) casts += 1;
+    if (only?.type === 'link' && isLocalCast(only.url)) {
+      const recording = rel(path.join(docsSource, 'casts'), path.resolve(path.dirname(page.source), only.url));
+      page.castUrls.push(`${siteUrl}/docs-casts/${recording}`);
+    }
   });
+  const casts = page.castUrls.length;
   const light = (article.match(/\sid="mermaid-light-\d+"/g) ?? []).length;
   const dark = (article.match(/\sid="mermaid-dark-\d+"/g) ?? []).length;
   if (light !== fences || dark !== fences) {
@@ -259,6 +268,10 @@ for (const page of pages) {
     }
     const copyTitle = title(page.copyText.slice(page.copyText.indexOf('\n') + 1));
     if (copyTitle !== page.title) fail(`${rel(out, page.copy)}: H1 "${copyTitle}", its source's is "${page.title}"`);
+    // Each recording the source plays is a link in the copy.
+    const copyUrls = new Set(markdownUrls(page.copyText));
+    const lost = page.castUrls.filter((url) => !copyUrls.has(url));
+    if (lost.length > 0) fail(`${rel(out, page.copy)}: lacks the recording link ${lost.join(', ')}`);
   }
 }
 

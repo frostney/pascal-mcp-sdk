@@ -78,7 +78,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends fpc \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-RUN fpc @lwpt.cfg -O4 -dPRODUCTION -Xs -CX -XX -FEbuild source/apps/myserver.pas
+# build/ is not committed, and fpc needs -FE's directory to exist.
+RUN mkdir -p build \
+    && fpc @lwpt.cfg -O4 -dPRODUCTION -Xs -CX -XX -FEbuild source/apps/myserver.pas
 
 FROM debian:bookworm-slim
 COPY --from=build /src/build/myserver /usr/local/bin/myserver

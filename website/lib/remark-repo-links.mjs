@@ -12,6 +12,16 @@ import { defaultHandlers } from 'mdast-util-to-markdown';
 
 const githubBase = 'https://github.com/frostney/pascal-mcp-sdk';
 
+// Folders under docs/ that are repository records, not site pages:
+// lib/source.ts leaves them out of the site, so a link to one of their
+// files resolves to GitHub like any other file outside the rendered set.
+export const repoOnlyDocDirs = ['adr'];
+
+// Whether a docs/-relative path (with / separators) is repo-only.
+export function isRepoOnlyDoc(relativePath) {
+  return repoOnlyDocDirs.some((dir) => relativePath === dir || relativePath.startsWith(`${dir}/`));
+}
+
 // Walk up from the processed file to the repository root (the
 // directory holding lwpt.toml) — bundlers rewrite import.meta paths,
 // so the anchor must come from the file being processed.
@@ -59,8 +69,8 @@ function mapHref(href, filePath) {
         'leaves the repository',
     );
   }
-  const fromDocs = path.relative(docsRoot, resolved);
-  if (!fromDocs.startsWith('..') && resolved.endsWith('.md')) {
+  const fromDocs = path.relative(docsRoot, resolved).split(path.sep).join('/');
+  if (!fromDocs.startsWith('..') && resolved.endsWith('.md') && !isRepoOnlyDoc(fromDocs)) {
     // Stays inside the rendered set: site route.
     return `${pageRoute(resolved, docsRoot)}${suffix}`;
   }

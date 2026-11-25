@@ -43,7 +43,8 @@ lwpt format --check    # formatter gate
 Ground rules (the load-bearing ones — reasoning in `docs/adr/`):
 FreePascal only (FPC 3.2.2, flags centralised in
 `source/units/MCP.inc`); zero third-party runtime dependencies
-(RTL + fpjson); `MCP.Server` owns the protocol surface, transports
+(FPC-shipped packages only: RTL, fpjson, fcl-base, and fcl-web for
+the HTTP transport); `MCP.Server` owns the protocol surface, transports
 move lines only; spec facts are verified against
 [modelcontextprotocol.io](https://modelcontextprotocol.io), never
 recalled.

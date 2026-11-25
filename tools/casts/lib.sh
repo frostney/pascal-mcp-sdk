@@ -13,11 +13,14 @@ say() {
   sleep 1.2
 }
 
-# Print the command like a prompt line, then execute it for real.
+# Print the command like a prompt line, then execute it for real. The
+# child shell fails on any failing pipeline stage, so a failing mcpdemo
+# behind a successful jq stops the demo (the demo scripts run under
+# `set -e`) instead of being recorded as a working example.
 run() {
   printf '\033[1;32m❯\033[0m %s\n' "$*"
   sleep 0.9
-  bash -c "$*"
+  bash -o pipefail -c "$*"
   sleep 1.4
 }
 
