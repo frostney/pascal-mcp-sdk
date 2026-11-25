@@ -86,7 +86,7 @@ unit MCP.Server;
 // 2026-07-21 against:
 // https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 interface
 
@@ -692,6 +692,8 @@ implementation
 // dependency rule as fpjson and fcl-web (AGENTS.md); MCP.Transport.HTTP
 // already depends on this unit for the mirrored-header sentinel.
 uses
+  Math,
+
   base64;
 
 var
@@ -1240,9 +1242,15 @@ begin
         ProgressToken.Free;
       end;
     end;
-    Params.Add('progress', AProgress);
-    if ATotal >= 0 then
-      Params.Add('total', ATotal);
+    // Compact number nodes (MCP.Schema's MCPWireNumber): fpjson's
+    // default float serialization is full-precision exponent form;
+    // the official SDKs put plain decimals on the wire.
+    // A NaN or infinite progress or total raises EMCPSchema there (no
+    // JSON form); only a finite negative total means "no total", and
+    // IsNan comes first so a NaN is never compared.
+    Params.Add('progress', MCPWireNumber(AProgress));
+    if IsNan(ATotal) or IsInfinite(ATotal) or (ATotal >= 0) then
+      Params.Add('total', MCPWireNumber(ATotal));
     if AMessage <> '' then
       Params.Add('message', AMessage);
     NotificationParams := Params;

@@ -32,11 +32,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # Tracks the release the dependency tag stream resolves from; keep in
-  # step with the lwpt used locally so format --check cannot disagree.
-  LWPT_VERSION: "0.5.1"
-
 jobs:
   test:
     # matrix.name keeps the job name stable across matrix edits,
@@ -168,9 +163,13 @@ jobs:
             echo "LWPT_FPC=$(cygpath -w "$PPCX64")" >> "$GITHUB_ENV"
           fi
 
+      # The release lwpt.toml's exact testing version pins (same tag as
+      # the toolchain); keep the local lwpt on it so format --check
+      # cannot disagree.
       - name: Install lwpt (release binary, checksum-verified)
         run: |
           set -euo pipefail
+          LWPT_VERSION=$(bash .github/scripts/lwpt-version.sh)
           cd "$RUNNER_TEMP"
           ASSET="lwpt-${LWPT_VERSION}-${{ matrix.lwpt-asset }}"
           BASE="https://github.com/frostney/lwpt/releases/download/${LWPT_VERSION}"

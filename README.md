@@ -6,8 +6,9 @@ the current **stateless** protocol revision (`2026-07-28`).
 Expose tools, resources, and prompts from any Pascal program to AI
 agents — no second language runtime, no framework.
 
-- **Zero third-party runtime dependencies** — FPC RTL + fpjson only
-  (the HTTP transport uses fcl-web, which ships inside FPC).
+- **Zero third-party runtime dependencies** — only packages that ship
+  inside FPC: the RTL, fpjson and fcl-base (the HTTP transport adds
+  fcl-web).
 - **Two transports, one core** — newline-delimited JSON-RPC over
   stdio (the standard local-subprocess transport) and **Streamable
   HTTP** (single POST endpoint, SSE response streams), both thin
@@ -43,14 +44,15 @@ discovery.
 **By vendoring** — the library is seven files. Copy
 `source/units/MCP.JSONRPC.pas`, `MCP.Protocol.pas`, `MCP.Schema.pas`,
 `MCP.Server.pas`, `MCP.Transport.Stdio.pas`, `MCP.Transport.HTTP.pas`,
-and `Shared.inc` into your unit path. RTL + fpjson only (fcl-web for
-the HTTP transport unit).
+and `MCP.inc` into your unit path. FPC-shipped packages only (RTL,
+fpjson, fcl-base; fcl-web for the HTTP transport unit).
 
 **Zero-install from a clone** — the repo commits its dependency
 modules and the generated FPC response file, so a plain FPC 3.2.2 is
 enough to build the demo server with no lwpt binary at all:
 
 ```sh
+mkdir -p build
 fpc @lwpt.cfg -FEbuild source/apps/mcpdemo.pas
 ./build/mcpdemo
 ```

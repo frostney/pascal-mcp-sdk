@@ -22,11 +22,15 @@ lwpt install           # resolve deps → lwpt.cfg + lwpt.lock + .lwpt/modules
 lwpt install --frozen  # CI: verify lockfile + committed modules, no network
 lwpt build             # every [build] target in lwpt.toml → build/
 lwpt test              # discovers source/units/*.Test.pas
+lwpt test source/units/MCP.Server.Test.pas  # one test file (paths and globs select)
+lwpt test --inventory  # each test program's suite and case counts
 lwpt run smoke         # the built mcpsmoke E2E battery (scripts/smoke.pas)
 lwpt format            # rewrite in place (pre-commit does this)
 lwpt format --check    # CI gate: fail on drift
 lwpt agents            # refresh the AGENTS.md command-reference block
 lwpt agents --check    # CI gate: fail when that block is stale
+lwpt health            # CI gate: complexity vs the [health] ceilings
+lwpt duplication       # CI gate: clones vs the [duplication] ceiling
 ```
 
 - `lwpt.toml` is the **manifest you edit**: package metadata, the
@@ -43,11 +47,14 @@ lwpt agents --check    # CI gate: fail when that block is stale
 
 ## Dependency policy
 
-Runtime: **RTL + fpjson. Nothing else.** This is a hard constraint
-(AGENTS.md); it is what makes the library trivially vendorable and the
-no-lwpt path a one-liner. Dev-time: lwpt's `testing` package only.
-duetto's `cli` package joins only if an app grows real flag parsing —
-`mcpdemo`/`mcpsmoke` deliberately have none.
+Runtime: **FPC-shipped packages only — RTL, fpjson, fcl-base
+(`base64`), and fcl-web confined to `MCP.Transport.HTTP`. Nothing
+else** ([ADR-0003](https://github.com/frostney/pascal-mcp-sdk/blob/main/docs/adr/0003-zero-third-party-runtime-dependencies.md)).
+This is a hard constraint (AGENTS.md); it is what makes the library
+trivially vendorable and the no-lwpt path a one-liner. Dev-time: lwpt's `testing` package only.
+Any other dev-time package, such as duetto's `cli` should an app ever
+need real flag parsing (`mcpdemo`/`mcpsmoke` deliberately have none),
+is a future decision: it needs maintainer approval and an ADR first.
 
 ## Hooks — lefthook
 
@@ -69,7 +76,7 @@ CHANGELOG.md is generated — do not hand-edit entries.
 
 `.markdownlint-cli2.jsonc` mirrors the sibling repos: ATX headings,
 2-space list indent, fenced code blocks with language tags; long lines
-and bare URLs allowed. CI runs it via
+allowed, bare URLs not (MD034 — write explicit links). CI runs it via
 `DavidAnson/markdownlint-cli2-action`; locally:
 
 ```sh
@@ -78,15 +85,16 @@ npx markdownlint-cli2 "**/*.md"
 
 ## CI
 
-Four workflows (see [.github/workflows/](../../.github/workflows/)):
+Six workflows (see [.github/workflows/](../../.github/workflows/)):
 
 - **pr.yml** — every PR: Linux + macOS + Windows legs, each doing
   checksum-verified lwpt release install, `lwpt install --frozen`,
   then `build`, `test`, and the `mcpsmoke` E2E battery.
   One leg additionally runs the platform-independent gates:
   `lwpt format --check`, `lwpt agents --check`, and
-  `.github/scripts/check-reference-docs.sh` (every public
-  `MCP*`/`Register*` symbol must appear in `docs/reference/`). Plus
+  `.github/scripts/check-reference-docs.sh` (every
+  `MCP*`/`Register*` function or procedure in `MCP.Server`'s
+  interface must appear in `docs/reference/`). Plus
   a blocking markdownlint job, the required `interop` job, and the
   non-blocking `conformance` job (both below).
 - **ci.yml** — push to main: the same battery as the post-merge
@@ -94,6 +102,23 @@ Four workflows (see [.github/workflows/](../../.github/workflows/)):
 - **pr-title.yml** — Conventional Commit PR-title gate (squash-merge
   titles become the changelog).
 - **pages.yml** — website build/deploy; see the Website section.
+- **lwpt-bump.yml** — weekly (Mondays) and on demand: opens a PR
+  when the Homebrew tap's lwpt is newer than the pin, carrying the
+  complete bump (the pin, the regenerated lockfile, zero-install trees
+  and AGENTS.md command block). A failing run means the new release
+  needs a migration by hand. CI on the PR it opens waits for a
+  maintainer's **Approve workflows to run**.
+- **update-project-skills.yml** — weekly (Mondays) and on demand: a
+  thin caller of known-good-route's reusable workflow that refreshes
+  the skills `skills-lock.json` lists and opens a draft PR when they
+  changed. A skill deleted or renamed upstream stops the run until it
+  is migrated by hand. As with the lwpt bump, CI on that PR waits for
+  **Approve workflows to run**.
+
+The lwpt pin is the exact version of the `testing` dependency in
+`lwpt.toml`: the test framework comes from the same lwpt release tag
+as the toolchain, and every workflow installs that release
+(`.github/scripts/lwpt-version.sh` reads it).
 
 ## Cross-implementation check — tools/interop-ts
 
@@ -197,24 +222,53 @@ The project site (<https://frostney.github.io/pascal-mcp-sdk/>) is a
 [Fumadocs](https://fumadocs.dev) (Next.js) static export under
 `website/`, adopted wholesale from the frostney/lwpt#90 decision
 record: landing page + docs site in one deployment, `basePath`
-`/pascal-mcp-sdk`, built-in search, **no analytics**. The site
-renders the repository's `docs/` tree **directly** — no curated
-second copy; only landing-page content and glue live under
-`website/`. Two remark plugins process the markdown:
-`remark-repo-links` maps repo-relative links (links within `docs/`
-become site routes, links leaving the rendered set resolve to their
-GitHub URLs, images under `docs/images/` map to the synced
-`public/docs-images/` copy, and a broken mapping **fails the
-build**), and `remark-term-links` auto-links the first occurrence
-per page of well-known tooling terms. A `prebuild`/`predev` script
-syncs `docs/images/` into `public/`; the app also emits the SEO/AEO
-surfaces (sitemap, robots, per-page OG images, `llms.txt` /
-`llms-full.txt`, JSON-LD).
-Deployment is `.github/workflows/pages.yml` (official
-`configure-pages` / `upload-pages-artifact` / `deploy-pages`
-actions): pushes to `main` touching `website/**` or `docs/**` deploy;
-PRs touching those paths build without deploying. The Node toolchain
-is contributor/CI tooling only (precedent: `tools/interop-ts`) and
-never touches the shipped library or its RTL + fpjson dependency
-policy. **Node pin: 24** (`actions/setup-node` — both pages.yml and the
-interop job in pr.yml).
+`/pascal-mcp-sdk`, built-in search, **no analytics**.
+
+- **The site renders the repository's `docs/` tree directly** — no
+  curated second copy; only landing-page content and glue live under
+  `website/`. Repo-only records under `docs/` (the ADRs) are excluded
+  in `website/lib/source.ts`.
+- **Markdown pipeline** (`website/lib/source.ts`): the Markdown
+  options are wrapped in fumadocs-mdx's `applyMdxPreset` — the docs
+  macro applies no preset by itself, and without it tables, heading
+  ids and the table of contents are lost — plus four site plugins:
+  - `remark-casts` turns links to `.cast` files into the terminal
+    player. It runs before `remark-repo-links`, which would otherwise
+    route a `.cast` path as a page.
+  - `remark-repo-links` maps repo-relative links — links within
+    `docs/` become site routes, links leaving the rendered set
+    resolve to their GitHub URLs, images under `docs/images/` map to
+    the synced `public/docs-images/` copy, and a broken mapping
+    **fails the build**.
+  - `remark-term-links` auto-links the first occurrence per page of
+    well-known tooling terms.
+  - `rehype-mermaid-dual` renders ```` ```mermaid ```` fences to
+    themed inline SVGs at build time (light + dark, toggled by the
+    site theme; headless Chromium via playwright). No mermaid JS
+    ships to the client, and the same fences render natively on
+    GitHub.
+- **Terminal recordings**: `.cast` files under `docs/casts/` play
+  through a self-hosted asciinema-player wrapper (no CDN); the
+  recordings are real captures of the built binaries — see
+  `tools/casts/`.
+- A `prebuild`/`predev` script syncs `docs/images/` into `public/`;
+  the app also emits the SEO/AEO surfaces (sitemap, robots, per-page
+  OG images, `llms.txt` / `llms-full.txt`, JSON-LD).
+- **Post-build check**: `scripts/check-export.mjs` fails the build
+  unless each page's output matches its `docs/` source: its tables
+  render, every heading has an id and its table of contents lists the
+  h2 and h3 headings, every in-site link, anchor and search result is
+  served, its Mermaid fences rendered to SVG and its casts have their
+  player and recording, and its page actions, JSON-LD, sitemap entry,
+  `llms.txt` entry and Markdown copy name its own URL, with only
+  absolute URLs in `llms.txt`, `llms-full.txt` and the copies. No ADR
+  reaches the export.
+- **Deployment** is `.github/workflows/pages.yml` (official
+  `configure-pages` / `upload-pages-artifact` / `deploy-pages`
+  actions): pushes to `main` touching `website/**` or `docs/**`
+  deploy; PRs touching those paths build without deploying.
+- The Node toolchain is contributor/CI tooling only (precedent:
+  `tools/interop-ts`) and never touches the shipped library or its
+  FPC-shipped runtime dependency policy. **Node pin: 24**
+  (`actions/setup-node` — both pages.yml and the interop job in
+  pr.yml).

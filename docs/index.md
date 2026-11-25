@@ -4,7 +4,8 @@ pascal-mcp-sdk lets any FreePascal program expose **tools, resources,
 and prompts** to AI agents over the
 [Model Context Protocol](https://modelcontextprotocol.io) — no second
 language runtime, no framework, no third-party dependencies beyond
-FPC's own RTL and fpjson.
+packages that ship with FPC (the RTL, fpjson, fcl-base, and fcl-web
+for the HTTP transport).
 
 New to AI agents? Start with the
 [introduction](guides/introduction.md) — MCP explained for Pascal
@@ -24,6 +25,8 @@ Task-oriented pages for building and shipping your own MCP server:
   calling a Pascal tool, on screen and on the wire.
 - [Tools](guides/tools.md) — the core registration model: handlers,
   typed argument classes, validation, annotations, MRTR.
+- [Returning images](guides/images.md) — `MCPImageResult` from raw
+  bytes or base64, and the size budget.
 - [Schemas](guides/schemas.md) — the fluent builder, RTTI-derived
   argument classes, output schemas, and the enforced subset.
 - [Prompts](guides/prompts.md) — reusable message templates with
@@ -36,6 +39,8 @@ Task-oriented pages for building and shipping your own MCP server:
   notifications and stderr diagnostics.
 - [Shipping your server](guides/shipping.md) — release builds, the
   runtime contract, client registration, HTTP deployment posture.
+- [Deploying the HTTP binding](guides/deployment.md) — Docker,
+  Vercel, always-on hosts, and the TLS/proxy operator contract.
 - [Troubleshooting](guides/troubleshooting.md) — the failure modes
   everyone hits once.
 - [Cookbook](guides/cookbook.md) — complete worked examples, anchored
@@ -63,4 +68,4 @@ spec grounding), [tooling](internals/tooling.md),
 [code style](internals/code-style.md), and
 [releasing](internals/releasing.md). The contribution workflow —
 clone, build, test, format, CI — lives in
-[CONTRIBUTING.md](../CONTRIBUTING.md).
+[contributing](internals/contributing.md).

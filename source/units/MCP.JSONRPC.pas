@@ -24,7 +24,7 @@ unit MCP.JSONRPC;
 // The Build* functions clone the id (so the message can be freed
 // independently) and take ownership of the payload they are given.
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 interface
 
