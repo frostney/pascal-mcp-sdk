@@ -47,8 +47,9 @@ flowchart LR
 - **lefthook** — `lefthook install` once per clone wires the
   formatting pre-commit hook.
 - **Node 24** — what CI uses; only for the interop harness
-  (`tools/interop-ts/`) and the website (`website/`, whose Next.js
-  needs at least 20.9).
+  (`tools/interop-ts/`), the conformance runner (`tools/conformance/`,
+  at least 22) and the website (`website/`, whose Next.js needs at
+  least 20.9).
 
 Then:
 
@@ -147,9 +148,24 @@ npm ci
 npm run interop
 ```
 
+The official MCP conformance suite runs against `mcpdemo --http` and
+is judged against the committed `tools/conformance/baseline.json`
+(see [Tooling § Official conformance suite](tooling.md#official-conformance-suite--toolsconformance)).
+A regression it reports is fixed, not recorded. The baseline changes in
+the same PR only when a known failure or skip now passes, or a change
+in what the suite can test is deliberate and tracked by an issue:
+
+```sh
+lwpt build
+lwpt run conformance
+```
+
 Test *execution* touches no external network — pipes, loopback
-sockets, and temp files only. Dependency *installation* is separate:
-`npm ci` for the interop harness may reach the npm registry.
+sockets, and temp files only. The one exception is
+`lwpt run conformance`, whose `npx` fetches the pinned suite from the
+npm registry unless it is cached. Dependency *installation* is
+separate: `npm ci` for the interop harness may reach the npm
+registry.
 
 ## Open the PR
 
@@ -165,6 +181,7 @@ sockets, and temp files only. Dependency *installation* is separate:
 | Linux / macOS / Windows legs | checksum-verified lwpt install, `install --frozen`, build, unit suites, mcpsmoke on every platform |
 | `fpc @lwpt.cfg` leg | the zero-install path still works |
 | `interop` (required) | the official TypeScript clients still talk to `mcpdemo` — a red interop job is a real cross-implementation regression |
+| `conformance` (non-blocking) | the official conformance suite's 2026-07-28 requirement set still matches `tools/conformance/baseline.json` |
 | format / agents `--check` | formatter and AGENTS.md command block have not drifted |
 | `check-reference-docs.sh` | every `MCP*`/`Register*` routine in `MCP.Server`'s interface is documented in `docs/reference/` |
 | health / duplication | complexity and token-clone ceilings in `lwpt.toml` hold — ratchets set just above the adoption-day baseline, so they shrink but never grow unnoticed |

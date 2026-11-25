@@ -1,0 +1,327 @@
+{
+  "suite": "@modelcontextprotocol/conformance",
+  "version": "0.2.0-alpha.12",
+  "requirements": "2026-07-28",
+  "note": "Expected per-scenario results for the pinned suite version, run with --requirements at the named spec revision: pass (a check succeeded, none failed), fail (a check failed) or skip (only skipped or informational checks), each failure or skip with its tracking issue. passingChecks lists check ids that must keep passing inside an expected failure. Once results exist, run.mjs fails when a run differs from this file or a result is unreadable; usage errors, an invalid baseline and a run that produced no results fail it too. Update it together with the version pin.",
+  "scenarios": {
+    "caching": {
+      "expected": "pass"
+    },
+    "completion-complete": {
+      "expected": "fail",
+      "issue": 81,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "dns-rebinding-protection": {
+      "expected": "pass"
+    },
+    "http-custom-header-server-validation": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "http-header-validation": {
+      "expected": "pass"
+    },
+    "input-required-result-basic-elicitation": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "input-required-result-basic-list-roots": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "input-required-result-basic-sampling": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "input-required-result-capability-check": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "input-required-result-ignore-extra-params": {
+      "expected": "pass"
+    },
+    "input-required-result-missing-input-response": {
+      "expected": "pass"
+    },
+    "input-required-result-multi-round": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "input-required-result-multiple-input-requests": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "input-required-result-non-tool-request": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "input-required-result-request-state": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "input-required-result-result-type": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "input-required-result-tampered-state": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "input-required-result-unsupported-methods": {
+      "expected": "pass"
+    },
+    "input-required-result-validate-input": {
+      "expected": "pass"
+    },
+    "json-schema-2020-12": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "prompts-get-embedded-resource": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "prompts-get-simple": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "prompts-get-with-args": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "prompts-get-with-image": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "prompts-list": {
+      "expected": "pass"
+    },
+    "resources-list": {
+      "expected": "pass"
+    },
+    "resources-read-binary": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "resources-read-text": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "resources-templates-read": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "sep-2164-resource-not-found": {
+      "expected": "pass"
+    },
+    "server-sse-multiple-streams": {
+      "expected": "pass"
+    },
+    "server-stateless": {
+      "expected": "fail",
+      "issue": 79,
+      "passingChecks": [
+        "sep-2575-discover-capabilities-match-handlers",
+        "sep-2575-http-server-error-jsonrpc-id",
+        "sep-2575-http-server-header-mismatch-400",
+        "sep-2575-http-server-method-not-found-404",
+        "sep-2575-http-server-method-not-found-404-initialize",
+        "sep-2575-http-server-method-not-found-404-logging-setlevel",
+        "sep-2575-http-server-method-not-found-404-ping",
+        "sep-2575-http-server-method-not-found-404-resources-subscribe",
+        "sep-2575-http-server-method-not-found-404-resources-unsubscribe",
+        "sep-2575-http-server-unsupported-version-400",
+        "sep-2575-request-meta-client-info-optional",
+        "sep-2575-request-meta-invalid-missing-client-capabilities",
+        "sep-2575-request-meta-invalid-missing-meta",
+        "sep-2575-request-meta-invalid-missing-protocol-version",
+        "sep-2575-server-declares-prompts-in-discover",
+        "sep-2575-server-identifies-in-result-meta",
+        "sep-2575-server-implements-discover",
+        "sep-2575-server-unsupported-version-error"
+      ]
+    },
+    "tasks-capability-negotiation": {
+      "expected": "fail",
+      "issue": 82,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "tasks-dispatch-and-envelope": {
+      "expected": "fail",
+      "issue": 82,
+      "passingChecks": [
+        "sep-2663-tasks-result-removed-method-not-found",
+        "tasks-removed-tasks-list",
+        "wire-schema-valid"
+      ]
+    },
+    "tasks-lifecycle": {
+      "expected": "fail",
+      "issue": 82,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "tasks-mrtr-composition": {
+      "expected": "fail",
+      "issue": 82,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "tasks-mrtr-input": {
+      "expected": "fail",
+      "issue": 82,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "tasks-request-headers": {
+      "expected": "fail",
+      "issue": 82,
+      "passingChecks": [
+        "tasks-headers-reject-mismatched-method",
+        "wire-schema-valid"
+      ]
+    },
+    "tasks-request-state-removal": {
+      "expected": "fail",
+      "issue": 82,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "tasks-required-task-error": {
+      "expected": "fail",
+      "issue": 82,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "tasks-status-notifications": {
+      "expected": "skip",
+      "issue": 82
+    },
+    "tasks-wire-fields": {
+      "expected": "fail",
+      "issue": 82,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "tools-call-audio": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "tools-call-embedded-resource": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "tools-call-error": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "tools-call-image": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "tools-call-mixed-content": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "tools-call-simple-text": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "tools-call-with-progress": {
+      "expected": "fail",
+      "issue": 80,
+      "passingChecks": [
+        "wire-schema-valid"
+      ]
+    },
+    "tools-list": {
+      "expected": "pass"
+    }
+  }
+}

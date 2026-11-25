@@ -55,3 +55,11 @@ max-file-cognitive = 650
 # 1.59% across 6 clone groups.
 [duplication]
 maximum-percent = 3
+
+# `lwpt run conformance` — the official MCP conformance suite (pinned
+# npm release) against `build/mcpdemo --http`. Needs Node >= 22 and
+# npm registry access; each run's results land in a new directory
+# under build/conformance/.
+[conformance]
+command = "instantfpc"
+args = ["scripts/conformance.pas"]

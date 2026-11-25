@@ -8,8 +8,6 @@
 //
 // Usage: node http-interop.mjs /abs/path/to/mcpdemo
 
-import { spawn } from 'node:child_process';
-import { createServer, connect } from 'node:net';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import {
   check,
@@ -19,6 +17,7 @@ import {
   report,
   runModernBattery,
 } from './battery.mjs';
+import { freePort, startDemo } from './demo-http.mjs';
 
 printPackageVersions('@modelcontextprotocol/client');
 
@@ -28,79 +27,8 @@ if (!DEMO) {
   process.exit(2);
 }
 
-// Ask the kernel for a free port, release it, hand it to mcpdemo.
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const probe = createServer();
-    probe.listen(0, '127.0.0.1', () => {
-      const port = probe.address().port;
-      probe.close(() => resolve(port));
-    });
-    probe.on('error', reject);
-  });
-}
-
-// One connect attempt; resolves to whether the port accepted it.
-function canConnect(port) {
-  return new Promise((resolve) => {
-    const socket = connect({ host: '127.0.0.1', port });
-    const settle = (ok) => {
-      socket.destroy();
-      resolve(ok);
-    };
-    socket.once('connect', () => settle(true));
-    socket.once('error', () => settle(false));
-    socket.setTimeout(250, () => settle(false));
-  });
-}
-
-// mcpdemo prints its banner BEFORE the listener binds, so the banner
-// alone is not readiness: poll the port until a connection is accepted.
-async function waitUntilListening(port, timeoutMs = 5000, intervalMs = 50) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (await canConnect(port)) return;
-    if (Date.now() >= deadline)
-      throw new Error(`mcpdemo never listened on 127.0.0.1:${port}`);
-    await new Promise((resume) => setTimeout(resume, intervalMs));
-  }
-}
-
-function startDemo(port) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(DEMO, ['--http', String(port)], {
-      stdio: ['ignore', 'ignore', 'pipe'],
-    });
-    const timer = setTimeout(
-      () => reject(new Error('mcpdemo startup timed out')),
-      10000,
-    );
-    let banner = '';
-    const onData = (chunk) => {
-      banner += chunk.toString();
-      if (!banner.includes('http://127.0.0.1:')) return;
-      child.stderr.off('data', onData);
-      waitUntilListening(port).then(
-        () => {
-          clearTimeout(timer);
-          resolve(child);
-        },
-        (error) => {
-          clearTimeout(timer);
-          reject(error);
-        },
-      );
-    };
-    child.stderr.on('data', onData);
-    child.on('exit', (code) => {
-      clearTimeout(timer);
-      reject(new Error(`mcpdemo exited early (code ${code})`));
-    });
-  });
-}
-
 const port = await freePort();
-const demo = await startDemo(port);
+const demo = await startDemo(DEMO, port);
 
 try {
   const client = newModernClient('ts-http-interop', {
