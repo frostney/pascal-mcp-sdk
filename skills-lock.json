@@ -97,6 +97,12 @@
       "skillPath": "maintain-project-skills/SKILL.md",
       "computedHash": "52d9eaf3d1e9a07b32711a753889a54f62ccdbd20c84565a6e75d32ee0f17717"
     },
+    "milestone-rush": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "milestone-rush/SKILL.md",
+      "computedHash": "5b91e739dfbbcbde5972768d21ed97250eec48bd899bc407871c595eb984be4d"
+    },
     "native-nostalgia-stack": {
       "source": "frostney/known-good-route",
       "sourceType": "github",

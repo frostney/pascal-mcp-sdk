@@ -43,7 +43,7 @@ checkout, no bootstrap. Dependencies resolve from the same release tag:
 the exact `testing` version in `lwpt.toml` is the one pin, and CI
 installs that lwpt release (`.github/scripts/lwpt-version.sh`).
 The command surface itself is documented in the machine-written
-`lwpt agents` block at the end of this file — repo-specific context the
+[`lwpt` command reference](#lwpt-command-reference) block below — repo-specific context the
 generator can't know: `lwpt install --frozen` is the CI mode (verify
 lockfile + committed modules, no network), `lwpt build` produces
 `mcpdemo` + `mcpsmoke`, `lwpt test` runs the co-located unit suites, and
@@ -310,6 +310,7 @@ Delivery (defaults, no `ORCHESTRATION.md`): entry points that develop, review, t
 - Start with `/create-release`: Prepare or publish a release through the repository's release workflow.
 - Start with `/deliver`: Carry one feature, bug, issue, branch, or PR to its verified delivery endpoint.
 - Start with `/implement`: Develop an issue or idea until its requirements are verified.
+- Start with `/milestone-rush`: Complete one confirmed milestone, from its work items to its release.
 - Start with `/roadmap-review`: Turn current project evidence into a verified version plan.
 - Start with `/run-retro`: Review a workstream and agree process improvements.
 - Start with `/test-against-spec`: Test a change against its requirements through the real interface.
