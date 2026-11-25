@@ -273,7 +273,14 @@ for (const page of pages) {
   // <link> elements of the head the HTML parser builds: a link in the
   // body, in a <template>, commented out, or pushed out of the head by
   // other markup does not count.
-  const document = fromHtml(html);
+  // The parser runs without scripting, so it recovers markup from an
+  // invalid <noscript> in the head into the head; a browser with
+  // scripting would not. Such a head fails.
+  const parseErrors = [];
+  const document = fromHtml(html, { onerror: (error) => parseErrors.push(error.ruleId ?? error.reason) });
+  if (parseErrors.some((id) => String(id).includes('disallowed-content-in-noscript-in-head'))) {
+    fail(`${where}: the head has markup a <noscript> may not contain, which hides what follows it`);
+  }
   const element = (nodes, name) => nodes.find((n) => n.type === 'element' && n.tagName === name);
   const head = element(element(document.children, 'html')?.children ?? [], 'head');
   const links = (head?.children ?? []).filter((n) => n.type === 'element' && n.tagName === 'link');
