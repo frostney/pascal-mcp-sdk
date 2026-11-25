@@ -16,12 +16,16 @@ units = ["source/units"]
 exclude = [".lwpt/**"]
 
 [dependencies]
-# Dev-time only: the runtime library is RTL + fpjson, zero third-party
+# Dev-time only: the runtime library uses FPC-shipped packages only
+# (RTL, fpjson, fcl-base; fcl-web for the HTTP transport), zero third-party
 # dependencies (see docs/internals/architecture.md). testing is the co-located
 # *.Test.pas framework; resolved from the lwpt 0.6.0 release tag via an
-# include filter (one filtered fetch per package), mirroring duetto —
-# the same tag the toolchain binary is pinned to (CI's LWPT_VERSION).
-testing = { source = "frostney/lwpt", version = "^0.6.0", include = ["packages/testing/**"], exclude = ["**/*.Test.pas"] }
+# include filter (one filtered fetch per package), mirroring duetto.
+# This exact version is also the toolchain pin: CI installs the lwpt
+# release of the same tag (.github/scripts/lwpt-version.sh reads it
+# from here). A range would let a fresh resolve select a later tag
+# than the binary.
+testing = { source = "frostney/lwpt", version = "0.6.0", include = ["packages/testing/**"], exclude = ["**/*.Test.pas"] }
 
 [build]
 mcpdemo  = { source = "source/apps/mcpdemo.pas",  output = "build/mcpdemo" }
