@@ -18,10 +18,10 @@ exclude = [".lwpt/**"]
 [dependencies]
 # Dev-time only: the runtime library is RTL + fpjson, zero third-party
 # dependencies (see docs/internals/architecture.md). testing is the co-located
-# *.Test.pas framework; resolved from the lwpt 0.5.1 release tag via an
-# include filter (one filtered fetch per package), mirroring duetto. 0.5.1 is
-# the floor because it carries lwpt#167 (testing 0.2.0: Run sets ExitCode).
-testing = { source = "frostney/lwpt", version = "^0.5.1", include = ["packages/testing/**"], exclude = ["**/*.Test.pas"] }
+# *.Test.pas framework; resolved from the lwpt 0.6.0 release tag via an
+# include filter (one filtered fetch per package), mirroring duetto —
+# the same tag the toolchain binary is pinned to (CI's LWPT_VERSION).
+testing = { source = "frostney/lwpt", version = "^0.6.0", include = ["packages/testing/**"], exclude = ["**/*.Test.pas"] }
 
 [build]
 mcpdemo  = { source = "source/apps/mcpdemo.pas",  output = "build/mcpdemo" }
@@ -30,5 +30,7 @@ mcpsmoke = { source = "source/apps/mcpsmoke.pas", output = "build/mcpsmoke" }
 # `lwpt run smoke` — the E2E battery against the binaries `lwpt build`
 # produced. Run-scripts execute via InstantFPC without project include
 # paths, so the script is a self-contained wrapper, not mcpsmoke itself.
+# (lwpt 0.6.0 syntax: explicit command + args replaced `script = ...`.)
 [smoke]
-script = "scripts/smoke.pas"
+command = "instantfpc"
+args = ["scripts/smoke.pas"]
