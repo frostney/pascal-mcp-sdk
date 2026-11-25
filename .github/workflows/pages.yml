@@ -14,9 +14,10 @@ on:
     paths:
       - "website/**"
       - "docs/**"
+  # No base-branch filter on pull_request: stacked PRs target the
+  # branch below them, and every layer needs the same gates it will
+  # need after retargeting to main.
   pull_request:
-    branches:
-      - main
     paths:
       - "website/**"
       - "docs/**"
@@ -25,8 +26,12 @@ on:
 permissions:
   contents: read
 
+# One group per PR for PR builds, and one shared group for main's
+# deployments: GitHub replaces a pending run when another joins its
+# group, so a shared group would let a stack's layers cancel each
+# other's checks or displace a queued deployment.
 concurrency:
-  group: pages
+  group: pages-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'deploy' }}
   cancel-in-progress: false
 
 jobs:
@@ -50,6 +55,10 @@ jobs:
       - name: Install site dependencies
         working-directory: website
         run: npm ci
+
+      - name: Install Chromium (build-time Mermaid rendering)
+        working-directory: website
+        run: npx playwright install --with-deps chromium
 
       - name: Build (static export; broken doc links fail here)
         working-directory: website

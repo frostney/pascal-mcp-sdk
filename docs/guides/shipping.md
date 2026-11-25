@@ -25,10 +25,11 @@ Release mode compiles with `-O4 -dPRODUCTION -Xs -CX -XX`. Without
 lwpt, pass the flags to FPC yourself:
 
 ```sh
+mkdir -p build
 fpc -dPRODUCTION -O4 -Xs -CX -XX -Fu<units-path> -Fi<units-path> -FEbuild myserver.pas
 ```
 
-`-dPRODUCTION` flips the library's `Shared.inc` from checked
+`-dPRODUCTION` flips the library's `MCP.inc` from checked
 (range/overflow/assert on) to optimised (checks off, auto-inlining).
 `-Xs -CX -XX` strips and smart-links the binary down.
 Cross-compilation follows standard FPC practice.
@@ -85,7 +86,7 @@ until `Stop` is called from another thread.
   POST path, `/mcp` by default (`EndpointPath`).
 - **Origin allowlist.** The `Origin` header, when present, must pass
   the allowlist or the request is rejected — a DNS-rebinding defense.
-  The default allowlist accepts localhost origins only; add further
+  The default allowlist accepts `localhost` origins only; add further
   origins as exact-match strings via `AllowedOrigins`.
 - **No TLS, no authentication.** The library ships neither. A listener
   widened beyond loopback needs a reverse proxy or a tunnel in front

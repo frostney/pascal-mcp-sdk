@@ -4,7 +4,7 @@
 
 ## Executive Summary
 
-FPC 3.2.2, Delphi mode, one shared flags block (`Shared.inc`), `lwpt
+FPC 3.2.2, Delphi mode, one shared flags block (`MCP.inc`), `lwpt
 format` as the only formatting authority. Namespaced units
 (`MCP.*.pas`) with co-located tests, `A`-prefixed parameters,
 `F`-prefixed fields, explicit ownership comments on every fpjson
@@ -12,10 +12,17 @@ boundary, and spec citations next to protocol behaviour.
 
 ## Compiler surface
 
-Every unit and program starts with `{$I Shared.inc}` — Delphi mode,
-`{$H+}`, `{$M+}`, advanced records, and the PRODUCTION flag block
-(checks on in dev, off with `-dPRODUCTION`). No per-unit compiler
-directives; if a flag is worth setting, it is worth centralising.
+Every unit, test, and program under `source/` starts with
+`{$I MCP.inc}` — `{$mode delphi}` (which already implies `{$H+}` and
+advanced records, so neither is restated), `{$M+}`, and the PRODUCTION
+flag block (checks on in dev, off with `-dPRODUCTION`). The `scripts/`
+run-script wrappers are the exception: InstantFPC runs them without
+project include paths, so they stay self-contained and set their own
+mode. There are no per-unit compiler overrides; if a flag is worth
+setting, it is worth centralising. That includes RTTI: the
+published-property type info `MCP.Schema`'s argument classes rely on
+comes from the global `{$M+}`, not from a directive at the
+declaration.
 
 ## FPC pitfalls
 

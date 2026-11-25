@@ -10,10 +10,11 @@
 
 program MCP.Server.Test;
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 uses
   Classes,
+  Math,
   SysUtils,
 
   fpjson,
@@ -190,6 +191,7 @@ type
   public
     procedure SetupTests; override;
     procedure TestProgressEmitted;
+    procedure TestNonFiniteTotalRejected;
     procedure TestProgressWithoutToken;
     procedure TestStringTokenPreserved;
     procedure TestLogEmittedAtLevel;
@@ -563,6 +565,25 @@ begin
   MCPLogMessage(ACtx, 'warning', 'careful');
   MCPLogMessage(ACtx, 'debug', 'details');
   Result := MCPTextResult('noise done');
+end;
+
+// Reports progress with the non-finite total its `total` argument
+// names ('nan', 'inf' or '-inf').
+function NonFiniteTotalHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Name: string;
+  Total: Double;
+begin
+  Name := AArguments.Strings['total'];
+  if Name = 'nan' then
+    Total := NaN
+  else if Name = 'inf' then
+    Total := Infinity
+  else
+    Total := NegInfinity;
+  MCPReportProgress(ACtx, 0.5, Total);
+  Result := MCPTextResult('reported');
 end;
 
 function CancellationAwareHandler(AArguments: TJSONObject;
@@ -2691,6 +2712,9 @@ end;
 procedure TNotificationEmission.BeforeEach;
 begin
   inherited BeforeEach;
+  FServer.RegisterTool('nonfinite', 'Reports a non-finite progress total',
+    '{"type":"object","properties":{"total":{"type":"string"}}}',
+    NonFiniteTotalHandler);
   FLines := TStringList.Create;
   FLineSink := CaptureSink;
   FLineSinkData := FLines;
@@ -2729,6 +2753,35 @@ begin
   Expect<Boolean>(Note.Find('id') = nil).ToBe(True);
   Note.Free;
   Response.Free;
+end;
+
+// NaN and the infinities have no JSON form: a progress report with
+// one as its total raises (MCPWireNumber), so the call becomes an
+// isError result and no notification reaches the wire. (The compact
+// number text itself is pinned byte for byte by the wire-pin test
+// and by MCP.Schema's wire-number suite.)
+procedure TNotificationEmission.TestNonFiniteTotalRejected;
+var
+  Response: TJSONObject;
+  Total: string;
+begin
+  for Total in ['nan', 'inf', '-inf'] do
+  begin
+    FLines.Clear;
+    Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+      '"params":{"name":"nonfinite","arguments":{"total":"' + Total +
+      '"},"_meta":{' +
+      '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+      '"io.modelcontextprotocol/clientCapabilities":{},' +
+      '"progressToken":7}}}');
+    try
+      Expect<Integer>(FLines.Count).ToBe(0);
+      Expect<Boolean>(
+        TJSONData(Response.FindPath('result.isError')).AsBoolean).ToBe(True);
+    finally
+      Response.Free;
+    end;
+  end;
 end;
 
 procedure TNotificationEmission.TestProgressWithoutToken;
@@ -2878,6 +2931,8 @@ end;
 procedure TNotificationEmission.SetupTests;
 begin
   Test('progress emitted with numeric token', TestProgressEmitted);
+  Test('a NaN or infinite progress total becomes an isError result',
+    TestNonFiniteTotalRejected);
   Test('no progress without a token', TestProgressWithoutToken);
   Test('string token preserved verbatim', TestStringTokenPreserved);
   Test('log messages emitted at requested level', TestLogEmittedAtLevel);
@@ -4029,11 +4084,14 @@ begin
           '"progressToken":"wire-token"}}}', CaptureSink, Lines,
           Response)).ToBe(True);
         Expect<Integer>(Lines.Count).ToBe(1);
+        // Compact number forms (shortest round-trip decimal for
+        // fractional values, JSON integers for integral ones) —
+        // matching the plain decimals the official SDKs emit.
         Expect<string>(Lines[0]).ToBe(
           '{ "jsonrpc" : "2.0", "method" : "notifications/progress", ' +
           '"params" : { "progressToken" : "wire-token", ' +
-          '"progress" : 2.5000000000000000E-001, ' +
-          '"total" : 1.0000000000000000E+000, ' +
+          '"progress" : 0.25, ' +
+          '"total" : 1, ' +
           '"message" : "working" } }');
       finally
         Lines.Free;

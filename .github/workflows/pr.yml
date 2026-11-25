@@ -17,18 +17,14 @@ name: PR
 # committed lockfile + .lwpt/modules tree via install --frozen.
 
 on:
+  # No base-branch filter on pull_request: stacked PRs target the
+  # branch below them, and every layer needs the same gates it will
+  # need after retargeting to main.
   pull_request:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
   contents: read
-
-env:
-  # Tracks the release the dependency tag stream resolves from; keep in
-  # step with the lwpt used locally so format --check cannot disagree.
-  LWPT_VERSION: "0.8.0"
 
 jobs:
   build-and-test:
@@ -140,9 +136,13 @@ jobs:
             echo "LWPT_FPC=$(cygpath -w "$PPCX64")" >> "$GITHUB_ENV"
           fi
 
+      # The release lwpt.toml's exact testing version pins (same tag as
+      # the toolchain); keep the local lwpt on it so format --check
+      # cannot disagree.
       - name: Install lwpt (release binary, checksum-verified)
         run: |
           set -euo pipefail
+          LWPT_VERSION=$(bash .github/scripts/lwpt-version.sh)
           cd "$RUNNER_TEMP"
           ASSET="lwpt-${LWPT_VERSION}-${{ matrix.lwpt-asset }}"
           BASE="https://github.com/frostney/lwpt/releases/download/${LWPT_VERSION}"
@@ -172,6 +172,14 @@ jobs:
       - name: reference docs cover the public surface
         if: matrix.fpc-install == 'apt'   # platform-independent; one runner
         run: .github/scripts/check-reference-docs.sh
+
+      - name: lwpt health (complexity within the manifest ceilings?)
+        if: matrix.fpc-install == 'apt'   # platform-independent; one runner
+        run: lwpt health
+
+      - name: lwpt duplication (token clones within the manifest ceiling?)
+        if: matrix.fpc-install == 'apt'   # platform-independent; one runner
+        run: lwpt duplication
 
       - name: lwpt build (mcpdemo + mcpsmoke)
         run: lwpt build
@@ -207,29 +215,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install FPC (apt)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y fpc
-          fpc -iV
-
-      - name: Install lwpt (release binary, checksum-verified)
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP"
-          ASSET="lwpt-${LWPT_VERSION}-linux-x64"
-          BASE="https://github.com/frostney/lwpt/releases/download/${LWPT_VERSION}"
-          curl -fsSLO "${BASE}/${ASSET}.tar.gz"
-          curl -fsSLO "${BASE}/lwpt-${LWPT_VERSION}-checksums.txt"
-          sha256sum -c <(grep "${ASSET}.tar.gz" "lwpt-${LWPT_VERSION}-checksums.txt")
-          tar xzf "${ASSET}.tar.gz"
-          echo "$RUNNER_TEMP/${ASSET}" >> "$GITHUB_PATH"
-
-      - name: lwpt install --frozen (verify lockfile + committed modules)
-        run: lwpt install --frozen
-
-      - name: lwpt build (mcpdemo)
-        run: lwpt build
+      # FPC (apt), the pinned lwpt, install --frozen, lwpt build.
+      - uses: ./.github/actions/linux-lwpt
 
       - uses: actions/setup-node@v7
         with:
@@ -242,6 +229,49 @@ jobs:
         run: |
           npm ci
           npm run interop
+
+  # Official MCP conformance suite (modelcontextprotocol/conformance,
+  # exact npm pin in tools/conformance/baseline.json) against mcpdemo's
+  # Streamable HTTP binding. NON-BLOCKING and not a required context.
+  # run.mjs compares each scenario with the committed baseline and fails
+  # when they differ (a regression, a stale expected failure or skip, a
+  # scenario added or removed, an unreadable result), and on usage
+  # errors or a run without results. It runs the suite's 2026-07-28
+  # requirement set; each known failure names its issue in the baseline.
+  # Results (checks.json per scenario) upload as an artifact.
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # FPC (apt), the pinned lwpt, install --frozen, lwpt build.
+      - uses: ./.github/actions/linux-lwpt
+
+      # The suite's CLI needs Node >= 22 (fs.globSync).
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: conformance runner and comparator tests
+        run: node --test tools/conformance/compare.test.mjs tools/conformance/run.test.mjs
+
+      - name: conformance suite (server mode, mcpdemo --http)
+        run: node tools/conformance/run.mjs build/mcpdemo
+
+      - name: Upload conformance results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-results
+          path: build/conformance/
+          if-no-files-found: warn
 
   docs:
     runs-on: ubuntu-latest

@@ -3,12 +3,13 @@
 ## Hard Constraints
 
 - **FreePascal only.** FPC 3.2.2, Delphi mode, flags centralised in
-  `source/units/Shared.inc`. Do not introduce another compiled language or
+  `source/units/MCP.inc`. Do not introduce another compiled language or
   repeat compiler directives per unit.
-- **Zero third-party runtime dependencies.** The library is RTL + fpjson
-  only. Packages that ship inside FPC 3.2.2 are not third-party: fcl-web
-  is admitted on the same footing as fcl-json (fpjson), and stays
-  confined to `MCP.Transport.HTTP`. lwpt's `testing` package is dev-time;
+- **Zero third-party runtime dependencies.** The library uses only
+  packages that ship inside FPC 3.2.2: the RTL, fcl-json (fpjson) and
+  fcl-base (`base64`), plus fcl-web, admitted on the same footing and
+  confined to `MCP.Transport.HTTP` (ADR-0003 is the authoritative
+  list). lwpt's `testing` package is dev-time;
   anything beyond that needs explicit maintainer approval with a recorded
   justification.
 - **lwpt is the only toolchain entry point** — install, build, test, format
@@ -23,7 +24,7 @@
 - **Layout is fixed:** library units in `source/units/` (namespaced
   `MCP.*.pas`, tests co-located as `MCP.*.Test.pas`), program entry points
   in `source/apps/`, self-contained run-script wrappers in `scripts/`
-  (InstantFPC-executed, so no `Shared.inc` and no `MCP.*` units there).
+  (InstantFPC-executed, so no `MCP.inc` and no `MCP.*` units there).
 - **`build/` is generated** — never commit it.
 - **`MCP.Server` owns the protocol surface.** Dispatch rules, error codes,
   and result shapes must not leak into transports; transports move lines
@@ -38,7 +39,9 @@
 
 lwpt is the **released binary on PATH** (checksum-verified tarball from
 lwpt's GitHub releases — see `docs/guides/quick-start.md`); no sibling
-checkout, no bootstrap. Dependencies resolve from the same release tag.
+checkout, no bootstrap. Dependencies resolve from the same release tag:
+the exact `testing` version in `lwpt.toml` is the one pin, and CI
+installs that lwpt release (`.github/scripts/lwpt-version.sh`).
 The command surface itself is documented in the machine-written
 `lwpt agents` block at the end of this file — repo-specific context the
 generator can't know: `lwpt install --frozen` is the CI mode (verify
@@ -53,9 +56,9 @@ the way a real client does).
 | --- | --- |
 | `source/units/` | Library: `MCP.JSONRPC` (JSON-RPC 2.0 profile), `MCP.Protocol` (per-request `_meta` model), `MCP.Schema` (fluent schema builder + RTTI-derived argument classes), `MCP.Server` (sans-I/O dispatch core; tool/resource/prompt registries), `MCP.Transport.Stdio` (newline-delimited stdio binding), `MCP.Transport.HTTP` (Streamable HTTP binding: single POST endpoint, SSE response streams) |
 | `source/apps/` | Programs: `mcpdemo` (example stdio server), `mcpsmoke` (subprocess E2E battery) |
-| `scripts/` | Self-contained `lwpt run` wrappers (currently `smoke.pas` → runs the built `mcpsmoke`) |
-| `tools/` | Cross-implementation checks: `interop-ts/` (official MCP TypeScript clients vs `mcpdemo` over stdio, the legacy era, and Streamable HTTP) |
-| `docs/` | Consumer-first tree rendered by the website: `guides/` (quick start, tools, schemas, prompts, resources, configuration, notifications, shipping, troubleshooting, cookbook), `reference/` (public API, gated by `.github/scripts/check-reference-docs.sh`), `internals/` (architecture, tooling, code style, releasing — contributor pages) |
+| `scripts/` | Self-contained `lwpt run` wrappers (`smoke.pas` → runs the built `mcpsmoke`; `conformance.pas` → runs `tools/conformance/run.mjs`) |
+| `tools/` | Cross-implementation checks: `interop-ts/` (official MCP TypeScript clients vs `mcpdemo` over stdio, the legacy era, and Streamable HTTP); `conformance/` (official MCP conformance suite vs `mcpdemo --http`, non-blocking) |
+| `docs/` | Consumer-first tree rendered by the website: `guides/` (quick start, tools, images, schemas, prompts, resources, configuration, notifications, shipping, deployment, troubleshooting, cookbook), `reference/` (public API, gated by `.github/scripts/check-reference-docs.sh`), `internals/` (architecture, contributing, tooling, code style, releasing — contributor pages), `adr/` (decision records, repo-only — excluded from the website), `casts/` (committed terminal recordings served by the site) |
 | `website/` | GitHub Pages site: Fumadocs static export rendering `docs/` directly — contributor/CI tooling, not part of the library |
 
 Layering is strictly bottom-up: `MCP.JSONRPC` → `MCP.Protocol` →
@@ -74,7 +77,9 @@ sans-I/O discipline. See
   surface including error paths and the EOF shutdown contract.
 - Nothing in the test stack touches the **external** network; everything
   runs against local pipes, loopback (127.0.0.1) sockets, and temp
-  files. The loopback sockets are a recorded maintainer exception for
+  files. The one exception is the non-blocking conformance run
+  (`lwpt run conformance`, the `conformance` CI job), whose `npx`
+  fetches the pinned suite from the npm registry. The loopback sockets are a recorded maintainer exception for
   the transport binding suites: `MCP.Transport.HTTP.Test.pas`
   deliberately drives a live listener on an ephemeral 127.0.0.1 port,
   and stays co-located per the fixed layout above (this repo has no
@@ -87,7 +92,7 @@ sans-I/O discipline. See
   `.lwpt/modules/` and `.lwpt/archives/` are deliberate (zero-install)
   — do not gitignore them.
 - Do not push or open PRs without explicit maintainer go-ahead.
-- Edit `AGENTS.md` only — `CLAUDE.md` is a symlink to it.
+- Edit shared instructions in `AGENTS.md`; `CLAUDE.md` contains only `@AGENTS.md`.
 
 <!-- lwpt:agents:begin -->
 
@@ -97,27 +102,19 @@ Generated by `lwpt agents` from the toolkit's command registry and this project'
 
 ### Subcommands
 
-- `lwpt install [--frozen] [--offline] [--accept-moved-tags] [--silent]` — Resolve and fetch dependencies
-  - `--frozen` — Verify the lockfile and committed state without network access; never update them
-  - `--offline` — Restore locked dependency state without network access
-  - `--accept-moved-tags` — Re-pin locked tags that now point at a different commit (after review)
+- `lwpt install [--frozen] [--silent]` — Resolve and fetch dependencies
+  - `--frozen` — CI mode: refuse to update the lockfile, refuse network, verify hashes
   - `--silent` — Suppress ordinary output and emit only the final command result
 - `lwpt add <source[@version]> [--name <name>] [--silent]` — Add a dependency to the manifest and install it
   - `--name=<value>` — Dependency name in the manifest (default: the source's last path segment)
   - `--silent` — Suppress ordinary output and emit only the final command result
 - `lwpt remove <name> [<name>...] [--silent]` — Remove dependencies from the manifest and prune their modules
   - `--silent` — Suppress ordinary output and emit only the final command result
-- `lwpt outdated [--json] [--silent]` — Compare locked git-host dependencies to advertised tags
-  - `--json` — Emit a machine-readable report of each compared dependency
-  - `--silent` — Suppress ordinary output and emit only the final command result
-- `lwpt update [name ...] [--silent]` — Bump constraints and reinstall newer git-host dependencies
-  - `--silent` — Suppress ordinary output and emit only the final command result
-- `lwpt build [entry...] [--mode dev|release] [--clean] [--jobs N] [--verbose] [--no-cache] [--silent]` — Compile manifest build entries
+- `lwpt build [entry...] [--mode dev|release] [--clean] [--jobs N] [--verbose] [--silent]` — Compile manifest build entries
   - `--mode=<value>` — Build mode: dev (default) or release
   - `--clean` — Force a full rebuild in fresh private staging
   - `--jobs=<N>` — Maximum concurrent build entries (default: machine budget)
   - `--verbose` — Replay successful build-entry logs
-  - `--no-cache` — Compile without reading or writing reusable build results
   - `--silent` — Suppress ordinary output and emit only the final command result
 - `lwpt format [--check] [--silent]` — Format uses-clauses and identifiers
   - `--check` — Report files needing formatting without rewriting; exit 1 if any
@@ -125,37 +122,14 @@ Generated by `lwpt agents` from the toolkit's command registry and this project'
 - `lwpt duplication [--json] [--silent]` — Report manifest-scoped Pascal token clones
   - `--json` — Emit the deterministic machine-readable analysis envelope
   - `--silent` — Suppress ordinary output and emit only the final command result
-- `lwpt test [selector...] [--jobs N] [--bail N] [--verbose] [--inventory] [--no-cache] [--silent]` — Discover and run *.Test.pas files
+- `lwpt test [selector...] [--tier default|e2e] [--jobs N] [--bail N] [--verbose] [--inventory] [--silent]` — Discover and run *.Test.pas files
+  - `--tier=<value>` — Test tier to include: default (unit + integration) or e2e (adds network-touching tier)
   - `--jobs=<N>` — Maximum concurrent test programs (default: shared machine budget)
   - `--bail=<N>` — Stop after N compile or runtime failures; 0 runs the full queue
   - `--verbose` — Replay successful test logs
   - `--inventory` — Emit registered suites and cases as deterministic JSON without running tests
-  - `--no-cache` — Compile without reading or writing reusable test executables
   - `--silent` — Suppress ordinary output and emit only the final command result
-- `lwpt repair [--silent]` — Recover project and shared-cache residue and upgrade a v3 lockfile to v4
-  - `--silent` — Suppress ordinary output and emit only the final command result
-- `lwpt registry <init|sync|verify|rotate-key|publish|issue-token|revoke-token|serve> [<archive>] [--data-dir <path>] [configuration options] [--silent]` — Initialize, synchronize, verify, rotate keys, publish, manage publication tokens or serve a self-hosted registry
-  - `--data-dir=<value>` — Registry data directory (default: .lwpt/registry)
-  - `--identity=<value>` — Stable canonical HTTPS origin identity (init only)
-  - `--base-url=<value>` — Canonical public base URL (init only; default: http://localhost:8080)
-  - `--listen=<value>` — Listen address (init only; default: localhost)
-  - `--port=<N>` — Listen port (init only; default: 8080)
-  - `--tls-pkcs12=<value>` — PKCS#12 identity path required by HTTPS (init only)
-  - `--tls-password-env=<value>` — Environment variable containing the PKCS#12 password (init only)
-  - `--role=<value>` — Registry role: origin (default) or mirror (init only)
-  - `--upstream=<value>` — Canonical upstream base URL (required for mirror init)
-  - `--key-id=<value>` — Pinned origin root Ed25519 key ID (required for mirror init and publish)
-  - `--public-key=<value>` — Pinned origin root public key in hex: encoding (required for mirror init and publish)
-  - `--from-key=<value>` — Expected current signing key ID (required for rotate-key; guards retries)
-  - `--max-store-bytes=<value>` — Mirror data-directory byte budget (mirror init only; default: 34359738368)
-  - `--max-sync-bytes=<value>` — Bytes one mirror synchronization may add (mirror init only; default: 8589934592)
-  - `--packages=<value>` — Comma-separated package names, `name*` prefixes, or `*` the token may use (issue-token only)
-  - `--actions=<value>` — Token actions: publish, yank, or publish,yank (issue-token only; default: publish)
-  - `--expires-days=<value>` — Token lifetime in days, 1 to 365 (issue-token only; default: 90)
-  - `--label=<value>` — Printable token label shown by verify (issue-token only)
-  - `--token-id=<value>` — ID of the token to revoke (revoke-token only)
-  - `--origin=<value>` — Origin contact base URL to publish to (publish only; the archive path follows publish)
-  - `--token-env=<value>` — Environment variable holding the publication token (publish only; default: LWPT_REGISTRY_TOKEN)
+- `lwpt repair [--silent]` — Reclaim install, build-session, and worker-lease residue
   - `--silent` — Suppress ordinary output and emit only the final command result
 - `lwpt init [--yes] [--force] [--adopt] [--silent]` — Scaffold a new LWPT project or adopt an existing manifest
   - `--yes` — Skip prompts and use defaults derived from the directory name
@@ -175,6 +149,7 @@ Generated by `lwpt agents` from the toolkit's command registry and this project'
 ### Run tasks
 
 - `lwpt run smoke` — command: `instantfpc`; args: [0]=`scripts/smoke.pas`
+- `lwpt run conformance` — command: `instantfpc`; args: [0]=`scripts/conformance.pas`
 
 ### Manifest schema
 
@@ -187,7 +162,7 @@ Generated from the same immutable structural registry used by manifest validatio
 - `[dependencies]` — table; all manifests; invalid values are ignored as absent; unknown keys are ignored. Named dependency declarations.
   - `<name>`: string or table; optional; other values retain legacy handling. Bare `<source>@<version>` shorthand or an inline table.
 - `[dependencies].<name>` — string or inline table; all manifests; other values retain legacy handling; unknown keys are ignored. A source shorthand or expanded dependency declaration.
-  - `source`: string; required; invalid values are errors. `owner/repo` (GitHub), `<host>:owner/repo` (built-in or custom host), an HTTPS tarball, a local path, `workspace:<version>`, or `registry:[<alias>/]<package>`.
+  - `source`: string; required; invalid values are errors. `owner/repo` (GitHub), `<host>:owner/repo` (built-in or custom host), an HTTPS tarball, a local path, or `workspace:<version>`.
   - `version`: string; optional; default: `none`; invalid values are ignored as absent. Version range, exact version, SHA, or tag.
   - `include`: array of strings; optional; default: `all files`; invalid values and items are skipped. Post-extraction include globs.
   - `exclude`: array of strings; optional; default: `none`; invalid values and items are skipped. Post-extraction exclude globs.
@@ -202,15 +177,6 @@ Generated from the same immutable structural registry used by manifest validatio
 - `[sources].<name>` — inline table; all manifests; invalid values are ignored as absent; unknown keys are ignored. One custom Git-host source.
   - `archive`: string; required; invalid values are errors. HTTPS archive template containing {user}, {repository}, and {ref}.
   - `git`: string; required; invalid values are errors. HTTPS smart-HTTP template containing {user} and {repository}.
-- `[registries]` — table; root manifest only; invalid values are errors; unknown keys are ignored. Registry origins that `registry:` dependencies resolve through (ADR-0051).
-  - `default`: string; optional; default: `the only declared registry`; invalid values are errors. Alias used by `registry:<package>`; the alias `default` is reserved.
-  - `<alias>`: table; optional; invalid values are errors. One registry declaration.
-- `[registries].<alias>` — table; root manifest only; invalid values are errors; unknown keys are errors. One registry origin: identity, pinned root key, and ordered contacts.
-  - `identity`: string; optional; default: `advertised by the contacts, then locked`; invalid values are errors. Canonical HTTPS origin identity.
-  - `key-id`: string; required; invalid values are errors. Pinned Ed25519 root key ID (`ed25519:<sha256 of the key>`).
-  - `public-key`: string; required; invalid values are errors. Pinned Ed25519 root public key (`hex:<64 hex digits>`).
-  - `origin`: string; conditional; default: `identity`; invalid values are errors. Origin contact URL; required when identity is omitted.
-  - `mirrors`: array of strings; optional; default: `empty`; invalid values are errors. Mirror contact URLs, tried in order before the origin.
 - `[workspaces]` — table; all manifests; invalid values are ignored as absent; unknown keys are ignored. Workspace discovery globs.
   - `include`: array of strings; optional; default: `empty`; invalid values and items are skipped. Workspace discovery globs.
   - `exclude`: array of strings; optional; default: `empty`; invalid values and items are skipped. Workspace exclusion globs.
@@ -218,7 +184,7 @@ Generated from the same immutable structural registry used by manifest validatio
   - `<name>`: string or table; optional; other values retain legacy handling. Named entry; build.source enables single-entry shorthand.
 - `[build].<name>` — string or table; all manifests; other values retain legacy handling; unknown keys are ignored. One compiler-neutral build entry.
   - `source`: string; conditional; invalid values are ignored as absent. Compiler entry-point path.
-  - `output`: string; optional; default: `source path without extension; shorthand: build/<package name>`; invalid values are ignored as absent. Published executable path.
+  - `output`: string; optional; default: `build/<name>`; invalid values are ignored as absent. Published executable path.
   - `depends`: array of strings; optional; default: `empty`; invalid values are errors. Prerequisite build-entry names.
   - `flags`: array of strings; optional; default: `empty`; root manifest only; invalid values are errors. Ordered compiler-driver arguments.
   - `compiler`: string; optional; default: `[compiler].default`; root manifest only; invalid values are errors. Named compiler-profile override.

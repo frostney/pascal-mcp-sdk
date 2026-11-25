@@ -12,8 +12,10 @@ name: CI
 # per-arch matrix (arm64 Linux, Intel macOS, i386 Windows join here).
 # The stdio transport is pure RTL over pipes, so — unlike duetto —
 # every leg runs the identical battery: unit suites + the mcpsmoke
-# subprocess E2E battery. There is no external conformance suite for
-# MCP yet; mcpsmoke plus the spec-cited unit tests are the net.
+# subprocess E2E battery. mcpsmoke plus the spec-cited unit tests are
+# the net here. The official MCP conformance suite runs only in pr.yml,
+# as a non-blocking job against mcpdemo --http, judged against the
+# baseline in tools/conformance/baseline.json.
 #
 # The lwpt toolchain comes from its published release (checksum-
 # verified per-platform tarball, no sibling checkout, no bootstrap);
@@ -29,11 +31,6 @@ on:
 
 permissions:
   contents: read
-
-env:
-  # Tracks the release the dependency tag stream resolves from; keep in
-  # step with the lwpt used locally so format --check cannot disagree.
-  LWPT_VERSION: "0.8.0"
 
 jobs:
   test:
@@ -166,9 +163,13 @@ jobs:
             echo "LWPT_FPC=$(cygpath -w "$PPCX64")" >> "$GITHUB_ENV"
           fi
 
+      # The release lwpt.toml's exact testing version pins (same tag as
+      # the toolchain); keep the local lwpt on it so format --check
+      # cannot disagree.
       - name: Install lwpt (release binary, checksum-verified)
         run: |
           set -euo pipefail
+          LWPT_VERSION=$(bash .github/scripts/lwpt-version.sh)
           cd "$RUNNER_TEMP"
           ASSET="lwpt-${LWPT_VERSION}-${{ matrix.lwpt-asset }}"
           BASE="https://github.com/frostney/lwpt/releases/download/${LWPT_VERSION}"

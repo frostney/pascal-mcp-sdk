@@ -4,7 +4,7 @@ Complete, runnable patterns. Every snippet here is lifted from — or
 directly runnable against — the demo server,
 [mcpdemo.pas](../../source/apps/mcpdemo.pas): the smallest complete
 pascal-mcp-sdk program, exercising every registration style. Clone the
-repo and `lwpt build` (or `fpc @lwpt.cfg -FEbuild
+repo and `lwpt build` (or `mkdir -p build && fpc @lwpt.cfg -FEbuild
 source/apps/mcpdemo.pas` — no lwpt needed) to get `build/mcpdemo`.
 
 ## One server, both transports
