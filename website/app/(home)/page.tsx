@@ -187,7 +187,7 @@ export default async function HomePage() {
             <strong>Just trying it out?</strong> Clone the repo and build
             the demo server with plain FPC —{' '}
             <code className="rounded bg-fd-muted px-1.5 py-0.5">
-              fpc @lwpt.cfg -FEbuild source/apps/mcpdemo.pas
+              mkdir -p build && fpc @lwpt.cfg -FEbuild source/apps/mcpdemo.pas
             </code>{' '}
             — then wire{' '}
             <code className="rounded bg-fd-muted px-1.5 py-0.5">

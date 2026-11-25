@@ -52,6 +52,7 @@ modules and the generated FPC response file, so a plain FPC 3.2.2 is
 enough to build the demo server with no lwpt binary at all:
 
 ```sh
+mkdir -p build
 fpc @lwpt.cfg -FEbuild source/apps/mcpdemo.pas
 ./build/mcpdemo
 ```

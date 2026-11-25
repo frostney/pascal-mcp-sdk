@@ -173,10 +173,28 @@ function rehypeMermaidDarkPass() {
   });
 }
 
+// Pass 5: record each diagram's natural width (its viewBox) as
+// --mermaid-width, so global.css can keep a wide diagram readable on
+// a narrow column: it scrolls sideways instead of shrinking its labels
+// to a few pixels.
+function sizeMermaidSvgs() {
+  return (tree) => {
+    visit(tree, 'element', (node) => {
+      const id = node.properties?.id;
+      if (node.tagName !== 'svg' || typeof id !== 'string' || !/^mermaid-(light|dark)-\d+$/.test(id)) return;
+      const width = Number(String(node.properties.viewBox ?? '').split(/\s+/)[2]);
+      if (!Number.isFinite(width) || width <= 0) return;
+      const style = String(node.properties.style ?? '').trim();
+      node.properties.style = `${style}${style && !style.endsWith(';') ? ';' : ''}--mermaid-width:${width}px`;
+    });
+  };
+}
+
 // The full plugin chain, ready to spread into rehypePlugins.
 export const rehypeMermaidDual = [
   duplicateMermaidFences,
   rehypeMermaidLightPass,
   armDarkMermaidFences,
   rehypeMermaidDarkPass,
+  sizeMermaidSvgs,
 ];

@@ -68,6 +68,18 @@ function title(markdown) {
   const h1 = parse(markdown).children.find((node) => node.type === 'heading' && node.depth === 1);
   return h1 ? flatten(h1) : undefined;
 }
+// The recordings the terminal players in some HTML play, in order, as
+// absolute URLs: each player's caption links the file it plays
+// (components/terminal-cast.tsx).
+// A player that does not link the player's licence reads as
+// '(no licence link)'.
+function recordings(html) {
+  return [...html.matchAll(/<figure class="terminal-cast"[\s\S]*?<\/figure>/g)].map((m) => {
+    const hrefs = [...m[0].matchAll(/<a\s[^>]*href="([^"]+)"/g)].map((a) => decode(a[1]));
+    if (!hrefs.includes(`${basePath}/licenses/asciinema-player.txt`)) return '(no licence link)';
+    return hrefs[0] ? new URL(hrefs[0], `${siteOrigin}/`).href : '(no link)';
+  });
+}
 const sameSet = (where, actual, expected) => {
   const missing = [...expected].filter((url) => !actual.has(url));
   const extra = [...actual].filter((url) => !expected.has(url));
@@ -150,10 +162,20 @@ const leaked = walk(out).filter((file) =>
 );
 if (leaked.length > 0) fail(`repo-only docs reached the export: ${leaked.map((file) => rel(out, file)).join(', ')}`);
 
+// asciinema-player ships in the site's JavaScript under Apache-2.0,
+// so the export carries its licence, and each player links it (the
+// link itself is checked with every other href in step 1).
+const playerLicense = path.join(out, 'licenses', 'asciinema-player.txt');
+if (!fs.existsSync(playerLicense) || !read(playerLicense).includes('Apache License')) {
+  fail('licenses/asciinema-player.txt: the player licence is missing from the export');
+}
+
 // The home page plays the hero recording.
 const home = path.join(out, 'index.html');
-if (!fs.existsSync(home) || !read(home).includes('<figure class="terminal-cast"')) {
-  fail('index.html: no terminal player for the hero recording');
+const heroUrl = `${siteUrl}/docs-casts/hero.cast`;
+const homePlayers = fs.existsSync(home) ? recordings(read(home)) : [];
+if (homePlayers.join(' ') !== heroUrl) {
+  fail(`index.html: plays ${homePlayers.join(', ') || 'no recording'}, expected ${heroUrl}`);
 }
 
 // The llms.txt section a page is listed under: the title in the
@@ -202,15 +224,18 @@ for (const page of pages) {
       page.castUrls.push(`${siteUrl}/docs-casts/${recording}`);
     }
   });
-  const casts = page.castUrls.length;
   const light = (article.match(/\sid="mermaid-light-\d+"/g) ?? []).length;
   const dark = (article.match(/\sid="mermaid-dark-\d+"/g) ?? []).length;
   if (light !== fences || dark !== fences) {
     fail(`${where}: ${fences} Mermaid fence(s) in its source, ${light} light and ${dark} dark SVG(s) rendered`);
   }
   if (article.includes('language-mermaid')) fail(`${where}: a Mermaid fence rendered as code`);
-  const players = (article.match(/<figure class="terminal-cast"/g) ?? []).length;
-  if (players !== casts) fail(`${where}: ${casts} cast(s) in its source, ${players} player(s) rendered`);
+  const sized = (article.match(/<svg\s[^>]*id="mermaid-(?:light|dark)-\d+"[^>]*--mermaid-width:[0-9.]+px/g) ?? []).length;
+  if (sized !== 2 * fences) fail(`${where}: ${2 * fences - sized} diagram(s) without --mermaid-width (lib/rehype-mermaid-dual.mjs)`);
+  const players = recordings(article);
+  if (players.join(' ') !== page.castUrls.join(' ')) {
+    fail(`${where}: its source plays ${page.castUrls.join(', ') || 'no recording'}, its players ${players.join(', ') || 'none'}`);
+  }
 
   // 3. Every heading has an id, and the table of contents lists every
   // h2 and h3 and links only to the article's headings.

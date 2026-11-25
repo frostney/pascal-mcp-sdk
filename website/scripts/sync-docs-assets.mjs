@@ -24,3 +24,14 @@ function sync(sourceDir, targetDir, label) {
 sync('../../docs/images', '../public/docs-images', 'docs-images');
 // Terminal recordings (real captured sessions — see tools/casts/).
 sync('../../docs/casts', '../public/docs-casts', 'docs-casts');
+
+// The site ships asciinema-player (Apache-2.0) in its JavaScript, and
+// the licence asks that recipients get a copy of it: every player
+// links this file (components/terminal-cast.tsx).
+const licenses = path.resolve(here, '../public/licenses');
+fs.mkdirSync(licenses, { recursive: true });
+fs.copyFileSync(
+  path.resolve(here, '../node_modules/asciinema-player/LICENSE'),
+  path.join(licenses, 'asciinema-player.txt'),
+);
+console.log('licenses: copied asciinema-player LICENSE');

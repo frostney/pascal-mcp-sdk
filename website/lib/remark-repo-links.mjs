@@ -49,6 +49,9 @@ function pageRoute(file, docsRoot) {
 }
 
 function mapHref(href, filePath) {
+  // A network-path reference (//host/path) names another site: link
+  // it over HTTPS, as the Markdown copies need an absolute URL.
+  if (href.startsWith('//')) return `https:${href}`;
   const repoRoot = findRepoRoot(path.dirname(filePath));
   const docsRoot = path.join(repoRoot, 'docs');
   if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('#')) {
@@ -110,6 +113,7 @@ function recordAbsoluteUrl(node, filePath) {
 }
 
 function mapImage(src, filePath) {
+  if (src.startsWith('//')) return `https:${src}`;
   if (/^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith('#')) return src;
   const repoRoot = findRepoRoot(path.dirname(filePath));
   const resolved = path.resolve(path.dirname(filePath), src);

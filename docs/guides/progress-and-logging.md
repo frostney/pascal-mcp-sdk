@@ -53,8 +53,11 @@ notifications are sent at all.
 
 Request-scoped notifications are written **before** the response, on
 the same channel: under stdio they are lines preceding the response
-line; over Streamable HTTP a request that opted in is answered as an
-SSE stream — notification events first, the final response last.
+line; over Streamable HTTP a request that opted in becomes an SSE
+stream once its first notification is emitted — notification events
+first, the final response last. An opted-in request that emits none
+is answered as a single `application/json` object, so a client
+handles both.
 
 ## A worked example — what the client sees
 

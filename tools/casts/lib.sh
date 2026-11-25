@@ -17,11 +17,26 @@ say() {
 # child shell fails on any failing pipeline stage, so a failing mcpdemo
 # behind a successful jq stops the demo (the demo scripts run under
 # `set -e`) instead of being recorded as a working example.
+# Its output is also kept for `expect`.
+CAST_LAST=$(mktemp)
+trap 'rm -f "$CAST_LAST"' EXIT
 run() {
   printf '\033[1;32m❯\033[0m %s\n' "$*"
   sleep 0.9
-  bash -o pipefail -c "$*"
+  bash -o pipefail -c "$*" | tee "$CAST_LAST"
   sleep 1.4
+}
+
+# Fail the demo unless the last command's output (its JSON values,
+# slurped into one array) satisfies a jq filter. A JSON-RPC error
+# exits 0 and prints null through `jq .result...`, so the exit status
+# alone does not show that the demo worked. Prints nothing on success,
+# so it adds nothing to the recording.
+expect() {
+  if ! jq -e -s "$1" "$CAST_LAST" >/dev/null; then
+    echo "cast demo: the output does not satisfy: $1" >&2
+    exit 1
+  fi
 }
 
 # The modern per-request _meta envelope every 2026-07-28 request
