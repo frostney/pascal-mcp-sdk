@@ -136,8 +136,9 @@ While iterating, `lwpt test` takes selectors — a path or glob runs
 just the suites you're working on
 (`lwpt test source/units/MCP.Server.Test.pas`), and
 `lwpt test --inventory` prints JSON with each selected test program's
-path and its number of suites and cases. It compiles and starts every
-program to count what it registers, but runs no test bodies.
+path and its number of suites and cases. It starts every selected
+program (compiling it unless a cached executable is current) to count
+what it registers, and exits before any test body runs.
 
 Protocol-surface changes should also run the interop battery — the
 official MCP TypeScript clients against `mcpdemo`:
