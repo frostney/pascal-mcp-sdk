@@ -83,7 +83,7 @@ npx markdownlint-cli2 "**/*.md"
 
 ## CI
 
-Four workflows (see [.github/workflows/](../../.github/workflows/)):
+Six workflows (see [.github/workflows/](../../.github/workflows/)):
 
 - **pr.yml** — every PR: Linux + macOS + Windows legs, each doing
   checksum-verified lwpt release install, `lwpt install --frozen`,
@@ -99,6 +99,17 @@ Four workflows (see [.github/workflows/](../../.github/workflows/)):
 - **pr-title.yml** — Conventional Commit PR-title gate (squash-merge
   titles become the changelog).
 - **pages.yml** — website build/deploy; see the Website section.
+- **lwpt-bump.yml** — weekly (Mondays) and on demand: opens a PR
+  when the Homebrew tap's lwpt is newer than the `LWPT_VERSION` pin,
+  carrying the complete bump (both pins, the same-tag `testing`
+  dependency, the regenerated lockfile, zero-install trees and
+  AGENTS.md command block). A failing run means the new release needs
+  a migration by hand.
+- **update-project-skills.yml** — weekly (Mondays) and on demand: a
+  thin caller of known-good-route's reusable workflow that refreshes
+  the skills `skills-lock.json` lists and opens a draft PR when they
+  changed. A skill deleted or renamed upstream stops the run until it
+  is migrated by hand.
 
 ## Cross-implementation check — tools/interop-ts
 
