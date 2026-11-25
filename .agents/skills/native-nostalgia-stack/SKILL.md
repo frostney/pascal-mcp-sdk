@@ -18,8 +18,9 @@ language-neutral layout and documentation.
 
 ## Compiler and layout
 
-- Use the project-pinned latest stable FPC and Delphi mode unless project docs
-  explicitly choose another mode.
+- Use the FPC version the project and CI pin; a new project pins the latest
+  stable release. Use Delphi mode unless project docs explicitly choose another
+  mode.
 - Keep project-wide compiler directives in one shared include used by every
   unit.
 - Put Pascal source under one root (`source/` preferred), using namespaced
@@ -45,6 +46,20 @@ The project chooses the implementation but provides one root entry point:
 Document the entry point, targets, and flags in `docs/build-system.md`; read it
 before changing them.
 
+## Development loop
+
+- Prefer [hotfpc](https://github.com/frostney/hotfpc) for the edit-and-run loop of
+  a program that keeps running, such as a game, server, or TUI:
+  `hotfpc [fpc options] program.pas` builds and starts it, then swaps each saved
+  edit to a unit into the running program, or starts it over when the edit needs
+  that. Install it with `brew install frostney/tap/hotfpc` or from its releases.
+- Keep the code you edit during the loop in units: the main program's block is
+  already running and keeps its old code.
+- Pass the project's own fpc options. The build entry point stays the source of
+  clean, test, and release builds; hotfpc does not replace it.
+- hotfpc builds into `.hot/` next to the program's source; ignore `.hot/` along
+  with `build/`.
+
 ## Formatter and health contracts
 
 One formatter/linter command rewrites Pascal by default and has a non-mutating
@@ -56,13 +71,15 @@ and cognitive complexity, sortable file health, and complexity-times-churn
 hotspots. Thresholds and ignores live in one root config; breaches exit
 non-zero. Document the tool and thresholds in `docs/tooling.md`.
 
-## Hook and completion
+## Hook
 
 Lefthook runs the project's formatter check on staged Pascal and its
 build-and-test command. Use the exact project entry points, install the hook via
 the documented quick start, and never bypass it without explicit user direction.
 
-Before relying on tool behavior, inspect root and area AGENTS, confirm `fpc -iV`
-against project/CI pins, and verify any touched tool version live. Before
-handoff, observe the project formatter and build-and-test gates passing and
-update only the authoritative docs affected by the change.
+## Completion
+
+- Root and area AGENTS were inspected, `fpc -iV` matches the project/CI pin, and
+  any touched tool version was verified live before relying on its behavior.
+- The project formatter and build-and-test gates were observed passing.
+- Only the authoritative docs affected by the change were updated.

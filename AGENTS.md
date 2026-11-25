@@ -293,3 +293,26 @@ Generated from the same immutable structural registry used by manifest validatio
 
 <!-- lwpt:agents:end -->
 <!-- markdownlint-enable MD034 -->
+
+<!-- known-good-route:agents:begin -->
+
+## Agent skills
+
+Generated from the `metadata.agents-role` and `metadata.agents-text` of the skills installed in `.agents/skills`. Edit outside the `known-good-route:agents` markers only.
+
+Delivery (defaults, no `ORCHESTRATION.md`): entry points that develop, review, test or publish a change continue through `/deliver` to the `merged` endpoint. A defaulted setting gives way to a default stated in the person's standing global agent instructions.
+
+- Always apply `agent-writing`: Write replies, reports, PR and issue text, and docs that give the answer first, in plain words, define or drop any label the reader has not seen, and keep the evidence; a correction re-runs its check first.
+- Start with `/code-review`: Review a PR, branch, or worktree for evidence-backed findings.
+- Start with `/codebase-audit`: Audit a repository or subsystem for systemic engineering risks.
+- Start with `/create-issue`: File a project-aligned GitHub issue from a short description.
+- Start with `/create-pr`: Publish the current change as a pull request and bring it to ready for review.
+- Start with `/create-release`: Prepare or publish a release through the repository's release workflow.
+- Start with `/deliver`: Carry one feature, bug, issue, branch, or PR to its verified delivery endpoint.
+- Start with `/implement`: Develop an issue or idea until its requirements are verified.
+- Start with `/roadmap-review`: Turn current project evidence into a verified version plan.
+- Start with `/run-retro`: Review a workstream and agree process improvements.
+- Start with `/test-against-spec`: Test a change against its requirements through the real interface.
+- Start with `/update-pr`: Push new changes to an existing pull request and refresh its metadata.
+
+<!-- known-good-route:agents:end -->
