@@ -137,6 +137,14 @@ const pages = walk(docsSource)
   });
 if (pages.length === 0) fail(`no Markdown files under ${docsSource}`);
 
+// The llms.txt section a page is listed under: the title in the
+// meta.json of its top-level docs/ folder, or of docs/ itself.
+function sectionTitle(slug) {
+  const folder = slug.includes('/') ? slug.split('/')[0] : '';
+  const meta = path.join(docsSource, folder, 'meta.json');
+  return fs.existsSync(meta) ? JSON.parse(read(meta)).title : undefined;
+}
+
 for (const page of pages) {
   const where = rel(out, page.html);
   if (!fs.existsSync(page.html)) {
@@ -144,8 +152,12 @@ for (const page of pages) {
     continue;
   }
   const html = read(page.html);
-  const tocStart = html.indexOf('id="nd-toc"');
-  const article = tocStart < 0 ? html : html.slice(0, tocStart);
+  // The page's article and its table of contents, as fumadocs-ui's
+  // docs layout renders them.
+  const articleStart = html.indexOf('<article id="nd-page"');
+  const article = articleStart < 0 ? '' : html.slice(articleStart, html.indexOf('</article>', articleStart));
+  if (articleStart < 0) fail(`${where}: no <article id="nd-page">`);
+  const tocStart = html.indexOf('<div id="nd-toc"');
   const toc = tocStart < 0 ? '' : html.slice(tocStart);
 
   // 2. The tables of the page's source render as tables.
@@ -166,7 +178,7 @@ for (const page of pages) {
   const tocIds = headingIds('23');
   if (tocIds.size > 0 && tocStart < 0) fail(`${where}: ${tocIds.size} h2/h3 heading(s) but no table of contents`);
   if (tocStart >= 0) {
-    const linked = new Set([...toc.matchAll(/href="#([^"]+)"/g)].map((m) => decode(m[1])));
+    const linked = new Set([...toc.matchAll(/<a(?:\s[^>]*?)?\shref="#([^"]+)"/g)].map((m) => decode(m[1])));
     const articleHeadings = headingIds('1-6');
     const missing = [...tocIds].filter((id) => !linked.has(id));
     const stray = [...linked].filter((id) => !articleHeadings.has(id));
@@ -175,17 +187,22 @@ for (const page of pages) {
   }
 
   // The canonical link names the page by the URL it is served at.
-  const canonicals = [...html.matchAll(/<link rel="canonical" href="([^"]*)"/g)].map((m) => decode(m[1]));
+  const attribute = (tag, name) => tag.match(new RegExp(`\\s${name}="([^"]*)"`))?.[1];
+  const canonicals = [...html.matchAll(/<link\s[^>]*>/g)]
+    .map((m) => m[0])
+    .filter((tag) => attribute(tag, 'rel') === 'canonical')
+    .map((tag) => decode(attribute(tag, 'href') ?? ''));
   if (canonicals.length !== 1 || canonicals[0] !== page.url) {
     fail(`${where}: canonical ${canonicals.join(', ') || '(none)'}, expected ${page.url}`);
   }
 
-  // 4. The page actions name this page's own Markdown copy, under the
-  // basePath: fumadocs-ui adds it only under Vite.
-  const actionUrls = new Set(
-    [...html.matchAll(/\\?"markdownUrl\\?":\\?"([^"\\]+)\\?"/g)].map((m) => m[1]),
-  );
-  sameSet(`${where} markdownUrl`, actionUrls, new Set([page.copyPath]));
+  // 4. Both page actions, Copy Markdown and View Options, name this
+  // page's own Markdown copy, under the basePath: fumadocs-ui adds it
+  // only under Vite.
+  const actionUrls = [...html.matchAll(/\\?"markdownUrl\\?":\\?"([^"\\]+)\\?"/g)].map((m) => m[1]);
+  if (actionUrls.length !== 2 || actionUrls.some((url) => url !== page.copyPath)) {
+    fail(`${where}: page actions name ${actionUrls.join(', ') || 'no Markdown copy'}, expected ${page.copyPath} on both`);
+  }
 
   // 5. The JSON-LD names the page by the URL it is served at.
   const script = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
@@ -246,34 +263,47 @@ if (fs.existsSync(llms)) {
     });
   }
   if (loose.length > 0) fail(`llms.txt: links before the first H2: ${loose.join(', ')}`);
+  // Each entry is listed under the H2 that owns it: the nearest heading
+  // above its list, which must be an H2.
   const listed = new Set();
-  for (const list of tree.children.slice(firstH2 + 1).filter((node) => node.type === 'list')) {
-    for (const item of list.children) {
+  let heading;
+  for (const node of tree.children.slice(firstH2)) {
+    if (node.type === 'heading') heading = node;
+    if (node.type !== 'list') continue;
+    const section = heading?.depth === 2 ? flatten(heading) : `(under an H${heading?.depth})`;
+    for (const item of node.children) {
       const lead = item.children[0]?.type === 'paragraph' ? item.children[0].children[0] : undefined;
-      if (lead?.type === 'link') listed.add(`${flatten(lead)} -> ${lead.url}`);
+      if (lead?.type === 'link') listed.add(`${section}: ${flatten(lead)} -> ${lead.url}`);
       else fail(`llms.txt: a list item that does not start with a link: "${flatten(item).slice(0, 60)}"`);
     }
   }
+  const rootSection = sectionTitle('');
   sameSet(
     'llms.txt',
     listed,
     new Set([
-      ...pages.map((page) => `${page.title} -> ${siteOrigin}${page.copyPath}`),
-      `All of the documentation in one file -> ${siteUrl}/llms-full.txt`,
+      ...pages.map(
+        (page) => `${sectionTitle(page.slug)}: ${page.title} -> ${siteOrigin}${page.copyPath}`,
+      ),
+      `${rootSection}: All of the documentation in one file -> ${siteUrl}/llms-full.txt`,
     ]),
   );
 }
 
-// llms-full.txt is every page's Markdown copy, each once, and nothing
-// else.
+// llms-full.txt is every page's Markdown copy, each once, joined by a
+// blank line, and nothing else.
 const full = path.join(out, 'llms-full.txt');
-const copies = pages.map((page) => page.copyText).filter((text) => text !== undefined);
-if (fs.existsSync(full) && copies.length === pages.length) {
+if (fs.existsSync(full) && pages.every((page) => page.copyText !== undefined)) {
   const text = read(full);
   const absent = pages.filter((page) => !text.includes(page.copyText)).map((page) => page.url);
   if (absent.length > 0) fail(`llms-full.txt: lacks the Markdown copy of ${absent.join(', ')}`);
-  const expected = copies.reduce((sum, copy) => sum + copy.length, 0) + 2 * (copies.length - 1);
-  if (text.length !== expected) fail(`llms-full.txt: ${text.length} characters, the copies make ${expected}`);
+  else {
+    const joined = [...pages]
+      .sort((a, b) => text.indexOf(a.copyText) - text.indexOf(b.copyText))
+      .map((page) => page.copyText)
+      .join('\n\n');
+    if (text !== joined) fail("llms-full.txt: is not exactly the pages' Markdown copies joined by blank lines");
+  }
 }
 
 // 9. The sitemap lists the home page and every docs page by the URL it
