@@ -6,6 +6,9 @@ import { metaSchema, pageSchema } from 'fumadocs-core/source/schema';
 import { z } from 'zod';
 import { remarkRepoLinks, stringifyAbsoluteLinks } from './remark-repo-links.mjs';
 import { remarkTermLinks } from './remark-term-links.mjs';
+import { remarkCasts } from './remark-casts.mjs';
+import { rehypeMermaidDual } from './rehype-mermaid-dual.mjs';
+import type { PluggableList } from 'unified';
 
 const docs = defineDocs({
   // The site renders the repository's docs/ tree directly — no second
@@ -13,6 +16,10 @@ const docs = defineDocs({
   // website/.
   dir: '../docs',
   docs: {
+    // ADRs and other repo-only records under docs/ stay off the
+    // website: the docs tree is the site's content source, but not
+    // everything in it is site content.
+    files: ['**/*.md', '!adr/**'],
     // The rendered docs are plain GitHub markdown without frontmatter
     // (the site adapts to docs/, not the other way around): titles are
     // optional here and derived from the page path when absent — the
@@ -30,7 +37,14 @@ const docs = defineDocs({
     // macro takes plain processor options otherwise, which leaves all
     // of that out (issue #74).
     mdxOptions: applyMdxPreset({
-      remarkPlugins: [remarkRepoLinks, remarkTermLinks],
+      // The preset runs these after its GFM and heading-id plugins.
+      // Cast links become the terminal player before remarkRepoLinks,
+      // which would route .cast paths as pages.
+      remarkPlugins: [remarkCasts, remarkRepoLinks, remarkTermLinks],
+      // Mermaid fences become themed inline SVGs (light + dark) at
+      // build time, ahead of the preset's rehypeCode so Shiki never
+      // sees them; the preset's rehypeToc still runs last.
+      rehypePlugins: (preset) => [...(rehypeMermaidDual as PluggableList), ...preset],
       // remarkRepoLinks maps images to the site's copy of docs/images/.
       remarkImageOptions: false,
       // app/api/search/route.ts builds the search structure from the

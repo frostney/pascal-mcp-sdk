@@ -5,7 +5,8 @@
 // the fumadocs preset was not applied (issue #74), and llms.txt, the
 // Markdown copies and the sitemap named URLs that 404 or redirect on
 // GitHub Pages (issues #75, #76, #77). This fails the build unless
-// each page's output is what its docs/ source says it should be.
+// each page's output is what its docs/ source says it should be,
+// diagrams and terminal recordings included.
 //
 // Usage: node scripts/check-export.mjs [export dir, default out/]
 import fs from 'node:fs';
@@ -119,9 +120,12 @@ for (const file of htmlFiles) {
 }
 
 // The docs pages: every Markdown file under docs/ is one, at the route
-// its path gives (docs/guides/tools.md is /docs/guides/tools/).
+// its path gives (docs/guides/tools.md is /docs/guides/tools/), except
+// the repo-only records under docs/adr/, which lib/source.ts leaves
+// off the site.
+const repoOnly = (file) => rel(docsSource, file).startsWith('adr/');
 const pages = walk(docsSource)
-  .filter((file) => file.endsWith('.md'))
+  .filter((file) => file.endsWith('.md') && !repoOnly(file))
   .map((source) => {
     const slug = rel(docsSource, source)
       .replace(/\.md$/, '')
@@ -136,6 +140,16 @@ const pages = walk(docsSource)
     };
   });
 if (pages.length === 0) fail(`no Markdown files under ${docsSource}`);
+
+// The repo-only records reach no page, Markdown copy or other file.
+const leaked = walk(out).filter((file) => /(^|\/)adr(\/|$)/.test(rel(out, path.dirname(file))));
+if (leaked.length > 0) fail(`docs/adr is repo-only, but the export has ${leaked.map((file) => rel(out, file)).join(', ')}`);
+
+// The home page plays the hero recording.
+const home = path.join(out, 'index.html');
+if (!fs.existsSync(home) || !read(home).includes('<figure class="terminal-cast"')) {
+  fail('index.html: no terminal player for the hero recording');
+}
 
 // The llms.txt section a page is listed under: the title in the
 // meta.json of its top-level docs/ folder, or of docs/ itself.
@@ -167,6 +181,27 @@ for (const page of pages) {
   });
   const rendered = (article.match(/<table[\s>]/g) ?? []).length;
   if (rendered !== tables) fail(`${where}: ${tables} table(s) in its source, ${rendered} rendered`);
+
+  // Each Mermaid fence of the source renders as one light and one dark
+  // SVG (lib/rehype-mermaid-dual.mjs), and no fence is left as code.
+  // Each paragraph that is a lone link to a .cast file renders as the
+  // terminal player (lib/remark-casts.mjs); the player's link to the
+  // recording is checked with every other href in step 1.
+  let fences = 0;
+  let casts = 0;
+  visit(parse(read(page.source)), ['code', 'paragraph'], (node) => {
+    if (node.type === 'code' && node.lang === 'mermaid') fences += 1;
+    const [only] = node.type === 'paragraph' && node.children.length === 1 ? node.children : [];
+    if (only?.type === 'link' && only.url.endsWith('.cast')) casts += 1;
+  });
+  const light = (article.match(/\sid="mermaid-light-\d+"/g) ?? []).length;
+  const dark = (article.match(/\sid="mermaid-dark-\d+"/g) ?? []).length;
+  if (light !== fences || dark !== fences) {
+    fail(`${where}: ${fences} Mermaid fence(s) in its source, ${light} light and ${dark} dark SVG(s) rendered`);
+  }
+  if (article.includes('language-mermaid')) fail(`${where}: a Mermaid fence rendered as code`);
+  const players = (article.match(/<figure class="terminal-cast"/g) ?? []).length;
+  if (players !== casts) fail(`${where}: ${casts} cast(s) in its source, ${players} player(s) rendered`);
 
   // 3. Every heading has an id, and the table of contents lists every
   // h2 and h3 and links only to the article's headings.
@@ -246,6 +281,11 @@ for (const file of markdownFiles) {
     if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) fail(`${where}: ${url} is not an absolute URL`);
     else if (url.startsWith(`${siteOrigin}/`)) checkSiteUrl(url, where);
   }
+  // The site's own components, such as the terminal player, stay on
+  // the site: a copy carries the Markdown its docs/ source has.
+  visit(parse(text), 'html', (node) => {
+    if (/^<[A-Z]/.test(node.value)) fail(`${where}: site component in the Markdown: ${node.value.slice(0, 60)}`);
+  });
 }
 
 // 8. llms.txt has a list item per page, under an H2 (the format's file
@@ -338,5 +378,5 @@ if (failures.length > 0) {
 console.log(
   `check-export: ${htmlFiles.length} pages, ${pages.length} of them docs pages, and ` +
     `${markdownFiles.length} Markdown files OK (links, anchors, tables, heading ids, ` +
-    'tables of contents, page actions, JSON-LD, llms files, sitemap, search)',
+    'tables of contents, diagrams, recordings, page actions, JSON-LD, llms files, sitemap, search)',
 );
