@@ -58,7 +58,7 @@ unit MCP.Schema;
 // remain the escape hatch for anything richer ($ref, nested objects,
 // title/annotations).
 
-{$I Shared.inc}
+{$I MCP.inc}
 
 interface
 
@@ -71,15 +71,14 @@ uses
 type
   EMCPSchema = class(Exception);
 
-  // Base class for argument types: {$M+} turns on published-property
-  // RTTI for every descendant. Constructor kept virtual so the server
-  // can instantiate argument objects from a class reference.
-  {$M+}
+  // Base class for argument types. Published-property RTTI for every
+  // descendant comes from MCP.inc's global {$M+} (no per-unit
+  // override). Constructor kept virtual so the server can instantiate
+  // argument objects from a class reference.
   TMCPArgs = class(TObject)
   public
     constructor Create; virtual;
   end;
-  {$M-}
 
   TMCPArgsClass = class of TMCPArgs;
 

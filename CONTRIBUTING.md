@@ -10,7 +10,7 @@ consumers never need the toolchain below.
 - **FPC 3.2.2** — `apt install fpc` / `brew install fpc` / the
   win32+win64 combo installer from freepascal.org. The version must be
   **exactly 3.2.2**: compiler flags are pinned in
-  `source/units/Shared.inc` and CI pins 3.2.2. Where your package
+  `source/units/MCP.inc` and CI pins 3.2.2. Where your package
   manager ships a different release, install 3.2.2 from the official
   [FPC downloads](https://www.freepascal.org/download.html) instead
   (`fpc -iV` prints the installed version).
@@ -94,7 +94,7 @@ batteries). `ci.yml` runs the wider per-arch matrix post-merge on
 ## Ground rules
 
 - **FreePascal only.** FPC 3.2.2, Delphi mode, flags centralised in
-  `Shared.inc` — no per-unit compiler directives, no second compiled
+  `MCP.inc` — no per-unit compiler directives, no second compiled
   language.
 - **Zero third-party runtime dependencies.** The library is RTL +
   fpjson only (fcl-web powers `MCP.Transport.HTTP` and ships inside

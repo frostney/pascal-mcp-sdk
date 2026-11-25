@@ -43,7 +43,7 @@ discovery.
 **By vendoring** — the library is seven files. Copy
 `source/units/MCP.JSONRPC.pas`, `MCP.Protocol.pas`, `MCP.Schema.pas`,
 `MCP.Server.pas`, `MCP.Transport.Stdio.pas`, `MCP.Transport.HTTP.pas`,
-and `Shared.inc` into your unit path. RTL + fpjson only (fcl-web for
+and `MCP.inc` into your unit path. RTL + fpjson only (fcl-web for
 the HTTP transport unit).
 
 **Zero-install from a clone** — the repo commits its dependency
