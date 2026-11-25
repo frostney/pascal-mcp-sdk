@@ -36,7 +36,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { freePort, startDemo } from '../interop-ts/demo-http.mjs';
+import { freePort, startDemo, stopChild } from '../interop-ts/demo-http.mjs';
 import { classifyChecks, compare, differs, validateBaseline } from './compare.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -106,7 +106,7 @@ const suiteCode = await new Promise((done) => {
 });
 
 server.removeAllListeners('exit');
-server.kill();
+await stopChild(server);
 
 // One directory per scenario: server-<scenario>-<ISO timestamp>.
 // A missing, malformed or contradictory checks.json is a broken run,

@@ -44,10 +44,27 @@ async function waitUntilListening(port, timeoutMs = 5000, intervalMs = 50) {
   }
 }
 
+// Stops a child and resolves once it has exited: SIGTERM, then
+// SIGKILL if it is still running after graceMs.
+export function stopChild(child, graceMs = 2000) {
+  return new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve();
+      return;
+    }
+    const force = setTimeout(() => child.kill('SIGKILL'), graceMs);
+    child.once('exit', () => {
+      clearTimeout(force);
+      resolve();
+    });
+    child.kill();
+  });
+}
+
 // Resolves with the running child once it listens. On any startup
-// failure (timeout, early exit, never listening) the child is stopped
-// before the promise rejects, so a failed start never leaves mcpdemo
-// running.
+// failure (timeout, early exit, never listening) the child is stopped,
+// and has exited, before the promise rejects, so a failed start never
+// leaves mcpdemo running.
 export function startDemo(demo, port, timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
     const child = spawn(demo, ['--http', String(port)], {
@@ -58,8 +75,7 @@ export function startDemo(demo, port, timeoutMs = 10000) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (child.exitCode === null && child.signalCode === null) child.kill();
-      reject(error);
+      stopChild(child).then(() => reject(error));
     };
     const timer = setTimeout(() => fail(new Error('mcpdemo startup timed out')), timeoutMs);
     let banner = '';
