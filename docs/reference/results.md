@@ -49,8 +49,8 @@ Float properties of a typed output class and the `progress`/`total`
 of progress notifications go on the wire as the shortest decimal that
 parses back to the same `Double`, written the way JavaScript's
 `JSON.stringify` writes it: `0.25`, `1000000000000000`, `1e+21`,
-`5e-324`. Integers below 2^53 are JSON integers, and negative zero is
-`0`. NaN and infinities have no JSON form: serializing one raises
+`5e-324`. Integers of magnitude below 2^53 are JSON integers, and
+negative zero is `0`. NaN and infinities have no JSON form: serializing one raises
 `EMCPSchema` (in a tool handler, that becomes an `isError` result like
 any other exception). `MCP.Schema` exposes the same conversion for
 hand-built JSON:

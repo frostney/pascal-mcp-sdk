@@ -1245,10 +1245,11 @@ begin
     // Compact number nodes (MCP.Schema's MCPWireNumber): fpjson's
     // default float serialization is full-precision exponent form;
     // the official SDKs put plain decimals on the wire.
-    // A NaN progress or total raises EMCPSchema there (no JSON form);
-    // IsNan comes first so a NaN total is never compared.
+    // A NaN or infinite progress or total raises EMCPSchema there (no
+    // JSON form); only a finite negative total means "no total", and
+    // IsNan comes first so a NaN is never compared.
     Params.Add('progress', MCPWireNumber(AProgress));
-    if IsNan(ATotal) or (ATotal >= 0) then
+    if IsNan(ATotal) or IsInfinite(ATotal) or (ATotal >= 0) then
       Params.Add('total', MCPWireNumber(ATotal));
     if AMessage <> '' then
       Params.Add('message', AMessage);

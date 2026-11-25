@@ -332,88 +332,315 @@ begin
     Result := '-' + Result;
 end;
 
-// Shortest decimal for a finite, non-zero AValue that parses back to
-// the same Double, as JSNumberText writes it; '' when none does.
-// System.Str gives 17 significant digits of a Double on every target
-// (FloatToStrF stops at 15 where Extended is Double, as on Win64 and
-// AArch64); each shorter candidate is that decimal rounded to fewer
-// digits, and only a candidate that Val parses back into a Double
-// equal to AValue is returned. (Where Val parses through Extended, a
-// shorter candidate lying within 2^-64 of a halfway point between two
-// Doubles could be rounded twice; the 17-digit candidate is too close
-// to AValue for that.)
-function ShortestRoundTrip(AValue: Double): string;
+// Unsigned big integer for exact decimal conversion: 32-bit limbs,
+// least significant first, no leading zero limbs (zero is empty).
+type
+  TWireBig = array of LongWord;
+
+procedure BigTrim(var A: TWireBig);
 var
-  S, Mantissa, Candidate: string;
-  Negative: Boolean;
-  EPos, Exponent, Count, I, Code: Integer;
-  Digits: array[1..17] of Byte;
-  Back: Double;
+  N: Integer;
 begin
-  Result := '';
-  // ' d.dddddddddddddddE+ddd' (one sign position, 17 digits).
-  Str(AValue:24, S);
-  S := Trim(S);
-  Negative := (S <> '') and (S[1] = '-');
-  if Negative then
-    Delete(S, 1, 1);
-  EPos := Pos('E', S);
-  if (EPos <> 19) or (S[2] <> '.') then
-    Exit;
-  Mantissa := S[1] + Copy(S, 3, 16);
-  Val(Copy(S, EPos + 1, MaxInt), Exponent, Code);
-  if Code <> 0 then
-    Exit;
-  for Count := 1 to 17 do
+  N := Length(A);
+  while (N > 0) and (A[N - 1] = 0) do
+    Dec(N);
+  SetLength(A, N);
+end;
+
+function BigFrom(AValue: QWord): TWireBig;
+begin
+  SetLength(Result, 2);
+  Result[0] := LongWord(AValue and $FFFFFFFF);
+  Result[1] := LongWord(AValue shr 32);
+  BigTrim(Result);
+end;
+
+procedure BigMulSmall(var A: TWireBig; AFactor: LongWord);
+var
+  I: Integer;
+  Carry: QWord;
+begin
+  Carry := 0;
+  for I := 0 to High(A) do
   begin
-    for I := 1 to 17 do
-      Digits[I] := Ord(Mantissa[I]) - Ord('0');
-    // Round the 17-digit decimal half up at Count digits; a carry out
-    // of the first digit becomes 1 x 10^(Exponent + 1).
-    Candidate := '';
-    if (Count < 17) and (Digits[Count + 1] >= 5) then
-    begin
-      I := Count;
-      while (I >= 1) and (Digits[I] = 9) do
-      begin
-        Digits[I] := 0;
-        Dec(I);
-      end;
-      if I >= 1 then
-        Inc(Digits[I])
-      else
-        Candidate := '1';
-    end;
-    if Candidate = '1' then
-      Candidate := JSNumberText(Negative, '1', Exponent + 1)
-    else
-    begin
-      for I := 1 to Count do
-        Candidate := Candidate + Chr(Ord('0') + Digits[I]);
-      while (Length(Candidate) > 1) and (Candidate[Length(Candidate)] = '0') do
-        Delete(Candidate, Length(Candidate), 1);
-      Candidate := JSNumberText(Negative, Candidate, Exponent);
-    end;
-    // A candidate rounded past the largest Double overflows on the way
-    // back: it does not round-trip, so try the next length.
-    try
-      Val(Candidate, Back, Code);
-    except
-      on EMathError do
-        Code := -1;
-    end;
-    if (Code = 0) and (Back = AValue) then
-      Exit(Candidate);
+    Carry := QWord(A[I]) * AFactor + Carry;
+    A[I] := LongWord(Carry and $FFFFFFFF);
+    Carry := Carry shr 32;
+  end;
+  if Carry <> 0 then
+  begin
+    SetLength(A, Length(A) + 1);
+    A[High(A)] := LongWord(Carry);
   end;
 end;
 
-function TMCPWireFloat.GetAsString: TJSONStringType;
+procedure BigShl(var A: TWireBig; ABits: Integer);
+var
+  Words, Bits, I: Integer;
+  Old: TWireBig;
 begin
-  Result := ShortestRoundTrip(AsFloat);
-  // No candidate parsed back exactly (a parser that does not round
-  // correctly): fpjson's full-precision form, never an unchecked one.
-  if Result = '' then
-    Result := inherited GetAsString;
+  if (Length(A) = 0) or (ABits = 0) then
+    Exit;
+  Words := ABits div 32;
+  Bits := ABits mod 32;
+  Old := Copy(A);
+  SetLength(A, Length(Old) + Words + 1);
+  for I := 0 to High(A) do
+    A[I] := 0;
+  for I := 0 to High(Old) do
+  begin
+    A[I + Words] := A[I + Words] or (Old[I] shl Bits);
+    if Bits > 0 then
+      A[I + Words + 1] := Old[I] shr (32 - Bits);
+  end;
+  BigTrim(A);
+end;
+
+procedure BigMulPow10(var A: TWireBig; APower: Integer);
+begin
+  while APower >= 9 do
+  begin
+    BigMulSmall(A, 1000000000);
+    Dec(APower, 9);
+  end;
+  while APower > 0 do
+  begin
+    BigMulSmall(A, 10);
+    Dec(APower);
+  end;
+end;
+
+function BigCompare(const A, B: TWireBig): Integer;
+var
+  I: Integer;
+begin
+  if Length(A) <> Length(B) then
+    Exit(Ord(Length(A) > Length(B)) * 2 - 1);
+  for I := High(A) downto 0 do
+    if A[I] <> B[I] then
+      Exit(Ord(A[I] > B[I]) * 2 - 1);
+  Result := 0;
+end;
+
+function BigAdd(const A, B: TWireBig): TWireBig;
+var
+  I: Integer;
+  Carry: QWord;
+begin
+  SetLength(Result, Max(Length(A), Length(B)) + 1);
+  Carry := 0;
+  for I := 0 to High(Result) do
+  begin
+    if I < Length(A) then
+      Carry := Carry + A[I];
+    if I < Length(B) then
+      Carry := Carry + B[I];
+    Result[I] := LongWord(Carry and $FFFFFFFF);
+    Carry := Carry shr 32;
+  end;
+  BigTrim(Result);
+end;
+
+// A := A - B, for A >= B.
+procedure BigSub(var A: TWireBig; const B: TWireBig);
+var
+  I: Integer;
+  Borrow, Diff: Int64;
+begin
+  Borrow := 0;
+  for I := 0 to High(A) do
+  begin
+    Diff := Int64(A[I]) - Borrow;
+    if I < Length(B) then
+      Diff := Diff - B[I];
+    if Diff < 0 then
+    begin
+      Inc(Diff, Int64(1) shl 32);
+      Borrow := 1;
+    end
+    else
+      Borrow := 0;
+    A[I] := LongWord(Diff);
+  end;
+  BigTrim(A);
+end;
+
+// Burger and Dybvig's free-format algorithm ("Printing
+// Floating-Point Numbers Quickly and Accurately", 1996) in exact
+// integer arithmetic. R/S is the value; MPlus/S and MMinus/S are the
+// distances to the upper and lower ends of its rounding interval. A
+// decimal on an end of the interval reads back as the value only when
+// its significand is even (round-half-even), so Even says whether the
+// ends belong to it.
+type
+  TWireDigits = record
+    R, S, MPlus, MMinus: TWireBig;
+    Even: Boolean;
+    K: Integer; // the value is 0.ddd x 10^K
+  end;
+
+// R, S, MPlus and MMinus for a finite AValue > 0, all scaled by 2 so
+// the half-gaps stay integral. The gap below a power of two is half
+// the gap above it.
+procedure WireInterval(AValue: Double; var AState: TWireDigits);
+var
+  Bits, F: QWord;
+  BiasedExp, E: Integer;
+  PowerOfTwo: Boolean;
+begin
+  Move(AValue, Bits, SizeOf(Bits));
+  BiasedExp := Integer((Bits shr 52) and $7FF);
+  F := Bits and QWord($FFFFFFFFFFFFF);
+  if BiasedExp = 0 then
+    E := -1074
+  else
+  begin
+    F := F or (QWord(1) shl 52);
+    E := BiasedExp - 1075;
+  end;
+  AState.Even := not Odd(F);
+  PowerOfTwo := (F = QWord(1) shl 52) and (E > -1074);
+  AState.R := BigFrom(F);
+  BigShl(AState.R, 1 + Max(E, 0));
+  AState.S := BigFrom(2);
+  BigShl(AState.S, Max(-E, 0));
+  AState.MPlus := BigFrom(1);
+  BigShl(AState.MPlus, Max(E, 0));
+  AState.MMinus := Copy(AState.MPlus);
+  if PowerOfTwo then
+  begin
+    BigShl(AState.R, 1);
+    BigShl(AState.S, 1);
+    BigShl(AState.MPlus, 1);
+  end;
+end;
+
+// K: the smallest power of ten above the interval's top. Starts from
+// an estimate and corrects it exactly.
+procedure WireScale(AValue: Double; var AState: TWireDigits);
+var
+  Cmp: Integer;
+  Top: TWireBig;
+begin
+  AState.K := Ceil(Log10(AValue) - 1E-10);
+  if AState.K >= 0 then
+    BigMulPow10(AState.S, AState.K)
+  else
+  begin
+    BigMulPow10(AState.R, -AState.K);
+    BigMulPow10(AState.MPlus, -AState.K);
+    BigMulPow10(AState.MMinus, -AState.K);
+  end;
+  repeat
+    Top := BigAdd(AState.R, AState.MPlus);
+    Cmp := BigCompare(Top, AState.S);
+    if (Cmp > 0) or (AState.Even and (Cmp = 0)) then
+    begin
+      BigMulSmall(AState.S, 10);
+      Inc(AState.K);
+      Continue;
+    end;
+    BigMulSmall(Top, 10);
+    Cmp := BigCompare(Top, AState.S);
+    if (Cmp < 0) or (not AState.Even and (Cmp = 0)) then
+    begin
+      BigMulSmall(AState.R, 10);
+      BigMulSmall(AState.MPlus, 10);
+      BigMulSmall(AState.MMinus, 10);
+      Dec(AState.K);
+      Continue;
+    end;
+    Break;
+  until False;
+end;
+
+// The last digit D, once the remaining R is within the interval below
+// (ALow), above (AHigh) or both: the nearer of D and D + 1, the even
+// one on a tie, as JavaScript's Number#toString picks (ECMA-262,
+// Number::toString).
+function WireLastDigit(const AState: TWireDigits; D: Integer;
+  ALow, AHigh: Boolean): Integer;
+var
+  Twice: TWireBig;
+  Cmp: Integer;
+begin
+  Result := D;
+  if ALow and AHigh then
+  begin
+    Twice := Copy(AState.R);
+    BigShl(Twice, 1);
+    Cmp := BigCompare(Twice, AState.S);
+    if (Cmp > 0) or ((Cmp = 0) and Odd(D)) then
+      Result := D + 1;
+  end
+  else if AHigh then
+    Result := D + 1;
+end;
+
+// Appends the final digit, carrying a 10 into the digits before it;
+// the positions the carry leaves are trailing zeros.
+procedure WireAppendLast(var ADigits: string; D: Integer; var AK: Integer);
+begin
+  while (D = 10) and (ADigits <> '') do
+  begin
+    D := Ord(ADigits[Length(ADigits)]) - Ord('0') + 1;
+    Delete(ADigits, Length(ADigits), 1);
+  end;
+  if D = 10 then
+  begin
+    // 0.99...9 rounded up: 0.1 x 10^(K + 1).
+    ADigits := '1';
+    Inc(AK);
+  end
+  else
+    ADigits := ADigits + Chr(Ord('0') + D);
+end;
+
+// The shortest decimal digits and exponent E (d.ddd x 10^E) that read
+// back as a finite AValue > 0.
+procedure ShortestDigits(AValue: Double; out ADigits: string;
+  out AExponent: Integer);
+var
+  State: TWireDigits;
+  D, Cmp: Integer;
+  Low, High: Boolean;
+begin
+  WireInterval(AValue, State);
+  WireScale(AValue, State);
+  ADigits := '';
+  repeat
+    BigMulSmall(State.R, 10);
+    BigMulSmall(State.MPlus, 10);
+    BigMulSmall(State.MMinus, 10);
+    D := 0;
+    while BigCompare(State.R, State.S) >= 0 do
+    begin
+      BigSub(State.R, State.S);
+      Inc(D);
+    end;
+    Cmp := BigCompare(State.R, State.MMinus);
+    Low := (Cmp < 0) or (State.Even and (Cmp = 0));
+    Cmp := BigCompare(BigAdd(State.R, State.MPlus), State.S);
+    High := (Cmp > 0) or (State.Even and (Cmp = 0));
+    if Low or High then
+    begin
+      WireAppendLast(ADigits, WireLastDigit(State, D, Low, High), State.K);
+      Break;
+    end;
+    ADigits := ADigits + Chr(Ord('0') + D);
+  until False;
+  while (Length(ADigits) > 1) and (ADigits[Length(ADigits)] = '0') do
+    Delete(ADigits, Length(ADigits), 1);
+  AExponent := State.K - 1;
+end;
+
+function TMCPWireFloat.GetAsString: TJSONStringType;
+var
+  Digits: string;
+  Exponent: Integer;
+begin
+  ShortestDigits(Abs(AsFloat), Digits, Exponent);
+  Result := JSNumberText(AsFloat < 0, Digits, Exponent);
 end;
 
 function MCPWireNumber(AValue: Double): TJSONData;

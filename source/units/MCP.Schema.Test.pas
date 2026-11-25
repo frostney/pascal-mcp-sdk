@@ -100,7 +100,6 @@ type
   public
     procedure SetupTests; override;
     procedure TestJavaScriptForms;
-    procedure TestEveryFormParsesBack;
     procedure TestNonFiniteRaises;
     procedure TestSerializeNaNRaises;
   end;
@@ -120,32 +119,44 @@ end;
 
 // Doubles that exercise each branch: the shortest decimal needs 1, 15,
 // 16 or 17 digits; plain and exponent notation on both sides of
-// JavaScript's thresholds (1e-7 and 1e21); subnormal, largest finite,
-// negative zero, and the 2^53 integer-node bound. Expected texts are
-// what JSON.stringify writes for the same Double.
+// JavaScript's thresholds (1e-7 and 1e21); subnormal, smallest normal,
+// largest finite, negative zero, and the 2^53 integer-node bound;
+// a value whose shortest decimal an Extended-based parse misreads
+// (3.9174595656667484e+280); a last-digit tie that goes to the even
+// digit (708094031835588.25); a power of two whose lower gap is
+// narrower (2^-1017). Expected texts are what JSON.stringify writes
+// for the same Double. Each value is given by its bits: a decimal
+// literal would go through the compiler's own Extended-based parse,
+// the double rounding this checks for.
 const
-  WIRE_CASES: array[0..17] of record
-    Value: Double;
+  WIRE_CASES: array[0..23] of record
+    Bits: QWord; // the Double, bit for bit
     Text: string;
   end = (
-    (Value: 0.25; Text: '0.25'),
-    (Value: 0.1; Text: '0.1'),
-    (Value: -0.5; Text: '-0.5'),
-    (Value: 123.456; Text: '123.456'),
-    (Value: 1 / 3; Text: '0.3333333333333333'),
-    (Value: 1.0000000000000002; Text: '1.0000000000000002'),
-    (Value: 0.30000000000000004; Text: '0.30000000000000004'),
-    (Value: 5E-324; Text: '5e-324'),
-    (Value: 1.7976931348623157E308; Text: '1.7976931348623157e+308'),
-    (Value: 1E-7; Text: '1e-7'),
-    (Value: 0.000001; Text: '0.000001'),
-    (Value: 2.5E-10; Text: '2.5e-10'),
-    (Value: 1E15; Text: '1000000000000000'),
-    (Value: 9007199254740992.0; Text: '9007199254740992'),
-    (Value: 1.2345678901234568E20; Text: '123456789012345680000'),
-    (Value: 1E21; Text: '1e+21'),
-    (Value: 100; Text: '100'),
-    (Value: -0.0; Text: '0')
+    (Bits: QWord($3FD0000000000000); Text: '0.25'), // 0.25
+    (Bits: QWord($3FB999999999999A); Text: '0.1'), // 0.1
+    (Bits: QWord($BFE0000000000000); Text: '-0.5'), // -0.5
+    (Bits: QWord($405EDD2F1A9FBE77); Text: '123.456'), // 123.456
+    (Bits: QWord($3FD5555555555555); Text: '0.3333333333333333'), // 1/3
+    (Bits: QWord($3FF0000000000001); Text: '1.0000000000000002'), // 1.0000000000000002
+    (Bits: QWord($3FD3333333333334); Text: '0.30000000000000004'), // 0.30000000000000004
+    (Bits: QWord($0000000000000001); Text: '5e-324'), // 5e-324, smallest subnormal
+    (Bits: QWord($7FEFFFFFFFFFFFFF); Text: '1.7976931348623157e+308'), // largest finite
+    (Bits: QWord($3E7AD7F29ABCAF48); Text: '1e-7'), // 1e-7
+    (Bits: QWord($3EB0C6F7A0B5ED8D); Text: '0.000001'), // 0.000001
+    (Bits: QWord($3DF12E0BE826D695); Text: '2.5e-10'), // 2.5e-10
+    (Bits: QWord($430C6BF526340000); Text: '1000000000000000'), // 1e15
+    (Bits: QWord($4340000000000000); Text: '9007199254740992'), // 2^53
+    (Bits: QWord($441AC53A7E04BCDA); Text: '123456789012345680000'), // 1.2345678901234568e20
+    (Bits: QWord($444B1AE4D6E2EF50); Text: '1e+21'), // 1e21
+    (Bits: QWord($4059000000000000); Text: '100'), // 100
+    (Bits: QWord($8000000000000000); Text: '0'), // -0
+    (Bits: QWord($0010000000000000); Text: '2.2250738585072014e-308'), // smallest normal
+    (Bits: QWord($00005C0AB9347ED7); Text: '5e-310'), // 5e-310, subnormal
+    (Bits: QWord($0060000000000000); Text: '7.120236347223045e-307'), // 2^-1017, narrower gap below
+    (Bits: QWord($4304200FE9E18E22); Text: '708094031835588.2'), // last-digit tie goes to even
+    (Bits: QWord($7A3143DC27F61CA2); Text: '3.9174595656667484e+280'), // an Extended-based parse misreads it
+    (Bits: QWord($44B52D02C7E14AF6); Text: '1e+23') // 1e23
   );
 
 procedure TSchemaBuilder.TestObjectEnvelope;
@@ -526,21 +537,12 @@ end;
 procedure TWireNumber.TestJavaScriptForms;
 var
   I: Integer;
-begin
-  for I := Low(WIRE_CASES) to High(WIRE_CASES) do
-    Expect<string>(WireText(WIRE_CASES[I].Value)).ToBe(WIRE_CASES[I].Text);
-end;
-
-procedure TWireNumber.TestEveryFormParsesBack;
-var
-  I, Code: Integer;
-  Back: Double;
+  Value: Double;
 begin
   for I := Low(WIRE_CASES) to High(WIRE_CASES) do
   begin
-    Val(WireText(WIRE_CASES[I].Value), Back, Code);
-    Expect<Integer>(Code).ToBe(0);
-    Expect<Boolean>(Back = WIRE_CASES[I].Value).ToBe(True);
+    Move(WIRE_CASES[I].Bits, Value, SizeOf(Value));
+    Expect<string>(WireText(Value)).ToBe(WIRE_CASES[I].Text);
   end;
 end;
 
@@ -588,8 +590,6 @@ procedure TWireNumber.SetupTests;
 begin
   Test('numbers are written as JavaScript writes them',
     TestJavaScriptForms);
-  Test('every written number parses back to the same Double',
-    TestEveryFormParsesBack);
   Test('NaN and infinities raise EMCPSchema', TestNonFiniteRaises);
   Test('MCPSerialize raises on a NaN float property',
     TestSerializeNaNRaises);
