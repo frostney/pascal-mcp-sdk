@@ -57,6 +57,14 @@ function markdownUrls(markdown) {
   });
   return urls;
 }
+// The text of an mdast node, as a heading or a link label reads.
+const flatten = (node) =>
+  'value' in node ? node.value : (node.children ?? []).map(flatten).join('');
+// The text of a Markdown document's first H1.
+function title(markdown) {
+  const h1 = parse(markdown).children.find((node) => node.type === 'heading' && node.depth === 1);
+  return h1 ? flatten(h1) : undefined;
+}
 const sameSet = (where, actual, expected) => {
   const missing = [...expected].filter((url) => !actual.has(url));
   const extra = [...actual].filter((url) => !expected.has(url));
@@ -148,20 +156,28 @@ for (const page of pages) {
   const rendered = (article.match(/<table[\s>]/g) ?? []).length;
   if (rendered !== tables) fail(`${where}: ${tables} table(s) in its source, ${rendered} rendered`);
 
-  // 3. Every heading has an id, and every h2 and h3 is in the table of
-  // contents, which links to nothing else.
+  // 3. Every heading has an id, and the table of contents lists every
+  // h2 and h3 and links only to the article's headings.
   const headings = [...article.matchAll(/<h([1-6])(\s[^>]*)?>/g)];
   const withoutId = headings.filter((m) => m[1] !== '1' && !/\sid="/.test(m[2] ?? '')).length;
   if (withoutId > 0) fail(`${where}: ${withoutId} heading(s) without an id`);
-  const tocIds = new Set([...article.matchAll(/<h[23]\s[^>]*id="([^"]+)"/g)].map((m) => decode(m[1])));
+  const headingIds = (depths) =>
+    new Set([...article.matchAll(new RegExp(`<h[${depths}]\\s[^>]*id="([^"]+)"`, 'g'))].map((m) => decode(m[1])));
+  const tocIds = headingIds('23');
   if (tocIds.size > 0 && tocStart < 0) fail(`${where}: ${tocIds.size} h2/h3 heading(s) but no table of contents`);
   if (tocStart >= 0) {
     const linked = new Set([...toc.matchAll(/href="#([^"]+)"/g)].map((m) => decode(m[1])));
-    const articleIds = ids(article);
+    const articleHeadings = headingIds('1-6');
     const missing = [...tocIds].filter((id) => !linked.has(id));
-    const stray = [...linked].filter((id) => !articleIds.has(id));
+    const stray = [...linked].filter((id) => !articleHeadings.has(id));
     if (missing.length > 0) fail(`${where}: table of contents lacks ${missing.join(', ')}`);
-    if (stray.length > 0) fail(`${where}: table of contents links to missing ${stray.join(', ')}`);
+    if (stray.length > 0) fail(`${where}: table of contents links to non-headings ${stray.join(', ')}`);
+  }
+
+  // The canonical link names the page by the URL it is served at.
+  const canonicals = [...html.matchAll(/<link rel="canonical" href="([^"]*)"/g)].map((m) => decode(m[1]));
+  if (canonicals.length !== 1 || canonicals[0] !== page.url) {
+    fail(`${where}: canonical ${canonicals.join(', ') || '(none)'}, expected ${page.url}`);
   }
 
   // 4. The page actions name this page's own Markdown copy, under the
@@ -180,17 +196,23 @@ for (const page of pages) {
     if (data.isPartOf?.url !== `${siteUrl}/docs/`) fail(`${where} JSON-LD: isPartOf.url ${data.isPartOf?.url}`);
   }
 
-  // 6. The page's Markdown copy starts with its URL, and every link in
-  // it is absolute.
+  // 6. The page's Markdown copy starts with its URL, then its source's
+  // H1.
+  page.title = title(read(page.source));
   if (!fs.existsSync(page.copy)) fail(`${rel(out, page.copy)}: missing from the export`);
-  else if (!read(page.copy).startsWith(`URL: ${page.url}\n`)) {
-    fail(`${rel(out, page.copy)}: does not start with "URL: ${page.url}"`);
+  else {
+    page.copyText = read(page.copy);
+    if (!page.copyText.startsWith(`URL: ${page.url}\n`)) {
+      fail(`${rel(out, page.copy)}: does not start with "URL: ${page.url}"`);
+    }
+    const copyTitle = title(page.copyText.slice(page.copyText.indexOf('\n') + 1));
+    if (copyTitle !== page.title) fail(`${rel(out, page.copy)}: H1 "${copyTitle}", its source's is "${page.title}"`);
   }
 }
 
 // 7. llms.txt, llms-full.txt and the Markdown copies are read outside
 // the site: every link in them is absolute, and the ones to this site
-// are served.
+// are served. (Each copy's URL line is checked against its page above.)
 const markdownFiles = [
   path.join(out, 'llms.txt'),
   path.join(out, 'llms-full.txt'),
@@ -203,33 +225,55 @@ for (const file of markdownFiles) {
     continue;
   }
   const text = read(file);
-  const urls = [...markdownUrls(text), ...[...text.matchAll(/^URL: (\S+)$/gm)].map((m) => m[1])];
-  for (const url of urls) {
+  for (const url of markdownUrls(text)) {
     if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) fail(`${where}: ${url} is not an absolute URL`);
     else if (url.startsWith(`${siteOrigin}/`)) checkSiteUrl(url, where);
   }
 }
 
-// 8. llms.txt links every page's copy and llms-full.txt, each under an
-// H2 (the format's file lists), and llms-full.txt holds every page.
+// 8. llms.txt has a list item per page, under an H2 (the format's file
+// lists), that starts with a link to that page's copy labelled with its
+// title, and one for llms-full.txt; nothing is linked before the first
+// H2.
 const llms = path.join(out, 'llms.txt');
 if (fs.existsSync(llms)) {
-  const text = read(llms);
-  const firstH2 = text.search(/^## /m);
-  const beforeH2 = firstH2 < 0 ? text : text.slice(0, firstH2);
-  const loose = markdownUrls(beforeH2);
+  const tree = parse(read(llms));
+  const firstH2 = tree.children.findIndex((node) => node.type === 'heading' && node.depth === 2);
+  const loose = [];
+  for (const node of firstH2 < 0 ? tree.children : tree.children.slice(0, firstH2)) {
+    visit(node, ['link', 'definition'], (link) => {
+      loose.push(link.url);
+    });
+  }
   if (loose.length > 0) fail(`llms.txt: links before the first H2: ${loose.join(', ')}`);
+  const listed = new Set();
+  for (const list of tree.children.slice(firstH2 + 1).filter((node) => node.type === 'list')) {
+    for (const item of list.children) {
+      const lead = item.children[0]?.type === 'paragraph' ? item.children[0].children[0] : undefined;
+      if (lead?.type === 'link') listed.add(`${flatten(lead)} -> ${lead.url}`);
+      else fail(`llms.txt: a list item that does not start with a link: "${flatten(item).slice(0, 60)}"`);
+    }
+  }
   sameSet(
     'llms.txt',
-    new Set(markdownUrls(text)),
-    new Set([...pages.map((page) => `${siteOrigin}${page.copyPath}`), `${siteUrl}/llms-full.txt`]),
+    listed,
+    new Set([
+      ...pages.map((page) => `${page.title} -> ${siteOrigin}${page.copyPath}`),
+      `All of the documentation in one file -> ${siteUrl}/llms-full.txt`,
+    ]),
   );
 }
+
+// llms-full.txt is every page's Markdown copy, each once, and nothing
+// else.
 const full = path.join(out, 'llms-full.txt');
-if (fs.existsSync(full)) {
-  const urls = [...read(full).matchAll(/^URL: (\S+)$/gm)].map((m) => m[1]);
-  if (urls.length !== new Set(urls).size) fail('llms-full.txt: a page appears more than once');
-  sameSet('llms-full.txt', new Set(urls), new Set(pages.map((page) => page.url)));
+const copies = pages.map((page) => page.copyText).filter((text) => text !== undefined);
+if (fs.existsSync(full) && copies.length === pages.length) {
+  const text = read(full);
+  const absent = pages.filter((page) => !text.includes(page.copyText)).map((page) => page.url);
+  if (absent.length > 0) fail(`llms-full.txt: lacks the Markdown copy of ${absent.join(', ')}`);
+  const expected = copies.reduce((sum, copy) => sum + copy.length, 0) + 2 * (copies.length - 1);
+  if (text.length !== expected) fail(`llms-full.txt: ${text.length} characters, the copies make ${expected}`);
 }
 
 // 9. The sitemap lists the home page and every docs page by the URL it
