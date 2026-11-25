@@ -26,9 +26,9 @@ name: lwpt weekly bump
 # needs a migration, as 0.5.1 → 0.6.0 and 0.8.0's lockfile v4 did) is
 # the signal to migrate by hand.
 #
-# A PR opened with GITHUB_TOKEN does not start other workflows, so the
-# PR's CI starts once a maintainer pushes to the branch or closes and
-# reopens the PR.
+# The pull_request runs of a PR opened or updated with GITHUB_TOKEN
+# wait for approval: a maintainer starts the PR's CI with "Approve
+# workflows to run" in its merge box.
 #
 # Cadence: weekly (Mondays 07:17 UTC; GitHub delays or drops scheduled
 # runs queued at :00). Manual trigger available via workflow_dispatch.
@@ -63,12 +63,15 @@ jobs:
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
           echo "$HOMEBREW_PREFIX/bin" >> "$GITHUB_PATH"
           brew install frostney/tap/lwpt
-          latest=$(lwpt --version | awk '{print $2}')
+          reported=$(lwpt --version)
           current=$(bash .github/scripts/lwpt-version.sh)
-          if ! printf '%s\n' "$latest" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::the tap's lwpt reports an unexpected version: '$latest'"
+          # Exactly one line, "lwpt MAJOR.MINOR.PATCH", or stop: the value
+          # goes into GITHUB_OUTPUT and lwpt.toml.
+          if [[ ! "$reported" =~ ^lwpt\ ([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::the tap's lwpt reports an unexpected version: '$reported'"
             exit 1
           fi
+          latest=${BASH_REMATCH[1]}
           # Bump only to a strictly newer release (SemVer precedence of
           # plain MAJOR.MINOR.PATCH is version-sort order).
           newest=$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n 1)
@@ -200,9 +203,9 @@ jobs:
             `lwpt.cfg`/`lwpt.lock` and committed zero-install trees (stale
             archives pruned), and the refreshed AGENTS.md command block.
 
-            `lwpt install --frozen` was verified during the bump. CI does not
-            start on a PR this workflow opens: push to the branch or close and
-            reopen the PR to run it, review the
+            `lwpt install --frozen` was verified during the bump. CI on a PR
+            this workflow opens waits for approval: start it with **Approve
+            workflows to run** in the merge box, review the
             [release notes](https://github.com/frostney/lwpt/releases/tag/${{ needs.bump.outputs.version }}),
             and merge only once the full gate passes.
 

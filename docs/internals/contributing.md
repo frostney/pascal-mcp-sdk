@@ -20,7 +20,7 @@ flowchart LR
     IDEA["Feature idea<br/>or bug report"]
     TEST["Failing test first<br/>(co-located *.Test.pas,<br/>or mcpsmoke for E2E)"]
     OWN["Implement in the<br/>unit that owns the rule"]
-    GATE["Local gate:<br/>lwpt build · test ·<br/>run smoke · format --check"]
+    GATE["Local gate:<br/>lwpt install --frozen · build ·<br/>test · run smoke · format --check"]
     PR["PR with Conventional<br/>Commit title"]
     CI["CI: 3-platform battery,<br/>interop, docs + format gates"]
     MERGE["Squash merge —<br/>title becomes the<br/>changelog entry"]
@@ -36,8 +36,11 @@ flowchart LR
   `source/units/MCP.inc` (`fpc -iV` prints yours). CI's Windows leg
   installs 3.2.2 itself; the Linux and macOS legs take the package
   manager's FPC and print its version.
-- **lwpt** — the canonical build/test/format entry point. Download
-  the release tarball for your platform from
+- **lwpt** — the canonical build/test/format entry point, at the
+  release this repository pins: the exact `testing` version in
+  `lwpt.toml` (`bash .github/scripts/lwpt-version.sh` prints it; a
+  newer lwpt can refuse the committed lockfile). Download that
+  release's tarball for your platform from
   [lwpt's releases](https://github.com/frostney/lwpt/releases),
   verify the checksum, put `lwpt` on PATH. Do not invoke `fpc`
   directly except as `fpc @lwpt.cfg`.
@@ -52,10 +55,10 @@ Then:
 ```sh
 git clone https://github.com/frostney/pascal-mcp-sdk
 cd pascal-mcp-sdk
-lwpt install     # resolve deps, regenerate lwpt.cfg + lwpt.lock
-lwpt build       # build/mcpdemo + build/mcpsmoke
-lwpt test        # co-located unit suites
-lwpt run smoke   # E2E battery: spawns mcpdemo, drives the protocol
+lwpt install --frozen  # verify lwpt.lock and the committed modules
+lwpt build             # build/mcpdemo + build/mcpsmoke
+lwpt test              # co-located unit suites
+lwpt run smoke         # E2E battery: spawns mcpdemo, drives the protocol
 ```
 
 `lwpt install --frozen` is the CI mode: verify the lockfile and the
@@ -119,6 +122,7 @@ the ADRs under
 ## Run the gate locally
 
 ```sh
+lwpt install --frozen  # lockfile and committed modules agree
 lwpt build             # both apps compile
 lwpt test              # unit suites
 lwpt run smoke         # E2E: mcpsmoke drives mcpdemo over pipes

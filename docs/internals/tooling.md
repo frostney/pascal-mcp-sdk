@@ -22,7 +22,8 @@ lwpt install           # resolve deps → lwpt.cfg + lwpt.lock + .lwpt/modules
 lwpt install --frozen  # CI: verify lockfile + committed modules, no network
 lwpt build             # every [build] target in lwpt.toml → build/
 lwpt test              # discovers source/units/*.Test.pas
-lwpt test <path|glob>  # just the selected suites; --inventory counts their suites and cases
+lwpt test source/units/MCP.Server.Test.pas  # one test file (paths and globs select)
+lwpt test --inventory  # each test program's suite and case counts
 lwpt run smoke         # the built mcpsmoke E2E battery (scripts/smoke.pas)
 lwpt format            # rewrite in place (pre-commit does this)
 lwpt format --check    # CI gate: fail on drift
@@ -104,14 +105,14 @@ Six workflows (see [.github/workflows/](../../.github/workflows/)):
   when the Homebrew tap's lwpt is newer than the pin, carrying the
   complete bump (the pin, the regenerated lockfile, zero-install trees
   and AGENTS.md command block). A failing run means the new release
-  needs a migration by hand. CI does not start on the PR it opens
-  until someone pushes to it or closes and reopens it.
+  needs a migration by hand. CI on the PR it opens waits for a
+  maintainer's **Approve workflows to run**.
 - **update-project-skills.yml** — weekly (Mondays) and on demand: a
   thin caller of known-good-route's reusable workflow that refreshes
   the skills `skills-lock.json` lists and opens a draft PR when they
   changed. A skill deleted or renamed upstream stops the run until it
-  is migrated by hand. As with the lwpt bump, CI starts on that PR
-  once someone pushes to it or closes and reopens it.
+  is migrated by hand. As with the lwpt bump, CI on that PR waits for
+  **Approve workflows to run**.
 
 The lwpt pin is the exact version of the `testing` dependency in
 `lwpt.toml`: the test framework comes from the same lwpt release tag
