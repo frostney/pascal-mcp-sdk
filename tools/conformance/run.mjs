@@ -11,37 +11,44 @@
 // Usage: node run.mjs <path-to-mcpdemo> [extra conformance args]
 //   e.g. node run.mjs build/mcpdemo --scenario tools-list
 //
-// Results land in <repo>/build/conformance/results/ (checks.json per
-// scenario). Once results exist, the exit code is 1 when the run differs
-// from the baseline (rules in compare.mjs): an unlisted failure or a
-// recorded passing check that no longer passes (regression), a listed
-// failure or check that now passes (stale baseline), a scenario added or
-// removed, or a checks.json that is missing, malformed, contradictory or
-// duplicated. The suite's own exit code is not used then, unless a signal
-// ended it. Before that, operational errors exit non-zero too: 2 for
-// usage, an invalid baseline or suite command, or a results directory
-// another run holds; 1 when mcpdemo does not start (it is stopped first),
-// when a signal ended the suite, and 1 or the suite's code when no results
-// were produced.
+// Each run writes into a fresh directory of its own,
+// <repo>/build/conformance/<timestamp>-<pid>/ (checks.json per
+// scenario), and prints it; nothing is ever deleted, so concurrent runs
+// cannot touch each other's evidence. Once results exist, the exit code
+// is 1 when the run differs from the baseline (rules in compare.mjs):
+// an unlisted failure or a recorded passing check that no longer passes
+// (regression), a listed failure or check that now passes (stale
+// baseline), a scenario added or removed, or a checks.json that is
+// missing, malformed or duplicated. The suite's own exit code then
+// counts only when it is neither 0 nor 1 (its two ordinary results):
+// anything else, a signal included, means the suite was interrupted
+// or could not run, and fails the run. Before that, operational errors
+// exit non-zero too: 2 for usage or an invalid baseline or suite
+// command, and 1 when mcpdemo does not start (it is stopped first) or
+// no results were produced. When the runner itself is interrupted
+// (SIGINT, SIGTERM, SIGHUP) it stops the suite and mcpdemo first.
 //
-// Selection: --scenario or --suite (in `--opt value` or `--opt=value`
-// form) narrows the run to fewer scenarios, still at the baseline's spec
-// revision; scenarios outside the baseline are then listed as not
-// judged, and none count as added or removed. --requirements or
-// --spec-version may only name the baseline's own revision: another
-// revision runs a different wire that this baseline does not describe.
-// The runner owns --url and --output-dir/-o. Needs Node >= 22 (the
-// suite's CLI uses fs.globSync).
+// Selection: --scenario (in `--opt value` or `--opt=value` form) runs
+// those scenarios at the baseline's revision, extensions included
+// (`--force`, as the requirement set runs them); --suite runs a suite at
+// that revision, which leaves out extension scenarios. Scenarios outside
+// the baseline are then listed as not judged, and none count as added or
+// removed. --requirements and --spec-version may only name the
+// baseline's revision, and --requirements does not combine with a
+// selection. The runner owns --url, --output-dir/-o and
+// --expected-failures. Needs Node >= 22 (the suite's CLI uses
+// fs.globSync).
 //
 // Test seams (run.test.mjs): CONFORMANCE_BASELINE names another
-// baseline file, CONFORMANCE_RESULTS another results directory, and
-// CONFORMANCE_SUITE_COMMAND, a JSON array, replaces the
+// baseline file, CONFORMANCE_RESULTS a results directory that must not
+// exist yet, and CONFORMANCE_SUITE_COMMAND, a JSON array, replaces the
 // `npx --yes <suite>@<version>` prefix of the suite command.
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeSync, closeSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { constants } from 'node:os';
 import { freePort, startDemo, stopChild } from '../interop-ts/demo-http.mjs';
 import { classifyChecks, compare, differs, validateBaseline } from './compare.mjs';
 
@@ -94,6 +101,7 @@ const [demoArg, ...extra] = process.argv.slice(2);
 if (!demoArg) usage('usage: node run.mjs <path-to-mcpdemo> [conformance args]');
 
 // Commander accepts `--opt value` and `--opt=value`.
+const has = (name) => extra.some((a) => a === `--${name}` || a.startsWith(`--${name}=`));
 function optionValues(name) {
   const values = [];
   extra.forEach((arg, i) => {
@@ -102,8 +110,9 @@ function optionValues(name) {
   });
   return values;
 }
-const owned = extra.filter((a) => /^(--url|--output-dir)(=|$)/.test(a) || /^-o/.test(a));
-if (owned.length > 0) usage(`the runner sets the server URL and results directory; drop ${owned.join(' ')}`);
+const owned = extra.filter((a) => /^(--url|--output-dir|--expected-failures)(=|$)/.test(a) || /^-o/.test(a));
+if (owned.length > 0)
+  usage(`the runner sets the server URL, the results directory and the baseline; drop ${owned.join(' ')}`);
 const revisions = [...optionValues('requirements'), ...optionValues('spec-version')];
 const foreign = revisions.filter((r) => r !== baseline.requirements);
 if (foreign.length > 0)
@@ -111,54 +120,49 @@ if (foreign.length > 0)
     `baseline.json describes ${baseline.requirements}; run the suite directly (npx ${CONFORMANCE}) ` +
       `for ${foreign.join(', ')}`,
   );
-const narrowed = extra.some((a) => /^--(scenario|suite|spec-version)(=|$)/.test(a));
-// A narrowed run still runs at the baseline's revision; without one the
+if (has('requirements') && (has('scenario') || has('suite') || has('spec-version')))
+  usage('--requirements runs the whole requirement set and does not combine with --scenario, --suite or --spec-version');
+const narrowed = has('scenario') || has('suite') || has('spec-version');
+// A narrowed run stays at the baseline's revision; without one the
 // suite would pick each scenario's latest dated revision for itself.
-const selection = narrowed
-  ? revisions.length > 0
-    ? []
-    : ['--spec-version', baseline.requirements]
-  : revisions.length > 0
-    ? []
-    : ['--requirements', baseline.requirements];
+// --force runs a selected extension scenario as the requirement set
+// does instead of skipping it under the dated filter.
+const selection = [];
+if (!narrowed && !has('requirements')) selection.push('--requirements', baseline.requirements);
+if (narrowed && !has('spec-version')) selection.push('--spec-version', baseline.requirements);
+if (has('scenario') && !extra.includes('--force')) selection.push('--force');
 
 const demo = resolve(demoArg);
 const root = resolve(here, '..', '..');
+const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const resultsDir = process.env.CONFORMANCE_RESULTS
   ? resolve(process.env.CONFORMANCE_RESULTS)
-  : resolve(root, 'build', 'conformance', 'results');
-
-// One run per results directory: each run clears it first, so a second
-// run would erase the first one's evidence. The lock names its owner's
-// pid; a lock whose owner has exited is taken over.
-const lockFile = `${resultsDir}.lock`;
-mkdirSync(dirname(lockFile), { recursive: true });
-function takeLock() {
-  try {
-    const fd = openSync(lockFile, 'wx');
-    writeSync(fd, String(process.pid));
-    closeSync(fd);
-    return true;
-  } catch (error) {
-    if (error.code !== 'EEXIST') throw error;
-  }
-  const owner = Number(readFileSync(lockFile, 'utf8'));
-  try {
-    if (owner > 0) process.kill(owner, 0);
-    return false;
-  } catch {
-    rmSync(lockFile, { force: true });
-    return takeLock();
-  }
+  : resolve(root, 'build', 'conformance', `${stamp}-${process.pid}`);
+mkdirSync(dirname(resultsDir), { recursive: true });
+try {
+  // Not recursive: the directory must be new, so it holds nothing but
+  // this run's results.
+  mkdirSync(resultsDir);
+} catch (error) {
+  usage(`cannot create a fresh results directory ${resultsDir}: ${error.message}`);
 }
-if (!takeLock()) usage(`another run is using ${resultsDir} (${lockFile})`);
-process.on('exit', () => rmSync(lockFile, { force: true }));
 
-rmSync(resultsDir, { recursive: true, force: true });
-mkdirSync(resultsDir, { recursive: true });
+let server;
+let suite;
+let stopping = false;
+// Interrupted: stop the suite and mcpdemo, then exit with the signal's
+// conventional status.
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(signal, async () => {
+    if (stopping) return;
+    stopping = true;
+    console.error(`conformance: interrupted by ${signal}; stopping the suite and mcpdemo`);
+    await Promise.all([suite, server].filter(Boolean).map((child) => stopChild(child)));
+    process.exit(128 + constants.signals[signal]);
+  });
+}
 
 const port = await freePort();
-let server;
 try {
   server = await startDemo(demo, port);
 } catch (error) {
@@ -175,10 +179,10 @@ let suiteSignal = null;
 try {
   suiteCode = await new Promise((done) => {
     const [command, ...prefixArgs] = suitePrefix;
-    const suite = spawn(command, [...prefixArgs, ...suiteArgs], { stdio: 'inherit' });
+    suite = spawn(command, [...prefixArgs, ...suiteArgs], { stdio: 'inherit' });
     suite.on('exit', (exitCode, signal) => {
       suiteSignal = signal;
-      done(exitCode ?? 1);
+      done(exitCode);
     });
     suite.on('error', (error) => {
       console.error(`conformance: failed to start the suite: ${error.message}`);
@@ -186,19 +190,22 @@ try {
     });
   });
 } finally {
-  server.removeAllListeners('exit');
-  await stopChild(server);
+  // startDemo's own exit listener is inert once it has settled; the
+  // signal handler may be waiting on another, so none is removed.
+  if (!stopping) await stopChild(server);
 }
-if (suiteSignal) {
-  // Interrupted: whatever results exist are incomplete.
-  console.error(`conformance: the suite was ended by ${suiteSignal}`);
+if (stopping) await new Promise(() => {}); // the signal handler exits
+// 0 and 1 are the suite's ordinary results (all passed, some failed);
+// anything else, a signal included (even when a wrapper turns it into
+// 128 + n), means the run was cut short or never ran.
+if (suiteSignal || (suiteCode !== 0 && suiteCode !== 1)) {
+  console.error(`conformance: the suite did not finish normally (${suiteSignal ?? `exit ${suiteCode}`})`);
   process.exit(1);
 }
 
 // One directory per scenario: server-<scenario>-<ISO timestamp>.
-// A missing, malformed, contradictory or duplicated checks.json is a
-// broken run, never an ordinary failure: it would otherwise match an
-// expected `fail`.
+// A missing, malformed or duplicated checks.json is a broken run,
+// never an ordinary failure: it would otherwise match an expected `fail`.
 const actual = new Map();
 for (const entry of readdirSync(resultsDir).sort()) {
   const match = /^server-(.+)-\d{4}-\d{2}-\d{2}T.*$/.exec(entry);
@@ -216,10 +223,11 @@ for (const entry of readdirSync(resultsDir).sort()) {
   }
   actual.set(match[1], classifyChecks(checks));
 }
+console.log(`conformance: results in ${resultsDir}`);
 
 if (actual.size === 0) {
   console.error(`conformance: no scenario results found (suite exit ${suiteCode})`);
-  process.exit(suiteCode || 1);
+  process.exit(1);
 }
 
 const result = compare(baseline, actual, narrowed);
@@ -231,7 +239,7 @@ console.log(
     `${tally('pass')} passing, ${tally('fail')} failing, ${tally('skip')} skipped`,
 );
 const sections = [
-  ['UNREADABLE: checks.json missing, malformed, contradictory or duplicated', result.unreadable],
+  ['UNREADABLE: checks.json missing, malformed or duplicated', result.unreadable],
   ['REGRESSION: failing or no longer tested, or a recorded passing check no longer passes', result.regressions],
   ['STALE BASELINE: now passing (update baseline.json)', result.stale],
   ['ADDED: scenario not in baseline.json', result.added],

@@ -10,8 +10,15 @@ export const KNOWN_STATUSES = new Set(['SUCCESS', 'FAILURE', 'WARNING', 'INFO', 
 // failed; skip: the suite ran the scenario but every check was skipped
 // or informational, so it proved nothing either way.
 const EXPECTED = new Set(['pass', 'fail', 'skip']);
-// An exact npm version, pre-releases included: the pin cannot float.
-const EXACT_VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/;
+// An exact SemVer version, pre-releases included, as npm reads one:
+// numeric parts without leading zeros and within Number.MAX_SAFE_INTEGER
+// (npm treats anything else as a dist-tag, which can float).
+const EXACT_VERSION =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-(0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?$/;
+function isExactVersion(version) {
+  const match = EXACT_VERSION.exec(version);
+  return match !== null && match.slice(1, 4).every((part) => Number(part) <= Number.MAX_SAFE_INTEGER);
+}
 
 // Checks the shape of a parsed baseline.json and returns the list of
 // problems, empty when it is usable. A malformed expectation would
@@ -23,7 +30,7 @@ export function validateBaseline(baseline) {
   for (const key of ['suite', 'version', 'requirements'])
     if (typeof baseline[key] !== 'string' || baseline[key] === '')
       problems.push(`"${key}" is not a non-empty string`);
-  if (typeof baseline.version === 'string' && baseline.version !== '' && !EXACT_VERSION.test(baseline.version))
+  if (typeof baseline.version === 'string' && baseline.version !== '' && !isExactVersion(baseline.version))
     problems.push(`"version" ${JSON.stringify(baseline.version)} is not an exact version`);
   const scenarios = baseline.scenarios;
   if (scenarios === null || typeof scenarios !== 'object' || Array.isArray(scenarios)) {
@@ -57,16 +64,14 @@ export function validateBaseline(baseline) {
 }
 
 // Turns one parsed checks.json into { outcome, passing } or { error }.
-// The suite can report several probes under one check id, telling them
-// apart by name; a check id passes only when every probe under it
-// succeeded, and fails when any failed. An empty array, a non-object
-// entry, a missing or empty id, an unknown status, or one probe (same
-// id and name) reported both as SUCCESS and as FAILURE is invalid
-// evidence, never an outcome.
+// The suite can report a check id several times, once per probe or
+// subcase; as in the suite itself, the id fails when any report fails
+// and passes only when some report succeeded and none failed. An empty
+// array, a non-object entry, a missing or empty id, or an unknown status
+// is invalid evidence, never an outcome.
 export function classifyChecks(checks) {
   if (!Array.isArray(checks)) return { error: 'checks.json is not an array' };
   if (checks.length === 0) return { error: 'checks.json is empty' };
-  const probes = new Map();
   const succeeded = new Set();
   const failed = new Set();
   for (const [i, c] of checks.entries()) {
@@ -76,12 +81,6 @@ export function classifyChecks(checks) {
       return { error: `check ${i} has no id` };
     if (!KNOWN_STATUSES.has(c.status))
       return { error: `check ${c.id} has unknown status ${JSON.stringify(c.status)}` };
-    const probe = `${c.id}\u0000${typeof c.name === 'string' ? c.name : ''}`;
-    const statuses = probes.get(probe) ?? new Set();
-    statuses.add(c.status);
-    probes.set(probe, statuses);
-    if (statuses.has('SUCCESS') && statuses.has('FAILURE'))
-      return { error: `check ${c.id}${c.name ? ` (${c.name})` : ''} reported as both SUCCESS and FAILURE` };
     if (c.status === 'SUCCESS') succeeded.add(c.id);
     if (c.status === 'FAILURE') failed.add(c.id);
   }
@@ -129,9 +128,12 @@ export function compare(baseline, actual, narrowed) {
         r.stale.push(`${name} (issue #${want.issue}): now passes`);
         continue;
       }
-      for (const id of result.passing)
-        if (!recorded.has(id))
-          r.stale.push(`${name}: check ${id} now passes (add it to passingChecks)`);
+      // Only an expected failure that still fails can record more
+      // passing checks; a skip that now fails is a regression above.
+      if (want.expected === 'fail' && result.outcome === 'fail')
+        for (const id of result.passing)
+          if (!recorded.has(id))
+            r.stale.push(`${name}: check ${id} now passes (add it to passingChecks)`);
     }
   }
   if (!narrowed)

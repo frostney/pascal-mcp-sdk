@@ -1,12 +1,15 @@
 // End-to-end tests of run.mjs: argument handling, the default
 // requirement set, result discovery, exit codes and process cleanup,
-// with a stand-in mcpdemo and a stand-in suite (fixtures/).
+// with a stand-in mcpdemo and a stand-in suite (fixtures/). The stand-in
+// suite only writes results after reaching the URL run.mjs gives it, so
+// a run that never started mcpdemo, or pointed the suite elsewhere,
+// cannot pass.
 // Run: node --test tools/conformance/run.test.mjs
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,45 +34,66 @@ const matching = {
   'completion-complete': [bad('completion-complete'), ok('wire-schema-valid')],
 };
 
-function runConformance({ results = matching, baselineValue = baseline, demoMode, extra = [], env = {}, lockedBy } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'conformance-run-'));
+const read = (file) => {
   try {
-    const baselineFile = join(dir, 'baseline.json');
-    writeFileSync(baselineFile, JSON.stringify(baselineValue));
-    const argsFile = join(dir, 'suite-args.json');
-    const pidFile = join(dir, 'demo.pid');
-    if (lockedBy !== undefined) writeFileSync(`${join(dir, 'results')}.lock`, String(lockedBy));
+    return readFileSync(file, 'utf8');
+  } catch {
+    return undefined;
+  }
+};
+
+// The environment and files of one runner invocation in a fresh
+// directory; `results` must not exist yet, as run.mjs requires.
+function setUp({ results = matching, baselineValue = baseline, demoMode, env = {} }) {
+  const dir = mkdtempSync(join(tmpdir(), 'conformance-run-'));
+  const baselineFile = join(dir, 'baseline.json');
+  writeFileSync(baselineFile, JSON.stringify(baselineValue));
+  const files = {
+    dir,
+    results: join(dir, 'results'),
+    suiteArgs: join(dir, 'suite-args.json'),
+    suitePid: join(dir, 'suite.pid'),
+    demoPid: join(dir, 'demo.pid'),
+  };
+  files.env = {
+    ...process.env,
+    CONFORMANCE_BASELINE: baselineFile,
+    CONFORMANCE_RESULTS: files.results,
+    CONFORMANCE_SUITE_COMMAND: JSON.stringify([process.execPath, fakeSuite]),
+    FAKE_SUITE_ARGS: files.suiteArgs,
+    FAKE_SUITE_PID: files.suitePid,
+    FAKE_SUITE_RESULTS: JSON.stringify(results),
+    FAKE_DEMO_PID: files.demoPid,
+    ...(demoMode ? { FAKE_DEMO_MODE: demoMode } : {}),
+    ...env,
+  };
+  return files;
+}
+
+function observe(files, child) {
+  const suiteArgs = read(files.suiteArgs);
+  return {
+    code: child.status,
+    output: `${child.stdout}${child.stderr}`,
+    suiteArgs: suiteArgs === undefined ? undefined : JSON.parse(suiteArgs),
+    demoPid: Number(read(files.demoPid) ?? 0),
+    suitePid: Number(read(files.suitePid) ?? 0),
+  };
+}
+
+function runConformance({ extra = [], before, after, ...options } = {}) {
+  const files = setUp(options);
+  try {
+    before?.(files);
     const child = spawnSync(process.execPath, [join(here, 'run.mjs'), fakeDemo, ...extra], {
       encoding: 'utf8',
       timeout: 30000,
-      env: {
-        ...process.env,
-        CONFORMANCE_BASELINE: baselineFile,
-        CONFORMANCE_RESULTS: join(dir, 'results'),
-        CONFORMANCE_SUITE_COMMAND: JSON.stringify([process.execPath, fakeSuite]),
-        FAKE_SUITE_ARGS: argsFile,
-        FAKE_SUITE_RESULTS: JSON.stringify(results),
-        FAKE_DEMO_PID: pidFile,
-        ...(demoMode ? { FAKE_DEMO_MODE: demoMode } : {}),
-        ...env,
-      },
+      env: files.env,
     });
-    const read = (file) => {
-      try {
-        return readFileSync(file, 'utf8');
-      } catch {
-        return undefined;
-      }
-    };
-    const suiteArgs = read(argsFile);
-    return {
-      code: child.status,
-      output: `${child.stdout}${child.stderr}`,
-      suiteArgs: suiteArgs === undefined ? undefined : JSON.parse(suiteArgs),
-      demoPid: Number(read(pidFile)),
-    };
+    after?.(files);
+    return observe(files, child);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(files.dir, { recursive: true, force: true });
   }
 }
 
@@ -88,6 +112,7 @@ test('results that match the baseline exit 0 and run its requirement set', () =>
   assert.match(r.output, /results match the baseline/);
   const at = r.suiteArgs.indexOf('--requirements');
   assert.equal(r.suiteArgs[at + 1], '2026-07-28');
+  assert.ok(r.demoPid > 0, 'the stand-in mcpdemo did not start');
   assert.equal(alive(r.demoPid), false, 'mcpdemo still running after the run');
 });
 
@@ -97,18 +122,16 @@ test('a regression exits 1 and names it', () => {
   assert.match(r.output, /REGRESSION[\s\S]*tools-list/);
 });
 
-test('a contradictory checks.json exits 1 as unreadable', () => {
-  const r = runConformance({
-    results: { ...matching, 'tools-list': [ok('tools-list'), bad('tools-list')] },
-  });
-  assert.equal(r.code, 1, r.output);
-  assert.match(r.output, /UNREADABLE[\s\S]*tools-list/);
-});
-
 test('an unparseable checks.json exits 1 as unreadable', () => {
   const r = runConformance({ results: { ...matching, 'tools-list': '{not json' } });
   assert.equal(r.code, 1, r.output);
   assert.match(r.output, /UNREADABLE[\s\S]*tools-list/);
+});
+
+test('two result directories for one scenario are unreadable', () => {
+  const r = runConformance({ env: { FAKE_SUITE_DUPLICATE: 'tools-list' } });
+  assert.equal(r.code, 1, r.output);
+  assert.match(r.output, /UNREADABLE[\s\S]*tools-list \(more than one result directory/);
 });
 
 test('no results at all is an operational failure', () => {
@@ -117,26 +140,76 @@ test('no results at all is an operational failure', () => {
   assert.match(r.output, /no scenario results found/);
 });
 
-test('an invalid baseline exits 2 before the suite runs', () => {
-  const r = runConformance({
-    baselineValue: { ...baseline, scenarios: { 'tools-list': { expected: 'fial' } } },
+test("the suite's ordinary failure exit is judged by the baseline", () => {
+  const r = runConformance({ env: { FAKE_SUITE_EXIT: '1' } });
+  assert.equal(r.code, 0, r.output);
+});
+
+for (const [label, env] of [
+  ['a signal', { FAKE_SUITE_SIGNAL: 'SIGTERM' }],
+  ['a wrapped signal (exit 143)', { FAKE_SUITE_EXIT: '143' }],
+  ['a usage error (exit 2)', { FAKE_SUITE_EXIT: '2' }],
+]) {
+  test(`a suite ended by ${label} fails the run even when its results match`, () => {
+    const r = runConformance({ env });
+    assert.equal(r.code, 1, r.output);
+    assert.match(r.output, /did not finish normally/);
+    assert.ok(r.demoPid > 0);
+    assert.equal(alive(r.demoPid), false, 'mcpdemo left running');
   });
+}
+
+test('an invalid baseline exits 2 before the suite runs', () => {
+  const r = runConformance({ baselineValue: { ...baseline, scenarios: { 'tools-list': { expected: 'fial' } } } });
   assert.equal(r.code, 2, r.output);
   assert.match(r.output, /is invalid/);
   assert.equal(r.suiteArgs, undefined, 'the suite ran despite an invalid baseline');
 });
 
+test('an invalid suite command is refused before mcpdemo starts', () => {
+  const r = runConformance({ env: { CONFORMANCE_SUITE_COMMAND: '[]' } });
+  assert.equal(r.code, 2, r.output);
+  assert.equal(r.demoPid, 0, 'mcpdemo was started');
+});
+
+test('a results directory that already exists is refused and left alone', () => {
+  let kept;
+  const r = runConformance({
+    before: (files) => {
+      mkdirSync(files.results);
+      writeFileSync(join(files.results, 'keep.txt'), "not the runner's");
+    },
+    after: (files) => {
+      kept = read(join(files.results, 'keep.txt'));
+    },
+  });
+  assert.equal(r.code, 2, r.output);
+  assert.match(r.output, /fresh results directory/);
+  assert.equal(kept, "not the runner's", 'the existing directory was touched');
+  assert.equal(r.suiteArgs, undefined);
+  assert.equal(r.demoPid, 0);
+});
+
 for (const extra of [['--scenario', 'tools-list'], ['--scenario=tools-list']]) {
-  test(`a scenario selection (${extra.join(' ')}) runs at the baseline's revision`, () => {
+  test(`a scenario selection (${extra.join(' ')}) runs at the baseline's revision, extensions included`, () => {
     const r = runConformance({ extra });
     assert.equal(r.code, 0, r.output);
     assert.equal(r.suiteArgs.includes('--requirements'), false);
     const at = r.suiteArgs.indexOf('--spec-version');
     assert.equal(r.suiteArgs[at + 1], '2026-07-28');
+    assert.ok(r.suiteArgs.includes('--force'), 'the selection was not forced past the dated filter');
     assert.ok(extra.every((a) => r.suiteArgs.includes(a)), 'the selector was not forwarded');
     assert.match(r.output, /1 scenarios run/);
   });
 }
+
+test('a suite selection runs at the baseline revision without forcing extensions', () => {
+  const r = runConformance({ extra: ['--suite', 'core'] });
+  assert.equal(r.code, 0, r.output);
+  const at = r.suiteArgs.indexOf('--spec-version');
+  assert.equal(r.suiteArgs[at + 1], '2026-07-28');
+  assert.equal(r.suiteArgs.includes('--force'), false);
+});
 
 test('a scenario outside the baseline is listed as not judged in a narrowed run', () => {
   const r = runConformance({ results: { ping: [ok('ping')] }, extra: ['--scenario', 'ping'] });
@@ -144,51 +217,24 @@ test('a scenario outside the baseline is listed as not judged in a narrowed run'
   assert.match(r.output, /NOT JUDGED[\s\S]*ping/);
 });
 
-for (const extra of [['--spec-version', '2025-11-25'], ['--requirements=2025-11-25']]) {
-  test(`another revision (${extra.join(' ')}) is refused before the suite runs`, () => {
+for (const extra of [
+  ['--spec-version', '2025-11-25'],
+  ['--requirements=2025-11-25'],
+  ['--requirements', '2026-07-28', '--scenario', 'tools-list'],
+  ['--requirements=2026-07-28', '--spec-version=2026-07-28'],
+  ['--url', 'http://elsewhere/mcp'],
+  ['--output-dir=/somewhere'],
+  ['-o', 'somewhere'],
+  ['--expected-failures', 'list.yml'],
+  ['--expected-failures=list.yml'],
+]) {
+  test(`${extra.join(' ')} is refused before anything starts`, () => {
     const r = runConformance({ extra });
     assert.equal(r.code, 2, r.output);
     assert.equal(r.suiteArgs, undefined);
+    assert.equal(r.demoPid, 0, 'mcpdemo was started');
   });
 }
-
-for (const extra of [['--url', 'http://elsewhere/mcp'], ['--output-dir=/tmp/x'], ['-o', 'x']]) {
-  test(`a runner-owned option (${extra[0]}) is refused`, () => {
-    const r = runConformance({ extra });
-    assert.equal(r.code, 2, r.output);
-    assert.equal(r.suiteArgs, undefined);
-  });
-}
-
-test('two result directories for one scenario are unreadable', () => {
-  const r = runConformance({ env: { FAKE_SUITE_DUPLICATE: 'tools-list' } });
-  assert.equal(r.code, 1, r.output);
-  assert.match(r.output, /UNREADABLE[\s\S]*tools-list \(more than one result directory/);
-});
-
-test('a suite ended by a signal fails the run even when its results match', () => {
-  const r = runConformance({ env: { FAKE_SUITE_SIGNAL: 'SIGTERM' } });
-  assert.equal(r.code, 1, r.output);
-  assert.match(r.output, /ended by SIGTERM/);
-  assert.equal(alive(r.demoPid), false, 'mcpdemo left running');
-});
-
-test('an invalid suite command is refused before mcpdemo starts', () => {
-  const r = runConformance({ env: { CONFORMANCE_SUITE_COMMAND: '[]' } });
-  assert.equal(r.code, 2, r.output);
-  assert.ok(!(r.demoPid > 0), 'mcpdemo was started');
-});
-
-test('a results directory held by a running process is refused', () => {
-  const r = runConformance({ lockedBy: process.pid });
-  assert.equal(r.code, 2, r.output);
-  assert.match(r.output, /another run is using/);
-});
-
-test("a lock left by a process that has exited is taken over", () => {
-  const r = runConformance({ lockedBy: 2147483646 });
-  assert.equal(r.code, 0, r.output);
-});
 
 test('mcpdemo that never listens fails the run and is stopped', () => {
   const r = runConformance({ demoMode: 'never-listen' });
@@ -197,4 +243,25 @@ test('mcpdemo that never listens fails the run and is stopped', () => {
   assert.equal(r.suiteArgs, undefined, 'the suite ran without a server');
   assert.ok(r.demoPid > 0, 'the stand-in mcpdemo did not start');
   assert.equal(alive(r.demoPid), false, 'mcpdemo left running after a failed start');
+});
+
+test('a runner interrupted while the suite runs stops the suite and mcpdemo', async () => {
+  const files = setUp({ env: { FAKE_SUITE_SLEEP: '20000' } });
+  try {
+    const child = spawn(process.execPath, [join(here, 'run.mjs'), fakeDemo], { env: files.env, stdio: 'ignore' });
+    const deadline = Date.now() + 15000;
+    while (!existsSync(files.suitePid) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(existsSync(files.suitePid), 'the suite never started');
+    const exited = new Promise((resolve) => child.on('exit', (code) => resolve(code)));
+    child.kill('SIGTERM');
+    const code = await exited;
+    assert.equal(code, 143);
+    const demoPid = Number(read(files.demoPid));
+    const suitePid = Number(read(files.suitePid));
+    assert.ok(demoPid > 0 && suitePid > 0);
+    assert.equal(alive(demoPid), false, 'mcpdemo left running');
+    assert.equal(alive(suitePid), false, 'the suite left running');
+  } finally {
+    rmSync(files.dir, { recursive: true, force: true });
+  }
 });

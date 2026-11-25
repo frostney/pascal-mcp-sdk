@@ -151,8 +151,9 @@ npm run interop
 The official MCP conformance suite runs against `mcpdemo --http` and
 is judged against the committed `tools/conformance/baseline.json`
 (see [Tooling § Official conformance suite](tooling.md#official-conformance-suite--toolsconformance)).
-A change that makes a known failure pass, or breaks a passing check,
-updates the baseline in the same PR:
+A regression it reports is fixed, not recorded. The baseline changes in
+the same PR only when a known failure or skip now passes, or a change
+in what the suite can test is deliberate and tracked by an issue:
 
 ```sh
 lwpt build

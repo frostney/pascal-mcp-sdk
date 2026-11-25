@@ -41,7 +41,6 @@ test('invalid checks.json content is unreadable, not an outcome', () => {
     ['missing status', [{ id: 'x' }]],
     ['unknown status', [{ id: 'x', status: 'PASSED' }]],
     ['mixed valid and invalid', [bad('ping'), { notStatus: 'corrupt' }]],
-    ['one id both passing and failing', [bad('ping'), ok('ping')]],
   ]) {
     const r = run({ ...current, ping: checks });
     assert.equal(r.unreadable.length, 1, label);
@@ -147,24 +146,29 @@ test('an expected skip that passes is stale, one that fails is a regression', ()
   assert.equal(failed.regressions.length, 1);
 });
 
-test('distinct probes under one check id are not contradictory; any failing probe fails the id', () => {
-  const probes = [
-    { id: 'hdr', name: 'Missing', status: 'SUCCESS' },
-    { id: 'hdr', name: 'Mismatched', status: 'FAILURE' },
-  ];
-  const r = classifyChecks(probes);
+test('reports under one check id fail it when any fails, as the suite aggregates them', () => {
+  // server-stateless reports one id three times, told apart only by
+  // details.fieldIssue: a partial fix leaves one success and two failures.
+  const r = classifyChecks([
+    { id: 'meta-400', name: 'HttpServerMetaInvalid400', status: 'SUCCESS', details: { fieldIssue: 'missing-meta' } },
+    { id: 'meta-400', name: 'HttpServerMetaInvalid400', status: 'FAILURE', details: { fieldIssue: 'missing-protocol-version' } },
+    { id: 'meta-400', name: 'HttpServerMetaInvalid400', status: 'FAILURE', details: { fieldIssue: 'missing-capabilities' } },
+    ok('other'),
+  ]);
   assert.equal(r.error, undefined);
   assert.equal(r.outcome, 'fail');
-  assert.equal(r.passing.has('hdr'), false);
-  const same = classifyChecks([
-    { id: 'hdr', name: 'Missing', status: 'SUCCESS' },
-    { id: 'hdr', name: 'Missing', status: 'FAILURE' },
-  ]);
-  assert.match(same.error, /both SUCCESS and FAILURE/);
+  assert.deepEqual([...r.passing], ['other']);
+});
+
+test('a skip that starts failing is a regression without passingChecks advice', () => {
+  const base = { scenarios: { s: { expected: 'skip', issue: 82 } } };
+  const r = compare(base, new Map([['s', classifyChecks([bad('a'), ok('b')])]]), false);
+  assert.equal(r.regressions.length, 1);
+  assert.deepEqual(r.stale, []);
 });
 
 test('a floating suite version is rejected, an exact pre-release accepted', () => {
-  for (const version of ['latest', '^0.2.0', '0.2', '0.2.0-'])
+  for (const version of ['latest', '^0.2.0', '0.2', '0.2.0-', '01.2.3', '9007199254740992.0.0', '0.2.0-01'])
     assert.notDeepEqual(validateBaseline({ ...valid, version }), [], version);
   assert.deepEqual(validateBaseline({ ...valid, version: '0.2.0-alpha.12' }), []);
 });

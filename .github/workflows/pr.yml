@@ -270,7 +270,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: conformance-results
-          path: build/conformance/results/
+          path: build/conformance/
           if-no-files-found: warn
 
   docs:

@@ -1,20 +1,29 @@
 // Stand-in for the conformance CLI in run.test.mjs. Records its
-// arguments in FAKE_SUITE_ARGS and writes one checks.json per scenario
-// of FAKE_SUITE_RESULTS ({ scenario: checks }) into --output-dir the
-// way the suite names them; with --scenario NAME (either form) only
-// that scenario. FAKE_SUITE_DUPLICATE names a scenario to write twice;
-// FAKE_SUITE_SIGNAL ends the process with that signal after writing;
-// otherwise it exits with FAKE_SUITE_EXIT (default 0).
+// arguments and pid in FAKE_SUITE_ARGS / FAKE_SUITE_PID, and exits 3
+// unless the --url it was given answers. It then writes one checks.json
+// per scenario of FAKE_SUITE_RESULTS ({ scenario: checks }) into
+// --output-dir the way the suite names them; with --scenario NAME (either
+// form) only that scenario. FAKE_SUITE_DUPLICATE names a scenario to
+// write twice. FAKE_SUITE_SLEEP keeps it running that many ms before it
+// writes anything; FAKE_SUITE_SIGNAL ends it with that signal after
+// writing; otherwise it exits with FAKE_SUITE_EXIT (default 0).
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const args = process.argv.slice(2);
 writeFileSync(process.env.FAKE_SUITE_ARGS, JSON.stringify(args));
+if (process.env.FAKE_SUITE_PID) writeFileSync(process.env.FAKE_SUITE_PID, String(process.pid));
 const value = (name) => {
   const i = args.indexOf(`--${name}`);
   if (i >= 0) return args[i + 1];
   return args.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3);
 };
+try {
+  await fetch(value('url'), { method: 'POST', body: '{}' });
+} catch {
+  process.exit(3);
+}
+if (process.env.FAKE_SUITE_SLEEP) await new Promise((r) => setTimeout(r, Number(process.env.FAKE_SUITE_SLEEP)));
 const outputDir = value('output-dir');
 const only = value('scenario');
 const write = (scenario, checks, stamp) => {
