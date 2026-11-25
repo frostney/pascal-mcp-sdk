@@ -7,6 +7,8 @@ export const siteUrl = 'https://frostney.github.io/pascal-mcp-sdk';
 export const docsRoute = '/docs';
 export const docsImageRoute = '/og/docs';
 export const docsContentRoute = '/llms.mdx/docs';
+export const description =
+  'A FreePascal-native MCP (Model Context Protocol) server library with zero third-party dependencies.';
 
 export const gitConfig = {
   user: 'frostney',

@@ -124,7 +124,15 @@ build**), and `remark-term-links` auto-links the first occurrence
 per page of well-known tooling terms. A `prebuild`/`predev` script
 syncs `docs/images/` into `public/`; the app also emits the SEO/AEO
 surfaces (sitemap, robots, per-page OG images, `llms.txt` /
-`llms-full.txt`, JSON-LD).
+`llms-full.txt`, JSON-LD). `lib/source.ts` wraps its Markdown options
+in fumadocs-mdx's `applyMdxPreset`: the docs macro applies no preset
+by itself, and without it tables, heading ids and the table of
+contents are lost. A `postbuild` script, `scripts/check-export.mjs`,
+fails the build unless the export renders each page's tables, gives
+every heading an id and a table-of-contents entry, serves every
+in-site link and anchor, and names only absolute URLs that resolve
+on the site in `llms.txt`, `llms-full.txt`, the Markdown copies, the
+sitemap and the JSON-LD.
 Deployment is `.github/workflows/pages.yml` (official
 `configure-pages` / `upload-pages-artifact` / `deploy-pages`
 actions): pushes to `main` touching `website/**` or `docs/**` deploy;

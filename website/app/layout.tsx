@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import { Provider } from '@/components/provider';
-import { appName } from '@/lib/shared';
+import { appName, description } from '@/lib/shared';
 import './global.css';
 
 const inter = Inter({
@@ -16,8 +16,7 @@ export const metadata: Metadata = {
     template: `%s | ${appName}`,
     default: appName,
   },
-  description:
-    'A FreePascal-native MCP (Model Context Protocol) server library with zero third-party dependencies.',
+  description,
   openGraph: {
     siteName: appName,
     type: 'website',
