@@ -361,6 +361,15 @@ type
     procedure TestRepeatedBlockRejected;
   end;
 
+  TTypedNested = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestNestedArgumentsReachHandler;
+    procedure TestNestedErrorIsInBand;
+  end;
+
   // MCPImageResult: the spec's image content block, the raw-bytes
   // overload's base64 encoding (asserted against literal fixtures, not
   // against a decode of what we just encoded), mimeType passthrough,
@@ -432,6 +441,23 @@ begin
 end;
 
 type
+  // #95: a typed tool with a nested object and an array.
+  TBatchItem = class(TMCPArgs)
+  private
+    FLabel: string;
+    FWeights: TStringArray;
+  published
+    property label_: string read FLabel write FLabel;
+    property weights: TStringArray read FWeights write FWeights;
+  end;
+
+  TBatchArgs = class(TMCPArgs)
+  private
+    FItem: TBatchItem;
+  published
+    property item: TBatchItem read FItem write FItem;
+  end;
+
   TScaleArgs = class(TMCPArgs)
   private
     FValue: Double;
@@ -4713,6 +4739,58 @@ begin
     TestApplicationValidatedSkipsChecks);
 end;
 
+{ ───────── typed tools with nested arguments (#95) ───────── }
+
+function BatchHandler(AArgs: TMCPArgs;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Batch: TBatchArgs;
+begin
+  Batch := AArgs as TBatchArgs;
+  Result := MCPTextResult(Batch.item.label_ + ':' +
+    IntToStr(Length(Batch.item.weights)) + ':' + Batch.item.weights[0]);
+end;
+
+procedure TTypedNested.BeforeEach;
+begin
+  inherited BeforeEach;
+  FServer.RegisterTool('batch', 'Batch', TBatchArgs, BatchHandler);
+end;
+
+procedure TTypedNested.TestNestedArgumentsReachHandler;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{' +
+    '"name":"batch","arguments":{"item":{"label_":"x","weights":' +
+    '["\u00e9","b"]}},' + META_MODERN + '}}');
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+    .AsString).ToBe('x:2:' + #$C3#$A9);
+  Response.Free;
+end;
+
+procedure TTypedNested.TestNestedErrorIsInBand;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{' +
+    '"name":"batch","arguments":{"item":{"label_":"x","weights":[1]}},' +
+    META_MODERN + '}}');
+  Expect<Boolean>(TJSONData(Response.FindPath('result.isError')).AsBoolean)
+    .ToBe(True);
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+    .AsString).ToBe('Argument "item.weights[0]" must be a string');
+  Response.Free;
+end;
+
+procedure TTypedNested.SetupTests;
+begin
+  Test('nested object and array arguments reach a typed handler',
+    TestNestedArgumentsReachHandler);
+  Test('a nested binding error is an in-band isError naming the path',
+    TestNestedErrorIsInBand);
+end;
+
 { ───────── image results ───────── }
 
 const
@@ -5051,6 +5129,8 @@ begin
     TMRTRDispatch.Create('Server: MRTR input_required'));
   TestRunnerProgram.AddSuite(
     TImageResults.Create('Server: image tool results'));
+  TestRunnerProgram.AddSuite(
+    TTypedNested.Create('Server: typed tools with nested arguments'));
   TestRunnerProgram.AddSuite(
     TContentResults.Create('Server: content tool results and prompt messages'));
   TestRunnerProgram.Run;

@@ -25,10 +25,29 @@ Server.RegisterTool('search', 'Search the product catalog',
 
 - `AddString`, `AddNumber`, `AddInteger`, `AddBoolean` — one call per
   property, each with an optional description.
+- `AddEnum('mode', ['fast', 'thorough'])` — a string limited to the
+  listed values.
+- `AddArray('tags', 'string')` — an array of a primitive type
+  (`string`, `number`, `integer`, `boolean`); `AddArray('points',
+  ObjectSchema.AddNumber('x').AddNumber('y'))` — an array of objects.
+- `AddObject('opts', ObjectSchema.AddBoolean('dry'))` — a nested
+  object, built from another builder.
+- `.WithDefault(...)` after a property gives it a default (string,
+  integer, float or boolean) and makes it optional; the server seeds
+  the default into arguments that leave it out.
 - Properties are **required by default**; pass `False` as the third
   argument to make one optional.
-- The builder emits the JSON Schema 2020-12 subset the server
-  enforces, so calls are validated against exactly what you declared.
+
+```pascal
+ObjectSchema
+  .AddString('query', 'Search terms')
+  .AddEnum('sort', ['relevance', 'date']).WithDefault('relevance')
+  .AddArray('tags', 'string', 'Only results with these tags', False)
+  .AddObject('page', ObjectSchema.AddInteger('size').WithDefault(20), '', False)
+```
+
+The builder emits the JSON Schema 2020-12 subset the server enforces,
+so calls are validated against exactly what you declared.
 
 An output schema can be passed alongside the input schema — the
 two-schema `RegisterTool` overloads — declaring the shape of your
@@ -75,7 +94,35 @@ results before the handler runs; unknown keys are ignored.
 **Type mapping.** Published properties map to JSON Schema types:
 string kinds → `string`, floats → `number`, integer kinds →
 `integer`, `Boolean` → `boolean`, and enums → `string` with the enum
-names as allowed values.
+names as allowed values. A dynamic array of `string`, `Integer`,
+`Int64`, `Double` or `Boolean` (for example `TStringArray`) → an
+`array` of that type, and a property whose type is another `TMCPArgs`
+descendant → a nested `object`, bound recursively:
+
+```pascal
+type
+  TPaging = class(TMCPArgs)
+  private
+    FSize: Integer;
+  published
+    property size: Integer read FSize write FSize default 20;
+  end;
+
+  TSearchArgs = class(TMCPArgs)
+  private
+    FQuery: string;
+    FTags: TStringArray;
+    FPage: TPaging;
+  published
+    property query: string read FQuery write FQuery;
+    property tags: TStringArray read FTags write FTags stored False;
+    property page: TPaging read FPage write FPage stored False;
+  end;
+```
+
+The instance owns its nested objects and frees them; an optional one
+the client left out is `nil`. Binding errors name the path, such as
+`Argument "page.size" must be an integer`.
 
 **Optionality** uses the standard property directives:
 

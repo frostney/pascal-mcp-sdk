@@ -78,6 +78,9 @@ type
   TMCPArgs = class(TObject)
   public
     constructor Create; virtual;
+    // Frees the nested TMCPArgs objects its published properties hold
+    // (#95); do not free those yourself.
+    destructor Destroy; override;
   end;
 
   TMCPArgsClass = class of TMCPArgs;
@@ -95,6 +98,8 @@ type
     FRoot: TJSONObject;
     FProperties: TJSONObject; // borrowed: owned by FRoot
     FRequired: TJSONArray;    // owned here until Build attaches it
+    FLast: TJSONObject;       // borrowed: the property added last
+    FLastName: string;
   public
     destructor Destroy; override;
   end;
@@ -110,6 +115,10 @@ type
     function ActiveCore: TMCPSchemaCore;
     function AddProperty(const AName, AJsonType, ADescription: string;
       ARequired: Boolean): TMCPSchema;
+    // Adds AProperty (ownership transfers) under AName.
+    function AddPropertySchema(const AName: string; AProperty: TJSONObject;
+      const ADescription: string; ARequired: Boolean): TMCPSchema;
+    function SetDefault(AValue: TJSONData): TMCPSchema;
   public
     function AddString(const AName: string; const ADescription: string = '';
       ARequired: Boolean = True): TMCPSchema;
@@ -119,6 +128,24 @@ type
       ARequired: Boolean = True): TMCPSchema;
     function AddBoolean(const AName: string; const ADescription: string = '';
       ARequired: Boolean = True): TMCPSchema;
+    // A string limited to AValues (#95).
+    function AddEnum(const AName: string; const AValues: array of string;
+      const ADescription: string = ''; ARequired: Boolean = True): TMCPSchema;
+    // An array of AItemType ('string', 'number', 'integer' or 'boolean').
+    function AddArray(const AName, AItemType: string;
+      const ADescription: string = ''; ARequired: Boolean = True): TMCPSchema; overload;
+    // An array of objects shaped by AItems (built and consumed here).
+    function AddArray(const AName: string; constref AItems: TMCPSchema;
+      const ADescription: string = ''; ARequired: Boolean = True): TMCPSchema; overload;
+    // A nested object shaped by ASchema (built and consumed here).
+    function AddObject(const AName: string; constref ASchema: TMCPSchema;
+      const ADescription: string = ''; ARequired: Boolean = True): TMCPSchema;
+    // A default for the property added last, which then becomes
+    // optional: the server seeds the default into arguments that omit it.
+    function WithDefault(const AValue: string): TMCPSchema; overload;
+    function WithDefault(AValue: Int64): TMCPSchema; overload;
+    function WithDefault(AValue: Double): TMCPSchema; overload;
+    function WithDefault(AValue: Boolean): TMCPSchema; overload;
 
     // Finalizes the schema (attaches "required" when non-empty) and
     // transfers ownership. The record must not be used afterwards.
@@ -151,6 +178,15 @@ function MCPPropIsOptional(AInstance: TObject; AProp: PPropInfo): Boolean;
 // structured-output path — MCPStructuredResult(text, instance) —
 // pairs this with SchemaFrom(outputClass).
 function MCPSerialize(AObj: TMCPArgs): TJSONObject;
+
+// Instantiate AClass and fill its published properties from
+// AArguments, nested argument objects and arrays included (#95).
+// Missing required or mistyped arguments give False with AError set,
+// naming the nested path ('Argument "opts.limit" must be an integer');
+// the caller turns that into an in-band isError result. AArguments is
+// borrowed; AInstance belongs to the caller on success.
+function MCPBindArguments(AClass: TMCPArgsClass; AArguments: TJSONObject;
+  out AInstance: TMCPArgs; out AError: string): Boolean;
 
 // Compact JSON number node for wire output. fpjson's default float
 // serialization is full-precision exponent form
@@ -211,8 +247,86 @@ begin
   Result := QWord(LongWord(GetOrdProp(AInstance, AProp)));
 end;
 
-function SchemaFrom(AClass: TMCPArgsClass): TMCPSchema;
+// The JSON item type a published dynamic array maps to: 'string',
+// 'number', 'boolean', 'integer' (LongInt elements) or 'int64' (Int64
+// elements, also JSON integers); '' for an element type with no
+// mapping.
+function ArrayItemType(AArrayType: PTypeInfo): string;
 var
+  Element: PTypeInfo;
+begin
+  Result := '';
+  Element := GetTypeData(AArrayType)^.ElType2;
+  if Element = nil then
+    Exit;
+  case Element^.Kind of
+    tkAString:
+      Result := 'string';
+    tkFloat:
+      if GetTypeData(Element)^.FloatType = ftDouble then
+        Result := 'number';
+    tkBool:
+      if GetTypeData(Element)^.OrdType = otUByte then
+        Result := 'boolean';
+    tkInteger:
+      if GetTypeData(Element)^.OrdType = otSLong then
+        Result := 'integer';
+    tkInt64:
+      Result := 'int64';
+  end;
+end;
+
+destructor TMCPArgs.Destroy;
+var
+  Info: PTypeInfo;
+  Props: PPropList;
+  Count, I: Integer;
+  Nested: TObject;
+begin
+  // Nested argument objects (#95) belong to the instance that holds
+  // them: the binder creates them, so the parent frees them.
+  Info := PTypeInfo(ClassInfo);
+  Count := GetTypeData(Info)^.PropCount;
+  if Count > 0 then
+  begin
+    GetMem(Props, Count * SizeOf(Pointer));
+    try
+      GetPropInfos(Info, Props);
+      for I := 0 to Count - 1 do
+        if Props^[I]^.PropType^.Kind = tkClass then
+        begin
+          Nested := GetObjectProp(Self, Props^[I]);
+          if Nested is TMCPArgs then
+          begin
+            Nested.Free;
+          end;
+        end;
+    finally
+      FreeMem(Props);
+    end;
+  end;
+  inherited Destroy;
+end;
+
+const
+  // Guards against an argument class that contains itself.
+  MAX_NESTING = 16;
+
+function SchemaFromAt(AClass: TMCPArgsClass; ADepth: Integer): TMCPSchema; forward;
+
+function NestedSchema(AClass: TMCPArgsClass; ADepth: Integer): TJSONObject;
+begin
+  Result := SchemaFromAt(AClass, ADepth).Build;
+end;
+
+function SchemaFrom(AClass: TMCPArgsClass): TMCPSchema;
+begin
+  Result := SchemaFromAt(AClass, 0);
+end;
+
+function SchemaFromAt(AClass: TMCPArgsClass; ADepth: Integer): TMCPSchema;
+var
+  ItemType: string;
   Info: PTypeInfo;
   Props: PPropList;
   Count, I, E: Integer;
@@ -249,6 +363,31 @@ begin
           Result := Result.AddInteger(Prop^.Name, '', Req);
         tkBool:
           Result := Result.AddBoolean(Prop^.Name, '', Req);
+        tkDynArray:
+          begin
+            ItemType := ArrayItemType(Prop^.PropType);
+            if ItemType = '' then
+              raise EMCPSchema.CreateFmt('Array property "%s" of %s has ' +
+                'no JSON Schema mapping (element types: string, Integer, ' +
+                'Int64, Double, Boolean)', [Prop^.Name, AClass.ClassName]);
+            if ItemType = 'int64' then
+              ItemType := 'integer';
+            Result := Result.AddArray(Prop^.Name, ItemType, '', Req);
+          end;
+        tkClass:
+          begin
+            if not GetTypeData(Prop^.PropType)^.ClassType.InheritsFrom(
+              TMCPArgs) then
+              raise EMCPSchema.CreateFmt('Object property "%s" of %s must ' +
+                'be a TMCPArgs descendant', [Prop^.Name, AClass.ClassName]);
+            if ADepth >= MAX_NESTING then
+              raise EMCPSchema.CreateFmt('Argument classes nest deeper ' +
+                'than %d levels at "%s" of %s', [MAX_NESTING, Prop^.Name,
+                AClass.ClassName]);
+            Result := Result.AddPropertySchema(Prop^.Name, NestedSchema(
+              TMCPArgsClass(GetTypeData(Prop^.PropType)^.ClassType),
+              ADepth + 1), '', Req);
+          end;
         tkEnumeration:
           begin
             // Enums map to a string with the enum names as the
@@ -268,7 +407,8 @@ begin
         // result record goes out of scope during unwinding.
         raise EMCPSchema.CreateFmt(
           'Property "%s" of %s has no JSON Schema mapping ' +
-          '(supported: string, float, integer, boolean, enum)',
+          '(supported: string, float, integer, boolean, enum, ' +
+          'dynamic array, TMCPArgs object)',
           [Prop^.Name, AClass.ClassName]);
       end;
       if MCPPropHasDefault(Prop) then
@@ -674,6 +814,29 @@ begin
     Result := TMCPWireFloat.Create(AValue);
 end;
 
+// A published dynamic array as a JSON array.
+function SerializeArray(AObj: TMCPArgs; AProp: PPropInfo): TJSONArray;
+var
+  Raw: Pointer;
+  ItemType: string;
+  I: Integer;
+begin
+  Result := TJSONArray.Create;
+  Raw := GetDynArrayProp(AObj, AProp);
+  ItemType := ArrayItemType(AProp^.PropType);
+  for I := 0 to DynArraySize(Raw) - 1 do
+    if ItemType = 'string' then
+      Result.Add(PAnsiString(Raw)[I])
+    else if ItemType = 'number' then
+      Result.Add(WireFloatNode(PDouble(Raw)[I]))
+    else if ItemType = 'boolean' then
+      Result.Add(PBoolean(Raw)[I])
+    else if ItemType = 'integer' then
+      Result.Add(PLongInt(Raw)[I])
+    else
+      Result.Add(PInt64(Raw)[I]);
+end;
+
 function MCPSerialize(AObj: TMCPArgs): TJSONObject;
 var
   Info: PTypeInfo;
@@ -715,6 +878,13 @@ begin
             Result.Add(Prop^.Name, GetOrdProp(AObj, Prop) <> 0);
           tkEnumeration:
             Result.Add(Prop^.Name, GetEnumProp(AObj, Prop));
+          tkDynArray:
+            Result.Add(Prop^.Name, SerializeArray(AObj, Prop));
+          tkClass:
+            // An absent (nil) nested object is left out.
+            if GetObjectProp(AObj, Prop) is TMCPArgs then
+              Result.Add(Prop^.Name,
+                MCPSerialize(TMCPArgs(GetObjectProp(AObj, Prop))));
         else
           raise EMCPSchema.CreateFmt(
             'Property "%s" of %s has no JSON mapping',
@@ -785,7 +955,135 @@ begin
   Core.FProperties.Add(AName, Prop);
   if ARequired then
     Core.FRequired.Add(AName);
+  Core.FLast := Prop;
+  Core.FLastName := AName;
   Result := Self;
+end;
+
+function TMCPSchema.AddPropertySchema(const AName: string;
+  AProperty: TJSONObject; const ADescription: string;
+  ARequired: Boolean): TMCPSchema;
+var
+  Core: TMCPSchemaCore;
+begin
+  Core := FCore;
+  if (Core = nil) or (Core.FRoot = nil) then
+  begin
+    AProperty.Free;
+    Core := ActiveCore; // raises
+  end;
+  if Core.FProperties.IndexOfName(AName) >= 0 then
+  begin
+    AProperty.Free;
+    raise EMCPSchema.CreateFmt(
+      'Schema property "%s" is already defined', [AName]);
+  end;
+  if (ADescription <> '') and (AProperty.Find('description') = nil) then
+    AProperty.Add('description', ADescription);
+  Core.FProperties.Add(AName, AProperty);
+  if ARequired then
+    Core.FRequired.Add(AName);
+  Core.FLast := AProperty;
+  Core.FLastName := AName;
+  Result := Self;
+end;
+
+function TMCPSchema.AddEnum(const AName: string; const AValues: array of string;
+  const ADescription: string; ARequired: Boolean): TMCPSchema;
+var
+  Prop: TJSONObject;
+  Values: TJSONArray;
+  I: Integer;
+begin
+  if Length(AValues) = 0 then
+    raise EMCPSchema.CreateFmt('Enum property "%s" needs values', [AName]);
+  Values := TJSONArray.Create;
+  for I := 0 to High(AValues) do
+    Values.Add(AValues[I]);
+  Prop := TJSONObject.Create;
+  Prop.Add('type', 'string');
+  Prop.Add('enum', Values);
+  Result := AddPropertySchema(AName, Prop, ADescription, ARequired);
+end;
+
+function TMCPSchema.AddArray(const AName, AItemType: string;
+  const ADescription: string; ARequired: Boolean): TMCPSchema;
+var
+  Prop, Items: TJSONObject;
+begin
+  if (AItemType <> 'string') and (AItemType <> 'number') and
+    (AItemType <> 'integer') and (AItemType <> 'boolean') then
+    raise EMCPSchema.CreateFmt('Array property "%s" item type "%s" must be ' +
+      'string, number, integer or boolean', [AName, AItemType]);
+  Items := TJSONObject.Create;
+  Items.Add('type', AItemType);
+  Prop := TJSONObject.Create;
+  Prop.Add('type', 'array');
+  Prop.Add('items', Items);
+  Result := AddPropertySchema(AName, Prop, ADescription, ARequired);
+end;
+
+function TMCPSchema.AddArray(const AName: string; constref AItems: TMCPSchema;
+  const ADescription: string; ARequired: Boolean): TMCPSchema;
+var
+  Prop: TJSONObject;
+begin
+  Prop := TJSONObject.Create;
+  Prop.Add('type', 'array');
+  Prop.Add('items', AItems.Build);
+  Result := AddPropertySchema(AName, Prop, ADescription, ARequired);
+end;
+
+function TMCPSchema.AddObject(const AName: string; constref ASchema: TMCPSchema;
+  const ADescription: string; ARequired: Boolean): TMCPSchema;
+begin
+  Result := AddPropertySchema(AName, ASchema.Build, ADescription, ARequired);
+end;
+
+function TMCPSchema.SetDefault(AValue: TJSONData): TMCPSchema;
+var
+  Core: TMCPSchemaCore;
+  I: Integer;
+begin
+  Core := FCore;
+  if (Core = nil) or (Core.FRoot = nil) or (Core.FLast = nil) then
+  begin
+    AValue.Free;
+    if (Core <> nil) and (Core.FRoot <> nil) then
+      raise EMCPSchema.Create('WithDefault needs a property added before it');
+    Core := ActiveCore; // raises
+  end;
+  if Core.FLast.Get('type', '') = 'object' then
+  begin
+    AValue.Free;
+    raise EMCPSchema.CreateFmt('Property "%s" is an object; defaults ' +
+      'apply to primitive properties', [Core.FLastName]);
+  end;
+  Core.FLast.Add('default', AValue);
+  for I := Core.FRequired.Count - 1 downto 0 do
+    if Core.FRequired[I].AsString = Core.FLastName then
+      Core.FRequired.Delete(I);
+  Result := Self;
+end;
+
+function TMCPSchema.WithDefault(const AValue: string): TMCPSchema;
+begin
+  Result := SetDefault(TJSONString.Create(AValue));
+end;
+
+function TMCPSchema.WithDefault(AValue: Int64): TMCPSchema;
+begin
+  Result := SetDefault(TJSONInt64Number.Create(AValue));
+end;
+
+function TMCPSchema.WithDefault(AValue: Double): TMCPSchema;
+begin
+  Result := SetDefault(MCPWireNumber(AValue));
+end;
+
+function TMCPSchema.WithDefault(AValue: Boolean): TMCPSchema;
+begin
+  Result := SetDefault(TJSONBoolean.Create(AValue));
 end;
 
 function TMCPSchema.AddString(const AName: string; const ADescription: string;
@@ -827,6 +1125,289 @@ begin
   Core.FRoot := nil;
   Core.FProperties := nil;
   Core.FRequired := nil;
+  Core.FLast := nil;
+end;
+
+
+{ ───────── argument binding (moved from MCP.Server; #95) ───────── }
+
+function BindObject(AClass: TMCPArgsClass; AArguments: TJSONObject;
+  const APrefix: string; out AInstance: TMCPArgs;
+  out AError: string): Boolean; forward;
+
+function ArgumentPath(const APrefix, AName: string): string;
+begin
+  if APrefix = '' then
+    Result := AName
+  else
+    Result := APrefix + '.' + AName;
+end;
+
+function ReadSignedInteger(AValue: TJSONData; out AResult: Int64): Boolean;
+var
+  UnsignedValue: QWord;
+begin
+  Result := (AValue.JSONType = jtNumber) and
+    (TJSONNumber(AValue).NumberType in [ntInteger, ntInt64, ntQWord]);
+  if not Result then
+    Exit;
+  if TJSONNumber(AValue).NumberType = ntQWord then
+  begin
+    UnsignedValue := AValue.AsQWord;
+    if UnsignedValue > QWord(High(Int64)) then
+      Exit(False);
+    AResult := Int64(UnsignedValue);
+  end
+  else
+    AResult := AValue.AsInt64;
+end;
+
+function ReadUnsignedInteger(AValue: TJSONData; out AResult: QWord): Boolean;
+var
+  SignedValue: Int64;
+begin
+  Result := (AValue.JSONType = jtNumber) and
+    (TJSONNumber(AValue).NumberType in [ntInteger, ntInt64, ntQWord]);
+  if not Result then
+    Exit;
+  if TJSONNumber(AValue).NumberType = ntQWord then
+    AResult := AValue.AsQWord
+  else
+  begin
+    SignedValue := AValue.AsInt64;
+    if SignedValue < 0 then
+      Exit(False);
+    AResult := QWord(SignedValue);
+  end;
+end;
+
+function Mismatch(const APath, AExpected: string; out AError: string): Boolean;
+begin
+  AError := Format('Argument "%s" must be %s', [APath, AExpected]);
+  Result := False;
+end;
+
+// A JSON array into a published dynamic array of one of the supported
+// element types (see ArrayItemType).
+function BindArray(AInstance: TMCPArgs; AProp: PPropInfo; AValue: TJSONData;
+  const APath: string; out AError: string): Boolean;
+var
+  Strings: array of string;
+  Integers: array of LongInt;
+  Int64s: array of Int64;
+  Doubles: array of Double;
+  Booleans: array of Boolean;
+  Item: TJSONData;
+  ItemType: string;
+  I: Integer;
+  Signed: Int64;
+begin
+  Result := True;
+  if AValue.JSONType <> jtArray then
+    Exit(Mismatch(APath, 'an array', AError));
+  ItemType := ArrayItemType(AProp^.PropType);
+  SetLength(Strings, 0);
+  for I := 0 to AValue.Count - 1 do
+  begin
+    Item := AValue.Items[I];
+    if ItemType = 'string' then
+    begin
+      if Item.JSONType <> jtString then
+        Exit(Mismatch(Format('%s[%d]', [APath, I]), 'a string', AError));
+      SetLength(Strings, I + 1);
+      Strings[I] := Item.AsString;
+    end
+    else if ItemType = 'number' then
+    begin
+      if Item.JSONType <> jtNumber then
+        Exit(Mismatch(Format('%s[%d]', [APath, I]), 'a number', AError));
+      SetLength(Doubles, I + 1);
+      Doubles[I] := Item.AsFloat;
+    end
+    else if ItemType = 'boolean' then
+    begin
+      if Item.JSONType <> jtBoolean then
+        Exit(Mismatch(Format('%s[%d]', [APath, I]), 'a boolean', AError));
+      SetLength(Booleans, I + 1);
+      Booleans[I] := Item.AsBoolean;
+    end
+    else
+    begin
+      if not ReadSignedInteger(Item, Signed) or ((ItemType = 'integer') and
+        ((Signed < Low(LongInt)) or (Signed > High(LongInt)))) then
+        Exit(Mismatch(Format('%s[%d]', [APath, I]), 'an integer', AError));
+      if ItemType = 'integer' then
+      begin
+        SetLength(Integers, I + 1);
+        Integers[I] := LongInt(Signed);
+      end
+      else
+      begin
+        SetLength(Int64s, I + 1);
+        Int64s[I] := Signed;
+      end;
+    end;
+  end;
+  if ItemType = 'string' then
+    SetDynArrayProp(AInstance, AProp, Pointer(Strings))
+  else if ItemType = 'number' then
+    SetDynArrayProp(AInstance, AProp, Pointer(Doubles))
+  else if ItemType = 'boolean' then
+    SetDynArrayProp(AInstance, AProp, Pointer(Booleans))
+  else if ItemType = 'integer' then
+    SetDynArrayProp(AInstance, AProp, Pointer(Integers))
+  else
+    SetDynArrayProp(AInstance, AProp, Pointer(Int64s));
+end;
+
+procedure SetQWordProperty(AInstance: TMCPArgs; AProp: PPropInfo;
+  const AValue: QWord);
+var
+  SignedBits: Int64;
+begin
+  // FPC 3.2.2 has tkQWord RTTI but exposes only signed Int64 property
+  // accessors. Pass the unsigned value's bits through unchanged.
+  Move(AValue, SignedBits, SizeOf(SignedBits));
+  SetInt64Prop(AInstance, AProp, SignedBits);
+end;
+
+// Populate one published property from its JSON argument. False (with
+// AError set) on a type mismatch. APath names the argument in errors.
+function BindProperty(AInstance: TMCPArgs; AProp: PPropInfo;
+  AValue: TJSONData; const APath: string; out AError: string): Boolean;
+var
+  TypeData: PTypeData;
+  SignedValue: Int64;
+  UnsignedValue, Minimum, Maximum: QWord;
+  Nested: TMCPArgs;
+begin
+  Result := True;
+  case AProp^.PropType^.Kind of
+    tkSString, tkLString, tkAString, tkWString, tkUString:
+      if AValue.JSONType = jtString then
+        SetStrProp(AInstance, AProp, AValue.AsString)
+      else
+        Exit(Mismatch(APath, 'a string', AError));
+    tkFloat:
+      if AValue.JSONType = jtNumber then
+        SetFloatProp(AInstance, AProp, AValue.AsFloat)
+      else
+        Exit(Mismatch(APath, 'a number', AError));
+    tkInteger:
+      begin
+        TypeData := GetTypeData(AProp^.PropType);
+        if TypeData^.OrdType in [otUByte, otUWord, otULong] then
+        begin
+          if not ReadUnsignedInteger(AValue, UnsignedValue) then
+            Exit(Mismatch(APath, 'an integer', AError));
+          Minimum := QWord(LongWord(TypeData^.MinValue));
+          Maximum := QWord(LongWord(TypeData^.MaxValue));
+          if (UnsignedValue < Minimum) or (UnsignedValue > Maximum) then
+            Exit(Mismatch(APath, 'an integer', AError));
+          SetOrdProp(AInstance, AProp, Int64(UnsignedValue));
+        end
+        else
+        begin
+          if not ReadSignedInteger(AValue, SignedValue) or
+            (SignedValue < TypeData^.MinValue) or
+            (SignedValue > TypeData^.MaxValue) then
+            Exit(Mismatch(APath, 'an integer', AError));
+          SetOrdProp(AInstance, AProp, SignedValue);
+        end;
+      end;
+    tkInt64:
+      if ReadSignedInteger(AValue, SignedValue) then
+        SetInt64Prop(AInstance, AProp, SignedValue)
+      else
+        Exit(Mismatch(APath, 'an integer', AError));
+    tkQWord:
+      if ReadUnsignedInteger(AValue, UnsignedValue) then
+        SetQWordProperty(AInstance, AProp, UnsignedValue)
+      else
+        Exit(Mismatch(APath, 'an integer', AError));
+    tkBool:
+      if AValue.JSONType = jtBoolean then
+        SetOrdProp(AInstance, AProp, Ord(AValue.AsBoolean))
+      else
+        Exit(Mismatch(APath, 'a boolean', AError));
+    tkEnumeration:
+      if (AValue.JSONType = jtString) and
+        (GetEnumValue(AProp^.PropType, AValue.AsString) >= 0) then
+        SetEnumProp(AInstance, AProp, AValue.AsString)
+      else
+        Exit(Mismatch(APath, 'a string from the declared enum values', AError));
+    tkDynArray:
+      Exit(BindArray(AInstance, AProp, AValue, APath, AError));
+    tkClass:
+      begin
+        if AValue.JSONType <> jtObject then
+          Exit(Mismatch(APath, 'an object', AError));
+        if not BindObject(TMCPArgsClass(GetTypeData(AProp^.PropType)^.ClassType),
+          TJSONObject(AValue), APath, Nested, AError) then
+          Exit(False);
+        SetObjectProp(AInstance, AProp, Nested);
+      end;
+  else
+    // Unmappable kinds cannot get here: SchemaFrom rejected them at
+    // registration.
+    Exit(Mismatch(APath, 'a supported type', AError));
+  end;
+end;
+
+function BindObject(AClass: TMCPArgsClass; AArguments: TJSONObject;
+  const APrefix: string; out AInstance: TMCPArgs;
+  out AError: string): Boolean;
+var
+  Info: PTypeInfo;
+  Props: PPropList;
+  Count, I: Integer;
+  Value: TJSONData;
+begin
+  Result := False;
+  AError := '';
+  AInstance := AClass.Create;
+  Info := PTypeInfo(AClass.ClassInfo);
+  Count := GetTypeData(Info)^.PropCount;
+  if Count = 0 then
+    Exit(True);
+  GetMem(Props, Count * SizeOf(Pointer));
+  try
+    GetPropInfos(Info, Props);
+    for I := 0 to Count - 1 do
+    begin
+      Value := AArguments.Find(Props^[I]^.Name);
+      if (Value = nil) or ((Value.JSONType = jtNull) and
+        (Props^[I]^.PropType^.Kind = tkClass)) then
+      begin
+        // The `default` directive is streaming metadata, not field
+        // initialization — seed it explicitly. `stored False`
+        // properties simply stay zero-initialized.
+        if MCPPropHasDefault(Props^[I]) then
+          SetOrdProp(AInstance, Props^[I], Props^[I]^.Default)
+        else if IsStoredProp(AInstance, Props^[I]) then
+        begin
+          AError := Format('Missing required argument "%s"',
+            [ArgumentPath(APrefix, Props^[I]^.Name)]);
+          Exit(False);
+        end;
+        Continue;
+      end;
+      if not BindProperty(AInstance, Props^[I], Value,
+        ArgumentPath(APrefix, Props^[I]^.Name), AError) then
+        Exit(False);
+    end;
+    Result := True;
+  finally
+    FreeMem(Props);
+    if not Result then
+      FreeAndNil(AInstance);
+  end;
+end;
+
+function MCPBindArguments(AClass: TMCPArgsClass; AArguments: TJSONObject;
+  out AInstance: TMCPArgs; out AError: string): Boolean;
+begin
+  Result := BindObject(AClass, AArguments, '', AInstance, AError);
 end;
 
 end.

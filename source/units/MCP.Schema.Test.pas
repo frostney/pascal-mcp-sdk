@@ -13,11 +13,53 @@ uses
   SysUtils,
 
   fpjson,
+  jsonparser,
+  // UTF-8 string conversion (cwstring), as every program using the
+  // library gets it through MCP.Server.
+  MCP.JSONRPC,
   MCP.Schema,
   TestingPascalLibrary;
 
 type
   TProbeColor = (pcRed, pcGreen, pcBlue);
+
+  // #95: nested argument objects and arrays.
+  TProbeLimits = class(TMCPArgs)
+  private
+    FLimit: Integer;
+    FTags: TStringArray;
+  published
+    property limit: Integer read FLimit write FLimit;
+    property tags: TStringArray read FTags write FTags;
+  end;
+
+  TProbeNumbers = array of Double;
+  TProbeFlags = array of Boolean;
+  TProbeCounts = array of Int64;
+
+  TProbeNested = class(TMCPArgs)
+  private
+    FName: string;
+    FOpts: TProbeLimits;
+    FScores: TProbeNumbers;
+    FFlags: TProbeFlags;
+    FCounts: TProbeCounts;
+    FExtra: TProbeLimits;
+  published
+    property name: string read FName write FName;
+    property opts: TProbeLimits read FOpts write FOpts;
+    property scores: TProbeNumbers read FScores write FScores;
+    property flags: TProbeFlags read FFlags write FFlags;
+    property counts: TProbeCounts read FCounts write FCounts;
+    property extra: TProbeLimits read FExtra write FExtra stored False;
+  end;
+
+  TProbeBadArray = class(TMCPArgs)
+  private
+    FBytes: array of Byte;
+  published
+    property bytes: TBytes read FBytes write FBytes;
+  end;
 
   TProbeArgs = class(TMCPArgs)
   private
@@ -96,6 +138,19 @@ type
   end;
 
   // MCPWireNumber: the number text the wire carries.
+  TNestedSchemas = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestFluentEnumArrayObject;
+    procedure TestWithDefault;
+    procedure TestBuilderGuards;
+    procedure TestSchemaFromNestedClass;
+    procedure TestUnsupportedArrayElement;
+    procedure TestBindNestedAndArrays;
+    procedure TestBindErrorsNamePaths;
+    procedure TestSerializeRoundTrip;
+  end;
+
   TWireNumber = class(TTestSuite)
   public
     procedure SetupTests; override;
@@ -647,10 +702,224 @@ begin
     TestAssignedFloatNodeStaysValid);
 end;
 
+{ ───────── nested schemas and arrays (#95) ───────── }
+
+function Built(ASchema: TMCPSchema): string;
+var
+  Schema: TJSONObject;
+begin
+  Schema := ASchema.Build;
+  try
+    Result := Schema.AsJSON;
+  finally
+    Schema.Free;
+  end;
+end;
+
+procedure TNestedSchemas.TestFluentEnumArrayObject;
+begin
+  Expect<string>(Built(ObjectSchema
+    .AddEnum('mode', ['fast', 'b' + #$C3#$BC + 'ndig'], 'How')
+    .AddArray('tags', 'string')
+    .AddArray('points', ObjectSchema.AddNumber('x').AddNumber('y'))
+    .AddObject('opts', ObjectSchema.AddBoolean('dry', '', False), 'Options')))
+    .ToBe('{ "type" : "object", "properties" : { "mode" : { "type" : "string", ' +
+    '"enum" : ["fast", "b' + #$C3#$BC + 'ndig"], "description" : "How" }, ' +
+    '"tags" : { "type" : "array", "items" : { "type" : "string" } }, ' +
+    '"points" : { "type" : "array", "items" : { "type" : "object", ' +
+    '"properties" : { "x" : { "type" : "number" }, "y" : { "type" : "number" } }, ' +
+    '"required" : ["x", "y"] } }, "opts" : { "type" : "object", "properties" : ' +
+    '{ "dry" : { "type" : "boolean" } }, "description" : "Options" } }, ' +
+    '"required" : ["mode", "tags", "points", "opts"] }');
+end;
+
+procedure TNestedSchemas.TestWithDefault;
+begin
+  // A default makes the property optional.
+  Expect<string>(Built(ObjectSchema.AddString('a').AddInteger('n').WithDefault(3)
+    .AddNumber('r').WithDefault(0.5).AddBoolean('b').WithDefault(True)
+    .AddString('s').WithDefault('x')))
+    .ToBe('{ "type" : "object", "properties" : { "a" : { "type" : "string" }, ' +
+    '"n" : { "type" : "integer", "default" : 3 }, "r" : { "type" : "number", ' +
+    '"default" : 0.5 }, "b" : { "type" : "boolean", "default" : true }, ' +
+    '"s" : { "type" : "string", "default" : "x" } }, "required" : ["a"] }');
+end;
+
+function SchemaRaises(ASchema: TMCPSchema): Boolean;
+begin
+  Result := False;
+  try
+    ASchema.Build.Free;
+  except
+    on E: EMCPSchema do
+      Result := True;
+  end;
+end;
+
+procedure TNestedSchemas.TestBuilderGuards;
+var
+  Raised: Boolean;
+begin
+  Raised := False;
+  try
+    ObjectSchema.WithDefault('x').Build.Free;
+  except
+    on E: EMCPSchema do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  Raised := False;
+  try
+    ObjectSchema.AddArray('a', 'date').Build.Free;
+  except
+    on E: EMCPSchema do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  Raised := False;
+  try
+    ObjectSchema.AddEnum('e', []).Build.Free;
+  except
+    on E: EMCPSchema do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+end;
+
+procedure TNestedSchemas.TestSchemaFromNestedClass;
+begin
+  Expect<string>(Built(SchemaFrom(TProbeNested)))
+    .ToBe('{ "type" : "object", "properties" : { "name" : { "type" : "string" }, ' +
+    '"opts" : { "type" : "object", "properties" : { "limit" : { "type" : ' +
+    '"integer" }, "tags" : { "type" : "array", "items" : { "type" : "string" } } }, ' +
+    '"required" : ["limit", "tags"] }, "scores" : { "type" : "array", "items" : ' +
+    '{ "type" : "number" } }, "flags" : { "type" : "array", "items" : { "type" : ' +
+    '"boolean" } }, "counts" : { "type" : "array", "items" : { "type" : ' +
+    '"integer" } }, "extra" : { "type" : "object", "properties" : { "limit" : ' +
+    '{ "type" : "integer" }, "tags" : { "type" : "array", "items" : { "type" : ' +
+    '"string" } } }, "required" : ["limit", "tags"] } }, "required" : ["name", ' +
+    '"opts", "scores", "flags", "counts"] }');
+end;
+
+procedure TNestedSchemas.TestUnsupportedArrayElement;
+var
+  Message: string;
+begin
+  Message := '';
+  try
+    SchemaFrom(TProbeBadArray).Build.Free;
+  except
+    on E: EMCPSchema do
+      Message := E.Message;
+  end;
+  Expect<Boolean>(Pos('Array property "bytes"', Message) = 1).ToBe(True);
+end;
+
+function BindJson(AClass: TMCPArgsClass; const AJson: string;
+  out AInstance: TMCPArgs): string;
+var
+  Arguments: TJSONObject;
+begin
+  Arguments := TJSONObject(GetJSON(AJson));
+  try
+    if MCPBindArguments(AClass, Arguments, AInstance, Result) then
+      Result := '';
+  finally
+    Arguments.Free;
+  end;
+end;
+
+procedure TNestedSchemas.TestBindNestedAndArrays;
+var
+  Instance: TMCPArgs;
+  Probe: TProbeNested;
+begin
+  Expect<string>(BindJson(TProbeNested, '{"name":"größ",' +
+    '"opts":{"limit":7,"tags":["a","é"]},"scores":[0.5,2],' +
+    '"flags":[true,false],"counts":[9007199254740993]}', Instance)).ToBe('');
+  Probe := Instance as TProbeNested;
+  try
+    Expect<string>(Probe.name).ToBe('gr' + #$C3#$B6 + #$C3#$9F);
+    Expect<Integer>(Probe.opts.limit).ToBe(7);
+    Expect<string>(Probe.opts.tags[1]).ToBe(#$C3#$A9);
+    Expect<Integer>(Length(Probe.scores)).ToBe(2);
+    Expect<Boolean>(Probe.flags[1]).ToBe(False);
+    Expect<Boolean>(Probe.counts[0] = 9007199254740993).ToBe(True);
+    // Optional nested object, absent: nil.
+    Expect<Boolean>(Probe.extra = nil).ToBe(True);
+  finally
+    Instance.Free;
+  end;
+end;
+
+procedure TNestedSchemas.TestBindErrorsNamePaths;
+var
+  Instance: TMCPArgs;
+const
+  BASE = '"name":"n","scores":[],"flags":[],"counts":[]';
+begin
+  Expect<string>(BindJson(TProbeNested, '{' + BASE + ',"opts":{"tags":[]}}',
+    Instance)).ToBe('Missing required argument "opts.limit"');
+  Expect<string>(BindJson(TProbeNested, '{' + BASE +
+    ',"opts":{"limit":"x","tags":[]}}', Instance))
+    .ToBe('Argument "opts.limit" must be an integer');
+  Expect<string>(BindJson(TProbeNested, '{' + BASE +
+    ',"opts":{"limit":1,"tags":["a",2]}}', Instance))
+    .ToBe('Argument "opts.tags[1]" must be a string');
+  Expect<string>(BindJson(TProbeNested, '{' + BASE + ',"opts":[]}', Instance))
+    .ToBe('Argument "opts" must be an object');
+  Expect<string>(BindJson(TProbeNested, '{"name":"n","opts":{"limit":1,' +
+    '"tags":[]},"scores":"x","flags":[],"counts":[]}', Instance))
+    .ToBe('Argument "scores" must be an array');
+  Expect<string>(BindJson(TProbeNested, '{"name":"n","opts":{"limit":1,' +
+    '"tags":[]},"scores":[],"flags":[],"counts":[1.5]}', Instance))
+    .ToBe('Argument "counts[0]" must be an integer');
+  Expect<Boolean>(Instance = nil).ToBe(True);
+end;
+
+procedure TNestedSchemas.TestSerializeRoundTrip;
+var
+  Instance: TMCPArgs;
+  Serialized: TJSONObject;
+begin
+  Expect<string>(BindJson(TProbeNested, '{"name":"n","opts":{"limit":7,' +
+    '"tags":["a"]},"scores":[0.25],"flags":[true],"counts":[3]}', Instance))
+    .ToBe('');
+  Serialized := MCPSerialize(Instance);
+  try
+    Expect<string>(Serialized.AsJSON).ToBe('{ "name" : "n", "opts" : ' +
+      '{ "limit" : 7, "tags" : ["a"] }, "scores" : [0.25], "flags" : [true], ' +
+      '"counts" : [3] }');
+  finally
+    Serialized.Free;
+    Instance.Free;
+  end;
+end;
+
+procedure TNestedSchemas.SetupTests;
+begin
+  Test('fluent enum, arrays and nested object, byte-exact',
+    TestFluentEnumArrayObject);
+  Test('WithDefault for each type makes the property optional',
+    TestWithDefault);
+  Test('builder guards: default first, unknown item type, empty enum',
+    TestBuilderGuards);
+  Test('SchemaFrom maps nested classes and arrays', TestSchemaFromNestedClass);
+  Test('an unsupported array element type is refused',
+    TestUnsupportedArrayElement);
+  Test('binding fills nested objects and arrays, UTF-8 byte-exact',
+    TestBindNestedAndArrays);
+  Test('binding errors name the nested path', TestBindErrorsNamePaths);
+  Test('MCPSerialize writes nested objects and arrays',
+    TestSerializeRoundTrip);
+end;
+
 begin
   TestRunnerProgram.AddSuite(TSchemaBuilder.Create('Schema: fluent builder'));
   TestRunnerProgram.AddSuite(
     TSchemaFromClass.Create('Schema: derived from classes'));
   TestRunnerProgram.AddSuite(TWireNumber.Create('Schema: wire numbers'));
+  TestRunnerProgram.AddSuite(
+    TNestedSchemas.Create('Schema: nested objects and arrays'));
   TestRunnerProgram.Run;
 end.
