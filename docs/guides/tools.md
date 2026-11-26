@@ -79,7 +79,10 @@ Results are built with the helpers in
 
 - `MCPTextResult('...')` — plain text content.
 - `MCPStructuredResult(Text, StructuredData)` — text plus
-  `structuredContent` matching your output schema.
+  `structuredContent` matching your output schema, which the server
+  checks before sending ([the enforced subset](schemas.md#the-enforced-subset)).
+  `MCPStructuredResult(StructuredData)` uses the serialized JSON as the
+  text. The value can be any JSON value: an array of records, a number.
 - `MCPImageResult(Bytes, 'image/png')` — one image content block;
   takes raw bytes (base64-encoded for you) or already-base64 data.
 - `MCPErrorResult('...')` — an explicit in-band error
@@ -88,8 +91,8 @@ Results are built with the helpers in
 ## Validation before your handler runs
 
 Every call is checked against the registered schema's enforceable
-subset — `type`, `properties`, `required`, `enum`, `default` —
-before the handler runs. Violations become in-band `isError` results
+subset — `type`, `properties`, `required`, `items`, `enum`,
+`default`, nested to any depth — before the handler runs. Violations become in-band `isError` results
 in the same shape for raw and typed tools, so the model sees what it
 got wrong and retries. Absent optional arguments are seeded with their
 schema `default`; unknown argument properties are ignored.

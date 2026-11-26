@@ -13,6 +13,10 @@ uses
   SysUtils,
 
   fpjson,
+  jsonparser,
+  // UTF-8 string conversion (cwstring), as every program using the
+  // library gets it through MCP.Server.
+  MCP.JSONRPC,
   MCP.Schema,
   TestingPascalLibrary;
 
@@ -96,6 +100,22 @@ type
   end;
 
   // MCPWireNumber: the number text the wire carries.
+  // #91: the enforced subset, recursive, and value validation against
+  // it. Messages asserted byte-exact, non-ASCII names included.
+  TSubsetSchemas = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestAcceptedSchemas;
+    procedure TestRejectedKeywords;
+    procedure TestObjectRootRequired;
+    procedure TestTypes;
+    procedure TestNestedPathsInMessages;
+    procedure TestArrayItems;
+    procedure TestEnumsOfAnyPrimitive;
+    procedure TestDefaultsSeededOnlyWhenAsked;
+    procedure TestRootValueMessages;
+  end;
+
   TWireNumber = class(TTestSuite)
   public
     procedure SetupTests; override;
@@ -647,10 +667,180 @@ begin
     TestAssignedFloatNodeStaysValid);
 end;
 
+{ ───────── the enforced subset (#91) ───────── }
+
+function ObjectOf(const AJson: string): TJSONObject;
+begin
+  Result := TJSONObject(GetJSON(AJson));
+end;
+
+function Violation(const ASchema: string; AObjectRoot: Boolean = False): string;
+var
+  Schema: TJSONObject;
+begin
+  Schema := ObjectOf(ASchema);
+  try
+    Result := MCPSchemaSubsetViolation(Schema, AObjectRoot);
+  finally
+    Schema.Free;
+  end;
+end;
+
+// '' when AValue conforms to ASchema, else the error.
+function Check(const ASchema, AValue: string; const AKind: string = 'argument';
+  ASeed: Boolean = False): string;
+var
+  Schema: TJSONObject;
+  Value: TJSONData;
+begin
+  Schema := ObjectOf(ASchema);
+  Value := GetJSON(AValue);
+  try
+    if MCPValidateAgainstSchema(Schema, Value, AKind, ASeed, Result) then
+      Result := '';
+  finally
+    Value.Free;
+    Schema.Free;
+  end;
+end;
+
+procedure TSubsetSchemas.TestAcceptedSchemas;
+begin
+  Expect<string>(Violation('{"$schema":"https://json-schema.org/draft/2020-12/schema",' +
+    '"type":"object","title":"t","description":"d","properties":{' +
+    '"a":{"type":"array","items":{"type":"object","properties":{' +
+    '"b":{"type":"integer","enum":[1,2],"default":1}},"required":["b"]}},' +
+    '"n":{"type":"null"}},"required":["a"]}')).ToBe('');
+  Expect<string>(Violation('{"type":"array","items":{"type":"string"}}')).ToBe('');
+  Expect<string>(Violation('{"type":"boolean"}')).ToBe('');
+end;
+
+procedure TSubsetSchemas.TestRejectedKeywords;
+begin
+  Expect<string>(Violation('{"type":"object","properties":{"a":{"type":"string",' +
+    '"format":"uri"}}}')).ToBe('property "a" uses unsupported keyword "format"');
+  Expect<string>(Violation('{"type":"object","properties":{"x":{"type":"array",' +
+    '"items":{"type":"object","properties":{"y":{"$ref":"#"}}}}}}'))
+    .ToBe('property "x[].y" needs a single "type"');
+  Expect<string>(Violation('{"type":["string","null"]}')).ToBe('needs a single "type"');
+  Expect<string>(Violation('{"type":"date"}')).ToBe('has unsupported type "date"');
+  Expect<string>(Violation('{"type":"object","properties":{"a":{"type":"string"}},' +
+    '"additionalProperties":false}')).ToBe('uses unsupported keyword "additionalProperties"');
+  // Keywords belong to their type: items on a string, enum on an object.
+  Expect<string>(Violation('{"type":"string","items":{"type":"string"}}'))
+    .ToBe('uses unsupported keyword "items"');
+  Expect<string>(Violation('{"type":"object","enum":[1]}'))
+    .ToBe('uses unsupported keyword "enum"');
+  Expect<string>(Violation('{"type":"object","properties":{"a":{"type":"string",' +
+    '"default":{}}}}')).ToBe('property "a" default must be a primitive');
+  Expect<string>(Violation('{"type":"object","properties":{"z":{"type":"string",' +
+    '"$schema":"x"}}}')).ToBe('property "z" uses unsupported keyword "$schema"');
+end;
+
+procedure TSubsetSchemas.TestObjectRootRequired;
+begin
+  Expect<string>(Violation('{"type":"array","items":{"type":"string"}}', True))
+    .ToBe('must have root type "object"');
+  Expect<string>(Violation('{"type":"object"}', True)).ToBe('');
+end;
+
+procedure TSubsetSchemas.TestTypes;
+begin
+  Expect<string>(Check('{"type":"integer"}', '2')).ToBe('');
+  Expect<string>(Check('{"type":"integer"}', '2.5')).ToBe('Argument must be an integer');
+  Expect<string>(Check('{"type":"number"}', '2')).ToBe('');
+  Expect<string>(Check('{"type":"string"}', '2')).ToBe('Argument must be a string');
+  Expect<string>(Check('{"type":"boolean"}', 'null')).ToBe('Argument must be a boolean');
+  Expect<string>(Check('{"type":"null"}', 'null')).ToBe('');
+  Expect<string>(Check('{"type":"object"}', '[]')).ToBe('Argument must be an object');
+  Expect<string>(Check('{"type":"array"}', '{}')).ToBe('Argument must be an array');
+end;
+
+procedure TSubsetSchemas.TestNestedPathsInMessages;
+const
+  NAME = 'gr' + #$C3#$B6 + #$C3#$9F + 'e';
+begin
+  Expect<string>(Check('{"type":"object","properties":{"' + NAME +
+    '":{"type":"object","properties":{"w":{"type":"number"}},"required":["w"]}}}',
+    '{"' + NAME + '":{}}')).ToBe('Missing required argument "' + NAME + '.w"');
+  Expect<string>(Check('{"type":"object","properties":{"' + NAME +
+    '":{"type":"object","properties":{"w":{"type":"number"}}}}}',
+    '{"' + NAME + '":{"w":"x"}}', 'structured output'))
+    .ToBe('Structured output "' + NAME + '.w" must be a number');
+end;
+
+procedure TSubsetSchemas.TestArrayItems;
+begin
+  Expect<string>(Check('{"type":"array","items":{"type":"object",' +
+    '"properties":{"id":{"type":"string"}},"required":["id"]}}',
+    '[{"id":"1"},{"id":2}]', 'structured output'))
+    .ToBe('Structured output "[1].id" must be a string');
+  Expect<string>(Check('{"type":"array","items":{"type":"integer"}}', '[1,2,3]'))
+    .ToBe('');
+end;
+
+procedure TSubsetSchemas.TestEnumsOfAnyPrimitive;
+begin
+  Expect<string>(Check('{"type":"string","enum":["a","b"]}', '"c"'))
+    .ToBe('Argument must be a string from the declared enum values');
+  Expect<string>(Check('{"type":"integer","enum":[1,3]}', '3')).ToBe('');
+  Expect<string>(Check('{"type":"integer","enum":[1,3]}', '2'))
+    .ToBe('Argument must be an integer from the declared enum values');
+  Expect<string>(Check('{"type":"boolean","enum":[true]}', 'false'))
+    .ToBe('Argument must be a boolean from the declared enum values');
+end;
+
+procedure TSubsetSchemas.TestDefaultsSeededOnlyWhenAsked;
+var
+  Schema, Value: TJSONObject;
+  Error: string;
+begin
+  Schema := ObjectOf('{"type":"object","properties":{"o":{"type":"object",' +
+    '"properties":{"n":{"type":"integer","default":7}}}}}');
+  Value := ObjectOf('{"o":{}}');
+  try
+    Expect<Boolean>(MCPValidateAgainstSchema(Schema, Value, 'argument', False,
+      Error)).ToBe(True);
+    Expect<Boolean>(Value.FindPath('o.n') = nil).ToBe(True);
+    Expect<Boolean>(MCPValidateAgainstSchema(Schema, Value, 'argument', True,
+      Error)).ToBe(True);
+    Expect<Integer>(TJSONData(Value.FindPath('o.n')).AsInteger).ToBe(7);
+  finally
+    Value.Free;
+    Schema.Free;
+  end;
+end;
+
+procedure TSubsetSchemas.TestRootValueMessages;
+begin
+  Expect<string>(Check('{"type":"array"}', '"x"', 'structured output'))
+    .ToBe('Structured output must be an array');
+  Expect<string>(Check('{"type":"object","required":["a"]}', '{}',
+    'structured output')).ToBe('Missing required structured output "a"');
+end;
+
+procedure TSubsetSchemas.SetupTests;
+begin
+  Test('nested objects, arrays, enums, defaults and null accepted',
+    TestAcceptedSchemas);
+  Test('keywords outside the subset named with their path',
+    TestRejectedKeywords);
+  Test('input schemas need an object root', TestObjectRootRequired);
+  Test('each type checked; integer means an integral number', TestTypes);
+  Test('nested paths in messages, non-ASCII byte-exact',
+    TestNestedPathsInMessages);
+  Test('array items checked with their index', TestArrayItems);
+  Test('enums of strings, integers and booleans', TestEnumsOfAnyPrimitive);
+  Test('defaults seeded into nested objects only when asked',
+    TestDefaultsSeededOnlyWhenAsked);
+  Test('root-level messages for output values', TestRootValueMessages);
+end;
+
 begin
   TestRunnerProgram.AddSuite(TSchemaBuilder.Create('Schema: fluent builder'));
   TestRunnerProgram.AddSuite(
     TSchemaFromClass.Create('Schema: derived from classes'));
   TestRunnerProgram.AddSuite(TWireNumber.Create('Schema: wire numbers'));
+  TestRunnerProgram.AddSuite(TSubsetSchemas.Create('Schema: enforced subset'));
   TestRunnerProgram.Run;
 end.

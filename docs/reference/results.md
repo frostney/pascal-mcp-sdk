@@ -12,6 +12,7 @@ function MCPTextResult(const AText: string): TMCPToolResult;
 function MCPErrorResult(const AText: string): TMCPToolResult;
 function MCPStructuredResult(const AText: string;
   AStructured: TJSONData): TMCPToolResult;
+function MCPStructuredResult(AStructured: TJSONData): TMCPToolResult;
 function MCPStructuredResult(const AText: string;
   AObj: TMCPArgs): TMCPToolResult;
 function MCPImageResult(const ABase64,
@@ -27,11 +28,20 @@ function MCPImageResult(const AData: TBytes;
   wrong *in the server* (they become `isError` results too, with
   messages subject to
   [redaction](../guides/configuration.md#redacterrordetails)).
-- `MCPStructuredResult` — text plus `structuredContent`. The
-  `TJSONData` overload takes ownership of the data you pass; the
-  `TMCPArgs` overload serializes an instance of a typed output class
-  **and frees it** (see
-  [Schemas](../guides/schemas.md#typed-argument-classes)).
+- `MCPStructuredResult` — text plus `structuredContent`, which can be
+  any JSON value (object, array, string, number, boolean or null). The
+  `TJSONData` overloads take ownership of the data you pass; the
+  one-argument form puts the value's serialized JSON in the text block,
+  which the specification says a structured result should also carry.
+  The `TMCPArgs` overload serializes an instance of a typed output
+  class **and frees it** (see
+  [Schemas](../guides/schemas.md#typed-argument-classes)). When the
+  tool declares an output schema inside the
+  [enforced subset](../guides/schemas.md#the-enforced-subset), the
+  server checks the value before sending it and turns a mismatch into
+  an `isError` result. To a client on a classic-handshake revision
+  (2025-11-25 and earlier), which allows only object structured
+  content, a non-object value is sent in the text block only.
 - `MCPImageResult` — one image content block (`type`, `data`,
   `mimeType`). The string overload takes data that is **already**
   base64 (the same contract as `MCPBlobContents`); the `TBytes`

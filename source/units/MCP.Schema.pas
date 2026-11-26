@@ -165,6 +165,40 @@ function MCPSerialize(AObj: TMCPArgs): TJSONObject;
 // properties and the server's progress notifications.
 function MCPWireNumber(AValue: Double): TJSONData;
 
+// ── The enforced schema subset (ADR-0004; #23, #91) ──
+//
+// The server validates arguments and structured output itself only for
+// schemas inside this JSON Schema 2020-12 subset; anything else is the
+// handler's job (.ApplicationValidated). Every schema node carries a
+// "type" of object, array, string, number, integer, boolean or null,
+// and may use:
+//   object      properties (each a node), required (names)
+//   array       items (a node)
+//   primitives  enum (primitive values), default (a primitive)
+//   any node    description, title; $schema at the root
+// Nesting is unlimited. Verified 2026-11-26 against the structured
+// content and output schema rules of
+// https://modelcontextprotocol.io/specification/2026-07-28/server/tools
+
+// '' when ASchema is inside the subset, otherwise the first violation
+// ('uses unsupported keyword "format"', 'property "a.b" has
+// unsupported type "x"', ...). AObjectRoot additionally requires the
+// root type to be object (input schemas).
+function MCPSchemaSubsetViolation(ASchema: TJSONObject;
+  AObjectRoot: Boolean): string;
+
+// Checks AValue against a subset schema: types (integer means an
+// integral JSON number), required members, enum membership, nested
+// properties and array items. Members a schema does not name are
+// ignored. With ASeedDefaults, an absent optional property that
+// declares a default is added to its object, so a handler sees the
+// same view a typed handler gets. AKind names the value in errors:
+// 'argument' gives 'Missing required argument "a.b"' and
+// 'Argument "a.b" must be a string'. False with AError on the first
+// violation.
+function MCPValidateAgainstSchema(ASchema: TJSONObject; AValue: TJSONData;
+  const AKind: string; ASeedDefaults: Boolean; out AError: string): Boolean;
+
 implementation
 
 uses
@@ -827,6 +861,284 @@ begin
   Core.FRoot := nil;
   Core.FProperties := nil;
   Core.FRequired := nil;
+end;
+
+
+{ ───────── the enforced schema subset (#91) ───────── }
+
+function IsSubsetType(const AType: string): Boolean;
+begin
+  Result := (AType = 'object') or (AType = 'array') or (AType = 'string') or
+    (AType = 'number') or (AType = 'integer') or (AType = 'boolean') or
+    (AType = 'null');
+end;
+
+function IsPrimitiveType(const AType: string): Boolean;
+begin
+  Result := (AType <> 'object') and (AType <> 'array');
+end;
+
+// 'property "a.b" ' for a nested node, '' for the root.
+function NodeLabel(const APath: string): string;
+begin
+  if APath = '' then
+    Result := ''
+  else
+    Result := 'property "' + APath + '" ';
+end;
+
+function JoinPath(const APath, AName: string): string;
+begin
+  if APath = '' then
+    Result := AName
+  else
+    Result := APath + '.' + AName;
+end;
+
+function NodeViolation(ANode: TJSONObject; const APath: string;
+  ARoot: Boolean): string; forward;
+
+// The keyword ANode[AIndex] is allowed for a node of AType.
+function KeywordViolation(ANode: TJSONObject; AIndex: Integer;
+  const AType, APath: string; ARoot: Boolean): string;
+var
+  Key: string;
+  Value: TJSONData;
+  I: Integer;
+begin
+  Result := '';
+  Key := ANode.Names[AIndex];
+  Value := ANode.Items[AIndex];
+  if (Key = 'type') or (Key = 'description') or (Key = 'title') or
+    (ARoot and (Key = '$schema')) then
+    Exit;
+  if (Key = 'properties') and (AType = 'object') then
+  begin
+    if Value.JSONType <> jtObject then
+      Exit(NodeLabel(APath) + 'properties must be an object');
+    for I := 0 to Value.Count - 1 do
+    begin
+      if TJSONObject(Value).Items[I].JSONType <> jtObject then
+        Exit(Format('property "%s" must be an object schema',
+          [JoinPath(APath, TJSONObject(Value).Names[I])]));
+      Result := NodeViolation(TJSONObject(TJSONObject(Value).Items[I]),
+        JoinPath(APath, TJSONObject(Value).Names[I]), False);
+      if Result <> '' then
+        Exit;
+    end;
+  end
+  else if (Key = 'required') and (AType = 'object') then
+  begin
+    if Value.JSONType <> jtArray then
+      Exit(NodeLabel(APath) + 'required must be an array');
+  end
+  else if (Key = 'items') and (AType = 'array') then
+  begin
+    if Value.JSONType <> jtObject then
+      Exit(NodeLabel(APath) + 'items must be an object schema');
+    Result := NodeViolation(TJSONObject(Value), APath + '[]', False);
+  end
+  else if (Key = 'enum') and IsPrimitiveType(AType) then
+  begin
+    if Value.JSONType <> jtArray then
+      Exit(NodeLabel(APath) + 'enum must be an array');
+    for I := 0 to Value.Count - 1 do
+      if not (Value.Items[I].JSONType in
+        [jtString, jtNumber, jtBoolean, jtNull]) then
+        Exit(NodeLabel(APath) + 'enum values must be primitives');
+  end
+  else if (Key = 'default') and IsPrimitiveType(AType) then
+  begin
+    if not (Value.JSONType in [jtString, jtNumber, jtBoolean, jtNull]) then
+      Exit(NodeLabel(APath) + 'default must be a primitive');
+  end
+  else
+    Result := NodeLabel(APath) + 'uses unsupported keyword "' + Key + '"';
+end;
+
+function NodeViolation(ANode: TJSONObject; const APath: string;
+  ARoot: Boolean): string;
+var
+  TypeData: TJSONData;
+  NodeType: string;
+  I: Integer;
+begin
+  TypeData := ANode.Find('type');
+  if (TypeData = nil) or (TypeData.JSONType <> jtString) or
+    not IsSubsetType(TypeData.AsString) then
+  begin
+    if (TypeData <> nil) and (TypeData.JSONType = jtString) then
+      Exit(NodeLabel(APath) + 'has unsupported type "' +
+        TypeData.AsString + '"');
+    Exit(NodeLabel(APath) + 'needs a single "type"');
+  end;
+  NodeType := TypeData.AsString;
+  for I := 0 to ANode.Count - 1 do
+  begin
+    Result := KeywordViolation(ANode, I, NodeType, APath, ARoot);
+    if Result <> '' then
+      Exit;
+  end;
+  Result := '';
+end;
+
+function MCPSchemaSubsetViolation(ASchema: TJSONObject;
+  AObjectRoot: Boolean): string;
+begin
+  if ASchema = nil then
+    Exit('is missing');
+  if AObjectRoot and (ASchema.Get('type', '') <> 'object') then
+    Exit('must have root type "object"');
+  Result := NodeViolation(ASchema, '', True);
+end;
+
+// 'a string', 'an integer', ... for messages.
+function TypePhrase(const AType: string): string;
+begin
+  if (AType = 'integer') or (AType = 'object') or (AType = 'array') then
+    Result := 'an ' + AType
+  else if AType = 'null' then
+    Result := 'null'
+  else
+    Result := 'a ' + AType;
+end;
+
+function MatchesType(AValue: TJSONData; const AType: string): Boolean;
+begin
+  if AType = 'string' then
+    Result := AValue.JSONType = jtString
+  else if AType = 'number' then
+    Result := AValue.JSONType = jtNumber
+  else if AType = 'integer' then
+    Result := (AValue.JSONType = jtNumber) and
+      (TJSONNumber(AValue).NumberType in [ntInteger, ntInt64, ntQWord])
+  else if AType = 'boolean' then
+    Result := AValue.JSONType = jtBoolean
+  else if AType = 'null' then
+    Result := AValue.JSONType = jtNull
+  else if AType = 'object' then
+    Result := AValue.JSONType = jtObject
+  else
+    Result := AValue.JSONType = jtArray;
+end;
+
+// Equal primitive JSON values: same JSON type and the same text (for
+// numbers, the same numeric value).
+function SamePrimitive(A, B: TJSONData): Boolean;
+begin
+  if A.JSONType <> B.JSONType then
+    Exit(False);
+  case A.JSONType of
+    jtNumber:
+      Result := A.AsFloat = B.AsFloat;
+    jtNull:
+      Result := True;
+  else
+    Result := A.AsJSON = B.AsJSON;
+  end;
+end;
+
+// 'Argument "a.b"' or 'Argument' (root) for the value at APath.
+function Subject(const AKind, APath: string): string;
+begin
+  Result := UpperCase(Copy(AKind, 1, 1)) + Copy(AKind, 2, MaxInt);
+  if APath <> '' then
+    Result := Result + ' "' + APath + '"';
+end;
+
+function ValidateNode(ANode: TJSONObject; AValue: TJSONData;
+  const AKind, APath: string; ASeedDefaults: Boolean;
+  out AError: string): Boolean; forward;
+
+function ValidateMembers(ANode, AValue: TJSONObject;
+  const AKind, APath: string; ASeedDefaults: Boolean;
+  out AError: string): Boolean;
+var
+  Data, Member, DefaultData: TJSONData;
+  Properties: TJSONObject;
+  I: Integer;
+begin
+  Result := False;
+  Data := ANode.Find('required');
+  if (Data <> nil) and (Data.JSONType = jtArray) then
+    for I := 0 to Data.Count - 1 do
+      if (Data.Items[I].JSONType = jtString) and
+        (AValue.Find(Data.Items[I].AsString) = nil) then
+      begin
+        AError := Format('Missing required %s "%s"',
+          [AKind, JoinPath(APath, Data.Items[I].AsString)]);
+        Exit;
+      end;
+  Data := ANode.Find('properties');
+  if (Data <> nil) and (Data.JSONType = jtObject) then
+  begin
+    Properties := TJSONObject(Data);
+    for I := 0 to Properties.Count - 1 do
+    begin
+      Member := AValue.Find(Properties.Names[I]);
+      if Member = nil then
+      begin
+        DefaultData := TJSONObject(Properties.Items[I]).Find('default');
+        if ASeedDefaults and (DefaultData <> nil) then
+          AValue.Add(Properties.Names[I], DefaultData.Clone);
+        Continue;
+      end;
+      if not ValidateNode(TJSONObject(Properties.Items[I]), Member, AKind,
+        JoinPath(APath, Properties.Names[I]), ASeedDefaults, AError) then
+        Exit;
+    end;
+  end;
+  Result := True;
+end;
+
+function ValidateNode(ANode: TJSONObject; AValue: TJSONData;
+  const AKind, APath: string; ASeedDefaults: Boolean;
+  out AError: string): Boolean;
+var
+  NodeType: string;
+  EnumData, ItemSchema: TJSONData;
+  I: Integer;
+  Matched: Boolean;
+begin
+  Result := False;
+  AError := '';
+  NodeType := ANode.Get('type', '');
+  if not MatchesType(AValue, NodeType) then
+  begin
+    AError := Subject(AKind, APath) + ' must be ' + TypePhrase(NodeType);
+    Exit;
+  end;
+  EnumData := ANode.Find('enum');
+  if (EnumData <> nil) and (EnumData.JSONType = jtArray) then
+  begin
+    Matched := False;
+    for I := 0 to EnumData.Count - 1 do
+      if SamePrimitive(EnumData.Items[I], AValue) then
+        Matched := True;
+    if not Matched then
+    begin
+      AError := Subject(AKind, APath) + ' must be ' + TypePhrase(NodeType) +
+        ' from the declared enum values';
+      Exit;
+    end;
+  end;
+  if NodeType = 'object' then
+    Exit(ValidateMembers(ANode, TJSONObject(AValue), AKind, APath,
+      ASeedDefaults, AError));
+  ItemSchema := ANode.Find('items');
+  if (NodeType = 'array') and (ItemSchema <> nil) and
+    (ItemSchema.JSONType = jtObject) then
+    for I := 0 to AValue.Count - 1 do
+      if not ValidateNode(TJSONObject(ItemSchema), AValue.Items[I], AKind,
+        Format('%s[%d]', [APath, I]), ASeedDefaults, AError) then
+        Exit;
+  Result := True;
+end;
+
+function MCPValidateAgainstSchema(ASchema: TJSONObject; AValue: TJSONData;
+  const AKind: string; ASeedDefaults: Boolean; out AError: string): Boolean;
+begin
+  Result := ValidateNode(ASchema, AValue, AKind, '', ASeedDefaults, AError);
 end;
 
 end.

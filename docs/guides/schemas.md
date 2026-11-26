@@ -135,12 +135,34 @@ call time.
 
 ## The enforced subset
 
-The server enforces a deliberate subset of JSON Schema 2020-12 —
-`type`, `description`, `title`, `properties`, `required`, `enum`,
-`default` — exactly the dialect the builders emit. Every raw-schema
-registration is checked against that subset at startup: a schema using
-a keyword outside it **fails at registration, naming the keyword**,
-instead of being silently under-validated at call time.
+The server enforces a deliberate subset of JSON Schema 2020-12. Every
+schema node has one `type` (`object`, `array`, `string`, `number`,
+`integer`, `boolean` or `null`) and may use:
+
+| Node type | Keywords |
+| --- | --- |
+| `object` | `properties` (each a node), `required` |
+| `array` | `items` (a node) |
+| primitives | `enum` (primitive values), `default` (a primitive) |
+| any | `description`, `title`; `$schema` at the root |
+
+Objects and arrays nest to any depth. Input schemas have an `object`
+root, as the specification requires; output schemas can have any root.
+Every raw input schema is checked against the subset at startup: a
+schema using a keyword outside it **fails at registration, naming the
+keyword and its path**, instead of being silently under-validated at
+call time.
+
+Output schemas inside the subset are enforced too: before a result
+leaves the server, its `structuredContent` is checked against the
+tool's `outputSchema`. The specification makes conforming output a
+server duty
+([Output Schema](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#output-schema),
+verified 2026-11-26), so a handler that returns the wrong shape, or no
+structured content at all, gets an `isError` result naming the first
+mismatch instead of sending it. A handler's own `isError` result is not
+checked. An output schema outside the subset is published unchanged and
+not checked: honouring it is the handler's job.
 
 The escape hatch is `.ApplicationValidated`:
 
@@ -153,3 +175,20 @@ That publishes the full schema to clients unchanged, skips server-side
 argument validation, and hands the job to your handler — report
 violations as in-band `MCPErrorResult`s so the model can correct
 itself.
+
+The checks the server runs are public in `MCP.Schema`, so a handler can
+reuse them, for example on a part of its arguments that does fit the
+subset:
+
+```pascal
+function MCPSchemaSubsetViolation(ASchema: TJSONObject;
+  AObjectRoot: Boolean): string;
+function MCPValidateAgainstSchema(ASchema: TJSONObject; AValue: TJSONData;
+  const AKind: string; ASeedDefaults: Boolean; out AError: string): Boolean;
+```
+
+`MCPSchemaSubsetViolation` returns `''` for a schema inside the subset,
+otherwise the first violation with its path. `MCPValidateAgainstSchema`
+checks a value, naming it with `AKind` in the error (`'argument'` gives
+`Missing required argument "a.b"`), and with `ASeedDefaults` adds the
+declared defaults of absent optional properties.

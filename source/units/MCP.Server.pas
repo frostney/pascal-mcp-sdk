@@ -159,6 +159,9 @@ type
     // Set at freeze: the inputSchema is within the enforceable
     // subset, so arguments are validated against it per call.
     SubsetValidate: Boolean;
+    // Set at freeze: an outputSchema within the subset, so every
+    // structuredContent is checked against it before it is sent (#91).
+    OutputValidate: Boolean;
   end;
 
   TMCPResourceRegistration = record
@@ -587,6 +590,11 @@ function MCPTextResult(const AText: string): TMCPToolResult;
 function MCPErrorResult(const AText: string): TMCPToolResult;
 function MCPStructuredResult(const AText: string;
   AStructured: TJSONData): TMCPToolResult; overload;
+// Structured output of any JSON value (object, array, string, number,
+// boolean or null; SEP-2106), with its serialized JSON as the text
+// block, which the spec says such a result SHOULD also carry
+// (tools#structured-content, verified 2026-11-26). Takes ownership.
+function MCPStructuredResult(AStructured: TJSONData): TMCPToolResult; overload;
 // Typed structured output: serializes the instance's published
 // properties (MCPSerialize) and frees it.
 function MCPStructuredResult(const AText: string;
@@ -1557,6 +1565,13 @@ begin
   Result.StructuredContent := AStructured;
 end;
 
+function MCPStructuredResult(AStructured: TJSONData): TMCPToolResult;
+begin
+  if AStructured = nil then
+    raise EMCPServer.Create('MCPStructuredResult: structured value is nil');
+  Result := MCPStructuredResult(SerializeCompact(AStructured), AStructured);
+end;
+
 function MCPStructuredResult(const AText: string;
   AObj: TMCPArgs): TMCPToolResult;
 begin
@@ -1725,216 +1740,11 @@ end;
 
 { ───────── subset schema validation (#23) ───────── }
 
-// The server-enforced subset is exactly the dialect this SDK's
-// builders emit: a root object schema with properties / required /
-// enum / default plus annotation keywords. Returns '' when ASchema is
-// within the subset, otherwise a diagnostic naming the first
-// offending keyword. Decided 2026-07-20 (roadmap): no general
-// JSON-Schema engine — foreign dialects need the ApplicationValidated
-// escape hatch.
-function SchemaSubsetViolation(ASchema: TJSONObject): string;
-
-  function PropertyViolation(const AName: string;
-    ASpec: TJSONObject): string;
-  var
-    I: Integer;
-    Key, PropType: string;
-    EnumData, DefaultData: TJSONData;
-  begin
-    Result := '';
-    PropType := ASpec.Get('type', '');
-    if (PropType <> 'string') and (PropType <> 'number') and
-       (PropType <> 'integer') and (PropType <> 'boolean') then
-      Exit(Format('property "%s" has unsupported type "%s"',
-        [AName, PropType]));
-    for I := 0 to ASpec.Count - 1 do
-    begin
-      Key := ASpec.Names[I];
-      if (Key = 'type') or (Key = 'description') or (Key = 'title') then
-        Continue
-      else if Key = 'enum' then
-      begin
-        if PropType <> 'string' then
-          Exit(Format('property "%s" uses enum with type "%s" ' +
-            '(only string enums are enforceable)', [AName, PropType]));
-        EnumData := ASpec.Items[I];
-        if EnumData.JSONType <> jtArray then
-          Exit(Format('property "%s" enum must be an array', [AName]));
-      end
-      else if Key = 'default' then
-      begin
-        DefaultData := ASpec.Items[I];
-        if not (DefaultData.JSONType in
-          [jtString, jtNumber, jtBoolean]) then
-          Exit(Format('property "%s" default must be a primitive',
-            [AName]));
-      end
-      else
-        Exit(Format('property "%s" uses unsupported keyword "%s"',
-          [AName, Key]));
-    end;
-  end;
-
-var
-  I: Integer;
-  Key: string;
-  Data: TJSONData;
-  Properties: TJSONObject;
-begin
-  Result := '';
-  for I := 0 to ASchema.Count - 1 do
-  begin
-    Key := ASchema.Names[I];
-    if (Key = 'type') or (Key = 'description') or (Key = 'title') or
-       (Key = '$schema') then
-      Continue
-    else if Key = 'properties' then
-    begin
-      if ASchema.Items[I].JSONType <> jtObject then
-        Exit('properties must be an object');
-    end
-    else if Key = 'required' then
-    begin
-      if ASchema.Items[I].JSONType <> jtArray then
-        Exit('required must be an array');
-    end
-    else
-      Exit(Format('uses unsupported root keyword "%s"', [Key]));
-  end;
-  Data := ASchema.Find('properties');
-  if Data = nil then
-    Exit;
-  Properties := TJSONObject(Data);
-  for I := 0 to Properties.Count - 1 do
-  begin
-    if Properties.Items[I].JSONType <> jtObject then
-      Exit(Format('property "%s" must be an object schema',
-        [Properties.Names[I]]));
-    Result := PropertyViolation(Properties.Names[I],
-      TJSONObject(Properties.Items[I]));
-    if Result <> '' then
-      Exit;
-  end;
-end;
-
-// Call-time argument validation against a subset schema (raw-handler
-// tools only; the typed path validates through BindArguments). The
-// checks mirror BindProperty: required presence, JSON type per
-// property (integer means an integral JSON number), enum membership,
-// and default seeding into AArguments for absent optional
-// properties. Unknown argument properties are deliberately ignored —
-// the same tolerance the typed path applies to unknown keys.
-function ValidateSubsetArguments(ASchema, AArguments: TJSONObject;
-  out AError: string): Boolean;
-var
-  I: Integer;
-  Data, Value, EnumData, DefaultData: TJSONData;
-  Required: TJSONArray;
-  Properties, PropSpec: TJSONObject;
-  PropName, PropType: string;
-  EnumMatched: Boolean;
-  J: Integer;
-begin
-  Result := False;
-  AError := '';
-
-  Data := ASchema.Find('required');
-  if (Data <> nil) and (Data.JSONType = jtArray) then
-  begin
-    Required := TJSONArray(Data);
-    for I := 0 to Required.Count - 1 do
-      if (Required[I].JSONType = jtString) and
-         (AArguments.Find(Required[I].AsString) = nil) then
-      begin
-        AError := Format('Missing required argument "%s"',
-          [Required[I].AsString]);
-        Exit;
-      end;
-  end;
-
-  Data := ASchema.Find('properties');
-  if (Data <> nil) and (Data.JSONType = jtObject) then
-  begin
-    Properties := TJSONObject(Data);
-    for I := 0 to Properties.Count - 1 do
-    begin
-      PropName := Properties.Names[I];
-      PropSpec := TJSONObject(Properties.Items[I]);
-      Value := AArguments.Find(PropName);
-      if Value = nil then
-      begin
-        // Absent optional argument: seed the declared default so the
-        // handler sees the same view a typed handler would.
-        DefaultData := PropSpec.Find('default');
-        if DefaultData <> nil then
-          AArguments.Add(PropName, DefaultData.Clone);
-        Continue;
-      end;
-      PropType := PropSpec.Get('type', '');
-      if PropType = 'string' then
-      begin
-        if Value.JSONType <> jtString then
-        begin
-          AError := Format('Argument "%s" must be a string', [PropName]);
-          Exit;
-        end;
-        EnumData := PropSpec.Find('enum');
-        if (EnumData <> nil) and (EnumData.JSONType = jtArray) then
-        begin
-          EnumMatched := False;
-          for J := 0 to TJSONArray(EnumData).Count - 1 do
-            if (TJSONArray(EnumData)[J].JSONType = jtString) and
-               (TJSONArray(EnumData)[J].AsString = Value.AsString) then
-            begin
-              EnumMatched := True;
-              Break;
-            end;
-          if not EnumMatched then
-          begin
-            AError := Format(
-              'Argument "%s" must be a string from the declared enum values',
-              [PropName]);
-            Exit;
-          end;
-        end;
-      end
-      else if PropType = 'number' then
-      begin
-        if Value.JSONType <> jtNumber then
-        begin
-          AError := Format('Argument "%s" must be a number', [PropName]);
-          Exit;
-        end;
-      end
-      else if PropType = 'integer' then
-      begin
-        if (Value.JSONType <> jtNumber) or
-           not (TJSONNumber(Value).NumberType in
-             [ntInteger, ntInt64, ntQWord]) then
-        begin
-          AError := Format('Argument "%s" must be an integer', [PropName]);
-          Exit;
-        end;
-      end
-      else if PropType = 'boolean' then
-      begin
-        if Value.JSONType <> jtBoolean then
-        begin
-          AError := Format('Argument "%s" must be a boolean', [PropName]);
-          Exit;
-        end;
-      end;
-    end;
-  end;
-
-  Result := True;
-end;
-
 procedure TMCPServer.FreezeConfiguration;
 var
   I: Integer;
   Violation: string;
-  InputSchema: TJSONData;
+  InputSchema, OutputSchema: TJSONData;
 begin
   if FFrozen then
     Exit;
@@ -1947,16 +1757,24 @@ begin
     if FTools[I].ArgsClass = nil then
     begin
       InputSchema := FTools[I].Definition.Find('inputSchema');
-      Violation := SchemaSubsetViolation(TJSONObject(InputSchema));
+      Violation := MCPSchemaSubsetViolation(TJSONObject(InputSchema), True);
       if Violation = '' then
         FTools[I].SubsetValidate := not FTools[I].AppValidated
       else if not FTools[I].AppValidated then
         raise EMCPServer.CreateFmt(
           'Tool "%s" inputSchema %s — outside the server-validated ' +
-          'subset (type/properties/required/enum/default). Mark the ' +
-          'registration .ApplicationValidated to take over argument ' +
+          'subset (type/properties/required/items/enum/default). Mark ' +
+          'the registration .ApplicationValidated to take over argument ' +
           'validation', [FTools[I].Definition.Get('name', ''), Violation]);
     end;
+  // Structured output is checked whenever the output schema is inside
+  // the subset (#91); a richer one is the handler's to honour.
+  for I := 0 to High(FTools) do
+  begin
+    OutputSchema := FTools[I].Definition.Find('outputSchema');
+    FTools[I].OutputValidate := (OutputSchema <> nil) and
+      (MCPSchemaSubsetViolation(TJSONObject(OutputSchema), False) = '');
+  end;
   FFrozen := True;
 end;
 
@@ -2152,15 +1970,12 @@ begin
   OutputSchema := ADefinition.Find('outputSchema');
   if OutputSchema <> nil then
   begin
+    // Any root type since SEP-2106 (tools#structured-content, verified
+    // 2026-11-26); the schema itself is still a JSON object.
     if OutputSchema.JSONType <> jtObject then
       raise EMCPServer.CreateFmt(
         'Tool "%s" definition must carry an object-valued outputSchema',
         [AToolName]);
-    SchemaType := TJSONObject(OutputSchema).Find('type');
-    if (SchemaType = nil) or (SchemaType.JSONType <> jtString) or
-      (SchemaType.AsString <> 'object') then
-      raise EMCPServer.CreateFmt(
-        'Tool "%s" outputSchema must have root type "object"', [AToolName]);
   end;
   if FindTool(AToolName) >= 0 then
     raise EMCPServer.CreateFmt(
@@ -3284,7 +3099,8 @@ end;
 function TMCPServer.HandleToolsList(const AMessage: TJSONRPCMessage;
   ALegacy: Boolean): string;
 var
-  ListResult: TJSONObject;
+  ListResult, Definition: TJSONObject;
+  OutputSchema: TJSONData;
   Tools: TJSONArray;
   I: Integer;
 begin
@@ -3292,7 +3108,16 @@ begin
   // spec asks for, and without pagination there is no cursor to honor.
   Tools := TJSONArray.Create;
   for I := 0 to High(FTools) do
-    Tools.Add(FTools[I].Definition.Clone);
+  begin
+    Definition := TJSONObject(FTools[I].Definition.Clone);
+    // The classic dialect's outputSchema has an object root (2025-11-25
+    // schema); a tool with any other is listed without one there (#91).
+    OutputSchema := Definition.Find('outputSchema');
+    if ALegacy and (OutputSchema <> nil) and
+      (TJSONObject(OutputSchema).Get('type', '') <> 'object') then
+      Definition.Delete('outputSchema');
+    Tools.Add(Definition);
+  end;
   ListResult := TJSONObject.Create;
   ListResult.Add('tools', Tools);
   if not ALegacy then
@@ -3386,6 +3211,26 @@ begin
   Result := '';
 end;
 
+// A tool with a subset outputSchema must send conforming structured
+// output: the spec makes that a server MUST (tools#output-schema,
+// verified 2026-11-26). A handler that breaks it gets an isError result
+// naming the first violation instead of sending the bad value.
+procedure CheckStructuredOutput(const AToolName: string;
+  AOutputSchema: TJSONObject; var AResult: TMCPToolResult);
+var
+  Violation: string;
+begin
+  if AResult.StructuredContent = nil then
+    Violation := 'no structuredContent was returned'
+  else if MCPValidateAgainstSchema(AOutputSchema, AResult.StructuredContent,
+    'structured output', False, Violation) then
+    Exit;
+  AResult.Content.Free;
+  AResult.StructuredContent.Free;
+  AResult := MCPErrorResult('Tool "' + AToolName + '" produced output that ' +
+    'does not match its outputSchema: ' + Violation);
+end;
+
 function TMCPServer.HandleToolsCall(const AMessage: TJSONRPCMessage;
   const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
 var
@@ -3421,9 +3266,9 @@ begin
           ToolResult := MCPErrorResult(BindError);
       end
       else if FTools[Index].SubsetValidate and
-        not ValidateSubsetArguments(
+        not MCPValidateAgainstSchema(
           TJSONObject(FTools[Index].Definition.Find('inputSchema')),
-          Arguments, BindError) then
+          Arguments, 'argument', True, BindError) then
         // Raw path (#23): the registered schema's enforceable subset
         // is checked before the handler runs; violations travel
         // in-band exactly like typed binding failures.
@@ -3465,10 +3310,18 @@ begin
 
   if ToolResult.Content = nil then
     ToolResult.Content := TJSONArray.Create;
+  if FTools[Index].OutputValidate and not ToolResult.IsError then
+    CheckStructuredOutput(ToolName,
+      TJSONObject(FTools[Index].Definition.Find('outputSchema')), ToolResult);
 
   CallResult := TJSONObject.Create;
   CallResult.Add('content', ToolResult.Content);
   CallResult.Add('isError', ToolResult.IsError);
+  // The classic dialect's structuredContent is an object (2025-11-25
+  // schema); any other value stays in the text block only (#91).
+  if (ToolResult.StructuredContent <> nil) and ALegacy and
+    (ToolResult.StructuredContent.JSONType <> jtObject) then
+    FreeAndNil(ToolResult.StructuredContent);
   if ToolResult.StructuredContent <> nil then
     CallResult.Add('structuredContent', ToolResult.StructuredContent);
 
