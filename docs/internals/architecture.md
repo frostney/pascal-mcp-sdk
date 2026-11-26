@@ -354,18 +354,16 @@ The binding's rules, all transport-owned:
   against the frozen core — the concurrency model the v1.2.0 state
   split was built for.
 
-One SDK-anchor fact lives in the transport (verified 2026-08-08
-against `@modelcontextprotocol/client` 2.0.0): the official client
-derives the mirrored headers from the body's `_meta` envelope and
-sends its pre-negotiation `server/discover` probe with no mirrored
-header, so header validation keys on the envelope claim rather than
-demanding the header on literally every POST. This is only about not
-masking the request with a `-32020` header error: the body still
-carries `_meta` (`server/discover` does, like every request), and the
-core still answers `-32602` for a request missing it — the header
-tolerance never lets a bare-`_meta` request succeed (spec verified
-2026-08-08:
-[server/discover](https://modelcontextprotocol.io/specification/2026-07-28/server/discover)).
+Header validation keys on the body's `_meta` envelope claim rather
+than demanding the mirrored headers on literally every POST. A body
+without the envelope is malformed anyway, and the core's `-32602`
+(answered `400`, #79) names the missing field, where a `-32020` header
+error would point at the headers instead; the tolerance never lets a
+request without `_meta` succeed (spec verified 2026-11-26:
+[`_meta`](https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta)).
+The official client sends the full envelope and headers even on its
+first `server/discover` probe (re-checked 2026-11-26 against
+`@modelcontextprotocol/client` 2.0.0).
 Proven end-to-end by the `tools/interop-ts` Streamable HTTP battery
 (`http-interop.mjs`) driving `mcpdemo --http`, including streamed
 progress notifications.

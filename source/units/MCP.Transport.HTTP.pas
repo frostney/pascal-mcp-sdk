@@ -32,13 +32,12 @@ unit MCP.Transport.HTTP;
 //     =?base64?...?= sentinel decoded first) on tools/call,
 //     resources/read and prompts/get. Failures answer 400 with a
 //     -32020 HeaderMismatch JSON-RPC error. A request without the
-//     envelope claim skips header validation — SDK-anchor fact
-//     (verified 2026-08-08 against @modelcontextprotocol/client
-//     2.0.0): the official client derives these headers from the
-//     body envelope and sends its pre-negotiation server/discover
-//     probe bare, so demanding the header there would break the
-//     documented up-front version-selection flow; the core still
-//     rejects every other _meta-less request with -32602.
+//     envelope claim skips header validation: it is malformed anyway,
+//     and the core's -32602 (HTTP 400, #79) names what is missing,
+//     where a -32020 would point at the headers instead. The official
+//     client sends the full envelope and headers even on its first
+//     server/discover probe (re-checked 2026-11-26 against
+//     @modelcontextprotocol/client 2.0.0, buildProbeRequest).
 //     Mcp-Param-* headers are forwarded-and-ignored: this server
 //     designates no x-mcp-header parameters, so none are recognized;
 //   - HTTP status mapping: -32601 → 404 (unknown RPC method, and the
@@ -548,10 +547,8 @@ begin
   Result := True;
 
   // The mirrored headers derive from the body's _meta envelope; a
-  // request without the envelope claim (the official client's
-  // pre-negotiation server/discover probe) carries none and is left
-  // to the core, which rejects every other _meta-less request with
-  // its more useful -32602 diagnostic.
+  // request without the envelope claim is malformed and left to the
+  // core, whose -32602 names the missing field (400 on HTTP, #79).
   BodyVersion := '';
   Meta := MetaObject(AMessage.Params);
   if Meta <> nil then

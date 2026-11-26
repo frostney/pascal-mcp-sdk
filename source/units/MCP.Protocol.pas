@@ -151,7 +151,7 @@ procedure ExtractProgressToken(AMeta: TJSONObject;
 // 2026-11-26 against
 // https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta
 // Transports use it to tell that rejection from other -32602 errors,
-// which stay in-band.
+// which stay in-band. AParams is borrowed and may be nil (no params).
 function MissingRequiredMeta(AParams: TJSONObject): string;
 
 // Validate the required per-request _meta fields and extract the

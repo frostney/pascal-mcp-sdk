@@ -128,7 +128,9 @@ begin
 end;
 
 // MissingRequiredMeta (#79): the first absent or mistyped required
-// field, in the order ExtractRequestContext checks them.
+// field, in the order ExtractRequestContext checks them. Required
+// fields verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta
 function MissingOf(const AJson: string): string;
 var
   Params: TJSONObject;
