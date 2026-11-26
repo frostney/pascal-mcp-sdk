@@ -2,9 +2,9 @@
 
 ## Executive Summary
 
-`TMCPServer` has five request-visible configuration properties —
-`Instructions`, `CacheTtlMs`, `CacheScope`, `RedactErrorDetails`, and
-`DualEra` — all set between `Create` and serving. Configuration
+`TMCPServer` has six request-visible configuration properties —
+`Instructions`, `CacheTtlMs`, `CacheScope`, `RedactErrorDetails`,
+`DualEra` and `PageSize` — all set between `Create` and serving. Configuration
 freezes together with the registries when the first session is
 created; a later write raises `EMCPServer`.
 
@@ -69,9 +69,27 @@ is rejected with a diagnostic naming the supported versions. The
 Streamable HTTP binding forces this mode — HTTP clients speak
 `2026-07-28`.
 
+## PageSize
+
+`0` by default: every list method returns the whole registry. Set it to
+hand lists out in pages (useful once a server registers hundreds of
+tools):
+
+```pascal
+Server.PageSize := 50;
+```
+
+Each page then carries at most 50 entries and a `nextCursor` while more
+remain; the client sends it back as `cursor` to get the next page. The
+cursor is opaque and stays valid for the server's life, because the
+registries do not change after startup. A cursor the server did not
+hand out for that list is answered `-32602`, as the
+[pagination](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/pagination)
+page asks (verified 2026-11-26).
+
 ## Freeze semantics
 
-All five properties, like the registries, are mutable only until the
+All six properties, like the registries, are mutable only until the
 first session exists (`RunMCPStdioServer` and `TMCPHTTPServer` create
 sessions internally). Configure fully, then serve:
 

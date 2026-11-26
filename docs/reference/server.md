@@ -24,6 +24,7 @@ is created, and later mutation raises `EMCPServer`.
 | `CacheScope` | `string` | `'private'` | SEP-2549 `cacheScope`; `'private'` or `'public'` |
 | `RedactErrorDetails` | `Boolean` | `False` | `True` replaces exception detail with a correlation reference, logging the full error to stderr |
 | `DualEra` | `Boolean` | `True` | Answer the classic `initialize` handshake alongside stateless 2026-07-28 requests |
+| `PageSize` | `Integer` | `0` | Entries per page of `tools/list`, `resources/list`, `resources/templates/list` and `prompts/list`, with a `nextCursor` while more remain; `0` lists everything at once |
 | `Name`, `Version` | `string` | — | Read-only, from `Create` |
 
 Semantics and guidance: [Configuration](../guides/configuration.md).

@@ -361,6 +361,19 @@ type
     procedure TestRepeatedBlockRejected;
   end;
 
+  // PageSize and cursors on the four list methods (#94).
+  TPagination = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestPagesConcatenateInOrder;
+    procedure TestInvalidCursors;
+    procedure TestNoPagingByDefault;
+    procedure TestOtherListsPage;
+    procedure TestLegacyDialectPages;
+  end;
+
   // MCPImageResult: the spec's image content block, the raw-bytes
   // overload's base64 encoding (asserted against literal fixtures, not
   // against a decode of what we just encoded), mimeType passthrough,
@@ -4713,6 +4726,160 @@ begin
     TestApplicationValidatedSkipsChecks);
 end;
 
+{ ───────── pagination (#94) ───────── }
+
+procedure TPagination.BeforeEach;
+var
+  I: Integer;
+begin
+  inherited BeforeEach;
+  // The suite's server already has seven tools; add four more.
+  for I := 1 to 4 do
+    FServer.RegisterTool('extra' + IntToStr(I), 'Extra', '{"type":"object"}',
+      EchoHandler);
+  FServer.PageSize := 4;
+end;
+
+function ListLine(const AMethod, ACursor: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":3,"method":"' + AMethod + '","params":{';
+  if ACursor <> '' then
+    Result := Result + '"cursor":"' + ACursor + '",';
+  Result := Result + META_MODERN + '}}';
+end;
+
+procedure TPagination.TestPagesConcatenateInOrder;
+var
+  Response: TJSONObject;
+  Cursor, Names: string;
+  Pages, I: Integer;
+  Tools: TJSONArray;
+begin
+  Cursor := '';
+  Names := '';
+  Pages := 0;
+  repeat
+    Response := Call(ListLine('tools/list', Cursor));
+    Tools := TJSONArray(Response.FindPath('result.tools'));
+    Expect<Boolean>(Tools.Count <= 4).ToBe(True);
+    for I := 0 to Tools.Count - 1 do
+      Names := Names + TJSONObject(Tools[I]).Get('name', '') + ',';
+    // Caching fields on every page.
+    Expect<Boolean>(Response.FindPath('result.ttlMs') <> nil).ToBe(True);
+    if Response.FindPath('result.nextCursor') <> nil then
+      Cursor := TJSONData(Response.FindPath('result.nextCursor')).AsString
+    else
+      Cursor := '';
+    Response.Free;
+    Inc(Pages);
+  until (Cursor = '') or (Pages > 10);
+  Expect<Integer>(Pages).ToBe(3);
+  Expect<string>(Names).ToBe('echo,sum,boom,whoami,scale,repeat,noisy,' +
+    'extra1,extra2,extra3,extra4,');
+end;
+
+function ErrorCodeOfLine(ASuite: TDispatchSuite; const ALine: string): Integer;
+var
+  Response: TJSONObject;
+begin
+  Response := ASuite.Call(ALine);
+  try
+    Result := TJSONData(Response.FindPath('error.code')).AsInteger;
+  finally
+    Response.Free;
+  end;
+end;
+
+procedure TPagination.TestInvalidCursors;
+var
+  Response: TJSONObject;
+  ToolsCursor: string;
+begin
+  Response := Call(ListLine('tools/list', ''));
+  ToolsCursor := TJSONData(Response.FindPath('result.nextCursor')).AsString;
+  Response.Free;
+  Expect<Integer>(ErrorCodeOfLine(Self, ListLine('tools/list', 'not-ours')))
+    .ToBe(-32602);
+  // A cursor names its list: tools/list's is not prompts/list's.
+  Expect<Integer>(ErrorCodeOfLine(Self, ListLine('prompts/list', ToolsCursor)))
+    .ToBe(-32602);
+  // Past the end ("tools/list:99").
+  Expect<Integer>(ErrorCodeOfLine(Self, ListLine('tools/list',
+    'dG9vbHMvbGlzdDo5OQ=='))).ToBe(-32602);
+  Expect<Integer>(ErrorCodeOfLine(Self, '{"jsonrpc":"2.0","id":3,' +
+    '"method":"tools/list","params":{"cursor":7,' + META_MODERN + '}}'))
+    .ToBe(-32602);
+end;
+
+procedure TPagination.TestNoPagingByDefault;
+var
+  Bare: TMCPServer;
+  Session: TMCPSession;
+  Line: string;
+begin
+  Bare := TMCPServer.Create('bare', '1');
+  try
+    Bare.RegisterTool('a', 'A', '{"type":"object"}', EchoHandler);
+    Bare.RegisterTool('b', 'B', '{"type":"object"}', EchoHandler);
+    Session := Bare.CreateSession;
+    try
+      Bare.HandleMessage(Session, ListLine('tools/list', ''), Line);
+      Expect<Boolean>(Pos('nextCursor', Line) = 0).ToBe(True);
+      Expect<Boolean>(Pos('"name" : "b"', Line) > 0).ToBe(True);
+    finally
+      Session.Free;
+    end;
+  finally
+    Bare.Free;
+  end;
+end;
+
+procedure TPagination.TestOtherListsPage;
+var
+  Response: TJSONObject;
+begin
+  // Fewer entries than a page: one page, no cursor.
+  Response := Call(ListLine('resources/list', ''));
+  Expect<Boolean>(Response.FindPath('result.nextCursor') = nil).ToBe(True);
+  Response.Free;
+  Response := Call(ListLine('resources/templates/list', ''));
+  Expect<Boolean>(Response.FindPath('result.resourceTemplates') <> nil)
+    .ToBe(True);
+  Response.Free;
+end;
+
+procedure TPagination.TestLegacyDialectPages;
+var
+  Response: TJSONObject;
+  Cursor: string;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification('{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}');
+  Cursor := TJSONData(Response.FindPath('result.nextCursor')).AsString;
+  Expect<Boolean>(Response.FindPath('result.ttlMs') = nil).ToBe(True);
+  Response.Free;
+  Response := Call('{"jsonrpc":"2.0","id":3,"method":"tools/list",' +
+    '"params":{"cursor":"' + Cursor + '"}}');
+  Expect<Integer>(TJSONArray(Response.FindPath('result.tools')).Count).ToBe(4);
+  Response.Free;
+end;
+
+procedure TPagination.SetupTests;
+begin
+  Test('pages concatenate to the whole list in registration order',
+    TestPagesConcatenateInOrder);
+  Test('foreign, garbled, past-the-end and non-string cursors → -32602',
+    TestInvalidCursors);
+  Test('PageSize 0 lists everything with no cursor', TestNoPagingByDefault);
+  Test('resources and templates lists page too', TestOtherListsPage);
+  Test('classic dialect pages without caching fields',
+    TestLegacyDialectPages);
+end;
+
 { ───────── image results ───────── }
 
 const
@@ -5051,6 +5218,7 @@ begin
     TMRTRDispatch.Create('Server: MRTR input_required'));
   TestRunnerProgram.AddSuite(
     TImageResults.Create('Server: image tool results'));
+  TestRunnerProgram.AddSuite(TPagination.Create('Server: pagination'));
   TestRunnerProgram.AddSuite(
     TContentResults.Create('Server: content tool results and prompt messages'));
   TestRunnerProgram.Run;
