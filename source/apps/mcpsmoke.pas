@@ -189,7 +189,7 @@ end;
 var
   Demo: TProcess;
   Response: TJSONObject;
-  ResponseLine: string;
+  ResponseLine, SealedState: string;
   ServerInfo: TJSONData;
   WaitedMs: Integer;
 
@@ -330,13 +330,25 @@ begin
       'MRTR round 1: resultType input_required');
     Check(PathString(Response, 'result.inputRequests.who.method') =
       'elicitation/create', 'MRTR round 1: elicitation request present');
-    Check(PathString(Response, 'result.requestState') = 'greet-round-1',
-      'MRTR round 1: requestState carried');
+    // The handler's state leaves sealed (#89), never as plain text.
+    SealedState := PathString(Response, 'result.requestState');
+    Check((Pos('v1.', SealedState) = 1) and
+      (Pos('greet-round-1', SealedState) = 0),
+      'MRTR round 1: requestState sealed');
+    Response.Free;
+    // A forged state is refused before the handler runs.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{' +
+      '"name":"greet_user","inputResponses":{"who":{"action":"accept",' +
+      '"content":{"name":"Ada"}}},"requestState":"greet-round-1",' +
+      META_MRTR + '}}');
+    Check(PathInt(Response, 'error.code') = -32602,
+      'MRTR retry: forged requestState → -32602');
     Response.Free;
     Response := RoundTrip(Demo,
       '{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{' +
       '"name":"greet_user","inputResponses":{"who":{"action":"accept",' +
-      '"content":{"name":"Ada"}}},"requestState":"greet-round-1",' +
+      '"content":{"name":"Ada"}}},"requestState":"' + SealedState + '",' +
       META_MRTR + '}}');
     Check(PathString(Response, 'result.resultType') = 'complete',
       'MRTR retry: resultType complete');

@@ -275,8 +275,10 @@ begin
 end;
 ```
 
-The server stays stateless across rounds — your `requestState` string
-is echoed back by the client (treat it as untrusted input). Request
+The server stays stateless across rounds: your `requestState` string
+travels through the client, sealed by the server so that a tampered,
+expired or replayed copy is refused before your handler runs (see
+[requestState sealing](configuration.md#requeststate-sealing)). Request
 kinds are capability-gated per request. The entry builders and
 accessors are documented in
 [Client requests](../reference/client-requests.md).

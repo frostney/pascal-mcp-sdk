@@ -2,9 +2,10 @@
 
 ## Executive Summary
 
-`TMCPServer` has five request-visible configuration properties —
-`Instructions`, `CacheTtlMs`, `CacheScope`, `RedactErrorDetails`, and
-`DualEra` — all set between `Create` and serving. Configuration
+`TMCPServer` has six request-visible configuration properties —
+`Instructions`, `CacheTtlMs`, `CacheScope`, `RedactErrorDetails`,
+`DualEra` and `RequestStateTtlMs` — plus the `requestState` keys
+(`SetRequestStateKeys`), all set between `Create` and serving. Configuration
 freezes together with the registries when the first session is
 created; a later write raises `EMCPServer`.
 
@@ -69,14 +70,48 @@ is rejected with a diagnostic naming the supported versions. The
 Streamable HTTP binding forces this mode — HTTP clients speak
 `2026-07-28`.
 
+## requestState sealing
+
+A handler that asks for more input (MRTR) can return a `requestState`
+for the next round. The specification makes the client's echo of it
+attacker-controlled input: a server must protect its integrity and
+reject state that fails verification, and should bind it to an expiry
+and to the request
+([MRTR](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr),
+verified 2026-11-26). The server does this for every handler. It sends
+the state as a token signed with HMAC-SHA-256 that also carries an
+expiry, the method, the tool or prompt name, a SHA-256 digest of the
+arguments and the server's name, and it verifies the token before the
+handler runs again. A token that fails any of these checks is answered
+`-32602` ("Invalid or expired requestState"); the reason is logged to
+stderr only.
+
+```pascal
+Server.SetRequestStateKeys([LoadKey('MCP_STATE_KEY')]);  // >= 32 bytes
+Server.RequestStateTtlMs := 120000;                      // two minutes
+```
+
+- **No keys set:** the server makes a random 32-byte key when it starts
+  serving. That is enough for one process. When several processes
+  serve the same endpoint, behind a load balancer for example, give
+  them all the same key, or a retry that lands on another process is
+  refused.
+- **Rotation:** the first key seals and every key verifies. Roll out
+  `[New, Old]`, then `[New]` once one TTL has passed.
+- **What it does not do:** the client can read the state, so keep
+  secrets out of it. The token is not bound to a user, because the
+  library has no authenticated identity to bind it to; if your state
+  grants something per user, put the user in the state and check it in
+  the handler.
+
 ## Freeze semantics
 
-All five properties, like the registries, are mutable only until the
+All six properties and the keys, like the registries, are mutable only until the
 first session exists (`RunMCPStdioServer` and `TMCPHTTPServer` create
 sessions internally). Configure fully, then serve:
 
 ```text
-Create → Instructions/Cache*/Redact/DualEra → Register* → serve
+Create → Instructions/Cache*/Redact/DualEra/RequestState* → Register* → serve
 ```
 
 A write after freeze raises

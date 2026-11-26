@@ -309,6 +309,7 @@ type
   TMRTRDispatch = class(TDispatchSuite)
   protected
     procedure BeforeEach; override;
+    function SealedState(const AFirstRound: string): string;
   public
     procedure SetupTests; override;
     procedure TestFirstRoundInputRequired;
@@ -325,6 +326,31 @@ type
     procedure TestLegacyToolGetsInBandError;
     procedure TestPromptRoundTrip;
     procedure TestSamplingAndRootsBuilders;
+  end;
+
+  // requestState sealing (#89): what reaches the client is a token,
+  // the handler sees only its own state, and every token that is
+  // altered, expired, or presented for another tool, other arguments
+  // or another server is answered -32602 before the handler runs.
+  TRequestStateSealing = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestRoundTripNonASCIIState;
+    procedure TestTamperedTokenRejected;
+    procedure TestPlainStateRejected;
+    procedure TestOtherToolRejected;
+    procedure TestOtherArgumentsRejected;
+    procedure TestExpiredRejected;
+    procedure TestSharedKeyAcrossInstances;
+    procedure TestOtherAudienceRejected;
+    procedure TestKeyRotation;
+    procedure TestResourceReadDropsState;
+    procedure TestConfigurationGuards;
+  protected
+    function Token(const ATool, AArguments: string): string;
+    procedure ExpectRefused(const ALine: string);
   end;
 
   // #23: call-time validation of raw-handler tool arguments against
@@ -4267,13 +4293,30 @@ begin
   Expect<string>(
     TJSONData(Response.FindPath(
     'result.inputRequests.who.params.mode')).AsString).ToBe('form');
-  Expect<string>(
-    TJSONData(Response.FindPath('result.requestState')).AsString)
-    .ToBe('state-42');
+  // The client receives the handler's state sealed (#89), never plain.
+  Expect<Boolean>(Pos('v1.',
+    TJSONData(Response.FindPath('result.requestState')).AsString) = 1)
+    .ToBe(True);
+  Expect<Boolean>(Pos('state-42',
+    TJSONData(Response.FindPath('result.requestState')).AsString) = 0)
+    .ToBe(True);
   // An interim result still carries the serverInfo stamp.
   Expect<Boolean>(
     Response.FindPath('result._meta') <> nil).ToBe(True);
   Response.Free;
+end;
+
+// The sealed requestState a first round returns, for echoing back.
+function TMRTRDispatch.SealedState(const AFirstRound: string): string;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(AFirstRound);
+  try
+    Result := TJSONData(Response.FindPath('result.requestState')).AsString;
+  finally
+    Response.Free;
+  end;
 end;
 
 procedure TMRTRDispatch.TestRetryCompletes;
@@ -4282,7 +4325,8 @@ var
 begin
   Response := Call(GreetCall(
     '"inputResponses":{"who":{"action":"accept",' +
-    '"content":{"name":"Ada"}}},"requestState":"state-42",'));
+    '"content":{"name":"Ada"}}},"requestState":"' +
+    SealedState(GreetCall('')) + '",'));
   Expect<string>(
     TJSONData(Response.FindPath('result.resultType')).AsString)
     .ToBe('complete');
@@ -4295,6 +4339,7 @@ end;
 procedure TMRTRDispatch.TestStateOnlyRound;
 var
   Response: TJSONObject;
+  State: string;
 begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
     '"params":{"name":"resume",' + META_MRTR + '}}');
@@ -4303,13 +4348,11 @@ begin
     .ToBe('input_required');
   Expect<Boolean>(
     Response.FindPath('result.inputRequests') = nil).ToBe(True);
-  Expect<string>(
-    TJSONData(Response.FindPath('result.requestState')).AsString)
-    .ToBe('opaque-state');
+  State := TJSONData(Response.FindPath('result.requestState')).AsString;
   Response.Free;
 
   Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
-    '"params":{"name":"resume","requestState":"opaque-state",' +
+    '"params":{"name":"resume","requestState":"' + State + '",' +
     META_MRTR + '}}');
   Expect<string>(
     TJSONData(Response.FindPath('result.content[0].text')).AsString)
@@ -4463,21 +4506,20 @@ end;
 procedure TMRTRDispatch.TestPromptRoundTrip;
 var
   Response: TJSONObject;
+  State: string;
 begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"prompts/get",' +
     '"params":{"name":"setup",' + META_MRTR + '}}');
   Expect<string>(
     TJSONData(Response.FindPath('result.resultType')).AsString)
     .ToBe('input_required');
-  Expect<string>(
-    TJSONData(Response.FindPath('result.requestState')).AsString)
-    .ToBe('p-state');
+  State := TJSONData(Response.FindPath('result.requestState')).AsString;
   Response.Free;
 
   Response := Call('{"jsonrpc":"2.0","id":2,"method":"prompts/get",' +
     '"params":{"name":"setup",' +
     '"inputResponses":{"project":{"action":"accept",' +
-    '"content":{"name":"herakles"}}},"requestState":"p-state",' +
+    '"content":{"name":"herakles"}}},"requestState":"' + State + '",' +
     META_MRTR + '}}');
   Expect<string>(
     TJSONData(Response.FindPath('result.resultType')).AsString)
@@ -4697,6 +4739,302 @@ begin
     TestApplicationValidatedSkipsChecks);
 end;
 
+{ ───────── requestState sealing (#89) ───────── }
+
+const
+  SEAL_KEY_A = 'k-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  SEAL_KEY_B = 'k-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  // 'é😀': a handler's state with two- and four-byte sequences.
+  SEAL_STATE = 'st-' + #$C3#$A9#$F0#$9F#$98#$80;
+
+var
+  SealedHandlerRuns: Integer;
+
+// First round: asks for nothing and mints SEAL_STATE; second round:
+// echoes the state it was handed back.
+function StatefulHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Inc(SealedHandlerRuns);
+  if ACtx.RequestState = '' then
+    Exit(MCPInputRequired(nil, SEAL_STATE));
+  Result := MCPTextResult('got:' + ACtx.RequestState);
+end;
+
+function StateEchoReader(const AUri: string;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPTextContents(AUri, 'text/plain', '[' + ACtx.RequestState + ']');
+end;
+
+procedure TRequestStateSealing.BeforeEach;
+begin
+  inherited BeforeEach;
+  SealedHandlerRuns := 0;
+  FServer.RegisterTool('stateful', 'Stateful', '{"type":"object"}',
+    StatefulHandler);
+  FServer.RegisterTool('stateful2', 'Stateful too', '{"type":"object"}',
+    StatefulHandler);
+  FServer.RegisterResource('mem://state', 'state', 'text/plain',
+    StateEchoReader);
+end;
+
+function StatefulCall(const ATool, AArguments, AState: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{' +
+    '"name":"' + ATool + '","arguments":' + AArguments + ',';
+  if AState <> '' then
+    Result := Result + '"requestState":"' + AState + '",';
+  Result := Result + META_MODERN + '}}';
+end;
+
+// The token a first round on AServer hands out.
+function FirstRoundToken(AServer: TMCPServer; ASession: TMCPSession;
+  const ATool, AArguments: string): string;
+var
+  Line: string;
+  Response: TJSONObject;
+begin
+  AServer.HandleMessage(ASession, StatefulCall(ATool, AArguments, ''), Line);
+  Response := TJSONObject(GetJSON(Line));
+  try
+    Result := TJSONData(Response.FindPath('result.requestState')).AsString;
+  finally
+    Response.Free;
+  end;
+end;
+
+function TRequestStateSealing.Token(const ATool, AArguments: string): string;
+begin
+  if FSession = nil then
+    FSession := FServer.CreateSession;
+  Result := FirstRoundToken(FServer, FSession, ATool, AArguments);
+end;
+
+const
+  INVALID_STATE_LINE = '{ "jsonrpc" : "2.0", "id" : 3, "error" : { ' +
+    '"code" : -32602, "message" : "Invalid or expired requestState" } }';
+
+// Asserts the retry is refused before the handler runs.
+procedure TRequestStateSealing.ExpectRefused(const ALine: string);
+var
+  Response: string;
+  RunsBefore: Integer;
+begin
+  RunsBefore := SealedHandlerRuns;
+  Expect<Boolean>(Dispatch(ALine, Response)).ToBe(True);
+  Expect<string>(Response).ToBe(INVALID_STATE_LINE);
+  Expect<Integer>(SealedHandlerRuns).ToBe(RunsBefore);
+end;
+
+procedure TRequestStateSealing.TestRoundTripNonASCIIState;
+var
+  State: string;
+  Response: TJSONObject;
+begin
+  State := Token('stateful', '{"q":"' + #$C3#$BC + '"}');
+  Expect<Boolean>(Pos('v1.', State) = 1).ToBe(True);
+  Response := Call(StatefulCall('stateful', '{"q":"' + #$C3#$BC + '"}', State));
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('got:' + SEAL_STATE);
+  Response.Free;
+end;
+
+procedure TRequestStateSealing.TestTamperedTokenRejected;
+var
+  State: string;
+begin
+  State := Token('stateful', '{}');
+  // Flip one character of the envelope part, then truncate the tag.
+  if State[6] = 'A' then State[6] := 'B' else State[6] := 'A';
+  ExpectRefused(StatefulCall('stateful', '{}', State));
+  State := Token('stateful', '{}');
+  ExpectRefused(StatefulCall('stateful', '{}', Copy(State, 1, Length(State) - 1)));
+end;
+
+procedure TRequestStateSealing.TestPlainStateRejected;
+begin
+  ExpectRefused(StatefulCall('stateful', '{}', 'st-plain'));
+  ExpectRefused(StatefulCall('stateful', '{}', 'v1.e30.'));
+end;
+
+procedure TRequestStateSealing.TestOtherToolRejected;
+begin
+  ExpectRefused(StatefulCall('stateful2', '{}', Token('stateful', '{}')));
+end;
+
+procedure TRequestStateSealing.TestOtherArgumentsRejected;
+var
+  State: string;
+  Response: TJSONObject;
+begin
+  State := Token('stateful', '{"a":1,"b":[true,null]}');
+  ExpectRefused(StatefulCall('stateful', '{"a":2,"b":[true,null]}', State));
+  // Member order does not matter: the digest is over canonical JSON.
+  Response := Call(StatefulCall('stateful', '{"b":[true,null],"a":1}', State));
+  Expect<Boolean>(Response.FindPath('result.content') <> nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TRequestStateSealing.TestExpiredRejected;
+var
+  State: string;
+begin
+  FServer.RequestStateTtlMs := 1;
+  State := Token('stateful', '{}');
+  Sleep(20);
+  ExpectRefused(StatefulCall('stateful', '{}', State));
+end;
+
+// Builds a second server like the suite's, with AName and AKeys.
+function PeerServer(const AName: string;
+  const AKeys: array of RawByteString): TMCPServer;
+begin
+  Result := TMCPServer.Create(AName, '9.9.9');
+  Result.RegisterTool('stateful', 'Stateful', '{"type":"object"}',
+    StatefulHandler);
+  if Length(AKeys) > 0 then
+    Result.SetRequestStateKeys(AKeys);
+end;
+
+// AToken presented to APeer: True when it completes there.
+function PeerAccepts(APeer: TMCPServer; const AToken: string): Boolean;
+var
+  Session: TMCPSession;
+  Line: string;
+begin
+  Session := APeer.CreateSession;
+  try
+    APeer.HandleMessage(Session, StatefulCall('stateful', '{}', AToken), Line);
+    Result := Pos('"error"', Line) = 0;
+  finally
+    Session.Free;
+  end;
+end;
+
+procedure TRequestStateSealing.TestSharedKeyAcrossInstances;
+var
+  Peer: TMCPServer;
+begin
+  FServer.SetRequestStateKeys([SEAL_KEY_A]);
+  Peer := PeerServer('test-server', [SEAL_KEY_A]);
+  try
+    Expect<Boolean>(PeerAccepts(Peer, Token('stateful', '{}'))).ToBe(True);
+  finally
+    Peer.Free;
+  end;
+  // Without a configured key each process has its own random one.
+  Peer := PeerServer('test-server', []);
+  try
+    Expect<Boolean>(PeerAccepts(Peer, Token('stateful', '{}'))).ToBe(False);
+  finally
+    Peer.Free;
+  end;
+end;
+
+procedure TRequestStateSealing.TestOtherAudienceRejected;
+var
+  Peer: TMCPServer;
+begin
+  FServer.SetRequestStateKeys([SEAL_KEY_A]);
+  Peer := PeerServer('another-server', [SEAL_KEY_A]);
+  try
+    Expect<Boolean>(PeerAccepts(Peer, Token('stateful', '{}'))).ToBe(False);
+  finally
+    Peer.Free;
+  end;
+end;
+
+procedure TRequestStateSealing.TestKeyRotation;
+var
+  Peer: TMCPServer;
+  State: string;
+begin
+  FServer.SetRequestStateKeys([SEAL_KEY_A]);
+  State := Token('stateful', '{}');
+  // Phase two of a rotation: the new key seals, the old one verifies.
+  Peer := PeerServer('test-server', [SEAL_KEY_B, SEAL_KEY_A]);
+  try
+    Expect<Boolean>(PeerAccepts(Peer, State)).ToBe(True);
+  finally
+    Peer.Free;
+  end;
+  // Old key dropped: its tokens stop verifying.
+  Peer := PeerServer('test-server', [SEAL_KEY_B]);
+  try
+    Expect<Boolean>(PeerAccepts(Peer, State)).ToBe(False);
+  finally
+    Peer.Free;
+  end;
+end;
+
+procedure TRequestStateSealing.TestResourceReadDropsState;
+var
+  Response: TJSONObject;
+begin
+  // No resource handler here mints state, so a client-sent value is
+  // never handed to one.
+  Response := Call('{"jsonrpc":"2.0","id":3,"method":"resources/read",' +
+    '"params":{"uri":"mem://state","requestState":"forged",' +
+    META_MODERN + '}}');
+  Expect<string>(TJSONData(Response.FindPath('result.contents[0].text')).AsString)
+    .ToBe('[]');
+  Response.Free;
+end;
+
+procedure TRequestStateSealing.TestConfigurationGuards;
+var
+  Raised: Boolean;
+begin
+  Raised := False;
+  try
+    FServer.SetRequestStateKeys(['too-short']);
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  Raised := False;
+  try
+    FServer.RequestStateTtlMs := 0;
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  FServer.CreateSession.Free;
+  Raised := False;
+  try
+    FServer.SetRequestStateKeys([SEAL_KEY_A]);
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+end;
+
+procedure TRequestStateSealing.SetupTests;
+begin
+  Test('sealed round trip keeps a non-ASCII state byte-exact',
+    TestRoundTripNonASCIIState);
+  Test('altered or truncated token → -32602, handler not run',
+    TestTamperedTokenRejected);
+  Test('plain or forged state → -32602', TestPlainStateRejected);
+  Test('token from another tool → -32602', TestOtherToolRejected);
+  Test('token with other arguments → -32602; member order irrelevant',
+    TestOtherArgumentsRejected);
+  Test('expired token → -32602', TestExpiredRejected);
+  Test('shared key verifies across instances; random keys do not',
+    TestSharedKeyAcrossInstances);
+  Test('token from a server with another name → rejected',
+    TestOtherAudienceRejected);
+  Test('key rotation: old key verifies until dropped', TestKeyRotation);
+  Test('requestState on resources/read never reaches the reader',
+    TestResourceReadDropsState);
+  Test('short keys, a non-positive TTL and post-freeze keys refused',
+    TestConfigurationGuards);
+end;
+
 { ───────── image results ───────── }
 
 const
@@ -4900,5 +5238,7 @@ begin
     TMRTRDispatch.Create('Server: MRTR input_required'));
   TestRunnerProgram.AddSuite(
     TImageResults.Create('Server: image tool results'));
+  TestRunnerProgram.AddSuite(
+    TRequestStateSealing.Create('Server: requestState sealing'));
   TestRunnerProgram.Run;
 end.

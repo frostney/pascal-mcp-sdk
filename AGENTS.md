@@ -54,7 +54,7 @@ the way a real client does).
 
 | Path | Role |
 | --- | --- |
-| `source/units/` | Library: `MCP.JSONRPC` (JSON-RPC 2.0 profile), `MCP.Protocol` (per-request `_meta` model), `MCP.Schema` (fluent schema builder + RTTI-derived argument classes), `MCP.Server` (sans-I/O dispatch core; tool/resource/prompt registries), `MCP.Transport.Stdio` (newline-delimited stdio binding), `MCP.Transport.HTTP` (Streamable HTTP binding: single POST endpoint, SSE response streams) |
+| `source/units/` | Library: `MCP.JSONRPC` (JSON-RPC 2.0 profile), `MCP.Protocol` (per-request `_meta` model), `MCP.Schema` (fluent schema builder + RTTI-derived argument classes), `MCP.Server` (sans-I/O dispatch core; tool/resource/prompt registries), `MCP.RequestState` (requestState sealing), `MCP.Crypto` (in-tree SHA-256, HMAC-SHA-256, CSPRNG, base64url), `MCP.Transport.Stdio` (newline-delimited stdio binding), `MCP.Transport.HTTP` (Streamable HTTP binding: single POST endpoint, SSE response streams) |
 | `source/apps/` | Programs: `mcpdemo` (example stdio server), `mcpsmoke` (subprocess E2E battery) |
 | `scripts/` | Self-contained `lwpt run` wrappers (`smoke.pas` → runs the built `mcpsmoke`; `conformance.pas` → runs `tools/conformance/run.mjs`) |
 | `tools/` | Cross-implementation checks: `interop-ts/` (official MCP TypeScript clients vs `mcpdemo` over stdio, the legacy era, and Streamable HTTP); `conformance/` (official MCP conformance suite vs `mcpdemo --http`, non-blocking) |

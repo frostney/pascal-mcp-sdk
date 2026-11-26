@@ -55,8 +55,9 @@ unit MCP.Server;
 // MCPInputRequired(...) / MCPPromptInputRequired(...) — an
 // input_required result carrying inputRequests (elicitation form/url,
 // sampling/createMessage, roots/list entry builders below) and the
-// handler's opaque requestState. The client retries the ORIGINAL
-// request with inputResponses + the echoed requestState; the library
+// handler's opaque requestState, sealed by the server (#89, see
+// MCP.RequestState). The client retries the ORIGINAL request with
+// inputResponses + the echoed token; the library verifies it and
 // re-enters the same handler with both exposed on TMCPRequestContext.
 // Each round is one ordinary HandleMessage call — no threads, no
 // suspension. Modern era only: legacy calls get an in-band error
@@ -340,6 +341,12 @@ type
     FRedactErrorDetails: Boolean;
     FDualEra: Boolean;
     FFrozen: Boolean;
+    // requestState sealing (#89): the configured key ring (empty means
+    // a random per-process key), the token lifetime, and the sealer
+    // built from them at freeze (a TMCPRequestStateSealer, owned).
+    FRequestStateKeys: array of RawByteString;
+    FRequestStateTtlMs: Integer;
+    FSealer: TObject;
     FTools: array of TMCPToolRegistration;
     FResources: array of TMCPResourceRegistration;
     FTemplates: array of TMCPTemplateRegistration;
@@ -352,6 +359,11 @@ type
     procedure SetCacheScope(const AValue: string);
     procedure SetRedactErrorDetails(AValue: Boolean);
     procedure SetDualEra(AValue: Boolean);
+    procedure SetRequestStateTtlMs(AValue: Integer);
+    // Replaces ACtx.RequestState with the handler's own state when the
+    // client's token verifies for this request; False when it does not.
+    function OpenRequestState(const AMessage: TJSONRPCMessage;
+      var ACtx: TMCPRequestContext): Boolean;
     function ExceptionClientMessage(const ASite, AVerbosePrefix,
       ARedactedMessage: string; E: Exception): string;
     function ParseSchema(const ASchemaJson, AToolName: string): TJSONObject;
@@ -459,6 +471,25 @@ type
     // initialize is rejected with a diagnostic naming the supported
     // versions.
     property DualEra: Boolean read FDualEra write SetDualEra;
+
+    // requestState integrity (#89). Every requestState a handler returns
+    // goes to the client sealed (HMAC-SHA-256 over the state, an expiry,
+    // the method, the tool or prompt name, a digest of the arguments
+    // and this server's name), and every one a client sends back is
+    // verified before the handler runs: a token that fails is answered
+    // -32602 and the handler never sees it. Handlers keep reading and
+    // writing their own plain state (ACtx.RequestState).
+    //
+    // Keys: the first seals, every key verifies (rotate by adding the
+    // new key first, then dropping the old one after one TTL). Each key
+    // must be at least 32 bytes. Without keys the server seals with a
+    // random key made at freeze, which only this process can verify:
+    // set a shared key when several processes serve one endpoint. The
+    // client can read the state, so it must not carry secrets.
+    procedure SetRequestStateKeys(const AKeys: array of RawByteString);
+    // Token lifetime in milliseconds (default 600000, ten minutes).
+    property RequestStateTtlMs: Integer read FRequestStateTtlMs
+      write SetRequestStateTtlMs;
 
     // The response a transport sends for an inbound line it refused to
     // buffer (length cap). Kept here so the error shape remains a
@@ -694,7 +725,9 @@ implementation
 uses
   Math,
 
-  base64;
+  base64,
+  MCP.Crypto,
+  MCP.RequestState;
 
 var
   // Process-global diagnostic state intentionally remains outside
@@ -1714,6 +1747,7 @@ begin
   FRedactErrorDetails := False;
   FDualEra := True;
   FFrozen := False;
+  FRequestStateTtlMs := 600000;
 end;
 
 procedure TMCPServer.EnsureMutable;
@@ -1930,6 +1964,77 @@ begin
   Result := True;
 end;
 
+// The sealer for AKeys, or for one random 32-byte key when none were
+// configured. A missing random source fails closed: the server does not
+// start rather than seal with a guessable key.
+function CreateSealer(const AName: string; const AKeys: array of RawByteString;
+  ATtlMs: Integer): TMCPRequestStateSealer;
+begin
+  try
+    if Length(AKeys) > 0 then
+      Result := TMCPRequestStateSealer.Create(AName, AKeys, ATtlMs)
+    else
+      Result := TMCPRequestStateSealer.Create(AName,
+        [SecureRandomBytes(32)], ATtlMs);
+  except
+    on E: EMCPCrypto do
+      raise EMCPServer.Create('Cannot set up requestState sealing: ' +
+        E.Message);
+  end;
+end;
+
+procedure TMCPServer.SetRequestStateKeys(const AKeys: array of RawByteString);
+var
+  I: Integer;
+begin
+  EnsureMutable;
+  for I := 0 to High(AKeys) do
+    if Length(AKeys[I]) < 32 then
+      raise EMCPServer.CreateFmt('requestState key %d is %d bytes; ' +
+        'each key must be at least 32 bytes', [I, Length(AKeys[I])]);
+  SetLength(FRequestStateKeys, Length(AKeys));
+  for I := 0 to High(AKeys) do
+    FRequestStateKeys[I] := AKeys[I];
+end;
+
+procedure TMCPServer.SetRequestStateTtlMs(AValue: Integer);
+begin
+  EnsureMutable;
+  if AValue <= 0 then
+    raise EMCPServer.Create('RequestStateTtlMs must be positive');
+  FRequestStateTtlMs := AValue;
+end;
+
+// The request's arguments object, or nil.
+function RequestArguments(const AMessage: TJSONRPCMessage): TJSONObject;
+var
+  Data: TJSONData;
+begin
+  Result := nil;
+  if AMessage.Params = nil then
+    Exit;
+  Data := AMessage.Params.Find('arguments');
+  if (Data <> nil) and (Data.JSONType = jtObject) then
+    Result := TJSONObject(Data);
+end;
+
+function TMCPServer.OpenRequestState(const AMessage: TJSONRPCMessage;
+  var ACtx: TMCPRequestContext): Boolean;
+var
+  State, Reason: string;
+begin
+  Result := TMCPRequestStateSealer(FSealer).Unseal(AMessage.Method,
+    AMessage.Params.Get('name', ''), RequestArguments(AMessage),
+    ACtx.RequestState, State, Reason);
+  if Result then
+    ACtx.RequestState := State
+  else
+    // The reason stays off the wire: it would tell an attacker which
+    // check to aim at next.
+    TryLogToStderr('MCP requestState rejected on ' + AMessage.Method + ': ' +
+      Reason);
+end;
+
 procedure TMCPServer.FreezeConfiguration;
 var
   I: Integer;
@@ -1957,6 +2062,7 @@ begin
           'registration .ApplicationValidated to take over argument ' +
           'validation', [FTools[I].Definition.Get('name', ''), Violation]);
     end;
+  FSealer := CreateSealer(FName, FRequestStateKeys, FRequestStateTtlMs);
   FFrozen := True;
 end;
 
@@ -2036,6 +2142,7 @@ begin
     FTemplates[I].Definition.Free;
   for I := 0 to High(FPrompts) do
     FPrompts[I].Definition.Free;
+  FSealer.Free;
   inherited Destroy;
 end;
 
@@ -3053,6 +3160,20 @@ begin
       Ctx.Notifier := Dispatch.EmitNotification;
     Ctx.CancellationProbe := Dispatch.IsCancelled;
 
+    // requestState is verified before any handler sees it (#89). Only
+    // tools/call and prompts/get mint state here, so on any other
+    // method a client-sent value cannot be ours and is dropped.
+    if Ctx.RequestState <> '' then
+      if (AMessage.Method = 'tools/call') or
+        (AMessage.Method = 'prompts/get') then
+      begin
+        if not OpenRequestState(AMessage, Ctx) then
+          Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+            'Invalid or expired requestState'));
+      end
+      else
+        Ctx.RequestState := '';
+
     if AMessage.Method = 'server/discover' then
       Exit(HandleDiscover(AMessage));
     if AMessage.Method = 'tools/list' then
@@ -3338,8 +3459,12 @@ begin
   InterimResult.Add('resultType', RESULT_TYPE_INPUT_REQUIRED);
   if AInputRequests <> nil then
     InterimResult.Add('inputRequests', AInputRequests);
+  // Sealed for the client (#89); the retry is verified in
+  // DispatchRequest before the handler runs again.
   if ARequestState <> '' then
-    InterimResult.Add('requestState', ARequestState);
+    InterimResult.Add('requestState',
+      TMCPRequestStateSealer(FSealer).Seal(AMessage.Method, ASubjectName,
+      RequestArguments(AMessage), ARequestState));
   Result := ResultResponse(AMessage, InterimResult, False);
 end;
 
