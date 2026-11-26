@@ -1,7 +1,8 @@
 # Results and Content
 
-Handlers build their answers with these helpers, all from
-`MCP.Server`.
+Handlers build their answers with these helpers. The result and
+message builders are in `MCP.Server`; the content blocks they can
+carry are in `MCP.Content`.
 
 ## Tool results
 
@@ -18,6 +19,11 @@ function MCPImageResult(const ABase64,
   AMimeType: string): TMCPToolResult;
 function MCPImageResult(const AData: TBytes;
   const AMimeType: string): TMCPToolResult;
+function MCPAudioResult(const ABase64,
+  AMimeType: string): TMCPToolResult;
+function MCPAudioResult(const AData: TBytes;
+  const AMimeType: string): TMCPToolResult;
+function MCPContentResult(const ABlocks: array of TJSONObject): TMCPToolResult;
 ```
 
 - `MCPTextResult` — one text content block.
@@ -39,6 +45,21 @@ function MCPImageResult(const AData: TBytes;
   image's IANA media type (`image/png`, `image/jpeg`, …) and goes on
   the wire verbatim — the spec names no enumeration, so the handler
   owns that choice.
+- `MCPAudioResult` — one audio content block, with the same two
+  overloads and contracts as `MCPImageResult` (`audio/wav`,
+  `audio/mpeg`, …).
+- `MCPContentResult` — any list of content blocks from
+  [`MCP.Content`](#content-blocks), in order; it takes ownership of
+  every block, also when it raises `EMCPServer` for a `nil` or repeated
+  block. Use it for mixed results, resource links and embedded
+  resources:
+
+  ```pascal
+  Result := MCPContentResult([
+    MCPTextContent('Found the entry point:'),
+    MCPResourceLink('file:///src/main.pas', 'main.pas', 'text/x-pascal'),
+    MCPEmbeddedText('file:///src/main.pas', 'text/x-pascal', Source)]);
+  ```
 
 The MRTR variant `MCPInputRequired` is documented with the other
 client-request builders in [Client requests](client-requests.md).
@@ -61,6 +82,46 @@ function MCPWireNumber(AValue: Double): TJSONData;
 
 The caller owns the returned node until it adds it to a JSON object or
 array.
+
+## Content blocks
+
+`MCP.Content` builds the five content block types the 2026-07-28
+revision defines for tool results and prompt messages. Each returns a
+fresh `TJSONObject`; `MCPContentResult` and `MCPContentMessage` take
+ownership of the blocks you pass them.
+
+```pascal
+function MCPTextContent(const AText: string): TJSONObject;
+function MCPImageContent(const ABase64, AMimeType: string): TJSONObject;
+function MCPImageContent(const AData: TBytes;
+  const AMimeType: string): TJSONObject;
+function MCPAudioContent(const ABase64, AMimeType: string): TJSONObject;
+function MCPAudioContent(const AData: TBytes;
+  const AMimeType: string): TJSONObject;
+function MCPResourceLink(const AUri, AName: string;
+  const AMimeType: string = ''; const ADescription: string = ''): TJSONObject;
+function MCPEmbeddedText(const AUri, AMimeType, AText: string): TJSONObject;
+function MCPEmbeddedBlob(const AUri, AMimeType, ABase64: string): TJSONObject;
+function MCPEmbeddedBlob(const AUri, AMimeType: string;
+  const AData: TBytes): TJSONObject;
+function MCPBase64(const AData: TBytes): string;
+```
+
+| Builder | Wire shape |
+| --- | --- |
+| `MCPTextContent` | `{"type":"text","text":…}` |
+| `MCPImageContent`, `MCPAudioContent` | `{"type":"image"` or `"audio","data":<base64>,"mimeType":…}` |
+| `MCPResourceLink` | `{"type":"resource_link","uri":…,"name":…}`, plus `description` and `mimeType` when given |
+| `MCPEmbeddedText`, `MCPEmbeddedBlob` | `{"type":"resource","resource":{"uri":…,"mimeType":…,"text"` or `"blob":…}}`; `mimeType` is left out when empty |
+
+The string overloads take data that is already base64; the `TBytes`
+overloads encode raw bytes themselves (`MCPBase64` exposes that
+encoding). In a prompt message an embedded resource **must** carry its
+MIME type, so pass one there; elsewhere `mimeType` is optional. A resource link need not name a resource your server lists
+in `resources/list`. To add
+[annotations](https://modelcontextprotocol.io/specification/2026-07-28/server/resources#annotations),
+add an `annotations` member to the returned object before handing it
+over.
 
 ## Resource contents
 
@@ -85,8 +146,25 @@ A prompt handler returns a `TJSONArray` of messages:
 function MCPPromptMessage(const ARole, AText: string): TJSONObject;
 function MCPUserMessage(const AText: string): TJSONObject;
 function MCPAssistantMessage(const AText: string): TJSONObject;
+function MCPContentMessage(const ARole: string;
+  AContent: TJSONObject): TJSONObject;
 function MCPMessages(const AMessages: array of TJSONObject): TJSONArray;
 ```
+
+`MCPContentMessage` carries any [content block](#content-blocks), such
+as an image or an embedded resource, and takes ownership of it; the
+text helpers are shorthand for it with `MCPTextContent`. `ARole` is
+`user` or `assistant`, the two roles the specification defines.
+
+### Content types and older clients
+
+Audio blocks arrived in protocol revision 2025-03-26 and resource
+links in 2025-06-18; the 2024-11-05 revision has text, image and
+embedded resources only. A dual-era server can serve a client that
+negotiated an older revision over stdio, and a client that validates
+results against its own revision's schema may reject the newer block
+types. When that matters, check `ACtx.ProtocolVersion` and fall back,
+for example to a text block that names the resource.
 
 The MRTR-capable prompt shape returns `TMCPPromptResult` instead;
 wrap a message array with:

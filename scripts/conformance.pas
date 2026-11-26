@@ -1,7 +1,8 @@
 program conformance;
 
 // `lwpt run conformance` entry point: runs the official MCP conformance
-// suite (tools/conformance/run.mjs) against the built mcpdemo over
+// suite (tools/conformance/run.mjs) against the built conformance
+// fixture (mcpconformance, the suite's reference surface) over
 // Streamable HTTP. Needs Node >= 22 and npm registry access.
 //
 // Self-contained for the same reason as smoke.pas: run-scripts execute
@@ -21,7 +22,7 @@ var
   i: Integer;
   Args: array of string;
 begin
-  Bin := 'build' + DirectorySeparator + 'mcpdemo';
+  Bin := 'build' + DirectorySeparator + 'mcpconformance';
   {$IFDEF MSWINDOWS}
   if not FileExists(Bin) and FileExists(Bin + '.exe') then
     Bin := Bin + '.exe';
