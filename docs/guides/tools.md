@@ -85,6 +85,13 @@ Results are built with the helpers in
 - `MCPErrorResult('...')` — an explicit in-band error
   (`isError: true`).
 
+An exception a handler raises also becomes an in-band `isError`
+result: that is the channel a model reads and corrects against. When
+the request itself must be refused with a JSON-RPC error instead, for
+example a client capability it needs and did not declare, raise
+`EMCPProtocolError` (see
+[Answering with a JSON-RPC error](../reference/server.md#answering-with-a-json-rpc-error)).
+
 ## Validation before your handler runs
 
 Every call is checked against the registered schema's enforceable

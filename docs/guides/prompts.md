@@ -122,7 +122,10 @@ answers the spec error code for the era, a **missing required
 argument is rejected with `-32602`** before your handler runs (the
 server checks the declared arguments), and a handler exception
 becomes a JSON-RPC internal error (its message subject to
-[error redaction](configuration.md#redacterrordetails)).
+[error redaction](configuration.md#redacterrordetails)). To choose the
+code yourself, such as `-32602` for an argument your handler rejects,
+raise `EMCPProtocolError` (see
+[Answering with a JSON-RPC error](../reference/server.md#answering-with-a-json-rpc-error)).
 
 ## Prompts that need more input (MRTR)
 

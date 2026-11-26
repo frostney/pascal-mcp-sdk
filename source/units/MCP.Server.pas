@@ -74,7 +74,8 @@ unit MCP.Server;
 // overloads are provided). A handler that raises becomes an isError
 // tool result carrying the exception message — execution errors belong
 // in-band where the model can read them; protocol errors stay JSON-RPC
-// errors. RedactErrorDetails preserves that verbose behavior by default;
+// errors. A handler that raises EMCPProtocolError answers with that
+// JSON-RPC error instead, from any handler kind (#88). RedactErrorDetails preserves that verbose behavior by default;
 // when enabled, escaped exceptions carry only a stable generic message
 // and correlation reference on the wire, while the full detail is logged
 // to stderr under the same reference. Deliberate MCPErrorResult values
@@ -581,6 +582,45 @@ type
   end;
 
   EMCPServer = class(Exception);
+
+  // A JSON-RPC error a handler answers with instead of a result (#88).
+  // Raised from a tools/call, prompts/get or resources/read handler
+  // (typed and template handlers included), it becomes the error
+  // response with exactly this code, message and data, in both eras;
+  // it is deliberate, so RedactErrorDetails leaves it alone. Every
+  // other exception keeps its mapping (tools: in-band isError;
+  // prompts and resources: -32603).
+  //
+  // Allowed codes: the JSON-RPC ones (-32700, -32600 to -32603), the
+  // MCP-defined -32021 (MissingRequiredClientCapability; build it with
+  // MCPMissingCapabilityError), and application codes outside the
+  // reserved -32768..-32000 range. Any other code is reserved for a
+  // meaning the spec defines elsewhere or for legacy use, so the
+  // constructor raises EMCPServer for it (and frees AData). Error-code
+  // policy verified 2026-11-26 against
+  // https://modelcontextprotocol.io/specification/2026-07-28/basic/index#error-codes
+  EMCPProtocolError = class(Exception)
+  private
+    FCode: Integer;
+    FData: TJSONData;
+  public
+    // Takes ownership of AData (nil for none).
+    constructor Create(ACode: Integer; const AMessage: string;
+      AData: TJSONData = nil);
+    destructor Destroy; override;
+    // Hands the data to the caller, which then owns it (nil if none).
+    function TakeData: TJSONData;
+    property Code: Integer read FCode;
+    property Data: TJSONData read FData;
+  end;
+
+// The -32021 MissingRequiredClientCapability error for a request
+// that needs ACapability (for example 'sampling') which the client did
+// not declare, with the spec's data.requiredCapabilities. Raise it
+// from a handler: raise MCPMissingCapabilityError('sampling').
+// Verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta
+function MCPMissingCapabilityError(const ACapability: string): EMCPProtocolError;
 
 // Content builders for handler implementations.
 function MCPTextResult(const AText: string): TMCPToolResult;
@@ -1535,6 +1575,54 @@ begin
   Capabilities.Add(ACapability, TJSONObject.Create);
   Result := TJSONObject.Create;
   Result.Add('requiredCapabilities', Capabilities);
+end;
+
+{ ───────── handler-raised protocol errors (#88) ───────── }
+
+function IsAllowedHandlerErrorCode(ACode: Integer): Boolean;
+begin
+  case ACode of
+    JSONRPC_PARSE_ERROR, JSONRPC_INVALID_REQUEST, JSONRPC_METHOD_NOT_FOUND,
+    JSONRPC_INVALID_PARAMS, JSONRPC_INTERNAL_ERROR,
+    MCP_ERROR_MISSING_CLIENT_CAPABILITY:
+      Result := True;
+  else
+    Result := (ACode < -32768) or (ACode > -32000);
+  end;
+end;
+
+constructor EMCPProtocolError.Create(ACode: Integer; const AMessage: string;
+  AData: TJSONData);
+begin
+  if not IsAllowedHandlerErrorCode(ACode) then
+  begin
+    AData.Free;
+    raise EMCPServer.CreateFmt('EMCPProtocolError code %d is reserved: ' +
+      'use a JSON-RPC code (-32700, -32600 to -32603), -32021, or an ' +
+      'application code outside -32768..-32000', [ACode]);
+  end;
+  inherited Create(AMessage);
+  FCode := ACode;
+  FData := AData;
+end;
+
+destructor EMCPProtocolError.Destroy;
+begin
+  FData.Free;
+  inherited Destroy;
+end;
+
+function EMCPProtocolError.TakeData: TJSONData;
+begin
+  Result := FData;
+  FData := nil;
+end;
+
+function MCPMissingCapabilityError(const ACapability: string): EMCPProtocolError;
+begin
+  Result := EMCPProtocolError.Create(MCP_ERROR_MISSING_CLIENT_CAPABILITY,
+    'Missing required client capability: ' + ACapability,
+    CapabilityErrorData(ACapability));
 end;
 
 function MCPTextResult(const AText: string): TMCPToolResult;
@@ -2977,6 +3065,10 @@ begin
             try
               AResponse := DispatchRequest(ASession, ASink, ASinkData, Msg);
             except
+              // A handler's deliberate JSON-RPC error (#88).
+              on E: EMCPProtocolError do
+                AResponse := BuildErrorResponse(Msg.Id, E.Code, E.Message,
+                  E.TakeData);
               on E: Exception do
                 AResponse := BuildErrorResponse(Msg.Id,
                   JSONRPC_INTERNAL_ERROR,
@@ -3434,8 +3526,11 @@ begin
         ToolResult := FTools[Index].Handler(Arguments, ACtx);
     except
       // Execution errors travel in-band (isError: true) so the model
-      // can read them and self-correct; only dispatch-level faults are
-      // JSON-RPC errors.
+      // can read them and self-correct; only dispatch-level faults and
+      // a handler's deliberate EMCPProtocolError (answered by the
+      // dispatch wrapper, #88) are JSON-RPC errors.
+      on E: EMCPProtocolError do
+        raise;
       on E: Exception do
         ToolResult := MCPErrorResult(ExceptionClientMessage(
           'tools/call handler', 'Tool execution failed: ',
@@ -3661,6 +3756,9 @@ begin
           Messages := FPrompts[Index].Handler(Arguments, ACtx);
       end;
     except
+      // The dispatch wrapper answers a deliberate error (#88).
+      on E: EMCPProtocolError do
+        raise;
       on E: Exception do
         Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
           ExceptionClientMessage('prompts/get handler',

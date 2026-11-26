@@ -237,3 +237,44 @@ On Unix, `cthreads` must be first in the program's uses clause.
 `EMCPServer` is raised for API misuse: registration after freeze,
 malformed schemas, empty names, nil/foreign sessions. Wire-level
 problems never raise — they become JSON-RPC error responses.
+
+### Answering with a JSON-RPC error
+
+A handler that must refuse a request with a protocol error, rather than
+a result, raises `EMCPProtocolError`:
+
+```pascal
+EMCPProtocolError = class(Exception)
+  constructor Create(ACode: Integer; const AMessage: string;
+    AData: TJSONData = nil);   // takes ownership of AData
+  property Code: Integer;
+  property Data: TJSONData;
+end;
+
+function MCPMissingCapabilityError(const ACapability: string): EMCPProtocolError;
+```
+
+Raised from a `tools/call`, `prompts/get` or `resources/read` handler
+(typed and template handlers included), it becomes the error response
+with exactly that code, message and data, in both eras. It is
+deliberate, so [`RedactErrorDetails`](../guides/configuration.md#redacterrordetails)
+leaves it alone. Every other exception keeps its mapping: an `isError`
+result from a tool, `-32603` from a prompt or a resource reader.
+
+| Code | Use it for |
+| --- | --- |
+| `-32602` | Invalid params the handler rejects itself, such as an argument out of range or a `requestState` that fails verification |
+| `-32021` | A client capability the request needs and did not declare; `MCPMissingCapabilityError('sampling')` adds the spec's `data.requiredCapabilities` |
+| `-32700`, `-32600`, `-32601`, `-32603` | The other JSON-RPC codes, with their JSON-RPC meanings |
+| outside `-32768..-32000` | Your application's own codes |
+
+Any other code is reserved, by the
+[specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/index#error-codes)
+or for legacy use, and the constructor raises `EMCPServer` for it. On
+the Streamable HTTP binding the status follows the code, so a
+handler-raised `-32021` answers 400.
+
+```pascal
+if not ACtx.HasCapability('sampling') then
+  raise MCPMissingCapabilityError('sampling');
+```

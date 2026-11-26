@@ -94,6 +94,7 @@ type
   public
     procedure SetupTests; override;
     procedure TestSingleJSONResponse;
+    procedure TestHandlerRaisedMissingCapability400;
     procedure TestBareDiscoverProbe;
     procedure TestNotificationAccepted;
     procedure TestMalformedNotificationAccepted;
@@ -148,6 +149,14 @@ function QuietHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
   Result := MCPTextResult('quiet');
+end;
+
+// Raises the -32021 a handler decides itself (#88).
+function NeedsSamplingHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := Default(TMCPToolResult);
+  raise MCPMissingCapabilityError('sampling');
 end;
 
 // Ask the kernel for a free localhost port: bind port 0, read the
@@ -216,6 +225,8 @@ begin
   FServer.RegisterTool('echo', 'Echo',
     ObjectSchema.AddString('message', 'Text to echo'), NoisyEchoHandler);
   FServer.RegisterTool('quiet', 'Quiet', '{"type":"object"}', QuietHandler);
+  FServer.RegisterTool('needs_sampling', 'Needs sampling', '{"type":"object"}',
+    NeedsSamplingHandler);
   FTransport := TMCPHTTPServer.Create(FServer);
   FTransport.Port := FindFreePort;
   FBaseUrl := 'http://127.0.0.1:' + IntToStr(FTransport.Port);
@@ -385,6 +396,21 @@ begin
   Expect<string>(ContentType).ToBe('application/json');
   Expect<Boolean>(Pos('pong', Body) > 0).ToBe(True);
   Expect<Boolean>(Pos('"resultType" : "complete"', Body) > 0).ToBe(True);
+end;
+
+procedure THTTPBinding.TestHandlerRaisedMissingCapability400;
+var
+  Body: string;
+  Status: Integer;
+begin
+  // The status follows the code wherever the core decided it, so a
+  // handler-raised -32021 answers 400 like the library's own (spec
+  // verified 2026-11-26:
+  // https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta).
+  Status := Post(CallLine(1, 'needs_sampling'), 'tools/call',
+    'needs_sampling', Body);
+  Expect<Integer>(Status).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32021);
 end;
 
 procedure THTTPBinding.TestBareDiscoverProbe;
@@ -837,6 +863,7 @@ begin
     TestSingleJSONResponse);
   Test('bare server/discover probe served without headers',
     TestBareDiscoverProbe);
+  Test('handler-raised -32021 → 400', TestHandlerRaisedMissingCapability400);
   Test('notification → 202, no body', TestNotificationAccepted);
   Test('malformed notification dropped → 202',
     TestMalformedNotificationAccepted);
