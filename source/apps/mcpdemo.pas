@@ -201,7 +201,10 @@ begin
 
     Server.RegisterTool('greet_user',
       'Greet a person; asks who to greet via elicitation (MRTR)',
-      '{"type":"object"}', GreetUserHandler);
+      '{"type":"object"}', GreetUserHandler)
+      // Refused up front for a client without elicitation, instead of
+      // after the handler ran.
+      .RequiresClientCapability('elicitation');
 
     Server.RegisterTool('pixel',
       'Return a 1x1 transparent PNG as image content',

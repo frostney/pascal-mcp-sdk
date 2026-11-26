@@ -361,6 +361,19 @@ type
     procedure TestRepeatedBlockRejected;
   end;
 
+  // .RequiresClientCapability (#84): a declared need is checked before
+  // the handler runs.
+  TDeclaredCapabilities = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestMissingRefusedBeforeHandler;
+    procedure TestPresentRuns;
+    procedure TestLegacyEraNotChecked;
+    procedure TestGuards;
+  end;
+
   // MCPImageResult: the spec's image content block, the raw-bytes
   // overload's base64 encoding (asserted against literal fixtures, not
   // against a decode of what we just encoded), mimeType passthrough,
@@ -4713,6 +4726,99 @@ begin
     TestApplicationValidatedSkipsChecks);
 end;
 
+{ ───────── declared client capabilities (#84) ───────── }
+
+var
+  NeedyRuns: Integer;
+
+function NeedyHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Inc(NeedyRuns);
+  Result := MCPTextResult('ran');
+end;
+
+procedure TDeclaredCapabilities.BeforeEach;
+begin
+  inherited BeforeEach;
+  NeedyRuns := 0;
+  FServer.RegisterTool('needy', 'Needs two', '{"type":"object"}', NeedyHandler)
+    .RequiresClientCapability('elicitation')
+    .RequiresClientCapability('sampling');
+end;
+
+function NeedyCall(const ACapabilities: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{' +
+    '"name":"needy","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":' + ACapabilities + '}}}';
+end;
+
+procedure TDeclaredCapabilities.TestMissingRefusedBeforeHandler;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(NeedyCall('{"elicitation":{}}'), Response))
+    .ToBe(True);
+  Expect<string>(Response).ToBe('{ "jsonrpc" : "2.0", "id" : 4, "error" : ' +
+    '{ "code" : -32021, "message" : "Tool \"needy\" requires the client ' +
+    'capability \"sampling\"", "data" : { "requiredCapabilities" : ' +
+    '{ "sampling" : {} } } } }');
+  Expect<Integer>(NeedyRuns).ToBe(0);
+end;
+
+procedure TDeclaredCapabilities.TestPresentRuns;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(NeedyCall('{"elicitation":{},"sampling":{}}'));
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+    .AsString).ToBe('ran');
+  Response.Free;
+  Expect<Integer>(NeedyRuns).ToBe(1);
+end;
+
+procedure TDeclaredCapabilities.TestLegacyEraNotChecked;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification('{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"needy","arguments":{}}}');
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+    .AsString).ToBe('ran');
+  Response.Free;
+end;
+
+procedure TDeclaredCapabilities.TestGuards;
+var
+  Raised: Boolean;
+begin
+  Raised := False;
+  try
+    FServer.RegisterTool('nameless', 'x', '{"type":"object"}', NeedyHandler)
+      .RequiresClientCapability('');
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+end;
+
+procedure TDeclaredCapabilities.SetupTests;
+begin
+  Test('a missing declared capability → -32021 before the handler runs',
+    TestMissingRefusedBeforeHandler);
+  Test('declared capabilities present → the handler runs', TestPresentRuns);
+  Test('classic era: not checked (no MRTR there)', TestLegacyEraNotChecked);
+  Test('an empty capability name is refused', TestGuards);
+end;
+
 { ───────── image results ───────── }
 
 const
@@ -5051,6 +5157,8 @@ begin
     TMRTRDispatch.Create('Server: MRTR input_required'));
   TestRunnerProgram.AddSuite(
     TImageResults.Create('Server: image tool results'));
+  TestRunnerProgram.AddSuite(
+    TDeclaredCapabilities.Create('Server: declared client capabilities'));
   TestRunnerProgram.AddSuite(
     TContentResults.Create('Server: content tool results and prompt messages'));
   TestRunnerProgram.Run;

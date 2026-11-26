@@ -82,11 +82,21 @@ function DestructiveHint(AValue: Boolean = True): TMCPToolOptions;
 function IdempotentHint(AValue: Boolean = True): TMCPToolOptions;
 function OpenWorldHint(AValue: Boolean = True): TMCPToolOptions;
 function ApplicationValidated: TMCPToolOptions;
+function RequiresClientCapability(const AName: string): TMCPToolOptions;
 ```
 
 `ApplicationValidated` publishes a raw schema unchanged and hands
 argument validation to the handler — see
 [Schemas](../guides/schemas.md#the-enforced-subset).
+
+`RequiresClientCapability` declares a client capability the tool needs
+(`'elicitation'`, `'sampling'`, `'roots'`, …); call it once per
+capability. A request whose `clientCapabilities` lack one is answered
+`-32021` with `data.requiredCapabilities` before the handler runs. On
+Streamable HTTP that matters: an error decided after the handler has
+streamed progress can only end the stream, while one decided first is
+answered `400`, as the specification requires. Not checked for
+classic-handshake clients, which get no input requests anyway.
 
 ### Registering resources
 

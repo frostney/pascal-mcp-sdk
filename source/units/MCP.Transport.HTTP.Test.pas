@@ -119,6 +119,8 @@ type
     procedure TestNonWebSchemeOriginRejected;
     procedure TestSessionHeaderIgnored;
     procedure TestOversizedBody;
+    procedure TestDeclaredCapabilityRefusedBeforeStreaming;
+    procedure TestUndeclaredCapabilityStillEndsTheStream;
     procedure TestSSEStream;
     procedure TestStreamingProtocolErrorIsJSON;
     procedure TestStreamingWithoutNotificationsIsJSON;
@@ -140,6 +142,18 @@ begin
   MCPReportProgress(ACtx, 0.5, 1.0, 'halfway');
   MCPLogMessage(ACtx, 'info', 'echo invoked');
   Result := MCPTextResult(AArguments.Get('message', ''));
+end;
+
+// Reports progress, then asks for sampling (#84).
+function ProgressThenSamplingHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Requests: TJSONObject;
+begin
+  MCPReportProgress(ACtx, 0.5, 1.0, 'halfway');
+  Requests := TJSONObject.Create;
+  Requests.Add('s', MCPSamplingTextRequest('Say hi', 10));
+  Result := MCPInputRequired(Requests);
 end;
 
 // Emits nothing while it runs: a streaming-opted call to this tool
@@ -216,6 +230,11 @@ begin
   FServer.RegisterTool('echo', 'Echo',
     ObjectSchema.AddString('message', 'Text to echo'), NoisyEchoHandler);
   FServer.RegisterTool('quiet', 'Quiet', '{"type":"object"}', QuietHandler);
+  // The same handler, with and without its need declared (#84).
+  FServer.RegisterTool('sampler', 'Samples', '{"type":"object"}',
+    ProgressThenSamplingHandler).RequiresClientCapability('sampling');
+  FServer.RegisterTool('sampler_undeclared', 'Samples', '{"type":"object"}',
+    ProgressThenSamplingHandler);
   FTransport := TMCPHTTPServer.Create(FServer);
   FTransport.Port := FindFreePort;
   FBaseUrl := 'http://127.0.0.1:' + IntToStr(FTransport.Port);
@@ -831,6 +850,45 @@ begin
   end;
 end;
 
+procedure THTTPBinding.TestDeclaredCapabilityRefusedBeforeStreaming;
+var
+  Body, ContentType: string;
+  Status: Integer;
+begin
+  // Progress opted in, sampling not declared: the declared need is
+  // checked before the handler runs, so the answer is a plain 400
+  // (spec verified 2026-11-26:
+  // https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta).
+  Status := Exchange('POST', '/mcp',
+    CallLine(3, 'sampler', META_MODERN_STREAMING),
+    [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+     HeaderPair('Mcp-Method', 'tools/call'),
+     HeaderPair('Mcp-Name', 'sampler')], Body, ContentType);
+  Expect<Integer>(Status).ToBe(400);
+  Expect<string>(ContentType).ToBe('application/json');
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32021);
+  Expect<Boolean>(Pos('"requiredCapabilities" : { "sampling" : {} }', Body) > 0)
+    .ToBe(True);
+end;
+
+procedure THTTPBinding.TestUndeclaredCapabilityStillEndsTheStream;
+var
+  Body, ContentType: string;
+  Status: Integer;
+begin
+  // Without the declaration the need shows only after progress went
+  // out: the error can only be the stream's last event. This is the
+  // case the declaration exists for.
+  Status := Exchange('POST', '/mcp',
+    CallLine(3, 'sampler_undeclared', META_MODERN_STREAMING),
+    [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+     HeaderPair('Mcp-Method', 'tools/call'),
+     HeaderPair('Mcp-Name', 'sampler_undeclared')], Body, ContentType);
+  Expect<Integer>(Status).ToBe(200);
+  Expect<string>(ContentType).ToBe('text/event-stream');
+  Expect<Boolean>(Pos('-32021', Body) > 0).ToBe(True);
+end;
+
 procedure THTTPBinding.SetupTests;
 begin
   Test('request → single application/json response',
@@ -873,6 +931,10 @@ begin
   Test('legacy session/resume headers ignored',
     TestSessionHeaderIgnored);
   Test('oversized body → 413', TestOversizedBody);
+  Test('declared capability missing → 400 before any notification',
+    TestDeclaredCapabilityRefusedBeforeStreaming);
+  Test('undeclared capability after progress → error ends the stream',
+    TestUndeclaredCapabilityStillEndsTheStream);
   Test('notification-opted request → SSE stream, response last',
     TestSSEStream);
   Test('notification-opted protocol error → 400 JSON, -32022',

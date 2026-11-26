@@ -257,7 +257,14 @@ A handler that needs more input mid-call — a missing value, a user
 confirmation, a model completion — returns `MCPInputRequired(...)`
 instead of a final result. The client gathers the responses and
 retries the same call; your handler re-enters with the responses
-available on `ACtx`:
+available on `ACtx`. Declare the capability each kind of request needs
+on the registration, so a client without it is refused before the
+handler runs rather than after it has streamed progress:
+
+```pascal
+Server.RegisterTool('greet_user', 'Greet a person', '{"type":"object"}',
+  GreetUserHandler).RequiresClientCapability('elicitation');
+```
 
 ```pascal
 function GreetUserHandler(AArguments: TJSONObject;
