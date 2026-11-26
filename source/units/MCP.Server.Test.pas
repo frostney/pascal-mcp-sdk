@@ -345,6 +345,25 @@ type
     procedure TestApplicationValidatedSkipsChecks;
   end;
 
+  // completion/complete (#81): static and callable completions for
+  // prompt arguments and template variables, the 100-value cap,
+  // context arguments, error cases, and capabilities computed from
+  // the registrations.
+  TCompletionDispatch = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestStaticPromptCompletion;
+    procedure TestCallableTemplateCompletion;
+    procedure TestHundredValueCap;
+    procedure TestUnregisteredArgumentIsEmpty;
+    procedure TestErrors;
+    procedure TestRegistrationGuards;
+    procedure TestCapabilities;
+    procedure TestLegacyEra;
+  end;
+
   // MCPImageResult: the spec's image content block, the raw-bytes
   // overload's base64 encoding (asserted against literal fixtures, not
   // against a decode of what we just encoded), mimeType passthrough,
@@ -4040,6 +4059,10 @@ var
 begin
   Server := TMCPServer.Create('wire-server', '1.0');
   try
+    // Capabilities follow the registrations (#81): a tool and a
+    // resource here, no prompts and no completions.
+    Server.RegisterTool('echo', 'Echo', '{"type":"object"}', EchoHandler);
+    Server.RegisterTextResource('mem://w', 'w', 'text/plain', 'w');
     Session := Server.CreateSession;
     try
       Expect<Boolean>(Server.HandleMessage(Session,
@@ -4050,7 +4073,7 @@ begin
       Expect<string>(Response).ToBe(
         '{ "jsonrpc" : "2.0", "id" : 2, "result" : { ' +
         '"protocolVersion" : "2025-11-25", "capabilities" : { ' +
-        '"tools" : {}, "resources" : {}, "prompts" : {} }, ' +
+        '"tools" : {}, "resources" : {} }, ' +
         '"serverInfo" : { "name" : "wire-server", ' +
         '"version" : "1.0" } } }');
     finally
@@ -4697,6 +4720,247 @@ begin
     TestApplicationValidatedSkipsChecks);
 end;
 
+{ ───────── completion (#81) ───────── }
+
+function LanguagePrompt(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPMessages([MCPUserMessage('code_review')]);
+end;
+
+function TextReader(const AUri: string; AVars: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPTextContents(AUri, 'text/plain', 'x');
+end;
+
+// Completes a city from the country already chosen in the context.
+function CityCompletion(const AArgument, AValue: string; AContext: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPCompletion;
+begin
+  if (AContext <> nil) and (AContext.Get('country', '') = 'de') then
+    Result := MCPCompleteFrom(AValue, ['Berlin', 'Bonn', 'K' + #$C3#$B6 + 'ln'])
+  else
+    Result := MCPCompleteFrom(AValue, ['Paris', 'Pau']);
+end;
+
+function ManyCompletion(const AArgument, AValue: string; AContext: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPCompletion;
+var
+  I: Integer;
+begin
+  Result := Default(TMCPCompletion);
+  SetLength(Result.Values, 150);
+  for I := 0 to 149 do
+    Result.Values[I] := 'v' + IntToStr(I);
+  Result.Total := -1;
+end;
+
+procedure TCompletionDispatch.BeforeEach;
+begin
+  inherited BeforeEach;
+  FServer.RegisterPrompt('code_review', 'Review code',
+    PromptArguments.Add('language').Add('style', '', False), LanguagePrompt);
+  FServer.RegisterPromptCompletion('code_review', 'language',
+    ['Pascal', 'Python', 'PHP', 'Go']);
+  FServer.RegisterResourceTemplate('geo://{country}/{city}', 'city',
+    'text/plain', TextReader);
+  FServer.RegisterTemplateCompletion('geo://{country}/{city}', 'city',
+    CityCompletion);
+  FServer.RegisterTemplateCompletion('geo://{country}/{city}', 'country',
+    ManyCompletion);
+end;
+
+function CompleteLine(const ARef, AArgument, AValue: string;
+  const AExtra: string = ''): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":9,"method":"completion/complete",' +
+    '"params":{"ref":' + ARef + ',"argument":{"name":"' + AArgument +
+    '","value":"' + AValue + '"},' + AExtra + META_MODERN + '}}';
+end;
+
+procedure TCompletionDispatch.TestStaticPromptCompletion;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(CompleteLine('{"type":"ref/prompt","name":"code_review"}',
+    'language', 'p'), Response)).ToBe(True);
+  Expect<Boolean>(Pos('"result" : { "completion" : { "values" : ' +
+    '["Pascal", "Python", "PHP"], "total" : 3, "hasMore" : false }, ' +
+    '"resultType" : "complete"', Response) > 0).ToBe(True);
+end;
+
+procedure TCompletionDispatch.TestCallableTemplateCompletion;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(CompleteLine(
+    '{"type":"ref/resource","uri":"geo://{country}/{city}"}', 'city', 'k',
+    '"context":{"arguments":{"country":"de"}},'));
+  Expect<string>(TJSONData(Response.FindPath('result.completion.values[0]'))
+    .AsString).ToBe('K' + #$C3#$B6 + 'ln');
+  Response.Free;
+  Response := Call(CompleteLine(
+    '{"type":"ref/resource","uri":"geo://{country}/{city}"}', 'city', 'pa'));
+  Expect<Integer>(TJSONArray(Response.FindPath('result.completion.values'))
+    .Count).ToBe(2);
+  Response.Free;
+end;
+
+procedure TCompletionDispatch.TestHundredValueCap;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(CompleteLine(
+    '{"type":"ref/resource","uri":"geo://{country}/{city}"}', 'country', ''));
+  Expect<Integer>(TJSONArray(Response.FindPath('result.completion.values'))
+    .Count).ToBe(100);
+  Expect<Boolean>(TJSONData(Response.FindPath('result.completion.hasMore'))
+    .AsBoolean).ToBe(True);
+  // Total unknown (-1): left out.
+  Expect<Boolean>(Response.FindPath('result.completion.total') = nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TCompletionDispatch.TestUnregisteredArgumentIsEmpty;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(CompleteLine('{"type":"ref/prompt","name":"code_review"}',
+    'style', 'x'));
+  Expect<Integer>(TJSONArray(Response.FindPath('result.completion.values'))
+    .Count).ToBe(0);
+  Response.Free;
+end;
+
+function ErrorCode(ASuite: TDispatchSuite; const ALine: string): Integer;
+var
+  Response: TJSONObject;
+begin
+  Response := ASuite.Call(ALine);
+  try
+    Result := TJSONData(Response.FindPath('error.code')).AsInteger;
+  finally
+    Response.Free;
+  end;
+end;
+
+procedure TCompletionDispatch.TestErrors;
+begin
+  Expect<Integer>(ErrorCode(Self, CompleteLine(
+    '{"type":"ref/prompt","name":"nope"}', 'language', ''))).ToBe(-32602);
+  Expect<Integer>(ErrorCode(Self, CompleteLine(
+    '{"type":"ref/prompt","name":"code_review"}', 'nope', ''))).ToBe(-32602);
+  Expect<Integer>(ErrorCode(Self, CompleteLine(
+    '{"type":"ref/resource","uri":"geo://other"}', 'city', ''))).ToBe(-32602);
+  Expect<Integer>(ErrorCode(Self, CompleteLine(
+    '{"type":"ref/tool","name":"echo"}', 'x', ''))).ToBe(-32602);
+  Expect<Integer>(ErrorCode(Self, '{"jsonrpc":"2.0","id":9,' +
+    '"method":"completion/complete","params":{"ref":' +
+    '{"type":"ref/prompt","name":"code_review"},' + META_MODERN + '}}'))
+    .ToBe(-32602);
+end;
+
+function RegistrationRefused(AServer: TMCPServer; const APrompt,
+  AArgument: string): Boolean;
+begin
+  Result := False;
+  try
+    AServer.RegisterPromptCompletion(APrompt, AArgument, ['a']);
+  except
+    on E: EMCPServer do
+      Result := True;
+  end;
+end;
+
+procedure TCompletionDispatch.TestRegistrationGuards;
+var
+  Raised: Boolean;
+begin
+  Expect<Boolean>(RegistrationRefused(FServer, 'nope', 'language')).ToBe(True);
+  Expect<Boolean>(RegistrationRefused(FServer, 'code_review', 'nope')).ToBe(True);
+  // Already registered.
+  Expect<Boolean>(RegistrationRefused(FServer, 'code_review', 'language'))
+    .ToBe(True);
+  Raised := False;
+  try
+    FServer.RegisterTemplateCompletion('geo://{country}/{city}', 'street', ['a']);
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+end;
+
+procedure TCompletionDispatch.TestCapabilities;
+var
+  Response: TJSONObject;
+  Bare: TMCPServer;
+  Session: TMCPSession;
+  Line: string;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"server/discover",' +
+    '"params":{' + META_MODERN + '}}');
+  Expect<Boolean>(Response.FindPath('result.capabilities.completions') <> nil)
+    .ToBe(True);
+  Expect<Boolean>(Response.FindPath('result.capabilities.prompts') <> nil)
+    .ToBe(True);
+  Response.Free;
+  // A server with nothing registered declares nothing.
+  Bare := TMCPServer.Create('bare', '1');
+  try
+    Session := Bare.CreateSession;
+    try
+      Bare.HandleMessage(Session, '{"jsonrpc":"2.0","id":1,' +
+        '"method":"server/discover","params":{' + META_MODERN + '}}', Line);
+      Expect<Boolean>(Pos('"capabilities" : {}', Line) > 0).ToBe(True);
+    finally
+      Session.Free;
+    end;
+  finally
+    Bare.Free;
+  end;
+end;
+
+procedure TCompletionDispatch.TestLegacyEra;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Expect<Boolean>(Response.FindPath('result.capabilities.completions') <> nil)
+    .ToBe(True);
+  Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"completion/complete",' +
+    '"params":{"ref":{"type":"ref/prompt","name":"code_review"},' +
+    '"argument":{"name":"language","value":"g"}}}');
+  Expect<string>(TJSONData(Response.FindPath('result.completion.values[0]'))
+    .AsString).ToBe('Go');
+  // The classic dialect carries no resultType.
+  Expect<Boolean>(Response.FindPath('result.resultType') = nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TCompletionDispatch.SetupTests;
+begin
+  Test('static prompt completion by case-insensitive prefix',
+    TestStaticPromptCompletion);
+  Test('callable template completion sees context arguments, UTF-8',
+    TestCallableTemplateCompletion);
+  Test('more than 100 values: first 100, hasMore', TestHundredValueCap);
+  Test('argument without a completion answers an empty list',
+    TestUnregisteredArgumentIsEmpty);
+  Test('unknown prompt, argument, template or ref type → -32602',
+    TestErrors);
+  Test('registration refuses unknown targets and duplicates',
+    TestRegistrationGuards);
+  Test('capabilities follow the registrations', TestCapabilities);
+  Test('classic era: capability and completion/complete', TestLegacyEra);
+end;
+
 { ───────── image results ───────── }
 
 const
@@ -4900,5 +5164,7 @@ begin
     TMRTRDispatch.Create('Server: MRTR input_required'));
   TestRunnerProgram.AddSuite(
     TImageResults.Create('Server: image tool results'));
+  TestRunnerProgram.AddSuite(
+    TCompletionDispatch.Create('Server: completion/complete'));
   TestRunnerProgram.Run;
 end.

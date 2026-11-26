@@ -114,6 +114,24 @@ for reading; the wire is one line):
 default — the server enforces only *required* arguments before the
 handler runs.)
 
+## Suggesting argument values
+
+A client can ask for suggestions while the user types an argument
+(`completion/complete`). Register them after the prompt, as a static
+list or a handler:
+
+```pascal
+Server.RegisterPrompt('greet', 'Compose a friendly greeting',
+  PromptArguments.Add('name', 'Who to greet'), GreetPromptHandler);
+Server.RegisterPromptCompletion('greet', 'name',
+  ['Ada', 'Alan', 'Grace', 'Niklaus']);
+```
+
+A list completes by case-insensitive prefix. A handler receives the
+typed value and the arguments already filled in, so one argument's
+suggestions can depend on another's (see
+[Argument completion](../reference/server.md#argument-completion)).
+
 ## Error behaviour
 
 Prompts have no in-band `isError` channel — that is a tools concept.

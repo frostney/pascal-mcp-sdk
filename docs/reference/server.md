@@ -159,6 +159,52 @@ function Add(const AName: string; const ADescription: string = '';
   ARequired: Boolean = True): TMCPPromptArguments;
 ```
 
+### Argument completion
+
+`completion/complete` suggests values while a user fills in a prompt
+argument or a resource-template variable
+([Completion](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/completion),
+verified 2026-11-26). Register a completion after the prompt or
+template it belongs to:
+
+```pascal
+procedure RegisterPromptCompletion(const APrompt, AArgument: string;
+  const AValues: array of string);              // static list
+procedure RegisterPromptCompletion(const APrompt, AArgument: string;
+  AHandler: TMCPCompletionHandler);             // + Method variant
+procedure RegisterTemplateCompletion(const AUriTemplate, AVariable: string;
+  const AValues: array of string);              // + Handler, Method
+
+TMCPCompletionHandler = function(const AArgument, AValue: string;
+  AContext: TJSONObject; const ACtx: TMCPRequestContext): TMCPCompletion;
+
+TMCPCompletion = record
+  Values: array of string;  // ranked; at most 100 are sent
+  Total: Integer;           // all matches, -1 when unknown
+  HasMore: Boolean;
+end;
+
+function MCPCompleteFrom(const AValue: string;
+  const ACandidates: array of string): TMCPCompletion;
+```
+
+A static list completes by case-insensitive prefix, in the order given
+(`MCPCompleteFrom`, which a handler can call too). A handler gets the
+value typed so far and, in `AContext`, the arguments the client has
+already resolved (`nil` when none). More than 100 values are cut to
+100 with `hasMore: true`. An unknown prompt or template, or an argument
+it does not declare, is refused with `EMCPServer` at registration and
+answered `-32602` on the wire; an argument with no completion
+registered answers an empty list. Registering any completion declares
+the `completions` capability.
+
+### Capabilities
+
+`server/discover` and the classic `initialize` declare a capability
+for each kind of thing registered: `tools` when there is a tool,
+`resources` when there is a resource or template, `prompts` when there
+is a prompt, `completions` when there is a completion.
+
 ### The request context
 
 Every handler receives `TMCPRequestContext` (from `MCP.Protocol`):
