@@ -57,9 +57,9 @@ Then:
 git clone https://github.com/frostney/pascal-mcp-sdk
 cd pascal-mcp-sdk
 lwpt install --frozen  # verify lwpt.lock and the committed modules
-lwpt build             # build/mcpdemo + build/mcpsmoke
+lwpt build             # every [build] target in lwpt.toml (mcpdemo, mcpsmoke, mcpconformance)
 lwpt test              # co-located unit suites
-lwpt run smoke         # E2E battery: spawns mcpdemo, drives the protocol
+lwpt run smoke         # E2E battery: spawns mcpdemo and mcpconformance, drives the protocol
 ```
 
 `lwpt install --frozen` is the CI mode: verify the lockfile and the
@@ -116,17 +116,17 @@ the ADRs under
 - **Public API changes update the reference docs** —
   `.github/scripts/check-reference-docs.sh` fails CI when an
   `MCP*`/`Register*` function or procedure declared in the interface
-  of `MCP.Server.pas` is missing from `docs/reference/`. Public API in
-  other units (and types, constants, properties) is not gated —
-  document it by hand.
+  of `MCP.Server.pas` or `MCP.Content.pas` is missing from
+  `docs/reference/`. Public API in other units (and types, constants,
+  properties) is not gated — document it by hand.
 
 ## Run the gate locally
 
 ```sh
 lwpt install --frozen  # lockfile and committed modules agree
-lwpt build             # both apps compile
+lwpt build             # every app compiles
 lwpt test              # unit suites
-lwpt run smoke         # E2E: mcpsmoke drives mcpdemo over pipes
+lwpt run smoke         # E2E: mcpsmoke drives mcpdemo and mcpconformance over pipes
 lwpt format --check    # formatter drift (pre-commit fixes in place)
 lwpt health            # complexity within the manifest ceilings
 lwpt duplication       # token clones within the manifest ceiling
@@ -149,7 +149,8 @@ npm ci
 npm run interop
 ```
 
-The official MCP conformance suite runs against `mcpdemo --http` and
+The official MCP conformance suite runs against the conformance
+fixture (`mcpconformance --http`) and
 is judged against the committed `tools/conformance/baseline.json`
 (see [Tooling § Official conformance suite](tooling.md#official-conformance-suite--toolsconformance)).
 A regression it reports is fixed, not recorded. The baseline changes in
@@ -182,9 +183,9 @@ registry.
 | Linux / macOS / Windows legs | checksum-verified lwpt install, `install --frozen`, build, unit suites, mcpsmoke on every platform |
 | `fpc @lwpt.cfg` leg | the zero-install path still works |
 | `interop` (required) | the official TypeScript clients still talk to `mcpdemo` — a red interop job is a real cross-implementation regression |
-| `conformance` (non-blocking) | the official conformance suite's 2026-07-28 requirement set still matches `tools/conformance/baseline.json` |
+| `conformance` (non-blocking) | the official conformance suite's 2026-07-28 requirement set, run against `mcpconformance`, still matches `tools/conformance/baseline.json` |
 | format / agents `--check` | formatter and AGENTS.md command block have not drifted |
-| `check-reference-docs.sh` | every `MCP*`/`Register*` routine in `MCP.Server`'s interface is documented in `docs/reference/` |
+| `check-reference-docs.sh` | every `MCP*`/`Register*` routine in the interface of `MCP.Server` and `MCP.Content` is documented in `docs/reference/` |
 | health / duplication | complexity and token-clone ceilings in `lwpt.toml` hold — ratchets set just above the adoption-day baseline, so they shrink but never grow unnoticed |
 | markdownlint | docs follow `.markdownlint-cli2.jsonc` |
 | pages.yml (on `docs/`/`website/` changes) | the website still builds; broken internal doc links fail here |

@@ -1,6 +1,8 @@
 // Runs the official MCP conformance suite (modelcontextprotocol/
-// conformance, pinned on npm) in server mode against mcpdemo's
-// Streamable HTTP binding, then compares the per-scenario outcome with
+// conformance, pinned on npm) in server mode against the Streamable
+// HTTP binding of a server program started with `--http <port>`: in CI
+// the conformance fixture, build/mcpconformance, which registers the
+// suite's reference surface through the library's public API, then compares the per-scenario outcome with
 // the committed baseline (baseline.json). By default it runs the
 // suite's requirement set for the spec revision the baseline names
 // (`--requirements 2026-07-28`): the scenarios that revision requires,
@@ -8,8 +10,8 @@
 // without scoring. The suite only tests servers over HTTP, so the
 // stdio binding is not covered here.
 //
-// Usage: node run.mjs <path-to-mcpdemo> [extra conformance args]
-//   e.g. node run.mjs build/mcpdemo --scenario tools-list
+// Usage: node run.mjs <path-to-server> [extra conformance args]
+//   e.g. node run.mjs build/mcpconformance --scenario tools-list
 //
 // Each run writes into a fresh directory of its own,
 // <repo>/build/conformance/<timestamp>-<pid>/ (checks.json per
@@ -24,9 +26,9 @@
 // anything else, a signal included, means the suite was interrupted
 // or could not run, and fails the run. Before that, operational errors
 // exit non-zero too: 2 for usage or an invalid baseline or suite
-// command, and 1 when mcpdemo does not start (it is stopped first) or
-// no results were produced. When the runner itself is interrupted
-// (SIGINT, SIGTERM, SIGHUP) it stops the suite and mcpdemo first.
+// command, and 1 when the server does not start (it is stopped first)
+// or no results were produced. When the runner itself is interrupted
+// (SIGINT, SIGTERM, SIGHUP) it stops the suite and the server first.
 //
 // Selection: --scenario (in `--opt value` or `--opt=value` form) runs
 // those scenarios at the baseline's revision, extensions included
@@ -98,7 +100,7 @@ function suiteCommand() {
 const suitePrefix = suiteCommand();
 
 const [demoArg, ...extra] = process.argv.slice(2);
-if (!demoArg) usage('usage: node run.mjs <path-to-mcpdemo> [conformance args]');
+if (!demoArg) usage('usage: node run.mjs <path-to-server> [conformance args]');
 
 // Commander accepts `--opt value` and `--opt=value`.
 const has = (name) => extra.some((a) => a === `--${name}` || a.startsWith(`--${name}=`));
@@ -188,13 +190,13 @@ function stopSuite(child) {
     signalGroup('SIGTERM');
   });
 }
-// Interrupted: stop the suite and mcpdemo, then exit with the signal's
+// Interrupted: stop the suite and the server, then exit with the signal's
 // conventional status.
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, async () => {
     if (stopping) return;
     stopping = true;
-    console.error(`conformance: interrupted by ${signal}; stopping the suite and mcpdemo`);
+    console.error(`conformance: interrupted by ${signal}; stopping the suite and the server`);
     await Promise.all([suite && stopSuite(suite), server && stopChild(server)].filter(Boolean));
     process.exit(128 + constants.signals[signal]);
   });
@@ -206,7 +208,7 @@ try {
     server = child;
   });
 } catch (error) {
-  // An interrupt during startup stops mcpdemo, which rejects here too;
+  // An interrupt during startup stops the server, which rejects here too;
   // the signal handler owns that exit.
   if (stopping) await new Promise(() => {});
   console.error(`conformance: ${error.message}`);
