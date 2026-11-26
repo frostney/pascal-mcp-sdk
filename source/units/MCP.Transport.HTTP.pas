@@ -62,10 +62,13 @@ unit MCP.Transport.HTTP;
 //     is the stream's final event, not a mapped status (#84). All
 //     other requests get a single application/json object. (The spec
 //     lets the server choose per request; this is the policy.)
-//   - closing the SSE response stream is the cancellation signal:
-//     when a stream write fails, the failure aborts the running
-//     handler, the core converts it into a response the transport can
-//     no longer deliver, and nothing further is sent for that request
+//   - closing the connection is the cancellation signal: the
+//     session's cancellation poll (#93) reports a closed socket,
+//     checked at most every 50 ms, whenever the handler asks
+//     IsCancelled, so a handler that never writes stops too; and when
+//     a stream write fails, the failure aborts the running handler,
+//     the core converts it into a response the transport can no
+//     longer deliver, and nothing further is sent for that request
 //     — subscriptions/listen streams do not arise because the core
 //     advertises no subscription capability.
 //
@@ -173,7 +176,12 @@ implementation
 
 uses
   base64,
-  {$IFDEF DARWIN}
+  {$IFDEF UNIX}
+  BaseUnix,
+  {$ENDIF}
+  {$IFDEF WINDOWS}
+  winsock2,
+  {$ELSE}
   sockets,
   {$ENDIF}
   ssockets;
@@ -624,6 +632,65 @@ begin
   AResponse.Content := ABody;
 end;
 
+type
+  // The poll state of one POST (#93): its socket and when it was last
+  // checked.
+  THTTPDisconnectPoll = record
+    Socket: THandle;
+    LastCheck: QWord;
+    Closed: Boolean;
+  end;
+  PHTTPDisconnectPoll = ^THTTPDisconnectPoll;
+
+const
+  // How often a polling handler costs a system call.
+  DISCONNECT_POLL_INTERVAL_MS = 50;
+
+// The client closed the connection: the socket is readable and a peek
+// finds nothing to read (an orderly close). The request body was read
+// in full before dispatch, so readable data would be the client's.
+function SocketClosedByPeer(ASocket: THandle): Boolean;
+var
+  {$IFDEF WINDOWS}
+  ReadSet: winsock2.TFDSet;
+  Timeout: winsock2.TTimeVal;
+  {$ELSE}
+  ReadSet: TFDSet;
+  {$ENDIF}
+  Probe: Byte;
+begin
+  {$IFDEF WINDOWS}
+  winsock2.FD_ZERO(ReadSet);
+  winsock2.FD_SET(ASocket, ReadSet);
+  Timeout.tv_sec := 0;
+  Timeout.tv_usec := 0;
+  Result := (winsock2.select(0, @ReadSet, nil, nil, @Timeout) > 0) and
+    (winsock2.recv(ASocket, Probe, 1, winsock2.MSG_PEEK) = 0);
+  {$ELSE}
+  fpFD_ZERO(ReadSet);
+  fpFD_SET(ASocket, ReadSet);
+  Result := (fpSelect(ASocket + 1, @ReadSet, nil, nil, 0) > 0) and
+    (fpRecv(ASocket, @Probe, 1, MSG_PEEK) = 0);
+  {$ENDIF}
+end;
+
+// The session's cancellation poll on HTTP (#93): closing the
+// connection is how a client cancels, so a handler that never writes
+// still learns about it. Checked at most every 50 ms.
+function HTTPDisconnectPoll(ASession: TMCPSession;
+  AUserData: Pointer): Boolean;
+begin
+  with PHTTPDisconnectPoll(AUserData)^ do
+  begin
+    if not Closed and (GetTickCount64 - LastCheck >= DISCONNECT_POLL_INTERVAL_MS) then
+    begin
+      LastCheck := GetTickCount64;
+      Closed := SocketClosedByPeer(Socket);
+    end;
+    Result := Closed;
+  end;
+end;
+
 // Dispatch one request body through the core and answer it — a
 // single JSON object, or an SSE stream when AStream is set and the
 // handler actually emits a notification.
@@ -635,9 +702,14 @@ var
   Stream: TSSEStream;
   ResponseLine: string;
   Produced: Boolean;
+  Poll: THTTPDisconnectPoll;
 begin
   Session := FServer.CreateSession;
   try
+    Poll.Socket := ARequest.Connection.Socket.Handle;
+    Poll.LastCheck := 0;
+    Poll.Closed := False;
+    Session.SetCancellationPoll(HTTPDisconnectPoll, @Poll);
     if AStream then
     begin
       // Nothing is committed up front: the sink opens the stream on

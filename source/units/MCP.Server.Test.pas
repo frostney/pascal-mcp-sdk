@@ -224,6 +224,8 @@ type
     procedure TestStringReasonAccepted;
     procedure TestModernUnknownAndMalformedIgnored;
     procedure TestLegacyFinishedAndRepeatedIgnored;
+    procedure TestTransportPollCancels;
+    procedure TestTransportPollOnlyDuringRequests;
   end;
 
   TPromptDispatch = class(TDispatchSuite)
@@ -3158,6 +3160,60 @@ begin
   Response.Free;
 end;
 
+var
+  PollCalls: Integer;
+  PollAnswer: Boolean;
+
+// A transport poll (#93) that counts its calls and answers PollAnswer.
+function CountingPoll(ASession: TMCPSession; AUserData: Pointer): Boolean;
+begin
+  Inc(PollCalls);
+  Result := PollAnswer;
+end;
+
+procedure TCancellationDispatch.TestTransportPollCancels;
+var
+  ResponseLine: string;
+begin
+  PollCalls := 0;
+  PollAnswer := True;
+  FSession.SetCancellationPoll(CountingPoll, nil);
+  // The handler's IsCancelled consults the poll, which cancels: the
+  // response is withheld like any cancelled request's.
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":5,"method":"tools/call",' +
+    '"params":{"name":"cancellation-aware",' + META_MODERN + '}}',
+    ResponseLine)).ToBe(False);
+  Expect<string>(ResponseLine).ToBe('');
+  Expect<Boolean>(CancellationObserved).ToBe(True);
+  Expect<Boolean>(PollCalls >= 1).ToBe(True);
+end;
+
+procedure TCancellationDispatch.TestTransportPollOnlyDuringRequests;
+var
+  Response: TJSONObject;
+begin
+  PollCalls := 0;
+  PollAnswer := False;
+  FSession.SetCancellationPoll(CountingPoll, nil);
+  Response := Call('{"jsonrpc":"2.0","id":6,"method":"tools/call",' +
+    '"params":{"name":"cancellation-aware",' + META_MODERN + '}}');
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+    .AsString).ToBe('not cancelled');
+  Response.Free;
+  Expect<Integer>(PollCalls).ToBe(1);
+  // A request whose handler never asks does not poll, and nil removes
+  // the poll.
+  Response := Call('{"jsonrpc":"2.0","id":7,"method":"tools/list",' +
+    '"params":{' + META_MODERN + '}}');
+  Response.Free;
+  Expect<Integer>(PollCalls).ToBe(1);
+  FSession.SetCancellationPoll(nil, nil);
+  Response := Call('{"jsonrpc":"2.0","id":8,"method":"tools/call",' +
+    '"params":{"name":"cancellation-aware",' + META_MODERN + '}}');
+  Response.Free;
+  Expect<Integer>(PollCalls).ToBe(1);
+end;
+
 procedure TCancellationDispatch.SetupTests;
 begin
   Test('normal handler probe is present and false',
@@ -3180,6 +3236,10 @@ begin
     TestModernUnknownAndMalformedIgnored);
   Test('legacy finished and repeated cancellations are ignored',
     TestLegacyFinishedAndRepeatedIgnored);
+  Test('a transport poll that reports cancellation cancels the request',
+    TestTransportPollCancels);
+  Test('the poll runs only when a handler asks, and nil removes it',
+    TestTransportPollOnlyDuringRequests);
 end;
 
 { ───────── prompts ───────── }

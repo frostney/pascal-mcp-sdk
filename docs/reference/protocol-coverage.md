@@ -13,6 +13,7 @@ the README links here.
 | `resources/templates/list` + template matching | ✅ RFC 6570 level-1 (`{var}`), exact resources win, vars passed to readers |
 | `prompts/list`, `prompts/get` | ✅ fluent argument declaration, message builders, spec error codes |
 | MRTR `input_required` (SEP-2322) | ✅ on `tools/call` + `prompts/get`: elicitation (form + url), sampling, roots entry builders; capability-gated; stateless re-entry |
+| Cancellation | ✅ `notifications/cancelled` and, on Streamable HTTP, a closed connection reach a running handler through `ACtx.IsCancelled`; nothing more is sent for a cancelled request |
 | `notifications/progress`, `notifications/message` | ✅ `MCPReportProgress` / `MCPLogMessage` from any handler; strictly opt-in per request (`progressToken` / `logLevel`), severity-filtered, emitted before the response |
 | `_meta` validation, version negotiation | ✅ `-32602` / `-32021` / `-32022` per spec |
 | `ttlMs` / `cacheScope` caching hints (SEP-2549) | ✅ on discover/list/read, tunable via `CacheTtlMs`/`CacheScope` |

@@ -119,6 +119,7 @@ type
     procedure TestNonWebSchemeOriginRejected;
     procedure TestSessionHeaderIgnored;
     procedure TestOversizedBody;
+    procedure TestDisconnectCancelsSilentHandler;
     procedure TestSSEStream;
     procedure TestStreamingProtocolErrorIsJSON;
     procedure TestStreamingWithoutNotificationsIsJSON;
@@ -144,6 +145,30 @@ end;
 
 // Emits nothing while it runs: a streaming-opted call to this tool
 // must still come back as a single JSON object.
+var
+  // How the polling handler ended: '', 'cancelled' or 'finished'.
+  WaiterOutcome: string;
+
+// Polls IsCancelled for up to three seconds without writing anything:
+// only the binding's disconnect poll can cancel it (#93).
+function WaiterHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  I: Integer;
+begin
+  for I := 1 to 300 do
+  begin
+    if ACtx.IsCancelled then
+    begin
+      WaiterOutcome := 'cancelled';
+      Exit(MCPTextResult('cancelled'));
+    end;
+    Sleep(10);
+  end;
+  WaiterOutcome := 'finished';
+  Result := MCPTextResult('finished');
+end;
+
 function QuietHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
@@ -216,6 +241,7 @@ begin
   FServer.RegisterTool('echo', 'Echo',
     ObjectSchema.AddString('message', 'Text to echo'), NoisyEchoHandler);
   FServer.RegisterTool('quiet', 'Quiet', '{"type":"object"}', QuietHandler);
+  FServer.RegisterTool('waiter', 'Waits', '{"type":"object"}', WaiterHandler);
   FTransport := TMCPHTTPServer.Create(FServer);
   FTransport.Port := FindFreePort;
   FBaseUrl := 'http://127.0.0.1:' + IntToStr(FTransport.Port);
@@ -831,6 +857,35 @@ begin
   end;
 end;
 
+procedure THTTPBinding.TestDisconnectCancelsSilentHandler;
+var
+  Sock: TInetSocket;
+  Body, Request: string;
+  Deadline: QWord;
+begin
+  WaiterOutcome := '';
+  Body := CallLine(1, 'waiter');
+  Request := 'POST /mcp HTTP/1.1'#13#10 +
+    'Host: 127.0.0.1:' + IntToStr(FTransport.Port) + #13#10 +
+    'Content-Type: application/json'#13#10 +
+    'Accept: application/json, text/event-stream'#13#10 +
+    'MCP-Protocol-Version: ' + MCP_PROTOCOL_VERSION + #13#10 +
+    'Mcp-Method: tools/call'#13#10 + 'Mcp-Name: waiter'#13#10 +
+    'Content-Length: ' + IntToStr(Length(Body)) + #13#10#13#10 + Body;
+  Sock := TInetSocket.Create('127.0.0.1', FTransport.Port);
+  try
+    Sock.WriteBuffer(Request[1], Length(Request));
+    Sleep(200);
+  finally
+    // The client gives up: closing the connection is the cancellation.
+    Sock.Free;
+  end;
+  Deadline := GetTickCount64 + 5000;
+  while (WaiterOutcome = '') and (GetTickCount64 < Deadline) do
+    Sleep(20);
+  Expect<string>(WaiterOutcome).ToBe('cancelled');
+end;
+
 procedure THTTPBinding.SetupTests;
 begin
   Test('request → single application/json response',
@@ -873,6 +928,8 @@ begin
   Test('legacy session/resume headers ignored',
     TestSessionHeaderIgnored);
   Test('oversized body → 413', TestOversizedBody);
+  Test('client disconnect cancels a handler that never writes',
+    TestDisconnectCancelsSilentHandler);
   Test('notification-opted request → SSE stream, response last',
     TestSSEStream);
   Test('notification-opted protocol error → 400 JSON, -32022',

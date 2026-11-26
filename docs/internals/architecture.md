@@ -107,7 +107,8 @@ Modern 2026-07-28 requests remain **stateless**: every request
 validates its own `_meta`, and the session contributes no negotiated
 identity to that path. The session exists for two things only —
 isolating legacy lifecycle/identity, and exposing the one currently
-active cooperative-cancellation token.
+active cooperative-cancellation token, together with the transport's
+cancellation poll.
 
 ```mermaid
 stateDiagram-v2
@@ -116,16 +117,26 @@ stateDiagram-v2
     Running --> Running: handler polls IsCancelled → false
     Running --> Idle: handler completes<br/>response written
     Running --> Cancelled: notifications/cancelled<br/>matches the active request id
+    Running --> Cancelled: transport poll reports cancellation<br/>(closed HTTP connection)
     Cancelled --> Idle: handler observes IsCancelled<br/>server suppresses notifications + response
 ```
 
 `notifications/cancelled` validates its payload, matches string ids by
 decoded value and numeric ids by value, and flips that token; handlers
 poll `TMCPRequestContext.IsCancelled`, after which the server
-suppresses notifications and the final response. The synchronous stdio
-read-handle-write loop cannot receive a cancellation while a handler
-is running, so stdio handlers should stay short; a future transport
-with mid-request delivery points can use the same session entry point.
+suppresses notifications and the final response.
+
+A cancellation can arrive while the handler runs (#93). Each transport
+installs a cancellation poll on its session
+(`TMCPSession.SetCancellationPoll`), which the request consults
+whenever the handler asks `IsCancelled` and before each in-request
+notification, on the handler's own thread. The stdio loop reads stdin
+into its own buffer; its poll takes what is waiting without blocking
+and hands any `notifications/cancelled` line to the core, keeping the
+other lines queued in order. The HTTP binding's poll reports a closed
+connection, checked at most every 50 ms. No thread is involved, so a
+stdio-only program needs no thread driver; cancellation stays
+cooperative, as handlers already code it.
 
 ## Registration and handler model
 

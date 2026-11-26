@@ -1,11 +1,12 @@
 program mcpdemo;
 
 // Example MCP server: the smallest complete pascal-mcp-sdk program.
-// Exposes four tools showing every registration style — echo via the
+// Exposes tools showing every registration style — echo via the
 // fluent schema builder, add via a typed argument class (the class
 // expands into the schema, and the handler receives a populated,
 // validated instance), greet_user via a raw schema string, and pixel
-// returning binary image content — plus a static resource, a resource
+// returning binary image content, countdown stopping early when the
+// client cancels — plus a static resource, a resource
 // template, and a prompt. By default it
 // serves newline-delimited JSON-RPC on stdin/stdout until the client
 // closes stdin; with `--http <port>` the same registrations are
@@ -50,6 +51,26 @@ begin
   MCPLogMessage(ACtx, 'info', 'echo invoked');
   Result := MCPTextResult(MessageData.AsString);
   MCPReportProgress(ACtx, 1.0, 1.0);
+end;
+
+// Counts down, reporting progress, and stops as soon as the client
+// cancels: ACtx.IsCancelled sees a notifications/cancelled on stdio or a
+// closed connection on HTTP while the handler runs.
+function CountdownHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Seconds, Tick: Integer;
+begin
+  Seconds := AArguments.Get('seconds', 3);
+  for Tick := 1 to Seconds * 10 do
+  begin
+    if ACtx.IsCancelled then
+      Exit(MCPTextResult('cancelled'));
+    if Tick mod 10 = 0 then
+      MCPReportProgress(ACtx, Tick div 10, Seconds);
+    Sleep(100);
+  end;
+  Result := MCPTextResult('liftoff');
 end;
 
 type
@@ -202,6 +223,11 @@ begin
     Server.RegisterTool('greet_user',
       'Greet a person; asks who to greet via elicitation (MRTR)',
       '{"type":"object"}', GreetUserHandler);
+
+    Server.RegisterTool('countdown',
+      'Count down the given seconds; stops early when cancelled',
+      ObjectSchema.AddInteger('seconds', 'Seconds to count down'),
+      CountdownHandler);
 
     Server.RegisterTool('pixel',
       'Return a 1x1 transparent PNG as image content',

@@ -191,6 +191,7 @@ var
   Response: TJSONObject;
   ResponseLine: string;
   ServerInfo: TJSONData;
+  StartedAt: QWord;
   WaitedMs: Integer;
 
 begin
@@ -342,6 +343,23 @@ begin
       'MRTR retry: resultType complete');
     Check(PathString(Response, 'result.content[0].text') = 'Hello, Ada!',
       'MRTR retry: elicited name woven into the result');
+    Response.Free;
+
+    // Cancellation reaches a running handler (#93): countdown polls
+    // IsCancelled, the cancellation follows at once, and the next
+    // request is answered long before the countdown would end.
+    StartedAt := GetTickCount64;
+    SendLine(Demo, '{"jsonrpc":"2.0","id":40,"method":"tools/call",' +
+      '"params":{"name":"countdown","arguments":{"seconds":5},' +
+      META_MODERN + '}}');
+    SendLine(Demo, '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+      '"params":{"requestId":40,"reason":"smoke"}}');
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":41,"method":"tools/list","params":{' +
+      META_MODERN + '}}');
+    Check((PathInt(Response, 'id') = 41) and
+      (GetTickCount64 - StartedAt < 3000),
+      'cancellation: running countdown cancelled, its response withheld');
     Response.Free;
 
     // MRTR without the declared capability — the spec forbids sending

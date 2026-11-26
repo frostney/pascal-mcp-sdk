@@ -47,12 +47,39 @@ type
     procedure TestUtf8RoundTrip;
     procedure TestOversizedLineRejected;
     procedure TestOversizedLineRecovery;
+    procedure TestCancelReachesRunningHandler;
+    procedure TestCancelForOtherRequestIgnored;
+    procedure TestLastLineWithoutNewline;
   end;
 
 function PingHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
   Result := MCPTextResult('pong');
+end;
+
+var
+  // How the polling handler ended: 'cancelled' or 'finished'.
+  WaiterOutcome: string;
+
+// Polls IsCancelled the way a long handler does; the cancellation, if
+// any, comes from the stdio loop's poll (#93).
+function WaiterHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  I: Integer;
+begin
+  WaiterOutcome := 'finished';
+  for I := 1 to 200 do
+  begin
+    if ACtx.IsCancelled then
+    begin
+      WaiterOutcome := 'cancelled';
+      Exit(MCPTextResult('cancelled'));
+    end;
+    Sleep(1);
+  end;
+  Result := MCPTextResult('finished');
 end;
 
 function EchoHandler(AArguments: TJSONObject;
@@ -66,6 +93,7 @@ begin
   FServer := TMCPServer.Create('stdio-test', '1.0');
   FServer.RegisterTool('ping', 'Ping', '{"type":"object"}', PingHandler);
   FServer.RegisterTool('echo', 'Echo', '{"type":"object"}', EchoHandler);
+  FServer.RegisterTool('waiter', 'Waits', '{"type":"object"}', WaiterHandler);
   FDir := GetTempDir + 'pascal-mcp-sdk-stdio-test' + PathDelim;
   ForceDirectories(FDir);
 end;
@@ -240,6 +268,53 @@ begin
   Expect<Boolean>(Pos('"supportedVersions"', Output) > 0).ToBe(True);
 end;
 
+function WaiterCall(const AId: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":' + AId + ',"method":"tools/call",' +
+    '"params":{"name":"waiter",' + META_MODERN + '}}';
+end;
+
+procedure TStdioLoop.TestCancelReachesRunningHandler;
+var
+  Output: string;
+begin
+  // The cancellation arrives behind the request it names, ahead of
+  // another request: the running handler sees it at its next poll, its
+  // response is withheld, and the request after it is still served,
+  // byte-exact.
+  Output := RunLoop(WaiterCall('"w' + #$C3#$A9 + '"') + #10 +
+    '{"jsonrpc":"2.0","method":"notifications/cancelled","params":' +
+    '{"requestId":"w' + #$C3#$A9 + '","reason":"user"}}' + #10 +
+    '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{' +
+    '"name":"echo","arguments":{"message":"' + UTF8_PAYLOAD + '"},' +
+    META_MODERN + '}}' + #10);
+  Expect<string>(WaiterOutcome).ToBe('cancelled');
+  Expect<Boolean>(Pos('"id" : "w', Output) = 0).ToBe(True);
+  Expect<Boolean>(Pos('"id" : 9', Output) > 0).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "' + UTF8_PAYLOAD + '"', Output) > 0)
+    .ToBe(True);
+end;
+
+procedure TStdioLoop.TestCancelForOtherRequestIgnored;
+var
+  Output: string;
+begin
+  Output := RunLoop(WaiterCall('1') + #10 +
+    '{"jsonrpc":"2.0","method":"notifications/cancelled","params":' +
+    '{"requestId":2}}' + #10);
+  Expect<string>(WaiterOutcome).ToBe('finished');
+  Expect<Boolean>(Pos('"text" : "finished"', Output) > 0).ToBe(True);
+end;
+
+procedure TStdioLoop.TestLastLineWithoutNewline;
+var
+  Output: string;
+begin
+  // A final line without its LF is still served, as before.
+  Output := RunLoop(DiscoverLine(1));
+  Expect<Boolean>(Pos('"id" : 1', Output) > 0).ToBe(True);
+end;
+
 procedure TStdioLoop.SetupTests;
 begin
   Test('one request line → one response line', TestOneLineInOneLineOut);
@@ -252,6 +327,11 @@ begin
   Test('oversized line → -32700, null id', TestOversizedLineRejected);
   Test('stream recovers after an oversized line',
     TestOversizedLineRecovery);
+  Test('notifications/cancelled reaches a running handler; later lines served',
+    TestCancelReachesRunningHandler);
+  Test('a cancellation for another id leaves the handler running',
+    TestCancelForOtherRequestIgnored);
+  Test('a last line without LF is served', TestLastLineWithoutNewline);
 end;
 
 begin

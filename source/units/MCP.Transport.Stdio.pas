@@ -22,11 +22,14 @@ unit MCP.Transport.Stdio;
 //
 // The loop is synchronous and single-threaded: create one connection
 // session, read a line, handle it with this request's output sink, write
-// the response, flush. It cannot read notifications/cancelled while a
-// handler runs; by the time it reads one, the named request is finished
-// and the session safely ignores it. Handlers on stdio should therefore
-// stay short. A transport with mid-request delivery points can call the
-// session cancellation entry point while its handler is active.
+// the response, flush. Input is read from the handle into the loop's
+// own buffer, not through Text, so cancellation can reach a running
+// handler (#93): whenever the handler asks ACtx.IsCancelled, the
+// session's cancellation poll takes the bytes already waiting on stdin
+// without blocking (select on Unix, PeekNamedPipe on Windows), hands
+// any complete notifications/cancelled line to the core, which cancels
+// the request, and keeps every other line queued in order. No thread is
+// involved, so a stdio-only program needs no thread driver.
 //
 // The stdio binding says clients MUST send notifications/cancelled and
 // servers SHOULD stop work as soon as practical and MUST NOT send any
@@ -73,46 +76,250 @@ procedure MCPLogToStderr(const AMessage: string);
 
 implementation
 
-// Read one LF-terminated line, storing at most AMax bytes. True when
-// a line (possibly empty) was read; False on EOF with nothing read.
-// AOverflow reports that the line exceeded AMax — the excess is
-// consumed so the stream stays line-synchronized.
-function ReadBoundedLine(var AInput: Text; AMax: Integer;
-  out ALine: string; out AOverflow: Boolean): Boolean;
-var
-  C: Char;
-  Len: Integer;
-begin
-  ALine := '';
-  Len := 0;
-  AOverflow := False;
-  if EOF(AInput) then
-    Exit(False);
-  while not EOF(AInput) do
-  begin
-    Read(AInput, C);
-    if C = #10 then
-      Break;
-    if Len < AMax then
-    begin
-      // Amortized growth: appending char-by-char would be quadratic.
-      if Len = Length(ALine) then
-        if Len = 0 then
-          SetLength(ALine, 256)
-        else
-          SetLength(ALine, Len * 2);
-      Inc(Len);
-      ALine[Len] := C;
-    end
-    else
-      AOverflow := True; // keep consuming to the newline, store nothing
-  end;
-  SetLength(ALine, Len);
-  Result := True;
-end;
+uses
+  {$IFDEF UNIX}
+  BaseUnix,
+  {$ENDIF}
+  {$IFDEF WINDOWS}
+  Windows,
+  {$ENDIF}
+  MCP.JSONRPC;
+
+const
+  READ_CHUNK = 65536;
 
 type
   PText = ^Text;
+
+  TQueuedLine = record
+    Line: string;
+    Overflow: Boolean;
+  end;
+
+  // Reads the input handle directly, into its own buffer, so that a
+  // poll can take bytes that are waiting without blocking and without
+  // the Text buffer holding back what was already read (#93). Complete
+  // lines wait in a queue in arrival order; the line being received
+  // grows until its LF, keeping at most FMax bytes (the excess is
+  // consumed and the line flagged as overflowing, as before).
+  TStdioReader = class
+  private
+    FHandle: THandle;
+    FMax: Integer;
+    FQueue: array of TQueuedLine;
+    FHead: Integer;
+    FPartial: string;
+    FPartialLen: Integer;
+    FPartialOverflow: Boolean;
+    FEOF: Boolean;
+    procedure Feed(const AChunk: string);
+    procedure Push(const ALine: string; AOverflow: Boolean);
+    function ReadChunk: Boolean;
+    function DataWaiting: Boolean;
+  public
+    constructor Create(AHandle: THandle; AMax: Integer);
+    // The next line, blocking until one is complete; False at EOF.
+    function NextLine(out ALine: string; out AOverflow: Boolean): Boolean;
+    // Takes whatever is waiting on the handle without blocking.
+    procedure TakeWaiting;
+    // Removes and returns the queued notifications/cancelled lines.
+    function TakeCancellations: TStringArray;
+  end;
+
+constructor TStdioReader.Create(AHandle: THandle; AMax: Integer);
+begin
+  inherited Create;
+  FHandle := AHandle;
+  FMax := AMax;
+end;
+
+procedure TStdioReader.Push(const ALine: string; AOverflow: Boolean);
+var
+  Slot: Integer;
+begin
+  Slot := Length(FQueue);
+  SetLength(FQueue, Slot + 1);
+  FQueue[Slot].Line := ALine;
+  FQueue[Slot].Overflow := AOverflow;
+end;
+
+procedure TStdioReader.Feed(const AChunk: string);
+var
+  I: Integer;
+begin
+  for I := 1 to Length(AChunk) do
+    if AChunk[I] = #10 then
+    begin
+      Push(Copy(FPartial, 1, FPartialLen), FPartialOverflow);
+      FPartialLen := 0;
+      FPartialOverflow := False;
+    end
+    else if FPartialLen < FMax then
+    begin
+      // Amortized growth: appending char-by-char would be quadratic.
+      if FPartialLen = Length(FPartial) then
+        if FPartialLen = 0 then
+          SetLength(FPartial, 256)
+        else
+          SetLength(FPartial, FPartialLen * 2);
+      Inc(FPartialLen);
+      FPartial[FPartialLen] := AChunk[I];
+    end
+    else
+      FPartialOverflow := True; // consume to the newline, store nothing
+end;
+
+// One read from the handle; False (and EOF) when the input has ended.
+function TStdioReader.ReadChunk: Boolean;
+var
+  Chunk: string;
+  Got: LongInt;
+begin
+  SetLength(Chunk, READ_CHUNK);
+  Got := FileRead(FHandle, Chunk[1], READ_CHUNK);
+  if Got <= 0 then
+  begin
+    FEOF := True;
+    // A last line without its LF still counts, as before.
+    if (FPartialLen > 0) or FPartialOverflow then
+    begin
+      Push(Copy(FPartial, 1, FPartialLen), FPartialOverflow);
+      FPartialLen := 0;
+      FPartialOverflow := False;
+    end;
+    Exit(False);
+  end;
+  SetLength(Chunk, Got);
+  Feed(Chunk);
+  Result := True;
+end;
+
+// Whether a read would return at once: data or EOF is waiting.
+function TStdioReader.DataWaiting: Boolean;
+{$IFDEF UNIX}
+var
+  ReadSet: TFDSet;
+begin
+  fpFD_ZERO(ReadSet);
+  fpFD_SET(FHandle, ReadSet);
+  Result := fpSelect(FHandle + 1, @ReadSet, nil, nil, 0) > 0;
+end;
+{$ELSE}
+{$IFDEF WINDOWS}
+var
+  Available: DWORD;
+begin
+  case GetFileType(FHandle) of
+    FILE_TYPE_PIPE:
+      Result := PeekNamedPipe(FHandle, nil, 0, nil, @Available, nil) and
+        (Available > 0);
+    FILE_TYPE_DISK:
+      Result := True;
+  else
+    // A console cannot be peeked without consuming key events.
+    Result := False;
+  end;
+end;
+{$ELSE}
+begin
+  Result := False;
+end;
+{$ENDIF}
+{$ENDIF}
+
+procedure TStdioReader.TakeWaiting;
+begin
+  while not FEOF and DataWaiting do
+    if not ReadChunk then
+      Break;
+end;
+
+function TStdioReader.NextLine(out ALine: string;
+  out AOverflow: Boolean): Boolean;
+begin
+  while (FHead >= Length(FQueue)) and not FEOF do
+    ReadChunk;
+  if FHead >= Length(FQueue) then
+  begin
+    ALine := '';
+    AOverflow := False;
+    Exit(False);
+  end;
+  ALine := FQueue[FHead].Line;
+  AOverflow := FQueue[FHead].Overflow;
+  Inc(FHead);
+  if FHead = Length(FQueue) then
+  begin
+    FQueue := nil;
+    FHead := 0;
+  end;
+  Result := True;
+end;
+
+// A cancellation notification: cheap text check first, parse second.
+function IsCancellationLine(const ALine: string): Boolean;
+var
+  Msg: TJSONRPCMessage;
+begin
+  Result := False;
+  if Pos('notifications/cancelled', ALine) = 0 then
+    Exit;
+  Msg := ParseJSONRPCMessage(ALine);
+  try
+    Result := (Msg.Kind = jrkNotification) and
+      (Msg.Method = 'notifications/cancelled');
+  finally
+    FreeJSONRPCMessage(Msg);
+  end;
+end;
+
+function TStdioReader.TakeCancellations: TStringArray;
+var
+  I, Kept: Integer;
+begin
+  Result := nil;
+  Kept := FHead;
+  for I := FHead to High(FQueue) do
+    if not FQueue[I].Overflow and IsCancellationLine(FQueue[I].Line) then
+    begin
+      SetLength(Result, Length(Result) + 1);
+      Result[High(Result)] := FQueue[I].Line;
+    end
+    else
+    begin
+      FQueue[Kept] := FQueue[I];
+      Inc(Kept);
+    end;
+  SetLength(FQueue, Kept);
+end;
+
+type
+  TStdioPollState = record
+    Server: TMCPServer;
+    Reader: TStdioReader;
+  end;
+  PStdioPollState = ^TStdioPollState;
+
+// The session's cancellation poll (#93): a notifications/cancelled that
+// arrived while the handler runs is handed to the core at once, which
+// cancels the active request the ordinary way. Every other line stays
+// queued, in order, for the loop.
+function StdioCancellationPoll(ASession: TMCPSession;
+  AUserData: Pointer): Boolean;
+var
+  Lines: TStringArray;
+  I: Integer;
+  Ignored: string;
+begin
+  Result := False;
+  with PStdioPollState(AUserData)^ do
+  begin
+    Reader.TakeWaiting;
+    Lines := Reader.TakeCancellations;
+    for I := 0 to High(Lines) do
+      Server.HandleMessage(ASession, Lines[I], Ignored);
+  end;
+end;
 
 // Notification sink: in-request notifications (progress, log
 // messages) are written to the same output stream as responses, one
@@ -129,10 +336,16 @@ var
   Line, Response: string;
   Overflow: Boolean;
   Session: TMCPSession;
+  Reader: TStdioReader;
+  PollState: TStdioPollState;
 begin
+  Reader := TStdioReader.Create(TextRec(AInput).Handle, AMaxLineLength);
   Session := AServer.CreateSession;
   try
-    while ReadBoundedLine(AInput, AMaxLineLength, Line, Overflow) do
+    PollState.Server := AServer;
+    PollState.Reader := Reader;
+    Session.SetCancellationPoll(StdioCancellationPoll, @PollState);
+    while Reader.NextLine(Line, Overflow) do
     begin
       if Overflow then
       begin
@@ -155,6 +368,7 @@ begin
     end;
   finally
     Session.Free;
+    Reader.Free;
   end;
 end;
 

@@ -283,11 +283,23 @@ accessors are documented in
 
 ## Cancellation
 
-`notifications/cancelled` flips a per-request token; long-running
-handlers poll `ACtx.IsCancelled` and abandon work. The serial stdio
-transport cannot deliver a cancellation while a handler is running
-(one more reason to keep handlers short); transports with mid-request
-delivery points can.
+A client cancels a request with `notifications/cancelled`, or on
+Streamable HTTP by closing the connection. A long-running handler polls
+`ACtx.IsCancelled` and stops when it turns true; the server then sends
+nothing more for that request, neither notifications nor the response.
+Both transports deliver the cancellation while the handler runs: each
+call to `IsCancelled` checks for a `notifications/cancelled` waiting on
+stdin, or for a closed HTTP connection. `mcpdemo`'s `countdown` tool
+shows the pattern:
+
+```pascal
+for Tick := 1 to Seconds * 10 do
+begin
+  if ACtx.IsCancelled then
+    Exit(MCPTextResult('cancelled'));
+  Sleep(100);
+end;
+```
 
 > These protocol behaviours implement spec revision 2026-07-28; the
 > dated official-spec citations live in the architecture page's
