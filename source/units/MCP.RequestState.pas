@@ -66,12 +66,17 @@ function UnixTimeMs: Int64;
 
 implementation
 
+// MCP.JSONRPC installs the UTF-8 string conversion every unit that
+// moves JSON strings through `string` relies on (cwstring on Unix,
+// fpwidestring plus CP_UTF8 on Windows); without it a non-ASCII state
+// would come back in the system code page.
 uses
   DateUtils,
 
   jsonparser,
   jsonscanner,
-  MCP.Crypto;
+  MCP.Crypto,
+  MCP.JSONRPC;
 
 const
   TOKEN_VERSION = 'v1';
