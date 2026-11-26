@@ -41,7 +41,12 @@ official MCP TypeScript clients**: the stable v2 client
 (`@modelcontextprotocol/client` 2.0.0, pinned + auto-probe modes, over
 stdio and Streamable HTTP, including MRTR auto-fulfilment) and the v1
 SDK (`@modelcontextprotocol/sdk`, the handshake era Claude Code
-speaks). See [tools/interop-ts/](../../tools/interop-ts/) and the
+speaks). Those batteries drive `mcpdemo`. The content types `mcpdemo`
+does not return (audio, resource links, embedded resources, mixed
+results and non-text prompt messages) are covered by the unit suites,
+the `mcpsmoke` content battery and the official conformance suite
+against the conformance fixture. See
+[tools/interop-ts/](../../tools/interop-ts/) and the
 [architecture page](../internals/architecture.md#spec-grounding) for
 the grounding notes.
 

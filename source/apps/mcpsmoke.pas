@@ -9,6 +9,11 @@ program mcpsmoke;
 // process-level complement to the in-process *.Test.pas suites; CI
 // runs it as the "example-server smoke test" leg.
 //
+// A second battery launches the conformance fixture (mcpconformance,
+// next to mcpdemo) the same way and checks the content types mcpdemo
+// does not register: audio, resource links, embedded resources and
+// mixed results, and non-text prompt messages (#87).
+//
 // Usage: mcpsmoke [path-to-mcpdemo]   (default: ./build/mcpdemo)
 
 {$I MCP.inc}
@@ -186,12 +191,107 @@ begin
     Result := 0;
 end;
 
+// The conformance fixture beside the demo binary.
+function FixtureBinary: string;
+begin
+  Result := ExtractFilePath(DemoBinary) + 'mcpconformance';
+  {$IFDEF WINDOWS}
+  Result := Result + '.exe';
+  {$ENDIF}
+end;
+
+// Closes stdin and waits for a clean exit, as a client does at the end.
+procedure Shutdown(AProcess: TProcess; const ALabel: string);
+var
+  WaitedMs: Integer;
+begin
+  AProcess.CloseInput;
+  WaitedMs := 0;
+  while AProcess.Running and (WaitedMs < 5000) do
+  begin
+    Sleep(50);
+    Inc(WaitedMs, 50);
+  end;
+  Check(not AProcess.Running, ALabel + ': exits on stdin EOF');
+  if AProcess.Running then
+    AProcess.Terminate(1)
+  else
+    Check(AProcess.ExitStatus = 0, ALabel + ': exit status 0');
+end;
+
+// Content types over stdio, against the conformance fixture (#87).
+procedure FixtureContentBattery;
+var
+  Fixture: TProcess;
+  Response: TJSONObject;
+  ResponseLine: string;
+begin
+  Fixture := TProcess.Create(nil);
+  try
+    Fixture.Executable := FixtureBinary;
+    Fixture.Options := [poUsePipes];
+    try
+      Fixture.Execute;
+    except
+      on E: Exception do
+      begin
+        Check(False, 'content: launch ' + FixtureBinary + ': ' + E.Message);
+        Exit;
+      end;
+    end;
+
+    Response := RoundTripWithLine(Fixture,
+      '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{' +
+      '"name":"test_audio_content",' + META_MODERN + '}}', ResponseLine);
+    Check((PathString(Response, 'result.content[0].type') = 'audio') and
+      (PathString(Response, 'result.content[0].mimeType') = 'audio/wav') and
+      (Pos('"data" : "UklGR', ResponseLine) > 0),
+      'content: audio block (MCPAudioResult)');
+    Response.Free;
+
+    Response := RoundTripWithLine(Fixture,
+      '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{' +
+      '"name":"test_multiple_content_types",' + META_MODERN + '}}',
+      ResponseLine);
+    Check((PathString(Response, 'result.content[0].type') = 'text') and
+      (PathString(Response, 'result.content[1].type') = 'image') and
+      (PathString(Response, 'result.content[2].type') = 'resource') and
+      (PathString(Response, 'result.content[2].resource.mimeType') =
+      'application/json'),
+      'content: mixed text, image and embedded resource, in order');
+    Response.Free;
+
+    Response := RoundTripWithLine(Fixture,
+      '{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{' +
+      '"name":"test_prompt_with_embedded_resource","arguments":{' +
+      '"resourceUri":"test://' + UTF8_WORLD + '"},' + META_MODERN + '}}',
+      ResponseLine);
+    Check((PathString(Response, 'result.messages[0].content.type') =
+      'resource') and (Pos('"uri" : "test://' + UTF8_WORLD + '"',
+      ResponseLine) > 0) and
+      (PathString(Response, 'result.messages[0].content.resource.mimeType') =
+      'text/plain'),
+      'content: prompt message with an embedded resource, UTF-8 byte-exact');
+    Response.Free;
+
+    Response := RoundTrip(Fixture,
+      '{"jsonrpc":"2.0","id":4,"method":"prompts/get","params":{' +
+      '"name":"test_prompt_with_embedded_resource",' + META_MODERN + '}}');
+    Check(PathInt(Response, 'error.code') = -32602,
+      'content: prompt missing its required argument → -32602');
+    Response.Free;
+
+    Shutdown(Fixture, 'content');
+  finally
+    Fixture.Free;
+  end;
+end;
+
 var
   Demo: TProcess;
   Response: TJSONObject;
   ResponseLine: string;
   ServerInfo: TJSONData;
-  WaitedMs: Integer;
 
 begin
   Demo := TProcess.Create(nil);
@@ -547,21 +647,12 @@ begin
     Response.Free;
 
     // EOF on stdin → prompt exit (the graceful-shutdown contract).
-    Demo.CloseInput;
-    WaitedMs := 0;
-    while Demo.Running and (WaitedMs < 5000) do
-    begin
-      Sleep(50);
-      Inc(WaitedMs, 50);
-    end;
-    Check(not Demo.Running, 'shutdown: exits on stdin EOF');
-    if Demo.Running then
-      Demo.Terminate(1)
-    else
-      Check(Demo.ExitStatus = 0, 'shutdown: exit status 0');
+    Shutdown(Demo, 'shutdown');
   finally
     Demo.Free;
   end;
+
+  FixtureContentBattery;
 
   WriteLn;
   if Failures = 0 then

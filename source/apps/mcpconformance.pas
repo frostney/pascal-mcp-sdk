@@ -21,6 +21,7 @@ uses
   {$IFDEF UNIX}
   cthreads,
   {$ENDIF}
+  StrUtils,
   SysUtils,
 
   fpjson,
@@ -33,9 +34,11 @@ uses
   MCP.Transport.Stdio;
 
 const
-  // A 1x1 PNG and a minimal WAV header, as the reference fixture uses.
+  // A 1x1 PNG, as the reference fixture uses, and a complete one-frame
+  // WAV (16-bit mono PCM at 8 kHz, one silent sample) a client can
+  // decode.
   PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
-  WAV_BASE64 = 'UklGRiYAAABXQVZFZm10IBAAAAABAAEAQB8AAAB9AAACABAAZGF0YQIAAAA=';
+  WAV_BASE64 = 'UklGRiYAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQIAAAAAAA==';
 
   NO_ARGUMENTS = '{"type":"object","properties":{}}';
 
@@ -160,16 +163,83 @@ begin
   raise Exception.Create('This tool intentionally returns an error for testing');
 end;
 
+// '' when AArguments[AName] is absent or a string, else the problem.
+function OptionalString(AArguments: TJSONObject; const AName: string): string;
+var
+  Value: TJSONData;
+begin
+  Result := '';
+  Value := AArguments.Find(AName);
+  if (Value <> nil) and (Value.JSONType <> jtString) then
+    Result := '"' + AName + '" must be a string';
+end;
+
+// The checks JSON_SCHEMA_2020_12 states, which this handler owns
+// because the tool is ApplicationValidated (ADR-0004): known members
+// only, string fields, an address object of strings, contactMethod in
+// its enum, and the phone or email that contactMethod selects.
+function JsonSchemaViolation(AArguments: TJSONObject): string;
+const
+  KNOWN: array[0..4] of string =
+    ('name', 'address', 'contactMethod', 'phone', 'email');
+var
+  I: Integer;
+  Address: TJSONData;
+  Method: string;
+begin
+  for I := 0 to AArguments.Count - 1 do
+    if not AnsiMatchStr(AArguments.Names[I], KNOWN) then
+      Exit('unexpected argument "' + AArguments.Names[I] + '"');
+  for I := 0 to High(KNOWN) do
+    if (KNOWN[I] <> 'address') and (OptionalString(AArguments, KNOWN[I]) <> '') then
+      Exit(OptionalString(AArguments, KNOWN[I]));
+  Address := AArguments.Find('address');
+  if Address <> nil then
+  begin
+    if Address.JSONType <> jtObject then
+      Exit('"address" must be an object');
+    if (OptionalString(TJSONObject(Address), 'street') <> '') or
+      (OptionalString(TJSONObject(Address), 'city') <> '') then
+      Exit('"address" street and city must be strings');
+  end;
+  if (AArguments.Find('phone') = nil) and (AArguments.Find('email') = nil) then
+    Exit('one of "phone" or "email" is required');
+  Method := AArguments.Get('contactMethod', '');
+  if (AArguments.Find('contactMethod') <> nil) and
+    not AnsiMatchStr(Method, ['phone', 'email']) then
+    Exit('"contactMethod" must be "phone" or "email"');
+  if (Method = 'phone') and (AArguments.Find('phone') = nil) then
+    Exit('"phone" is required when contactMethod is "phone"');
+  if (Method <> 'phone') and (AArguments.Find('email') = nil) then
+    Exit('"email" is required unless contactMethod is "phone"');
+  Result := '';
+end;
+
 function JsonSchemaTool(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Violation: string;
 begin
+  Violation := JsonSchemaViolation(AArguments);
+  if Violation <> '' then
+    Exit(MCPErrorResult('Invalid arguments: ' + Violation));
   Result := MCPTextResult('JSON Schema 2020-12 tool called with: ' +
     AArguments.AsJSON);
 end;
 
+// CUSTOM_HEADER_SCHEMA's checks: a required string region and an
+// optional string query (ApplicationValidated, as above).
 function CustomHeaders(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Region: TJSONData;
 begin
+  Region := AArguments.Find('region');
+  if (Region = nil) or (Region.JSONType <> jtString) then
+    Exit(MCPErrorResult('Invalid arguments: "region" must be a string'));
+  if OptionalString(AArguments, 'query') <> '' then
+    Exit(MCPErrorResult('Invalid arguments: ' +
+      OptionalString(AArguments, 'query')));
   Result := MCPTextResult('Custom headers tool called with: ' +
     AArguments.AsJSON);
 end;

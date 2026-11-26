@@ -93,8 +93,8 @@ Six workflows (see [.github/workflows/](../../.github/workflows/)):
   One leg additionally runs the platform-independent gates:
   `lwpt format --check`, `lwpt agents --check`, and
   `.github/scripts/check-reference-docs.sh` (every
-  `MCP*`/`Register*` function or procedure in `MCP.Server`'s
-  interface must appear in `docs/reference/`). Plus
+  `MCP*`/`Register*` function or procedure in the interface of
+  `MCP.Server` and `MCP.Content` must appear in `docs/reference/`). Plus
   a blocking markdownlint job, the required `interop` job, and the
   non-blocking `conformance` job (both below).
 - **ci.yml** — push to main: the wider native matrix (Linux x64 and
@@ -196,41 +196,29 @@ suite's own exit code is not used:
 
 The rules live in `tools/conformance/compare.mjs`, covered by
 broken-input tests (`compare.test.mjs`); `run.test.mjs` drives
-`run.mjs` end to end with a stand-in mcpdemo and suite. The CI job runs
+`run.mjs` end to end with a stand-in server and suite. The CI job runs
 both before the suite: `node --test tools/conformance/compare.test.mjs
 tools/conformance/run.test.mjs`.
 
 The suite's own exit code counts only when it is neither 0 nor 1 (its
 two ordinary results): anything else, a signal included, means the
 suite was interrupted or could not run, and fails the run. Operational
-errors also exit non-zero: 2 for usage (a missing mcpdemo argument,
+errors also exit non-zero: 2 for usage (a missing server argument,
 another revision, a runner-owned option, an existing results
-directory) or an invalid baseline, 1 if mcpdemo does not start (it is
-stopped first) or no results were produced. Interrupted itself, the
-runner stops the suite and mcpdemo before it exits.
+directory) or an invalid baseline, 1 if the server does not start (it
+is stopped first) or no results were produced. Interrupted itself, the
+runner stops the suite and the server before it exits.
 
 It prints a summary of every difference. Bumping the suite version
 means updating the baseline in the same change.
 
-Current state: of 50 scenarios, 12 pass, 37 are expected failures and
-one is an expected skip, each failure or skip with its issue:
-
-- [#80](https://github.com/frostney/pascal-mcp-sdk/issues/80) (26
-  scenarios): the suite drives tools, prompts and resources that its
-  reference fixture registers, by fixed names and with fixture
-  capabilities such as an `x-mcp-header`-annotated tool, which
-  `mcpdemo` does not have, so they fail before reaching the behaviour
-  they test.
-- [#79](https://github.com/frostney/pascal-mcp-sdk/issues/79)
-  (`server-stateless`): a request missing required `_meta` answers 200
-  instead of 400. The scenario's checks that need fixture tools fail as
-  well (#80), so it stays failing until both are fixed.
-- [#81](https://github.com/frostney/pascal-mcp-sdk/issues/81)
-  (`completion-complete`): `completion/complete` is not implemented.
-- [#82](https://github.com/frostney/pascal-mcp-sdk/issues/82) (ten
-  `tasks-*` scenarios, nine failing and one skipped): the Tasks
-  extension is not implemented; the suite runs these for visibility
-  without scoring them.
+`baseline.json` is the current state: every expected failure or skip
+names the issue that tracks it, so the open issues it lists are the
+library's known conformance gaps. The suite runs against the
+conformance fixture, `source/apps/mcpconformance.pas`, which registers
+the tools, prompts and resources the suite's reference fixture
+registers, by the same names and through the public API only, so a
+scenario fails only on a gap in the library.
 
 CI runs it as the **non-blocking** `conformance` job on every PR and
 uploads the results as the `conformance-results` artifact. It is not a

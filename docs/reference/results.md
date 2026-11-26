@@ -50,7 +50,8 @@ function MCPContentResult(const ABlocks: array of TJSONObject): TMCPToolResult;
   `audio/mpeg`, …).
 - `MCPContentResult` — any list of content blocks from
   [`MCP.Content`](#content-blocks), in order; it takes ownership of
-  every block. Use it for mixed results, resource links and embedded
+  every block, also when it raises `EMCPServer` for a `nil` or repeated
+  block. Use it for mixed results, resource links and embedded
   resources:
 
   ```pascal
@@ -115,7 +116,8 @@ function MCPBase64(const AData: TBytes): string;
 
 The string overloads take data that is already base64; the `TBytes`
 overloads encode raw bytes themselves (`MCPBase64` exposes that
-encoding). A resource link need not name a resource your server lists
+encoding). In a prompt message an embedded resource **must** carry its
+MIME type, so pass one there; elsewhere `mimeType` is optional. A resource link need not name a resource your server lists
 in `resources/list`. To add
 [annotations](https://modelcontextprotocol.io/specification/2026-07-28/server/resources#annotations),
 add an `annotations` member to the returned object before handing it
@@ -151,7 +153,18 @@ function MCPMessages(const AMessages: array of TJSONObject): TJSONArray;
 
 `MCPContentMessage` carries any [content block](#content-blocks), such
 as an image or an embedded resource, and takes ownership of it; the
-text helpers are shorthand for it with `MCPTextContent`.
+text helpers are shorthand for it with `MCPTextContent`. `ARole` is
+`user` or `assistant`, the two roles the specification defines.
+
+### Content types and older clients
+
+Audio blocks arrived in protocol revision 2025-03-26 and resource
+links in 2025-06-18; the 2024-11-05 revision has text, image and
+embedded resources only. A dual-era server can serve a client that
+negotiated an older revision over stdio, and a client that validates
+results against its own revision's schema may reject the newer block
+types. When that matters, check `ACtx.ProtocolVersion` and fall back,
+for example to a text block that names the resource.
 
 The MRTR-capable prompt shape returns `TMCPPromptResult` instead;
 wrap a message array with:

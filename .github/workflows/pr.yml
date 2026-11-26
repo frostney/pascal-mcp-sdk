@@ -181,7 +181,7 @@ jobs:
         if: matrix.fpc-install == 'apt'   # platform-independent; one runner
         run: lwpt duplication
 
-      - name: lwpt build (mcpdemo + mcpsmoke)
+      - name: lwpt build (mcpdemo, mcpsmoke, mcpconformance)
         run: lwpt build
 
       - name: lwpt test (five co-located unit suites)

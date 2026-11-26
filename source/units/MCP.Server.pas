@@ -613,7 +613,9 @@ function MCPAudioResult(const AData: TBytes;
   const AMimeType: string): TMCPToolResult; overload;
 // Any mix of content blocks, in order (build them with MCP.Content:
 // MCPTextContent, MCPImageContent, MCPAudioContent, MCPResourceLink,
-// MCPEmbeddedText, MCPEmbeddedBlob). Takes ownership of every block.
+// MCPEmbeddedText, MCPEmbeddedBlob). Takes ownership of every block,
+// also when it raises: a nil or repeated block frees the blocks and
+// raises EMCPServer (in a tool handler, an isError result).
 function MCPContentResult(const ABlocks: array of TJSONObject): TMCPToolResult;
 function MCPTextContents(const AUri, AMimeType, AText: string): TJSONArray;
 function MCPBlobContents(const AUri, AMimeType, ABase64: string): TJSONArray;
@@ -683,7 +685,10 @@ function MCPUserMessage(const AText: string): TJSONObject;
 function MCPAssistantMessage(const AText: string): TJSONObject;
 // A prompt message carrying any content block (image, audio, resource
 // link, embedded resource; see MCP.Content). Takes ownership of
-// AContent. ARole is 'user' or 'assistant'.
+// AContent; nil raises EMCPServer. ARole is 'user' or 'assistant'. In
+// a prompt message an embedded resource MUST carry its mimeType
+// (prompts spec, verified 2026-11-26), so pass one to MCPEmbeddedText
+// and MCPEmbeddedBlob there.
 function MCPContentMessage(const ARole: string;
   AContent: TJSONObject): TJSONObject;
 function MCPMessages(const AMessages: array of TJSONObject): TJSONArray;
@@ -1009,6 +1014,8 @@ end;
 function MCPContentMessage(const ARole: string;
   AContent: TJSONObject): TJSONObject;
 begin
+  if AContent = nil then
+    raise EMCPServer.Create('MCPContentMessage: content block is nil');
   Result := TJSONObject.Create;
   Result.Add('role', ARole);
   Result.Add('content', AContent);
@@ -1574,10 +1581,46 @@ begin
   Result := MCPContentResult([MCPAudioContent(AData, AMimeType)]);
 end;
 
+// Frees every distinct non-nil block of ABlocks once.
+procedure FreeDistinctBlocks(const ABlocks: array of TJSONObject);
+var
+  I, J: Integer;
+  Seen: Boolean;
+begin
+  for I := 0 to High(ABlocks) do
+  begin
+    Seen := ABlocks[I] = nil;
+    for J := 0 to I - 1 do
+      if ABlocks[J] = ABlocks[I] then
+        Seen := True;
+    if not Seen then
+      ABlocks[I].Free;
+  end;
+end;
+
 function MCPContentResult(const ABlocks: array of TJSONObject): TMCPToolResult;
 var
-  I: Integer;
+  I, J: Integer;
 begin
+  // Checked before anything is adopted, so a rejected call leaves no
+  // half-built result: the blocks are freed (they were handed over)
+  // and EMCPServer raised. A nil block would serialize as null, and a
+  // repeated one is rejected by fpjson part-way through.
+  for I := 0 to High(ABlocks) do
+  begin
+    if ABlocks[I] = nil then
+    begin
+      FreeDistinctBlocks(ABlocks);
+      raise EMCPServer.CreateFmt('MCPContentResult: block %d is nil', [I]);
+    end;
+    for J := 0 to I - 1 do
+      if ABlocks[J] = ABlocks[I] then
+      begin
+        FreeDistinctBlocks(ABlocks);
+        raise EMCPServer.CreateFmt(
+          'MCPContentResult: block %d repeats block %d', [I, J]);
+      end;
+  end;
   Result := Default(TMCPToolResult);
   Result.Content := TJSONArray.Create;
   for I := 0 to High(ABlocks) do

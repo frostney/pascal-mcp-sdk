@@ -116,9 +116,9 @@ the ADRs under
 - **Public API changes update the reference docs** —
   `.github/scripts/check-reference-docs.sh` fails CI when an
   `MCP*`/`Register*` function or procedure declared in the interface
-  of `MCP.Server.pas` is missing from `docs/reference/`. Public API in
-  other units (and types, constants, properties) is not gated —
-  document it by hand.
+  of `MCP.Server.pas` or `MCP.Content.pas` is missing from
+  `docs/reference/`. Public API in other units (and types, constants,
+  properties) is not gated — document it by hand.
 
 ## Run the gate locally
 
