@@ -30,6 +30,9 @@ testing = { source = "frostney/lwpt", version = "0.10.0", include = ["packages/t
 [build]
 mcpdemo  = { source = "source/apps/mcpdemo.pas",  output = "build/mcpdemo" }
 mcpsmoke = { source = "source/apps/mcpsmoke.pas", output = "build/mcpsmoke" }
+# The conformance fixture: the suite's reference surface, registered
+# through the public API (`lwpt run conformance` runs the suite against it).
+mcpconformance = { source = "source/apps/mcpconformance.pas", output = "build/mcpconformance" }
 
 # `lwpt run smoke` — the E2E battery against the binaries `lwpt build`
 # produced. Run-scripts execute via InstantFPC without project include
@@ -57,7 +60,7 @@ max-file-cognitive = 650
 maximum-percent = 3
 
 # `lwpt run conformance` — the official MCP conformance suite (pinned
-# npm release) against `build/mcpdemo --http`. Needs Node >= 22 and
+# npm release) against `build/mcpconformance --http`. Needs Node >= 22 and
 # npm registry access; each run's results land in a new directory
 # under build/conformance/.
 [conformance]

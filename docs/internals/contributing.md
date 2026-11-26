@@ -149,7 +149,8 @@ npm ci
 npm run interop
 ```
 
-The official MCP conformance suite runs against `mcpdemo --http` and
+The official MCP conformance suite runs against the conformance
+fixture (`mcpconformance --http`) and
 is judged against the committed `tools/conformance/baseline.json`
 (see [Tooling § Official conformance suite](tooling.md#official-conformance-suite--toolsconformance)).
 A regression it reports is fixed, not recorded. The baseline changes in

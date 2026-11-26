@@ -135,8 +135,9 @@ the protocol surface changes.
 
 ## Official conformance suite — tools/conformance
 
-`tools/conformance/run.mjs` starts `build/mcpdemo --http` on a free
-localhost port and runs the official
+`tools/conformance/run.mjs` starts the conformance fixture,
+`build/mcpconformance --http`, on a free localhost port and runs the
+official
 [MCP conformance suite](https://github.com/modelcontextprotocol/conformance)
 in server mode against it, pinned exactly to the npm pre-release
 `@modelcontextprotocol/conformance@0.2.0-alpha.12`. The latest stable
@@ -154,7 +155,7 @@ so concurrent runs cannot touch each other's evidence.
 
 lwpt run tasks take no arguments, so a narrower run calls the runner
 directly, for example
-`node tools/conformance/run.mjs build/mcpdemo --scenario tools-list`.
+`node tools/conformance/run.mjs build/mcpconformance --scenario tools-list`.
 `--scenario` (in either `--opt value` or `--opt=value` form) runs the
 named scenarios at the baseline's revision, extension scenarios
 included (with `--force`, as the requirement set runs them); `--suite`

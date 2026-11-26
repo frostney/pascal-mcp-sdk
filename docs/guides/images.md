@@ -93,20 +93,21 @@ content block exactly as a client receives it:
 
 ## Text and image together
 
-A result's content array can carry both — build the image result and
-prepend text, or vice versa. The common shape is an explanatory
-sentence plus the rendering:
+A result's content array can carry both. Build each block with
+`MCP.Content` and pass them, in order, to `MCPContentResult`. The
+common shape is an explanatory sentence plus the rendering:
 
 ```pascal
-Result := MCPImageResult(ChartBytes, 'image/png');
-Result.Content.Insert(0, TJSONObject.Create([
-  'type', 'text',
-  'text', 'Revenue by month, Q1-Q2']));
+uses MCP.Content;
+
+Result := MCPContentResult([
+  MCPTextContent('Revenue by month, Q1-Q2'),
+  MCPImageContent(ChartBytes, 'image/png')]);
 ```
 
-(`Content` is the result's content array; entries added to it are
-owned by the result — see the ownership rules in
-[Results and content](../reference/results.md).)
+`MCPContentResult` owns the blocks you pass it. The same unit builds
+audio, resource-link and embedded-resource blocks; see
+[Content blocks](../reference/results.md#content-blocks).
 
 > The image content-block shape implements spec revision 2026-07-28,
 > verified 2026-08-09 against the
