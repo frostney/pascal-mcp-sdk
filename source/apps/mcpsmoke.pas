@@ -14,7 +14,8 @@ program mcpsmoke;
 // does not register: audio, resource links, embedded resources and
 // mixed results, and non-text prompt messages (#87).
 //
-// Usage: mcpsmoke [path-to-mcpdemo]   (default: ./build/mcpdemo)
+// Usage: mcpsmoke [path-to-mcpdemo]   (default: ./build/mcpdemo; the
+// fixture is always the mcpconformance next to mcpsmoke)
 
 {$I MCP.inc}
 
@@ -191,10 +192,11 @@ begin
     Result := 0;
 end;
 
-// The conformance fixture beside the demo binary.
+// The conformance fixture lwpt builds next to mcpsmoke itself, so a
+// demo given from elsewhere does not move it.
 function FixtureBinary: string;
 begin
-  Result := ExtractFilePath(DemoBinary) + 'mcpconformance';
+  Result := ExtractFilePath(ParamStr(0)) + 'mcpconformance';
   {$IFDEF WINDOWS}
   Result := Result + '.exe';
   {$ENDIF}
@@ -314,6 +316,13 @@ begin
       '"name":"test_prompt_with_embedded_resource",' + META_MODERN + '}}');
     Check(PathInt(Response, 'error.code') = -32602,
       'content: prompt missing its required argument → -32602');
+    Response.Free;
+    Response := RoundTrip(Fixture,
+      '{"jsonrpc":"2.0","id":8,"method":"prompts/get","params":{' +
+      '"name":"test_prompt_with_embedded_resource","arguments":{' +
+      '"resourceUri":"not a URI"},' + META_MODERN + '}}');
+    Check((Response <> nil) and (Response.Find('error') <> nil),
+      'content: prompt refuses a malformed resource URI');
     Response.Free;
 
     Shutdown(Fixture, 'content');

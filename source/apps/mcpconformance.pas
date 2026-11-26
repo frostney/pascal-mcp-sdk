@@ -417,26 +417,56 @@ begin
   Result := MCPMessages([MCPUserMessage('This is a simple prompt for testing.')]);
 end;
 
+// The string value of the prompt argument AName; anything else is
+// refused, so a wrong type is never turned into an empty string.
+function StringArgument(AArguments: TJSONObject; const AName: string): string;
+var
+  Value: TJSONData;
+begin
+  Value := AArguments.Find(AName);
+  if (Value = nil) or (Value.JSONType <> jtString) then
+    raise Exception.Create('argument "' + AName + '" must be a string');
+  Result := Value.AsString;
+end;
+
+// An absolute URI as RFC 3986 spells it: a scheme, a colon, and only
+// visible ASCII after it (non-ASCII has to be percent-encoded).
+function IsAbsoluteURI(const AValue: string): Boolean;
+var
+  I, Colon: Integer;
+begin
+  Colon := Pos(':', AValue);
+  Result := (Colon > 1) and (Colon < Length(AValue)) and
+    (AValue[1] in ['A'..'Z', 'a'..'z']);
+  for I := 2 to Colon - 1 do
+    if not (AValue[I] in ['A'..'Z', 'a'..'z', '0'..'9', '+', '-', '.']) then
+      Exit(False);
+  for I := Colon + 1 to Length(AValue) do
+    if not (AValue[I] in [#33..#126]) or (AValue[I] in ['"', '<', '>', '\',
+      '^', '`', '{', '|', '}']) then
+      Exit(False);
+end;
+
 function PromptWithArguments(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TJSONArray;
 begin
   Result := MCPMessages([MCPUserMessage('Prompt with arguments: arg1=''' +
-    AArguments.Get('arg1', '') + ''', arg2=''' + AArguments.Get('arg2', '') +
-    '''')]);
+    StringArgument(AArguments, 'arg1') + ''', arg2=''' +
+    StringArgument(AArguments, 'arg2') + '''')]);
 end;
 
 function PromptWithEmbeddedResource(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TJSONArray;
 var
-  Uri: TJSONData;
+  Uri: string;
 begin
   // An embedded resource MUST carry a valid URI (prompts spec): refuse
-  // anything but a non-empty string.
-  Uri := AArguments.Find('resourceUri');
-  if (Uri = nil) or (Uri.JSONType <> jtString) or (Uri.AsString = '') then
-    raise Exception.Create('resourceUri must be a non-empty URI string');
+  // anything else rather than emit a message clients reject.
+  Uri := StringArgument(AArguments, 'resourceUri');
+  if not IsAbsoluteURI(Uri) then
+    raise Exception.Create('resourceUri must be an absolute URI');
   Result := MCPMessages([
-    MCPContentMessage('user', MCPEmbeddedText(Uri.AsString,
+    MCPContentMessage('user', MCPEmbeddedText(Uri,
       'text/plain', 'Embedded resource content for testing.')),
     MCPUserMessage('Please process the embedded resource above.')]);
 end;
