@@ -19,6 +19,7 @@ uses
 
   fpjson,
   jsonparser,
+  MCP.Content,
   MCP.JSONRPC,
   MCP.Protocol,
   MCP.Schema,
@@ -369,6 +370,21 @@ type
     procedure TestUnknownArgumentIgnored;
     procedure TestOutOfSubsetSchemaFailsFreeze;
     procedure TestApplicationValidatedSkipsChecks;
+  end;
+
+  // MCPAudioResult, MCPContentResult and MCPContentMessage: the
+  // non-text blocks of MCP.Content reach tools/call and prompts/get
+  // results unchanged, in order, on the exact wire line.
+  TContentResults = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestAudioResultLine;
+    procedure TestMixedContentInOrder;
+    procedure TestPromptContentMessages;
+    procedure TestNilBlockRejected;
+    procedure TestRepeatedBlockRejected;
   end;
 
   // MCPImageResult: the spec's image content block, the raw-bytes
@@ -5213,6 +5229,141 @@ begin
     TestResponseLineByteExact);
 end;
 
+{ ───────── content results (#87) ─────────
+  Content block shapes verified 2026-11-26 against
+  https://modelcontextprotocol.io/specification/2026-07-28/server/tools#tool-result
+  and .../server/prompts#promptmessage (embedded resources in prompt
+  messages MUST carry a mimeType). }
+
+function AudioHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPAudioResult('UklGRg==', 'audio/wav');
+end;
+
+function MixedHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPContentResult([
+    MCPTextContent('caf' + #$C3#$A9),
+    MCPResourceLink('test://r', 'r'),
+    MCPEmbeddedText('test://e', 'text/plain', #$F0#$9F#$98#$80)]);
+end;
+
+function NilBlockHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPContentResult([MCPTextContent('before'), nil]);
+end;
+
+function ContentPromptHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPMessages([
+    MCPContentMessage('user', MCPImageContent('iVBORw0KGgo=', 'image/png')),
+    MCPContentMessage('assistant', MCPEmbeddedBlob('test://b',
+      'application/octet-stream', 'AA=='))]);
+end;
+
+procedure TContentResults.BeforeEach;
+begin
+  inherited BeforeEach;
+  FServer.RegisterTool('audio', 'Audio', '{"type":"object"}', AudioHandler);
+  FServer.RegisterTool('mixed', 'Mixed', '{"type":"object"}', MixedHandler);
+  FServer.RegisterTool('nilblock', 'Nil block', '{"type":"object"}',
+    NilBlockHandler);
+  FServer.RegisterPrompt('content', 'Content prompt', ContentPromptHandler);
+end;
+
+procedure TContentResults.TestAudioResultLine;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(ImageCallLine('audio'), Response)).ToBe(True);
+  Expect<string>(Response).ToBe(
+    '{ "jsonrpc" : "2.0", "id" : 1, "result" : { "content" : [{ ' +
+    '"type" : "audio", "data" : "UklGRg==", ' +
+    '"mimeType" : "audio/wav" }], "isError" : false, ' +
+    '"resultType" : "complete", "_meta" : { ' +
+    '"io.modelcontextprotocol/serverInfo" : { ' +
+    '"name" : "test-server", "version" : "9.9.9" } } } }');
+end;
+
+procedure TContentResults.TestMixedContentInOrder;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(ImageCallLine('mixed'), Response)).ToBe(True);
+  Expect<Boolean>(Pos('"content" : [{ "type" : "text", "text" : "caf' +
+    #$C3#$A9 + '" }, { "type" : "resource_link", "uri" : "test://r", ' +
+    '"name" : "r" }, { "type" : "resource", "resource" : { ' +
+    '"uri" : "test://e", "mimeType" : "text/plain", "text" : "' +
+    #$F0#$9F#$98#$80 + '" } }], "isError" : false', Response) > 0)
+    .ToBe(True);
+end;
+
+procedure TContentResults.TestPromptContentMessages;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"prompts/get",' +
+    '"params":{"name":"content",' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"messages" : [{ "role" : "user", "content" : { ' +
+    '"type" : "image", "data" : "iVBORw0KGgo=", "mimeType" : "image/png" } }, ' +
+    '{ "role" : "assistant", "content" : { "type" : "resource", ' +
+    '"resource" : { "uri" : "test://b", "mimeType" : ' +
+    '"application/octet-stream", "blob" : "AA==" } } }]', Response) > 0)
+    .ToBe(True);
+end;
+
+function RaisesServerError(const ABlocks: array of TJSONObject;
+  const AExpected: string): Boolean;
+begin
+  Result := False;
+  try
+    MCPContentResult(ABlocks);
+  except
+    on E: EMCPServer do
+      Result := Pos(AExpected, E.Message) > 0;
+  end;
+end;
+
+procedure TContentResults.TestNilBlockRejected;
+var
+  Response: TJSONObject;
+begin
+  Expect<Boolean>(RaisesServerError([MCPTextContent('a'), nil],
+    'block 1 is nil')).ToBe(True);
+  // Through a handler it is an exception like any other: isError.
+  Response := Call(ImageCallLine('nilblock'));
+  Expect<Boolean>(TJSONData(Response.FindPath('result.isError')).AsBoolean)
+    .ToBe(True);
+  Response.Free;
+end;
+
+procedure TContentResults.TestRepeatedBlockRejected;
+var
+  Block: TJSONObject;
+begin
+  // The repeated block is freed once, not twice.
+  Block := MCPTextContent('twice');
+  Expect<Boolean>(RaisesServerError([Block, MCPTextContent('b'), Block],
+    'block 2 repeats block 0')).ToBe(True);
+end;
+
+procedure TContentResults.SetupTests;
+begin
+  Test('audio tool result line is byte-exact', TestAudioResultLine);
+  Test('mixed content blocks keep their order and shapes',
+    TestMixedContentInOrder);
+  Test('prompt messages carry image and embedded-resource blocks',
+    TestPromptContentMessages);
+  Test('a nil block raises, freeing the others', TestNilBlockRejected);
+  Test('a repeated block raises and is freed once',
+    TestRepeatedBlockRejected);
+end;
+
+
 begin
   TestRunnerProgram.AddSuite(
     TDiscoverAndErrors.Create('Server: discover + protocol errors'));
@@ -5238,6 +5389,8 @@ begin
     TMRTRDispatch.Create('Server: MRTR input_required'));
   TestRunnerProgram.AddSuite(
     TImageResults.Create('Server: image tool results'));
+  TestRunnerProgram.AddSuite(
+    TContentResults.Create('Server: content tool results and prompt messages'));
   TestRunnerProgram.AddSuite(
     TRequestStateSealing.Create('Server: requestState sealing'));
   TestRunnerProgram.Run;

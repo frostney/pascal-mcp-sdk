@@ -19,8 +19,9 @@
     },
     "http-custom-header-server-validation": {
       "expected": "fail",
-      "issue": 80,
+      "issue": 90,
       "passingChecks": [
+        "sep-2243-server-decode-base64",
         "wire-schema-valid"
       ]
     },
@@ -28,32 +29,16 @@
       "expected": "pass"
     },
     "input-required-result-basic-elicitation": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "input-required-result-basic-list-roots": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "input-required-result-basic-sampling": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "input-required-result-capability-check": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "input-required-result-ignore-extra-params": {
       "expected": "pass"
@@ -62,46 +47,22 @@
       "expected": "pass"
     },
     "input-required-result-multi-round": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "input-required-result-multiple-input-requests": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "input-required-result-non-tool-request": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "input-required-result-request-state": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "input-required-result-result-type": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "input-required-result-tampered-state": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "input-required-result-unsupported-methods": {
       "expected": "pass"
@@ -110,39 +71,19 @@
       "expected": "pass"
     },
     "json-schema-2020-12": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "prompts-get-embedded-resource": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "prompts-get-simple": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "prompts-get-with-args": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "prompts-get-with-image": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "prompts-list": {
       "expected": "pass"
@@ -151,25 +92,13 @@
       "expected": "pass"
     },
     "resources-read-binary": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "resources-read-text": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "resources-templates-read": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "sep-2164-resource-not-found": {
       "expected": "pass"
@@ -190,7 +119,9 @@
         "sep-2575-http-server-method-not-found-404-ping",
         "sep-2575-http-server-method-not-found-404-resources-subscribe",
         "sep-2575-http-server-method-not-found-404-resources-unsubscribe",
+        "sep-2575-http-server-no-independent-requests-on-stream",
         "sep-2575-http-server-unsupported-version-400",
+        "sep-2575-missing-capability-http-400",
         "sep-2575-request-meta-client-info-optional",
         "sep-2575-request-meta-invalid-missing-client-capabilities",
         "sep-2575-request-meta-invalid-missing-meta",
@@ -198,6 +129,8 @@
         "sep-2575-server-declares-prompts-in-discover",
         "sep-2575-server-identifies-in-result-meta",
         "sep-2575-server-implements-discover",
+        "sep-2575-server-no-log-without-loglevel",
+        "sep-2575-server-rejects-undeclared-capability",
         "sep-2575-server-unsupported-version-error"
       ]
     },
@@ -272,53 +205,25 @@
       ]
     },
     "tools-call-audio": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "tools-call-embedded-resource": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "tools-call-error": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "tools-call-image": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "tools-call-mixed-content": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "tools-call-simple-text": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "tools-call-with-progress": {
-      "expected": "fail",
-      "issue": 80,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "tools-list": {
       "expected": "pass"
