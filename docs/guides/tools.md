@@ -107,6 +107,33 @@ handler exception becomes an `isError: true` result automatically
 (with the message redactable — see
 [Configuration](configuration.md#redacterrordetails)).
 
+## Routing headers (x-mcp-header)
+
+A parameter can be mirrored into an HTTP header so that load balancers
+and gateways can route on it without reading the body. Mark it with
+`x-mcp-header` in a raw schema:
+
+```pascal
+Server.RegisterTool('execute_sql', 'Run SQL in a region',
+  '{"type":"object","properties":{' +
+  '"region":{"type":"string","x-mcp-header":"Region"},' +
+  '"query":{"type":"string"}},"required":["region","query"]}',
+  SqlHandler).ApplicationValidated;
+```
+
+Over Streamable HTTP the client then sends `Mcp-Param-Region:
+us-west1` with the call, and the server checks that the header matches
+the body: a missing, extra or different header is refused with HTTP
+400 and `-32020`. At registration the server checks the annotations
+the way a client would: a non-empty header token, unique (ignoring
+case), only on a `string`, `integer` or `boolean` property, and only on
+properties reached through `properties` from the root. A violation
+raises `EMCPServer`, because a client would drop the whole tool from
+its list
+([x-mcp-header](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header),
+verified 2026-11-26). Header values are visible to every intermediary,
+so do not mark secrets or personal data.
+
 ## Annotations
 
 `RegisterTool` returns a `TMCPToolOptions` for fluent annotation

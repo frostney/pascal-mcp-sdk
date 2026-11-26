@@ -39,8 +39,16 @@ unit MCP.Transport.HTTP;
 //     probe bare, so demanding the header there would break the
 //     documented up-front version-selection flow; the core still
 //     rejects every other _meta-less request with -32602.
-//     Mcp-Param-* headers are forwarded-and-ignored: this server
-//     designates no x-mcp-header parameters, so none are recognized;
+//     Mcp-Param-* headers (#90): on tools/call, every parameter the
+//     tool designates with x-mcp-header (MCP.Server
+//     ToolHeaderParameters) must arrive as Mcp-Param-<name> whose
+//     value, after strict =?base64?...?= decoding, equals the body
+//     value in its wire encoding (strings as they are, integers in
+//     decimal, booleans lowercase); a missing, extra, mismatched,
+//     badly encoded or unencoded non-ASCII header answers 400 with
+//     -32020. Headers for parameters no tool designates are ignored.
+//     Verified 2026-11-26 against .../basic/transports/streamable-http
+//     #server-behavior-for-custom-headers;
 //   - HTTP status mapping: -32601 → 404 (unknown RPC method, and the
 //     legacy-initialize rejection whose diagnostic names the
 //     supported versions); -32700/-32600/-32020/-32021/-32022 → 400;
@@ -96,6 +104,7 @@ uses
   httpdefs,
   MCP.JSONRPC,
   MCP.Protocol,
+  MCP.Schema,
   MCP.Server;
 
 const
@@ -131,6 +140,8 @@ type
     function GetAddress: string;
     procedure SetAddress(const AValue: string);
     function OriginAllowed(const AOrigin: string): Boolean;
+    function ParamHeaderFailure(ARequest: TFPHTTPConnectionRequest;
+      const AMessage: TJSONRPCMessage; out AFailure: string): Boolean;
     function HeaderFailure(ARequest: TFPHTTPConnectionRequest;
       const AMessage: TJSONRPCMessage; out AFailure: string): Boolean;
     procedure HandleHTTPRequest(ASender: TObject;
@@ -216,6 +227,81 @@ begin
   Result := SameText(Host, 'localhost') or (Host = '127.0.0.1');
 end;
 
+// Base64 as the sentinel encoding needs it: the standard alphabet,
+// whole 4-character groups and padding only at the end. fcl-base's
+// decoder skips what it does not understand, so it is checked first:
+// the SEP-2243 test table rejects bad padding and foreign characters.
+function StrictBase64(const APayload: string; out ADecoded: string): Boolean;
+var
+  I, Padding: Integer;
+begin
+  Result := False;
+  ADecoded := '';
+  if (APayload = '') or (Length(APayload) mod 4 <> 0) then
+    Exit;
+  Padding := 0;
+  for I := 1 to Length(APayload) do
+    case APayload[I] of
+      'A'..'Z', 'a'..'z', '0'..'9', '+', '/':
+        if Padding > 0 then
+          Exit;
+      '=':
+        Inc(Padding);
+    else
+      Exit;
+    end;
+  if Padding > 2 then
+    Exit;
+  ADecoded := DecodeStringBase64(APayload);
+  Result := True;
+end;
+
+// A plain (unencoded) header value: visible ASCII, space and tab only
+// (RFC 9110 field values, as the transport spec requires of them).
+function IsPlainHeaderValue(const AValue: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := True;
+  for I := 1 to Length(AValue) do
+    if not (AValue[I] in [#9, #32..#126]) then
+      Exit(False);
+end;
+
+// The argument at APath under AArguments, or nil (absent or null).
+function ArgumentAt(AArguments: TJSONData;
+  const APath: array of string): TJSONData;
+var
+  I: Integer;
+begin
+  Result := AArguments;
+  for I := 0 to High(APath) do
+  begin
+    if (Result = nil) or (Result.JSONType <> jtObject) then
+      Exit(nil);
+    Result := TJSONObject(Result).Find(APath[I]);
+  end;
+  if (Result <> nil) and (Result.JSONType = jtNull) then
+    Result := nil;
+end;
+
+// The header text a client sends for AValue (Value Encoding: strings
+// as they are, integers in decimal, booleans in lowercase).
+function HeaderText(AValue: TJSONData): string;
+begin
+  case AValue.JSONType of
+    jtString:
+      Result := AValue.AsString;
+    jtBoolean:
+      if AValue.AsBoolean then
+        Result := 'true'
+      else
+        Result := 'false';
+  else
+    Result := AValue.AsJSON;
+  end;
+end;
+
 // Undo the =?base64?...?= sentinel encoding the transport spec
 // defines for header values that are not header-safe ASCII. Returns
 // False when the payload is not decodable base64.
@@ -234,11 +320,8 @@ begin
     Exit;
   Payload := Copy(AValue, Length(SENTINEL_PREFIX) + 1,
     Length(AValue) - Length(SENTINEL_PREFIX) - Length(SENTINEL_SUFFIX));
-  try
-    ADecoded := DecodeStringBase64(Payload);
-  except
-    Result := False;
-  end;
+  // The same strict decoding as Mcp-Param values (#90).
+  Result := StrictBase64(Payload, ADecoded);
 end;
 
 // params._meta as an object, or nil.
@@ -613,6 +696,74 @@ begin
     end;
   end;
 
+  if (AMessage.Method = 'tools/call') and
+    ParamHeaderFailure(ARequest, AMessage, AFailure) then
+    Exit;
+
+  Result := False;
+end;
+
+// Mcp-Param-* validation for tools/call (#90): every parameter the
+// tool designates with x-mcp-header must arrive as a header that,
+// decoded, equals the body value; a header for an absent or null value
+// does not match either. Verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-behavior-for-custom-headers
+function TMCPHTTPServer.ParamHeaderFailure(
+  ARequest: TFPHTTPConnectionRequest; const AMessage: TJSONRPCMessage;
+  out AFailure: string): Boolean;
+var
+  Parameters: TMCPHeaderParameters;
+  Arguments, Value: TJSONData;
+  HeaderName, Raw, Decoded: string;
+  I: Integer;
+begin
+  Result := True;
+  Parameters := FServer.ToolHeaderParameters(AMessage.Params.Get('name', ''));
+  Arguments := AMessage.Params.Find('arguments');
+  for I := 0 to High(Parameters) do
+  begin
+    HeaderName := 'Mcp-Param-' + Parameters[I].Header;
+    Value := ArgumentAt(Arguments, Parameters[I].Path);
+    Raw := Trim(ARequest.GetFieldByName(HeaderName));
+    if Raw = '' then
+    begin
+      if Value = nil then
+        Continue;
+      AFailure := 'Header mismatch: required ' + HeaderName +
+        ' header is missing';
+      Exit;
+    end;
+    if Value = nil then
+    begin
+      AFailure := 'Header mismatch: ' + HeaderName + ' header sent for ' +
+        'an argument the body does not carry';
+      Exit;
+    end;
+    if (Copy(Raw, 1, 9) = '=?base64?') and
+      (Copy(Raw, Length(Raw) - 1, 2) = '?=') and (Length(Raw) >= 11) then
+    begin
+      if not StrictBase64(Copy(Raw, 10, Length(Raw) - 11), Decoded) then
+      begin
+        AFailure := 'Header mismatch: ' + HeaderName + ' header value ' +
+          'is not valid base64';
+        Exit;
+      end;
+    end
+    else if IsPlainHeaderValue(Raw) then
+      Decoded := Raw
+    else
+    begin
+      AFailure := 'Header mismatch: ' + HeaderName + ' header value ' +
+        'has characters a header cannot carry unencoded';
+      Exit;
+    end;
+    if Decoded <> HeaderText(Value) then
+    begin
+      AFailure := 'Header mismatch: ' + HeaderName + ' header value does ' +
+        'not match the body argument';
+      Exit;
+    end;
+  end;
   Result := False;
 end;
 

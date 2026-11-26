@@ -13,6 +13,10 @@ uses
   SysUtils,
 
   fpjson,
+  jsonparser,
+  // UTF-8 string conversion (cwstring), as every program using the
+  // library gets it through MCP.Server.
+  MCP.JSONRPC,
   MCP.Schema,
   TestingPascalLibrary;
 
@@ -96,6 +100,15 @@ type
   end;
 
   // MCPWireNumber: the number text the wire carries.
+  // #90: x-mcp-header annotations and their constraints.
+  THeaderAnnotations = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestValidAnnotations;
+    procedure TestNoAnnotations;
+    procedure TestRejected;
+  end;
+
   TWireNumber = class(TTestSuite)
   public
     procedure SetupTests; override;
@@ -647,10 +660,90 @@ begin
     TestAssignedFloatNodeStaysValid);
 end;
 
+{ ───────── x-mcp-header annotations (#90) ───────── }
+
+function HeaderViolation(const ASchema: string): string;
+var
+  Schema: TJSONObject;
+  Params: TMCPHeaderParameters;
+begin
+  Schema := TJSONObject(GetJSON(ASchema));
+  try
+    Result := MCPHeaderParameters(Schema, Params);
+  finally
+    Schema.Free;
+  end;
+end;
+
+procedure THeaderAnnotations.TestValidAnnotations;
+var
+  Schema: TJSONObject;
+  Params: TMCPHeaderParameters;
+begin
+  Schema := TJSONObject(GetJSON('{"type":"object","properties":{' +
+    '"region":{"type":"string","x-mcp-header":"Region"},' +
+    '"opts":{"type":"object","properties":{"dry":{"type":"boolean",' +
+    '"x-mcp-header":"Dry-Run"},"n":{"type":"integer","x-mcp-header":"N"}}}}}'));
+  try
+    Expect<string>(MCPHeaderParameters(Schema, Params)).ToBe('');
+    Expect<Integer>(Length(Params)).ToBe(3);
+    Expect<string>(Params[0].Header).ToBe('Region');
+    Expect<string>(Params[1].Header).ToBe('Dry-Run');
+    Expect<string>(Params[1].Path[0] + '.' + Params[1].Path[1]).ToBe('opts.dry');
+    Expect<string>(Params[2].ParamType).ToBe('integer');
+  finally
+    Schema.Free;
+  end;
+end;
+
+procedure THeaderAnnotations.TestNoAnnotations;
+begin
+  Expect<string>(HeaderViolation('{"type":"object","properties":' +
+    '{"a":{"type":"string"}}}')).ToBe('');
+end;
+
+procedure THeaderAnnotations.TestRejected;
+begin
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"a":' +
+    '{"type":"string","x-mcp-header":""}}}'))
+    .ToBe('x-mcp-header of "a" must be a non-empty HTTP token');
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"a":' +
+    '{"type":"string","x-mcp-header":"Re gion"}}}'))
+    .ToBe('x-mcp-header of "a" must be a non-empty HTTP token');
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"a":' +
+    '{"type":"number","x-mcp-header":"A"}}}'))
+    .ToBe('x-mcp-header of "a" needs type string, integer or boolean, not "number"');
+  Expect<string>(HeaderViolation('{"type":"object","properties":{' +
+    '"a":{"type":"string","x-mcp-header":"Key"},' +
+    '"b":{"type":"string","x-mcp-header":"KEY"}}}'))
+    .ToBe('x-mcp-header "KEY" is used twice (headers compare case-insensitively)');
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"list":' +
+    '{"type":"array","items":{"type":"string","x-mcp-header":"Item"}}}}'))
+    .ToBe('x-mcp-header at "list.items" is not on a property reachable ' +
+    'through "properties" from the root');
+  Expect<string>(HeaderViolation('{"type":"object","anyOf":[{"properties":' +
+    '{"a":{"type":"string","x-mcp-header":"A"}}}]}'))
+    .ToBe('x-mcp-header at "anyOf.properties.a" is not on a property ' +
+    'reachable through "properties" from the root');
+  Expect<string>(HeaderViolation('{"type":"object","x-mcp-header":"Root"}'))
+    .ToBe('x-mcp-header at "" is not on a property reachable through ' +
+    '"properties" from the root');
+end;
+
+procedure THeaderAnnotations.SetupTests;
+begin
+  Test('annotations along properties, nested, three types',
+    TestValidAnnotations);
+  Test('a schema without annotations has none', TestNoAnnotations);
+  Test('each constraint violation named', TestRejected);
+end;
+
 begin
   TestRunnerProgram.AddSuite(TSchemaBuilder.Create('Schema: fluent builder'));
   TestRunnerProgram.AddSuite(
     TSchemaFromClass.Create('Schema: derived from classes'));
   TestRunnerProgram.AddSuite(TWireNumber.Create('Schema: wire numbers'));
+  TestRunnerProgram.AddSuite(
+    THeaderAnnotations.Create('Schema: x-mcp-header annotations'));
   TestRunnerProgram.Run;
 end.

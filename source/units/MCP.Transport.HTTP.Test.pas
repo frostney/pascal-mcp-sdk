@@ -72,6 +72,8 @@ type
       out AContentType: string): Integer;
     // POST to the endpoint with the standard modern headers for
     // AMcpMethod/AMcpName; '' skips a header entirely.
+    function PostRouted(const AArguments: string;
+      const AHeaders: array of THeaderPair; out ABody: string): Integer;
     function Post(const ABody, AMcpMethod, AMcpName: string;
       out AResponseBody: string): Integer;
     // A well-formed tools/call POST that differs only in Origin, then
@@ -105,6 +107,12 @@ type
     procedure TestUnsupportedVersion;
     procedure TestMissingMcpName;
     procedure TestSentinelEncodedMcpName;
+    procedure TestParamHeadersMatch;
+    procedure TestParamHeaderMissing;
+    procedure TestParamHeaderMismatch;
+    procedure TestParamHeaderBadBase64;
+    procedure TestParamHeaderUnencodedNonASCII;
+    procedure TestParamHeaderWithoutValue;
     procedure TestUnknownMethod404;
     procedure TestInitializeRejected404;
     procedure TestLegacyGetRefused;
@@ -216,6 +224,15 @@ begin
   FServer.RegisterTool('echo', 'Echo',
     ObjectSchema.AddString('message', 'Text to echo'), NoisyEchoHandler);
   FServer.RegisterTool('quiet', 'Quiet', '{"type":"object"}', QuietHandler);
+  // Mirrors region (string), opts.limit (integer) and opts.dry
+  // (boolean) into Mcp-Param-* headers (#90).
+  FServer.RegisterTool('routed', 'Routed',
+    '{"type":"object","properties":{' +
+    '"region":{"type":"string","x-mcp-header":"Region"},' +
+    '"opts":{"type":"object","properties":{' +
+    '"limit":{"type":"integer","x-mcp-header":"Limit"},' +
+    '"dry":{"type":"boolean","x-mcp-header":"Dry"}}}}}',
+    QuietHandler).ApplicationValidated;
   FTransport := TMCPHTTPServer.Create(FServer);
   FTransport.Port := FindFreePort;
   FBaseUrl := 'http://127.0.0.1:' + IntToStr(FTransport.Port);
@@ -526,6 +543,101 @@ begin
     '=?base64?cGluZw==?=', Body);
   Expect<Integer>(Status).ToBe(200);
   Expect<Boolean>(Pos('pong', Body) > 0).ToBe(True);
+end;
+
+// A tools/call of 'routed' with AArguments and the extra headers.
+function THTTPBinding.PostRouted(const AArguments: string;
+  const AHeaders: array of THeaderPair; out ABody: string): Integer;
+var
+  Headers: array of THeaderPair;
+  ContentType: string;
+  I: Integer;
+begin
+  Headers := [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+    HeaderPair('Mcp-Method', 'tools/call'), HeaderPair('Mcp-Name', 'routed')];
+  for I := 0 to High(AHeaders) do
+    Headers := Concat(Headers, [AHeaders[I]]);
+  Result := Exchange('POST', '/mcp', '{"jsonrpc":"2.0","id":4,' +
+    '"method":"tools/call","params":{"name":"routed","arguments":' +
+    AArguments + ',' + META_MODERN + '}}', Headers, ABody, ContentType);
+end;
+
+procedure THTTPBinding.TestParamHeadersMatch;
+var
+  Body: string;
+begin
+  // Plain values, nested properties, all three types.
+  Expect<Integer>(PostRouted('{"region":"us-west1","opts":{"limit":42,' +
+    '"dry":true}}', [HeaderPair('Mcp-Param-Region', 'us-west1'),
+    HeaderPair('Mcp-Param-Limit', '42'), HeaderPair('Mcp-Param-Dry', 'true')],
+    Body)).ToBe(200);
+  Expect<Boolean>(Pos('quiet', Body) > 0).ToBe(True);
+  // Header names compare case-insensitively; a non-ASCII value travels
+  // base64-encoded ('Hello, 世界', the spec's own example).
+  Expect<Integer>(PostRouted('{"region":"Hello, ' + #$E4#$B8#$96#$E7#$95#$8C +
+    '"}', [HeaderPair('mcp-param-region', '=?base64?SGVsbG8sIOS4lueVjA==?=')],
+    Body)).ToBe(200);
+end;
+
+procedure THTTPBinding.TestParamHeaderMissing;
+var
+  Body: string;
+begin
+  Expect<Integer>(PostRouted('{"region":"eu"}', [], Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  Expect<Boolean>(Pos('Mcp-Param-Region header is missing', Body) > 0)
+    .ToBe(True);
+end;
+
+procedure THTTPBinding.TestParamHeaderMismatch;
+var
+  Body: string;
+begin
+  Expect<Integer>(PostRouted('{"region":"eu"}',
+    [HeaderPair('Mcp-Param-Region', 'us')], Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  Expect<Integer>(PostRouted('{"opts":{"dry":false}}',
+    [HeaderPair('Mcp-Param-Dry', 'False')], Body)).ToBe(400);
+  // A base64 value that decodes to something else.
+  Expect<Integer>(PostRouted('{"region":"eu"}',
+    [HeaderPair('Mcp-Param-Region', '=?base64?dXM=?=')], Body)).ToBe(400);
+end;
+
+procedure THTTPBinding.TestParamHeaderBadBase64;
+var
+  Body: string;
+begin
+  // Missing padding and a character outside the alphabet: both
+  // rejected (SEP-2243 test table), not decoded leniently.
+  Expect<Integer>(PostRouted('{"region":"Hello"}',
+    [HeaderPair('Mcp-Param-Region', '=?base64?SGVsbG8?=')], Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  Expect<Integer>(PostRouted('{"region":"Hello"}',
+    [HeaderPair('Mcp-Param-Region', '=?base64?SGVs!!!bG8=?=')], Body))
+    .ToBe(400);
+  // Without the full sentinel the value is literal.
+  Expect<Integer>(PostRouted('{"region":"SGVsbG8="}',
+    [HeaderPair('Mcp-Param-Region', 'SGVsbG8=')], Body)).ToBe(200);
+end;
+
+procedure THTTPBinding.TestParamHeaderUnencodedNonASCII;
+var
+  Body: string;
+begin
+  Expect<Integer>(PostRouted('{"region":"' + #$C3#$A9 + '"}',
+    [HeaderPair('Mcp-Param-Region', #$C3#$A9)], Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+end;
+
+procedure THTTPBinding.TestParamHeaderWithoutValue;
+var
+  Body: string;
+begin
+  // Absent or null in the body: no header expected...
+  Expect<Integer>(PostRouted('{"region":null}', [], Body)).ToBe(200);
+  // ...and one that is sent anyway does not match.
+  Expect<Integer>(PostRouted('{}', [HeaderPair('Mcp-Param-Region', 'eu')],
+    Body)).ToBe(400);
 end;
 
 procedure THTTPBinding.TestUnknownMethod404;
@@ -853,6 +965,15 @@ begin
     TestMissingMcpName);
   Test('sentinel-encoded Mcp-Name decoded and matched',
     TestSentinelEncodedMcpName);
+  Test('Mcp-Param headers: plain, nested, typed and base64 values match',
+    TestParamHeadersMatch);
+  Test('Mcp-Param header missing → 400, -32020', TestParamHeaderMissing);
+  Test('Mcp-Param header mismatched → 400, -32020', TestParamHeaderMismatch);
+  Test('Mcp-Param base64 with bad padding or characters → 400',
+    TestParamHeaderBadBase64);
+  Test('Mcp-Param unencoded non-ASCII → 400', TestParamHeaderUnencodedNonASCII);
+  Test('Mcp-Param for an absent value: none expected, one sent → 400',
+    TestParamHeaderWithoutValue);
   Test('unknown method → 404, -32601', TestUnknownMethod404);
   Test('legacy initialize → 404, versions named',
     TestInitializeRejected404);

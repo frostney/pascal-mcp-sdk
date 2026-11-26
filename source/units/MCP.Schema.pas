@@ -71,6 +71,16 @@ uses
 type
   EMCPSchema = class(Exception);
 
+  // A tool parameter mirrored into an HTTP header by x-mcp-header (#90):
+  // the header is Mcp-Param-<Header>, and Path is the chain of property
+  // names from the inputSchema root to the parameter.
+  TMCPHeaderParameter = record
+    Header: string;
+    Path: array of string;
+    ParamType: string; // 'string', 'integer' or 'boolean'
+  end;
+  TMCPHeaderParameters = array of TMCPHeaderParameter;
+
   // Base class for argument types. Published-property RTTI for every
   // descendant comes from MCP.inc's global {$M+} (no per-unit
   // override). Constructor kept virtual so the server can instantiate
@@ -164,6 +174,17 @@ function MCPSerialize(AObj: TMCPArgs): TJSONObject;
 // object or array, which then frees it). Used by MCPSerialize's float
 // properties and the server's progress notifications.
 function MCPWireNumber(AValue: Double): TJSONData;
+
+// The x-mcp-header annotations of a tool's inputSchema (#90), checked
+// against the constraints the specification puts on them: a non-empty
+// RFC 9110 token, case-insensitively unique, only on a string, integer
+// or boolean property, and only on properties reachable from the root
+// through "properties" keys alone (not through items, composition,
+// conditionals, $ref or $defs). Returns '' with the annotations in
+// AParameters, or the first violation. Verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
+function MCPHeaderParameters(ASchema: TJSONObject;
+  out AParameters: TMCPHeaderParameters): string;
 
 implementation
 
@@ -827,6 +848,156 @@ begin
   Core.FRoot := nil;
   Core.FProperties := nil;
   Core.FRequired := nil;
+end;
+
+
+{ ───────── x-mcp-header annotations (#90) ───────── }
+
+const
+  HEADER_KEYWORD = 'x-mcp-header';
+
+function IsTokenChar(AChar: Char): Boolean;
+begin
+  Result := AChar in ['!', '#', '$', '%', '&', '''', '*', '+', '-', '.',
+    '^', '_', '`', '|', '~', '0'..'9', 'A'..'Z', 'a'..'z'];
+end;
+
+function IsHeaderToken(const AValue: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := AValue <> '';
+  for I := 1 to Length(AValue) do
+    if not IsTokenChar(AValue[I]) then
+      Exit(False);
+end;
+
+function PathText(const APath: array of string): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 0 to High(APath) do
+  begin
+    if I > 0 then
+      Result := Result + '.';
+    Result := Result + APath[I];
+  end;
+end;
+
+function ExtendPath(const APath: array of string;
+  const AName: string): TStringArray;
+var
+  I: Integer;
+begin
+  SetLength(Result, Length(APath) + 1);
+  for I := 0 to High(APath) do
+    Result[I] := APath[I];
+  Result[High(Result)] := AName;
+end;
+
+// One annotation on the node at APath, which is a property reachable
+// through "properties" alone (AReachable) or not.
+function CheckAnnotation(ANode: TJSONObject; const APath: array of string;
+  AReachable: Boolean; var AParameters: TMCPHeaderParameters): string;
+var
+  Value: TJSONData;
+  ParamType: string;
+  I, Slot: Integer;
+begin
+  Result := '';
+  Value := ANode.Find(HEADER_KEYWORD);
+  if not AReachable or (Length(APath) = 0) then
+    Exit(Format('x-mcp-header at "%s" is not on a property reachable ' +
+      'through "properties" from the root', [PathText(APath)]));
+  if (Value.JSONType <> jtString) or not IsHeaderToken(Value.AsString) then
+    Exit(Format('x-mcp-header of "%s" must be a non-empty HTTP token',
+      [PathText(APath)]));
+  ParamType := ANode.Get('type', '');
+  if (ParamType <> 'string') and (ParamType <> 'integer') and
+    (ParamType <> 'boolean') then
+    Exit(Format('x-mcp-header of "%s" needs type string, integer or ' +
+      'boolean, not "%s"', [PathText(APath), ParamType]));
+  for I := 0 to High(AParameters) do
+    if SameText(AParameters[I].Header, Value.AsString) then
+      Exit(Format('x-mcp-header "%s" is used twice (headers compare ' +
+        'case-insensitively)', [Value.AsString]));
+  Slot := Length(AParameters);
+  SetLength(AParameters, Slot + 1);
+  AParameters[Slot].Header := Value.AsString;
+  AParameters[Slot].ParamType := ParamType;
+  SetLength(AParameters[Slot].Path, Length(APath));
+  for I := 0 to High(APath) do
+    AParameters[Slot].Path[I] := APath[I];
+end;
+
+function CollectHeaders(AData: TJSONData; const APath: array of string;
+  AReachable: Boolean; var AParameters: TMCPHeaderParameters): string;
+var
+  I, J: Integer;
+  Obj, Properties: TJSONObject;
+  Key: string;
+begin
+  Result := '';
+  if AData.JSONType = jtArray then
+  begin
+    for I := 0 to AData.Count - 1 do
+    begin
+      Result := CollectHeaders(AData.Items[I], APath, False, AParameters);
+      if Result <> '' then
+        Exit;
+    end;
+    Exit;
+  end;
+  if AData.JSONType <> jtObject then
+    Exit;
+  Obj := TJSONObject(AData);
+  if Obj.Find(HEADER_KEYWORD) <> nil then
+  begin
+    Result := CheckAnnotation(Obj, APath, AReachable, AParameters);
+    if Result <> '' then
+      Exit;
+  end;
+  for I := 0 to Obj.Count - 1 do
+  begin
+    Key := Obj.Names[I];
+    if (Key = HEADER_KEYWORD) or not (Obj.Items[I].JSONType in
+      [jtObject, jtArray]) then
+      Continue;
+    if (Key = 'properties') and AReachable and
+      (Obj.Items[I].JSONType = jtObject) then
+    begin
+      // The one chain along which annotations are allowed.
+      Properties := TJSONObject(Obj.Items[I]);
+      for J := 0 to Properties.Count - 1 do
+      begin
+        Result := CollectHeaders(Properties.Items[J],
+          ExtendPath(APath, Properties.Names[J]), True, AParameters);
+        if Result <> '' then
+          Exit;
+      end;
+    end
+    else
+    begin
+      // items, anyOf, $defs and the rest: an annotation there is out
+      // of place.
+      Result := CollectHeaders(Obj.Items[I], ExtendPath(APath, Key), False,
+        AParameters);
+      if Result <> '' then
+        Exit;
+    end;
+  end;
+end;
+
+function MCPHeaderParameters(ASchema: TJSONObject;
+  out AParameters: TMCPHeaderParameters): string;
+begin
+  AParameters := nil;
+  if ASchema = nil then
+    Exit('');
+  Result := CollectHeaders(ASchema, [], True, AParameters);
+  if Result <> '' then
+    AParameters := nil;
 end;
 
 end.

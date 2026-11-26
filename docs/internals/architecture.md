@@ -332,8 +332,12 @@ The binding's rules, all transport-owned:
   mapped status, so clients handle both response types.
   Notifications answer `202`.
 - The mirrored metadata headers (`MCP-Protocol-Version`, `Mcp-Method`,
-  `Mcp-Name` with the base64 sentinel) are validated against the body
-  before dispatch (`-32020` on mismatch).
+  `Mcp-Name` with the base64 sentinel, and `Mcp-Param-*` for the
+  parameters a tool marks with `x-mcp-header`) are validated against
+  the body before dispatch (`-32020` on mismatch). Which parameters a
+  tool marks is a schema fact (`MCPHeaderParameters` in `MCP.Schema`,
+  exposed as `TMCPServer.ToolHeaderParameters`); comparing header text
+  is the binding's job.
 - JSON-RPC outcomes map onto HTTP statuses: `-32601` → 404;
   parse/invalid/`-32020..-32022` → 400; everything else 200.
 - The Origin allowlist plus the `127.0.0.1` default binding implement

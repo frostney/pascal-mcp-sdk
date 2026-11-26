@@ -575,6 +575,12 @@ type
       ASink: TMCPLineSink; ASinkData: Pointer;
       out AResponse: string): Boolean; overload;
 
+    // The x-mcp-header parameters of tool AName (#90): the parameters a
+    // Streamable HTTP client mirrors into Mcp-Param-* headers, which
+    // the HTTP binding validates. Empty for an unknown tool or one
+    // without annotations.
+    function ToolHeaderParameters(const AName: string): TMCPHeaderParameters;
+
     function ToolCount: Integer;
     function ResourceCount: Integer;
     function PromptCount: Integer;
@@ -2129,6 +2135,8 @@ procedure TMCPServer.ValidateToolDefinition(ADefinition: TJSONObject;
   out AToolName: string);
 var
   InputSchema, OutputSchema, SchemaType: TJSONData;
+  HeaderParams: TMCPHeaderParameters;
+  Violation: string;
 begin
   if ADefinition = nil then
     raise EMCPServer.Create('Tool definition must not be nil');
@@ -2162,6 +2170,12 @@ begin
       raise EMCPServer.CreateFmt(
         'Tool "%s" outputSchema must have root type "object"', [AToolName]);
   end;
+  // x-mcp-header annotations a client would reject make it drop the
+  // whole tool, so they fail here instead (#90).
+  Violation := MCPHeaderParameters(TJSONObject(InputSchema), HeaderParams);
+  if Violation <> '' then
+    raise EMCPServer.CreateFmt('Tool "%s" inputSchema: %s',
+      [AToolName, Violation]);
   if FindTool(AToolName) >= 0 then
     raise EMCPServer.CreateFmt(
       'Tool "%s" is already registered', [AToolName]);
@@ -2695,6 +2709,18 @@ procedure TMCPServer.RegisterResource(const AUri, AName, AMimeType: string;
   AMethod: TMCPResourceMethod; const ADescription: string);
 begin
   AddResource(AUri, AName, AMimeType, ADescription, nil, AMethod, '', False);
+end;
+
+function TMCPServer.ToolHeaderParameters(
+  const AName: string): TMCPHeaderParameters;
+var
+  Index: Integer;
+begin
+  Result := nil;
+  Index := FindTool(AName);
+  if Index >= 0 then
+    MCPHeaderParameters(TJSONObject(FTools[Index].Definition.Find(
+      'inputSchema')), Result);
 end;
 
 function TMCPServer.FindTool(const AName: string): Integer;

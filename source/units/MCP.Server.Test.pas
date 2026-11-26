@@ -130,6 +130,7 @@ type
     procedure TestMissingInputSchemaRoot;
     procedure TestWrongInputSchemaRoot;
     procedure TestNonObjectOutputSchema;
+    procedure TestBadHeaderAnnotationRejected;
     procedure TestWrongOutputSchemaRoot;
     procedure TestValidInputAndOutputSchemaRoots;
     procedure TestDuplicateResource;
@@ -1821,6 +1822,31 @@ begin
   end;
 end;
 
+procedure TRegistrationGuards.TestBadHeaderAnnotationRejected;
+var
+  Server: TMCPServer;
+  Raised: string;
+begin
+  // A client would drop the whole tool, so registration refuses it
+  // (#90).
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := '';
+    try
+      Server.RegisterTool('bad', 'Bad', '{"type":"object","properties":' +
+        '{"n":{"type":"number","x-mcp-header":"N"}}}', EchoHandler)
+        .ApplicationValidated;
+    except
+      on E: EMCPServer do
+        Raised := E.Message;
+    end;
+    Expect<string>(Raised).ToBe('Tool "bad" inputSchema: x-mcp-header of ' +
+      '"n" needs type string, integer or boolean, not "number"');
+  finally
+    Server.Free;
+  end;
+end;
+
 procedure TRegistrationGuards.TestWrongOutputSchemaRoot;
 var
   Definition: TJSONObject;
@@ -2445,6 +2471,8 @@ begin
   Test('inputSchema array root rejected', TestWrongInputSchemaRoot);
   Test('non-object outputSchema rejected', TestNonObjectOutputSchema);
   Test('outputSchema array root rejected', TestWrongOutputSchemaRoot);
+  Test('invalid x-mcp-header annotation rejected at registration',
+    TestBadHeaderAnnotationRejected);
   Test('object inputSchema and outputSchema accepted',
     TestValidInputAndOutputSchemaRoots);
   Test('duplicate resource uri rejected', TestDuplicateResource);
