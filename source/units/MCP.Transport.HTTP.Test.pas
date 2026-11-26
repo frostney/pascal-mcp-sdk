@@ -95,6 +95,9 @@ type
     procedure SetupTests; override;
     procedure TestSingleJSONResponse;
     procedure TestBareDiscoverProbe;
+    procedure TestMissingProtocolVersion400;
+    procedure TestMissingClientCapabilities400;
+    procedure TestInBandInvalidParamsStays200;
     procedure TestNotificationAccepted;
     procedure TestMalformedNotificationAccepted;
     procedure TestInvalidRequestBody;
@@ -400,10 +403,54 @@ begin
   // verified 2026-08-08:
   // https://modelcontextprotocol.io/specification/2026-07-28/server/discover),
   // so the core answers the accurate -32602 for the missing _meta
-  // rather than the transport masking it as a header error.
+  // rather than the transport masking it as a header error. A request
+  // missing a required field is malformed, which HTTP answers 400
+  // (#79; spec verified 2026-11-26:
+  // https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta).
   Status := Exchange('POST', '/mcp',
     '{"jsonrpc":"2.0","id":0,"method":"server/discover","params":{}}',
     [], Body, ContentType);
+  Expect<Integer>(Status).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32602);
+end;
+
+procedure THTTPBinding.TestMissingProtocolVersion400;
+var
+  Body, ContentType: string;
+  Status: Integer;
+begin
+  // No protocolVersion claim, so no header check applies; the core's
+  // -32602 is the malformed-request rejection.
+  Status := Exchange('POST', '/mcp',
+    '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":' +
+    '{"io.modelcontextprotocol/clientCapabilities":{}}}}',
+    [HeaderPair('Mcp-Method', 'tools/list')], Body, ContentType);
+  Expect<Integer>(Status).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32602);
+  Expect<Boolean>(Pos('protocolVersion', Body) > 0).ToBe(True);
+end;
+
+procedure THTTPBinding.TestMissingClientCapabilities400;
+var
+  Body: string;
+  Status: Integer;
+begin
+  Status := Post('{"jsonrpc":"2.0","id":1,"method":"tools/list","params":' +
+    '{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}',
+    'tools/list', '', Body);
+  Expect<Integer>(Status).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32602);
+  Expect<Boolean>(Pos('clientCapabilities', Body) > 0).ToBe(True);
+end;
+
+procedure THTTPBinding.TestInBandInvalidParamsStays200;
+var
+  Body: string;
+  Status: Integer;
+begin
+  // A complete envelope with an unknown tool: -32602 again, but an
+  // ordinary invalid-params answer, so the status stays 200.
+  Status := Post(CallLine(1, 'nope'), 'tools/call', 'nope', Body);
   Expect<Integer>(Status).ToBe(200);
   Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32602);
 end;
@@ -835,8 +882,13 @@ procedure THTTPBinding.SetupTests;
 begin
   Test('request → single application/json response',
     TestSingleJSONResponse);
-  Test('bare server/discover probe served without headers',
+  Test('bare server/discover probe → 400, -32602 (not -32020)',
     TestBareDiscoverProbe);
+  Test('missing _meta protocolVersion → 400, -32602',
+    TestMissingProtocolVersion400);
+  Test('missing _meta clientCapabilities → 400, -32602',
+    TestMissingClientCapabilities400);
+  Test('unknown tool → 200, -32602 in-band', TestInBandInvalidParamsStays200);
   Test('notification → 202, no body', TestNotificationAccepted);
   Test('malformed notification dropped → 202',
     TestMalformedNotificationAccepted);

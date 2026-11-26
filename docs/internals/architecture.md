@@ -335,7 +335,10 @@ The binding's rules, all transport-owned:
   `Mcp-Name` with the base64 sentinel) are validated against the body
   before dispatch (`-32020` on mismatch).
 - JSON-RPC outcomes map onto HTTP statuses: `-32601` → 404;
-  parse/invalid/`-32020..-32022` → 400; everything else 200.
+  parse/invalid/`-32020..-32022` → 400; `-32602` → 400 when the
+  request lacks a required `_meta` field (`MissingRequiredMeta` in
+  `MCP.Protocol` decides that, so the rule stays in the layer that owns
+  `_meta`); everything else 200, other `-32602`s included.
 - The Origin allowlist plus the `127.0.0.1` default binding implement
   the spec's DNS-rebinding defenses.
 - The server primitive is FPC's own `fphttpserver` (fcl-web ships

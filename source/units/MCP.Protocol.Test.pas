@@ -36,6 +36,8 @@ type
     procedure TestUnknownLogLevelRejected;
     procedure TestWrongCaseLogLevelRejected;
     procedure TestHasCapability;
+    procedure TestMissingRequiredMetaNames;
+    procedure TestMissingRequiredMetaComplete;
   end;
 
   TStamping = class(TTestSuite)
@@ -123,6 +125,47 @@ begin
     Pos('protocolVersion', MetaErr.Message) > 0).ToBe(True);
   FreeMetaError(MetaErr);
   Params.Free;
+end;
+
+// MissingRequiredMeta (#79): the first absent or mistyped required
+// field, in the order ExtractRequestContext checks them.
+function MissingOf(const AJson: string): string;
+var
+  Params: TJSONObject;
+begin
+  Params := ParseObj(AJson);
+  try
+    Result := MissingRequiredMeta(Params);
+  finally
+    Params.Free;
+  end;
+end;
+
+procedure TMetaValidation.TestMissingRequiredMetaNames;
+begin
+  Expect<string>(MissingRequiredMeta(nil)).ToBe('_meta');
+  Expect<string>(MissingOf('{}')).ToBe('_meta');
+  Expect<string>(MissingOf('{"_meta":[]}')).ToBe('_meta');
+  Expect<string>(MissingOf(
+    '{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}'))
+    .ToBe('_meta["io.modelcontextprotocol/protocolVersion"]');
+  Expect<string>(MissingOf(
+    '{"_meta":{"io.modelcontextprotocol/protocolVersion":7,' +
+    '"io.modelcontextprotocol/clientCapabilities":{}}}'))
+    .ToBe('_meta["io.modelcontextprotocol/protocolVersion"]');
+  Expect<string>(MissingOf(
+    '{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":"none"}}'))
+    .ToBe('_meta["io.modelcontextprotocol/clientCapabilities"]');
+end;
+
+procedure TMetaValidation.TestMissingRequiredMetaComplete;
+begin
+  // Complete, even with a version the server does not support: that
+  // is -32022, not a malformed request.
+  Expect<string>(MissingOf(
+    '{"_meta":{"io.modelcontextprotocol/protocolVersion":"1999-01-01",' +
+    '"io.modelcontextprotocol/clientCapabilities":{}}}')).ToBe('');
 end;
 
 procedure TMetaValidation.TestMissingCapabilities;
@@ -296,6 +339,10 @@ begin
   Test('unknown logLevel → -32602', TestUnknownLogLevelRejected);
   Test('wrong-case logLevel → -32602', TestWrongCaseLogLevelRejected);
   Test('HasCapability lookup', TestHasCapability);
+  Test('MissingRequiredMeta names the first missing field',
+    TestMissingRequiredMetaNames);
+  Test('MissingRequiredMeta is empty for a complete envelope',
+    TestMissingRequiredMetaComplete);
 end;
 
 { ───────── result stamping ───────── }
