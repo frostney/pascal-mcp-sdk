@@ -220,7 +220,15 @@ begin
 end;
 
 // Content types over stdio, against the conformance fixture (#87).
+// Shapes verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/tools#tool-result
+// and .../server/prompts#embedded-resources (an embedded resource in a
+// prompt message MUST carry a URI and a MIME type).
 procedure FixtureContentBattery;
+const
+  // The fixture's complete one-frame WAV, written out literally.
+  ONE_FRAME_WAV_BASE64 =
+    'UklGRiYAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQIAAAAAAA==';
 var
   Fixture: TProcess;
   Response: TJSONObject;
@@ -245,8 +253,8 @@ begin
       '"name":"test_audio_content",' + META_MODERN + '}}', ResponseLine);
     Check((PathString(Response, 'result.content[0].type') = 'audio') and
       (PathString(Response, 'result.content[0].mimeType') = 'audio/wav') and
-      (Pos('"data" : "UklGR', ResponseLine) > 0),
-      'content: audio block (MCPAudioResult)');
+      (Pos('"data" : "' + ONE_FRAME_WAV_BASE64 + '"', ResponseLine) > 0),
+      'content: audio block (MCPAudioResult), payload byte-exact');
     Response.Free;
 
     Response := RoundTripWithLine(Fixture,
@@ -262,16 +270,43 @@ begin
     Response.Free;
 
     Response := RoundTripWithLine(Fixture,
+      '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{' +
+      '"name":"fixture_resource_link",' + META_MODERN + '}}', ResponseLine);
+    Check((PathString(Response, 'result.content[1].type') = 'resource_link') and
+      (Pos('"uri" : "test://static-text", "name" : "static-text ' +
+      #$E4#$B8#$96 + '", "description" : "Caf' + #$C3#$A9 + ' ' +
+      #$F0#$9F#$98#$80 + '", "mimeType" : "text/plain"', ResponseLine) > 0),
+      'content: resource link (MCPResourceLink), UTF-8 byte-exact');
+    Response.Free;
+
+    Response := RoundTripWithLine(Fixture,
       '{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{' +
       '"name":"test_prompt_with_embedded_resource","arguments":{' +
-      '"resourceUri":"test://' + UTF8_WORLD + '"},' + META_MODERN + '}}',
-      ResponseLine);
+      '"resourceUri":"test://embedded/%E4%B8%96%E7%95%8C"},' + META_MODERN +
+      '}}', ResponseLine);
     Check((PathString(Response, 'result.messages[0].content.type') =
-      'resource') and (Pos('"uri" : "test://' + UTF8_WORLD + '"',
+      'resource') and (Pos('"uri" : "test://embedded/%E4%B8%96%E7%95%8C"',
       ResponseLine) > 0) and
       (PathString(Response, 'result.messages[0].content.resource.mimeType') =
       'text/plain'),
-      'content: prompt message with an embedded resource, UTF-8 byte-exact');
+      'content: prompt message with an embedded resource and its MIME type');
+    Response.Free;
+
+    // The fixture's ApplicationValidated tools check their own arguments.
+    Response := RoundTrip(Fixture,
+      '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{' +
+      '"name":"json_schema_2020_12_tool","arguments":{' +
+      '"contactMethod":"phone","email":"a@example.com"},' + META_MODERN + '}}');
+    Check((FindPath(Response, 'result.isError') <> nil) and
+      FindPath(Response, 'result.isError').AsBoolean,
+      'content: json_schema_2020_12_tool refuses phone without a phone');
+    Response.Free;
+    Response := RoundTrip(Fixture,
+      '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{' +
+      '"name":"test_custom_headers","arguments":{},' + META_MODERN + '}}');
+    Check((FindPath(Response, 'result.isError') <> nil) and
+      FindPath(Response, 'result.isError').AsBoolean,
+      'content: test_custom_headers refuses a missing region');
     Response.Free;
 
     Response := RoundTrip(Fixture,

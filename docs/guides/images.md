@@ -98,7 +98,7 @@ A result's content array can carry both. Build each block with
 common shape is an explanatory sentence plus the rendering:
 
 ```pascal
-uses MCP.Content;
+uses MCP.Content, MCP.Server;
 
 Result := MCPContentResult([
   MCPTextContent('Revenue by month, Q1-Q2'),

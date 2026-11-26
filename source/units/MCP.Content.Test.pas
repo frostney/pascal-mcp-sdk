@@ -1,7 +1,11 @@
 { MCP.Content.Test — the content-block builders, asserted on the exact
   serialized JSON the wire carries (SerializeCompact), so a field name,
   an optional member or an encoding regression shows up byte for byte
-  rather than cancelling out through a decode (#10, #26). }
+  rather than cancelling out through a decode (#10, #26). Shapes
+  verified 2026-11-26 against
+  https://modelcontextprotocol.io/specification/2026-07-28/server/tools#tool-result
+  and .../server/prompts#promptmessage. URIs stay ASCII (RFC 3986;
+  non-ASCII is percent-encoded); names and text carry the UTF-8. }
 
 program MCP.Content.Test;
 
@@ -95,10 +99,10 @@ end;
 
 procedure TContentBlocks.TestResourceLinkFull;
 begin
-  Expect<string>(Wire(MCPResourceLink('file:///src/' + UTF8_TEXT + '.rs',
+  Expect<string>(Wire(MCPResourceLink('file:///src/%C3%A9.rs',
     UTF8_TEXT + '.rs', 'text/x-rust', 'Entry ' + UTF8_TEXT)))
-    .ToBe('{ "type" : "resource_link", "uri" : "file:///src/' + UTF8_TEXT +
-      '.rs", "name" : "' + UTF8_TEXT + '.rs", "description" : "Entry ' +
+    .ToBe('{ "type" : "resource_link", "uri" : "file:///src/%C3%A9.rs", ' +
+      '"name" : "' + UTF8_TEXT + '.rs", "description" : "Entry ' +
       UTF8_TEXT + '", "mimeType" : "text/x-rust" }');
 end;
 

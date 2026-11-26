@@ -6,6 +6,8 @@ program mcpconformance;
 // and resources up by the names its reference fixture uses
 // (examples/servers/typescript/everything-server.ts in that repository),
 // so this program registers the same names with the same behaviour.
+// Tools named fixture_* are this fixture's own, for content types the
+// suite does not exercise (mcpsmoke drives them over stdio).
 // tools/conformance/run.mjs starts it with `--http <port>` and compares
 // each scenario with tools/conformance/baseline.json; any scenario that
 // still fails here is a gap in the library, listed there with its issue.
@@ -121,6 +123,17 @@ function EmbeddedResource(AArguments: TJSONObject;
 begin
   Result := MCPContentResult([MCPEmbeddedText('test://embedded-resource',
     'text/plain', 'This is an embedded resource content.')]);
+end;
+
+// Not in the reference fixture: no scenario returns a resource link.
+// The name and description carry multi-byte UTF-8, the URI stays ASCII.
+function FixtureResourceLink(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPContentResult([
+    MCPTextContent('Linked resource:'),
+    MCPResourceLink('test://static-text', 'static-text ' + #$E4#$B8#$96,
+      'text/plain', 'Caf' + #$C3#$A9 + ' ' + #$F0#$9F#$98#$80)]);
 end;
 
 function MultipleContentTypes(AArguments: TJSONObject;
@@ -335,21 +348,20 @@ begin
   Result := MCPInputRequired(Requests, 'multiple-inputs');
 end;
 
+// The state only names the round: the library passes the client's echo
+// through unverified until #89, so nothing from it reaches the result.
 function IRMultiRound(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
-const
-  ROUND_TWO = 'round2:';
 begin
   if (ACtx.RequestState = 'round1') and
     (MCPInputResponse(ACtx, 'step1') <> nil) then
     Exit(MCPInputRequired(OneRequest('step2',
       MCPElicitFormRequest('Step 2: What is your favorite color?',
-      FieldSchema('color'))), ROUND_TWO + ElicitedText(ACtx, 'step1', 'name')));
-  if (Copy(ACtx.RequestState, 1, Length(ROUND_TWO)) = ROUND_TWO) and
+      FieldSchema('color'))), 'round2'));
+  if (ACtx.RequestState = 'round2') and
     (MCPInputResponse(ACtx, 'step2') <> nil) then
-    Exit(MCPTextResult('Multi-round complete for ' +
-      Copy(ACtx.RequestState, Length(ROUND_TWO) + 1, MaxInt) +
-      ' who likes ' + ElicitedText(ACtx, 'step2', 'color')));
+    Exit(MCPTextResult('Multi-round complete: favorite color ' +
+      ElicitedText(ACtx, 'step2', 'color')));
   Result := MCPInputRequired(OneRequest('step1',
     MCPElicitFormRequest('Step 1: What is your name?', FieldSchema('name'))),
     'round1');
@@ -415,9 +427,16 @@ end;
 
 function PromptWithEmbeddedResource(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TJSONArray;
+var
+  Uri: TJSONData;
 begin
+  // An embedded resource MUST carry a valid URI (prompts spec): refuse
+  // anything but a non-empty string.
+  Uri := AArguments.Find('resourceUri');
+  if (Uri = nil) or (Uri.JSONType <> jtString) or (Uri.AsString = '') then
+    raise Exception.Create('resourceUri must be a non-empty URI string');
   Result := MCPMessages([
-    MCPContentMessage('user', MCPEmbeddedText(AArguments.Get('resourceUri', ''),
+    MCPContentMessage('user', MCPEmbeddedText(Uri.AsString,
       'text/plain', 'Embedded resource content for testing.')),
     MCPUserMessage('Please process the embedded resource above.')]);
 end;
@@ -474,7 +493,7 @@ type
 
 const
   // Every tool without arguments, under the reference fixture's names.
-  ARGUMENTLESS_TOOLS: array[0..18] of TArgumentlessTool = (
+  ARGUMENTLESS_TOOLS: array[0..19] of TArgumentlessTool = (
     (Name: 'test_simple_text';
      Description: 'Tests simple text content response'; Handler: SimpleText),
     (Name: 'test_image_content';
@@ -484,6 +503,9 @@ const
     (Name: 'test_embedded_resource';
      Description: 'Tests embedded resource content response';
      Handler: EmbeddedResource),
+    (Name: 'fixture_resource_link';
+     Description: 'Returns text and a resource link (not a suite scenario)';
+     Handler: FixtureResourceLink),
     (Name: 'test_multiple_content_types';
      Description: 'Tests response with multiple content types (text, image, resource)';
      Handler: MultipleContentTypes),

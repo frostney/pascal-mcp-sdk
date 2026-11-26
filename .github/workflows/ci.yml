@@ -14,8 +14,9 @@ name: CI
 # every leg runs the identical battery: unit suites + the mcpsmoke
 # subprocess E2E battery. mcpsmoke plus the spec-cited unit tests are
 # the net here. The official MCP conformance suite runs only in pr.yml,
-# as a non-blocking job against mcpdemo --http, judged against the
-# baseline in tools/conformance/baseline.json.
+# as a non-blocking job against the conformance fixture
+# (mcpconformance --http), judged against the baseline in
+# tools/conformance/baseline.json.
 #
 # The lwpt toolchain comes from its published release (checksum-
 # verified per-platform tarball, no sibling checkout, no bootstrap);
@@ -200,13 +201,13 @@ jobs:
         if: matrix.format-check == true
         run: .github/scripts/check-reference-docs.sh
 
-      - name: lwpt build (mcpdemo, mcpsmoke, mcpconformance)
+      - name: lwpt build (every [build] target)
         run: lwpt build
 
-      - name: lwpt test (five co-located unit suites)
+      - name: lwpt test (co-located unit suites)
         run: lwpt test
 
-      - name: mcpsmoke (example-server E2E battery over real pipes)
+      - name: mcpsmoke (E2E battery over real pipes, mcpdemo and mcpconformance)
         run: ./build/mcpsmoke${{ matrix.exe }}
 
       # The zero-install path the README promises: a plain fpc build

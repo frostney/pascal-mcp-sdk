@@ -181,13 +181,13 @@ jobs:
         if: matrix.fpc-install == 'apt'   # platform-independent; one runner
         run: lwpt duplication
 
-      - name: lwpt build (mcpdemo, mcpsmoke, mcpconformance)
+      - name: lwpt build (every [build] target)
         run: lwpt build
 
-      - name: lwpt test (five co-located unit suites)
+      - name: lwpt test (co-located unit suites)
         run: lwpt test
 
-      - name: mcpsmoke (example-server E2E battery over real pipes)
+      - name: mcpsmoke (E2E battery over real pipes, mcpdemo and mcpconformance)
         run: ./build/mcpsmoke${{ matrix.exe }}
 
       # The zero-install path the README promises: a plain fpc build

@@ -2,8 +2,8 @@
 
 ## Executive Summary
 
-Add pascal-mcp-sdk to your project (`lwpt add` or vendor seven
-files), register tools with a name, description, schema, and a
+Add pascal-mcp-sdk to your project (`lwpt add`, or vendor its
+library units and `MCP.inc`), register tools with a name, description, schema, and a
 handler function, and call `RunMCPStdioServer` — or serve the same
 registrations over Streamable HTTP with `TMCPHTTPServer`. Wire the
 binary into any MCP client.

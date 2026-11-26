@@ -47,8 +47,8 @@ The command surface itself is documented in the machine-written
 generator can't know: `lwpt install --frozen` is the CI mode (verify
 lockfile + committed modules, no network), `lwpt build` produces
 `mcpdemo`, `mcpsmoke` and `mcpconformance`, `lwpt test` runs the co-located unit suites, and
-`lwpt run smoke` drives the built E2E battery (mcpsmoke spawns mcpdemo
-the way a real client does).
+`lwpt run smoke` drives the built E2E battery (mcpsmoke spawns mcpdemo,
+then mcpconformance, the way a real client does).
 
 ## Code Organization
 
@@ -76,7 +76,9 @@ sans-I/O discipline. See
   with the unit they cover and must keep providing regression value.
 - `mcpsmoke` is the in-repo E2E battery: it launches `mcpdemo` the way a
   real MCP client does (subprocess, pipes) and drives the full v1
-  surface including error paths and the EOF shutdown contract.
+  surface including error paths and the EOF shutdown contract, then
+  launches the conformance fixture `mcpconformance` for the content
+  types `mcpdemo` does not return.
 - Nothing in the test stack touches the **external** network; everything
   runs against local pipes, loopback (127.0.0.1) sockets, and temp
   files. The one exception is the non-blocking conformance run

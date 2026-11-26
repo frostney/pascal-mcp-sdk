@@ -6,7 +6,7 @@
 
 lwpt is the single toolchain entry point: `install` resolves the one
 dev-time dependency and regenerates `lwpt.cfg`/`lwpt.lock`, `build`
-compiles the two apps, `test` runs the co-located suites, `format` is
+compiles the apps the manifest's `[build]` table lists, `test` runs the co-located suites, `format` is
 the canonical formatter (wired into lefthook pre-commit), and
 `agents` writes the machine-managed AGENTS.md command reference.
 git-cliff generates CHANGELOG.md from Conventional Commits. CI gates
@@ -35,7 +35,7 @@ lwpt duplication       # CI gate: clones vs the [duplication] ceiling
 
 - `lwpt.toml` is the **manifest you edit**: package metadata, the
   `units = ["source/units"]` path, the `[format]` exclude, the
-  dev-time `testing` dependency, the two `[build]` targets, and the
+  dev-time `testing` dependency, the `[build]` targets, and the
   `[smoke]` run-script (`lwpt run smoke` → `scripts/smoke.pas`, a
   self-contained wrapper because run-scripts execute via InstantFPC
   without project include paths).
