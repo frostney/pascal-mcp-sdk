@@ -130,6 +130,7 @@ type
     procedure TestEventRouting;
     procedure TestEventStream;
     procedure TestEventStreamClientClose;
+    procedure TestQuietStreamClientClose;
     procedure TestStopDuringACheck;
     procedure TestStopDuringTheOpeningCheck;
     procedure TestProgressThenPark;
@@ -465,11 +466,26 @@ type
     procedure Close(ASink: TMCPLineSink; ASinkData: Pointer); override;
   end;
 
-  // test/parkprogress: reports progress, then parks a one-frame stream.
+  // A stream that writes one frame and is not due again for a minute;
+  // QuietReleased is 1 once it is destroyed.
+  TQuietStream = class(TMCPStream)
+  public
+    destructor Destroy; override;
+    function Step(ASink: TMCPLineSink; ASinkData: Pointer): Int64; override;
+    procedure Close(ASink: TMCPLineSink; ASinkData: Pointer); override;
+  end;
+
+  // test/parkprogress: reports progress, then parks a one-frame stream;
+  // test/parkquiet parks a quiet stream.
   TParkProgress = class
     function Handle(AParams: TJSONObject; const ACtx: TMCPRequestContext;
       ALegacy: Boolean): TJSONObject;
+    function Quiet(AParams: TJSONObject; const ACtx: TMCPRequestContext;
+      ALegacy: Boolean): TJSONObject;
   end;
+
+var
+  QuietReleased: LongInt;
 
 function TOneFrameStream.Step(ASink: TMCPLineSink; ASinkData: Pointer): Int64;
 begin
@@ -481,6 +497,30 @@ end;
 procedure TOneFrameStream.Close(ASink: TMCPLineSink; ASinkData: Pointer);
 begin
   Finish;
+end;
+
+destructor TQuietStream.Destroy;
+begin
+  InterLockedExchange(QuietReleased, 1);
+  inherited Destroy;
+end;
+
+function TQuietStream.Step(ASink: TMCPLineSink; ASinkData: Pointer): Int64;
+begin
+  ASink('{"frame":"quiet"}', ASinkData);
+  Result := MCPNowMs + 60000;
+end;
+
+procedure TQuietStream.Close(ASink: TMCPLineSink; ASinkData: Pointer);
+begin
+  Finish;
+end;
+
+function TParkProgress.Quiet(AParams: TJSONObject;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+begin
+  TMCPStreamHost(ACtx.StreamHost).Park(TQuietStream.Create(ACtx.RequestId));
+  Result := TJSONObject.Create;
 end;
 
 function TParkProgress.Handle(AParams: TJSONObject;
@@ -579,6 +619,8 @@ begin
   RegisterEvent(FServer, 'waiting', 'Waits in its check', ObjectSchema,
     ObjectSchema, WaitingCheck);
   FServer.RegisterMethod('test/parkprogress', ParkProgress.Handle);
+  FServer.RegisterMethod('test/parkquiet', ParkProgress.Quiet);
+  QuietReleased := 0;
   WaitingSawStop := False;
   EndingCalls := 0;
   EndlessCalls := 0;
@@ -718,9 +760,10 @@ begin
 end;
 
 // Sends ARequest and reads until the first SSE frame is complete, then
-// closes the connection: what the response held by then.
-function ReadFirstFrameThenClose(APort: Word;
-  const ARequest: string): string;
+// keeps the connection open for AHoldMs and closes it: what the
+// response held by then.
+function ReadFirstFrameThenClose(APort: Word; const ARequest: string;
+  AHoldMs: Integer = 0): string;
 var
   Sock: TInetSocket;
   Buf: array[0..4095] of Byte;
@@ -741,6 +784,7 @@ begin
       HeaderEnd := Pos(#13#10#13#10, Result);
     until (Got <= 0) or ((HeaderEnd > 0) and
       (Pos(#10#10, Copy(Result, HeaderEnd + 4, MaxInt)) > 0));
+    Sleep(AHoldMs);
   finally
     Sock.Free;
   end;
@@ -1315,6 +1359,38 @@ begin
   Calls := EndlessCalls;
   Sleep(400);
   Expect<Integer>(EndlessCalls).ToBe(Calls);
+end;
+
+// A client that closes the connection ends a stream that is not due
+// for a minute within the disconnect poll's interval: the wait between
+// steps is capped by the poll, which runs on the streams' clock (#134
+// review). The client holds the connection open for 200 ms after the
+// first frame, so the poll's first probe, right after that frame, finds
+// it open and the stream is waiting when the client closes.
+procedure THTTPBinding.TestQuietStreamClientClose;
+var
+  Payload, Response: string;
+  Waited: Integer;
+begin
+  Payload := '{"jsonrpc":"2.0","id":5,"method":"test/parkquiet",' +
+    '"params":{' + META_MODERN + '}}';
+  Response := ReadFirstFrameThenClose(FTransport.Port,
+    'POST /mcp HTTP/1.1'#13#10 + 'Host: 127.0.0.1:' +
+    IntToStr(FTransport.Port) + #13#10 +
+    'Content-Type: application/json'#13#10 +
+    'Accept: application/json, text/event-stream'#13#10 +
+    'MCP-Protocol-Version: ' + MCP_PROTOCOL_VERSION + #13#10 +
+    'Mcp-Method: test/parkquiet'#13#10 + 'Connection: close'#13#10 +
+    'Content-Length: ' + IntToStr(Length(Payload)) + #13#10#13#10 + Payload,
+    200);
+  Expect<Boolean>(Pos('{"frame":"quiet"}', Response) > 0).ToBe(True);
+  Waited := 0;
+  while (QuietReleased = 0) and (Waited < 3000) do
+  begin
+    Sleep(10);
+    Inc(Waited, 10);
+  end;
+  Expect<Integer>(QuietReleased).ToBe(1);
 end;
 
 procedure THTTPBinding.TestParamHeaderMissing;
@@ -1942,6 +2018,8 @@ begin
     TestEventStream);
   Test('a client that closes the connection ends its stream',
     TestEventStreamClientClose);
+  Test('a client that closes the connection ends a quiet stream promptly',
+    TestQuietStreamClientClose);
   Test('Stop reaches a waiting check, then the final frame',
     TestStopDuringACheck);
   Test('Stop reaches the opening check', TestStopDuringTheOpeningCheck);
