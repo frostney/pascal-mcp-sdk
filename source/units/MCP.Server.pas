@@ -2177,25 +2177,30 @@ begin
   Result := EncodeStringBase64(AMethod + ':' + IntToStr(AOffset));
 end;
 
-// The offset ACursor points at in AMethod's list of ACount entries, or
-// False for a cursor this server did not hand out for that list.
-function TryCursorOffset(const ACursor, AMethod: string; ACount: Integer;
-  out AOffset: Integer): Boolean;
+// The offset ACursor points at in AMethod's list of ACount entries
+// paged APageSize at a time, or False for any cursor this server could
+// not have handed out for that list: paging off, an offset that is no
+// interior page boundary, or any spelling other than the one ListCursor
+// gives (#94 review).
+function TryCursorOffset(const ACursor, AMethod: string;
+  ACount, APageSize: Integer; out AOffset: Integer): Boolean;
 var
   Decoded: string;
 begin
   Result := False;
   AOffset := 0;
+  if APageSize <= 0 then
+    Exit;
   try
     Decoded := DecodeStringBase64(ACursor);
   except
     Exit;
   end;
-  if (EncodeStringBase64(Decoded) <> ACursor) or
-    (Copy(Decoded, 1, Length(AMethod) + 1) <> AMethod + ':') then
+  if Copy(Decoded, 1, Length(AMethod) + 1) <> AMethod + ':' then
     Exit;
   Result := TryStrToInt(Copy(Decoded, Length(AMethod) + 2, MaxInt), AOffset) and
-    (AOffset > 0) and (AOffset < ACount);
+    (AOffset > 0) and (AOffset < ACount) and (AOffset mod APageSize = 0) and
+    (ListCursor(AMethod, AOffset) = ACursor);
 end;
 
 // One page of a list result (#94). Without a cursor and with PageSize
@@ -2217,28 +2222,28 @@ begin
     CursorData := AMessage.Params.Find('cursor');
   if (CursorData <> nil) and ((CursorData.JSONType <> jtString) or
     not TryCursorOffset(CursorData.AsString, AMessage.Method, ACount,
-    First)) then
+    FPageSize, First)) then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
       'Invalid params: unknown cursor'));
   Last := ACount - 1;
-  if (FPageSize > 0) and (First + FPageSize < ACount) then
+  // Compared before adding, so a huge PageSize cannot overflow.
+  if (FPageSize > 0) and (FPageSize < ACount - First) then
     Last := First + FPageSize - 1;
-  // Whole list in registration order: the deterministic ordering the
-  // spec asks for.
-  Items := TJSONArray.Create;
+  // Registration order: the deterministic ordering the spec asks for.
+  ListResult := TJSONObject.Create;
   try
+    Items := TJSONArray.Create;
+    ListResult.Add(AKey, Items);
     for I := First to Last do
       Items.Add(ADefinition(I, ALegacy));
+    if Last < ACount - 1 then
+      ListResult.Add('nextCursor', ListCursor(AMessage.Method, Last + 1));
+    if not ALegacy then
+      AddCacheFields(ListResult, FCacheTtlMs);
   except
-    Items.Free;
+    ListResult.Free;
     raise;
   end;
-  ListResult := TJSONObject.Create;
-  ListResult.Add(AKey, Items);
-  if Last < ACount - 1 then
-    ListResult.Add('nextCursor', ListCursor(AMessage.Method, Last + 1));
-  if not ALegacy then
-    AddCacheFields(ListResult, FCacheTtlMs);
   Result := ResultResponse(AMessage, ListResult, ALegacy);
 end;
 

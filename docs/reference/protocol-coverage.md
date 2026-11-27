@@ -7,7 +7,7 @@ the README links here.
 | Surface | Status |
 | --- | --- |
 | `server/discover` | ✅ mandatory entry point, capabilities + instructions |
-| `tools/list` | ✅ registered tool definitions, whole list in registration order (deterministic; no pagination cursor) |
+| `tools/list` | ✅ registered tool definitions in registration order (deterministic), whole or in pages (see Pagination) |
 | `tools/call` | ✅ text / image / audio / resource-link / embedded-resource / structured content, in-band execution errors, server-side subset validation of arguments, structured output of any JSON type checked against a subset `outputSchema` |
 | `resources/list`, `resources/read` | ✅ static + dynamic, text + blob builders |
 | `resources/templates/list` + template matching | ✅ RFC 6570 level-1 (`{var}`), exact resources win, vars passed to readers |
@@ -15,7 +15,7 @@ the README links here.
 | `completion/complete` | ✅ prompt arguments and resource-template variables, from a static list (prefix match) or a handler with context arguments; `completions` capability declared when registered |
 | MRTR `input_required` (SEP-2322) | ✅ on `tools/call` + `prompts/get`: elicitation (form + url), sampling, roots entry builders; capability-gated; stateless re-entry; `requestState` sealed by the server (HMAC-SHA-256, expiry, bound to the method, target, arguments and server) and verified before the handler runs |
 | Cancellation | ✅ `notifications/cancelled` and, on Streamable HTTP, a closed or reset connection reach a running handler through `ACtx.IsCancelled`; nothing more is sent for a cancelled request. Covered by the stdio and HTTP transport suites and the `mcpsmoke` countdown check |
-| Pagination | ✅ `PageSize` pages all four list methods with opaque `nextCursor` tokens; invalid cursors answer `-32602`; whole lists by default |
+| Pagination | ✅ opt-in: `PageSize` pages all four list methods with opaque `nextCursor` tokens, and a cursor the server did not hand out for that list answers `-32602`; whole lists by default. Covered by the server suite and `mcpsmoke` (`mcpdemo --page-size 2` over stdio); the TypeScript batteries run `mcpdemo` unpaged |
 | `notifications/progress`, `notifications/message` | ✅ `MCPReportProgress` / `MCPLogMessage` from any handler; strictly opt-in per request (`progressToken` / `logLevel`), severity-filtered, emitted before the response |
 | `_meta` validation, version negotiation | ✅ `-32602` / `-32021` / `-32022` per spec |
 | `ttlMs` / `cacheScope` caching hints (SEP-2549) | ✅ on discover/list/read, tunable via `CacheTtlMs`/`CacheScope` |
@@ -46,7 +46,8 @@ stdio and Streamable HTTP, including MRTR auto-fulfilment) and the v1
 SDK (`@modelcontextprotocol/sdk`, the handshake era Claude Code
 speaks). Those batteries drive `mcpdemo`. The content types `mcpdemo`
 does not return (audio, resource links, embedded resources, mixed
-results and non-text prompt messages) are covered by the unit suites,
+results and non-text prompt messages), and paging, which `mcpdemo`
+leaves off by default, are covered by the unit suites,
 the `mcpsmoke` content battery and the official conformance suite
 against the conformance fixture. See
 [tools/interop-ts/](../../tools/interop-ts/) and the

@@ -10,7 +10,8 @@ program mcpdemo;
 // template, and a prompt. By default it
 // serves newline-delimited JSON-RPC on stdin/stdout until the client
 // closes stdin; with `--http <port>` the same registrations are
-// served over Streamable HTTP on 127.0.0.1 instead (modern era only).
+// served over Streamable HTTP on 127.0.0.1 instead (modern era only),
+// and with `--page-size <n>` stdio hands its lists out in pages of n.
 //
 // Try it by hand (all on one line; _meta is required on every request):
 //   ./build/mcpdemo <<'EOF'
@@ -187,6 +188,15 @@ begin
     Plural(AServer.PromptCount, 'prompt') + ')';
 end;
 
+// `--page-size <n>` serves stdio with its lists in pages of n (#94).
+function PageSizeFromArgs(out ASize: Integer): Boolean;
+begin
+  Result := (ParamCount = 2) and (ParamStr(1) = '--page-size') and
+    TryStrToInt(ParamStr(2), ASize) and (ASize > 0);
+  if not Result then
+    ASize := 0;
+end;
+
 // `--http <port>` selects the Streamable HTTP binding; anything else
 // (including no arguments) serves stdio.
 function HTTPPortFromArgs(out APort: Word): Boolean;
@@ -206,6 +216,7 @@ var
   Server: TMCPServer;
   Transport: TMCPHTTPServer;
   HTTPPort: Word;
+  PageSize: Integer;
 
 begin
   Server := TMCPServer.Create('pascal-mcp-sdk-demo', '0.1.0');
@@ -251,6 +262,9 @@ begin
 
     Server.RegisterResourceTemplate('mcp://pascal-mcp-sdk/shout/{text}',
       'shout', 'text/plain', ShoutReader, 'Uppercase echo of {text}');
+
+    if PageSizeFromArgs(PageSize) then
+      Server.PageSize := PageSize;
 
     if HTTPPortFromArgs(HTTPPort) then
     begin
