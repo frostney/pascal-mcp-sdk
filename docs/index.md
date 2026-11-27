@@ -35,6 +35,8 @@ Task-oriented pages for building and shipping your own MCP server:
   blobs, and RFC 6570 URI templates.
 - [Interactive UIs (MCP Apps)](guides/mcp-apps.md) — `ui://` HTML
   resources and the tools that link them.
+- [Skills](guides/skills.md) — Agent Skills served as `skill://`
+  resources with the digests hosts verify.
 - [Configuration](guides/configuration.md) — the server properties:
   instructions, caching hints, error redaction, dual-era mode.
 - [Progress and logging](guides/progress-and-logging.md) — in-request

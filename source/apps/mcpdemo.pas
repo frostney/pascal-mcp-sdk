@@ -33,6 +33,7 @@ uses
   MCP.Protocol,
   MCP.Schema,
   MCP.Server,
+  MCP.Skills,
   MCP.Transport.HTTP,
   MCP.Transport.Stdio;
 
@@ -300,6 +301,16 @@ begin
     RegisterAppResource(Server, 'ui://pascal-mcp-sdk/echo-card', 'Echo card',
       ECHO_CARD_HTML, MCPAppUiMeta([], [], [], [], [], '', 1),
       'Shows the echoed message on a card');
+
+    // Skills (#115): one skill, with an example file, that a client
+    // supporting the extension lists, verifies and loads.
+    RegisterSkill(Server, 'pascal-mcp-sdk/echo-usage',
+      TJSONObject.Create(['name', 'echo-usage', 'description',
+      'Call the echo tool and read its card', 'license', 'MIT']),
+      '# Echo usage' + #10 + #10 + 'Call `echo` with a `message`; see ' +
+      '[the example](examples/call.json).' + #10,
+      [MCPSkillFile('examples/call.json',
+      '{"name":"echo","arguments":{"message":"hi"}}' + #10)]);
 
     Server.RegisterResourceTemplate('mcp://pascal-mcp-sdk/shout/{text}',
       'shout', 'text/plain', ShoutReader, 'Uppercase echo of {text}');

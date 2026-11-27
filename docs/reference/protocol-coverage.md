@@ -18,6 +18,7 @@ the README links here.
 | Pagination | ✅ opt-in: `PageSize` pages all four list methods with opaque `nextCursor` tokens (caching fields on every modern page), and a cursor that is not one of that list's page cursors answers `-32602`; whole lists by default. Covered by the server suite and `mcpsmoke` (`mcpdemo --page-size 2` over stdio); the TypeScript batteries run `mcpdemo` unpaged |
 | Extensions | ✅ `capabilities.extensions` declared on opt-in (`DeclareExtension`); client declarations readable per request |
 | MCP Apps (`io.modelcontextprotocol/ui`) | ✅ `MCP.Apps`: `ui://` HTML resources with `_meta.ui` (CSP, permissions, domain, border), tool links with visibility, startup check of links |
+| Skills (`io.modelcontextprotocol/skills`) | ✅ `MCP.Skills`: skills defined in code as `skill://` resources, `skills/list` (paged), `skills/get`, `resources/directory/read`, SHA-256 digests and sizes, nested skills, the Agent Skills name and field rules. Loading skills from disk: not yet |
 | `notifications/progress`, `notifications/message` | ✅ `MCPReportProgress` / `MCPLogMessage` from any handler; strictly opt-in per request (`progressToken` / `logLevel`), severity-filtered, emitted before the response |
 | `_meta` validation, version negotiation | ✅ `-32602` / `-32021` / `-32022` per spec |
 | `ttlMs` / `cacheScope` caching hints (SEP-2549) | ✅ on discover/list/read, tunable via `CacheTtlMs`/`CacheScope` |
@@ -58,8 +59,11 @@ Paging, which `mcpdemo` leaves off by default, is covered by the server
 unit suite and the `mcpsmoke` pagination battery, which runs
 `mcpdemo --page-size 2` over stdio.
 The TypeScript batteries exercise the transports and the core protocol;
-they assert neither extension negotiation nor MCP Apps. Those are
-covered by the
+they assert neither extension negotiation, MCP Apps nor Skills.
+Skills is covered by the `MCP.Skills` unit suite, with digests computed
+outside Pascal, and by `mcpsmoke`, which reads `mcpdemo`'s skill back
+over stdio and checks its digest and size. The other two are covered
+by the
 `MCP.Apps` unit suite and the `mcpsmoke` checks of `mcpdemo`'s card
 over stdio: the wire data and the served HTML. No host renders the card
 in these checks.

@@ -650,10 +650,10 @@ type
     // prefix ('io.modelcontextprotocol/ui'); ASettings (owned; nil = {})
     // is the extension's settings object. Declaring again replaces it.
     procedure DeclareExtension(const AId: string; ASettings: TJSONObject = nil);
-    // Declares AId with {} unless it is declared already, so a helper
-    // that opts in never replaces settings set with DeclareExtension
-    // (#98 review).
-    procedure EnsureExtension(const AId: string);
+    // Declares AId with ASettings (owned; nil = {}) unless it is
+    // declared already, then frees them, so a helper that opts in never
+    // replaces settings set with DeclareExtension (#98 review).
+    procedure EnsureExtension(const AId: string; ASettings: TJSONObject = nil);
     // Static text read contents for resource AUri carry AMeta (owned)
     // as their _meta (MCP.Apps puts _meta.ui there).
     procedure SetResourceContentMeta(const AUri: string; AMeta: TJSONObject);
@@ -2617,11 +2617,16 @@ begin
   FExtensions.Add(AId, ASettings);
 end;
 
-procedure TMCPServer.EnsureExtension(const AId: string);
+procedure TMCPServer.EnsureExtension(const AId: string;
+  ASettings: TJSONObject);
 begin
-  EnsureMutable;
   if FExtensions.Find(AId) = nil then
-    DeclareExtension(AId);
+    DeclareExtension(AId, ASettings)
+  else
+  begin
+    ASettings.Free;
+    EnsureMutable;
+  end;
 end;
 
 procedure TMCPServer.RegisterMethod(const AMethod: string;

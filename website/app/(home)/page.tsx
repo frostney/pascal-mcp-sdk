@@ -39,7 +39,7 @@ const FAQ: { q: string; a: string; extra?: React.ReactNode }[] = [
   },
   {
     q: 'Which parts of the MCP specification are implemented?',
-    a: 'Tools, resources with RFC 6570 templates, prompts, multi-round-trip input requests (elicitation, sampling, roots), progress and log notifications, caching hints, extension negotiation with MCP Apps interactive UIs, stdio and Streamable HTTP transports, plus the classic initialize handshake era that current clients speak. Deliberately out: subscriptions/listen and list-changed notifications, since registries are static after startup.',
+    a: 'Tools, resources with RFC 6570 templates, prompts, multi-round-trip input requests (elicitation, sampling, roots), progress and log notifications, caching hints, extension negotiation with MCP Apps interactive UIs and Skills, stdio and Streamable HTTP transports, plus the classic initialize handshake era that current clients speak. Deliberately out: subscriptions/listen and list-changed notifications, since registries are static after startup.',
   },
   {
     q: 'Is this the same as tina4stack/pascal-mcp (claude-pascal-mcp) or @pascal-app/mcp?',
@@ -212,7 +212,8 @@ export default async function HomePage() {
           <Link href="/docs/reference/protocol-coverage" className="underline">
             protocol coverage
           </Link>
-          . Extension negotiation and MCP Apps interactive UIs are checked
+          . Extension negotiation, MCP Apps interactive UIs and Skills are
+          checked
           by the library&apos;s own unit and stdio tests of the wire data
           and the served page, not by a rendering host:{' '}
           <Link href="/docs/guides/mcp-apps" className="underline">
