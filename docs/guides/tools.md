@@ -7,7 +7,8 @@ name, a description the model reads, a JSON Schema for its arguments,
 and a Pascal handler. Register tools on a `TMCPServer` before serving;
 the library validates every call against the schema before your
 handler runs, turns handler exceptions into in-band errors the model
-can correct against, and stamps the protocol envelope — your handler
+can correct against (an `EMCPProtocolError` answers with its JSON-RPC
+error instead), and stamps the protocol envelope — your handler
 contains domain logic and nothing else.
 
 ## The registration model
@@ -112,7 +113,8 @@ violations with `MCPErrorResult`, not exceptions, when you want the
 model to read and correct them. Exceptions work too: an escaped
 handler exception becomes an `isError: true` result automatically
 (with the message redactable — see
-[Configuration](configuration.md#redacterrordetails)).
+[Configuration](configuration.md#redacterrordetails)); an
+`EMCPProtocolError` is the exception to that, and is never redacted.
 
 ## Annotations
 

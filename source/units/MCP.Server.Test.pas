@@ -380,7 +380,6 @@ type
     procedure TestMissingCapabilityHelper;
     procedure TestReservedCodesRefused;
     procedure TestAllowedCodesAccepted;
-    procedure TestOtherExceptionsUnchanged;
   end;
 
   // MCPImageResult: the spec's image content block, the raw-bytes
@@ -4781,14 +4780,17 @@ function RefusingReader(const AUri: string;
   const ACtx: TMCPRequestContext): TJSONArray;
 begin
   Result := nil;
-  raise EMCPProtocolError.Create(JSONRPC_INVALID_PARAMS, 'gone: ' + AUri);
+  raise EMCPProtocolError.Create(4030, 'not shared with you: ' + AUri);
 end;
 
 function RefusingTemplateReader(const AUri: string; AVars: TJSONObject;
   const ACtx: TMCPRequestContext): TJSONArray;
 begin
   Result := nil;
-  raise EMCPProtocolError.Create(4040, 'no such id ' + AVars.Get('id', ''));
+  // An application refusal: a resource that does not exist is the
+  // reader returning nil, which the server answers era-appropriately.
+  raise EMCPProtocolError.Create(4290, 'quota exhausted for ' +
+    AVars.Get('id', ''));
 end;
 
 procedure THandlerProtocolErrors.BeforeEach;
@@ -4866,7 +4868,7 @@ begin
     '"params":{"uri":"mem://refuse",' + META_MODERN + '}}', Response))
     .ToBe(True);
   Expect<string>(Response).ToBe('{ "jsonrpc" : "2.0", "id" : 7, "error" : ' +
-    '{ "code" : -32602, "message" : "gone: mem://refuse" } }');
+    '{ "code" : 4030, "message" : "not shared with you: mem://refuse" } }');
 end;
 
 procedure THandlerProtocolErrors.TestTemplateError;
@@ -4877,7 +4879,7 @@ begin
     '"params":{"uri":"mem://item/42",' + META_MODERN + '}}', Response))
     .ToBe(True);
   Expect<string>(Response).ToBe('{ "jsonrpc" : "2.0", "id" : 7, "error" : ' +
-    '{ "code" : 4040, "message" : "no such id 42" } }');
+    '{ "code" : 4290, "message" : "quota exhausted for 42" } }');
 end;
 
 procedure THandlerProtocolErrors.TestLegacyEraToolError;
@@ -4909,8 +4911,8 @@ end;
 
 procedure THandlerProtocolErrors.TestReservedCodesRefused;
 const
-  RESERVED: array[0..5] of Integer =
-    (-32000, -32002, -32019, -32020, -32022, -32099);
+  RESERVED: array[0..7] of Integer =
+    (-32768, -32604, -32000, -32002, -32019, -32020, -32022, -32099);
 var
   I: Integer;
   Raised: Boolean;
@@ -4928,13 +4930,17 @@ begin
   end;
 end;
 
+// Error-code policy verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/index#error-codes
+// and the schema's MissingRequiredClientCapabilityError.
 procedure THandlerProtocolErrors.TestAllowedCodesAccepted;
 const
-  ALLOWED: array[0..9] of Integer =
-    (-32700, -32600, -32601, -32602, -32603, -32021, -32769, -1, 0, 4040);
+  ALLOWED: array[0..8] of Integer =
+    (-32700, -32600, -32601, -32602, -32603, -32769, -1, 0, 4040);
 var
   I: Integer;
   E: EMCPProtocolError;
+  Raised: Boolean;
 begin
   for I := Low(ALLOWED) to High(ALLOWED) do
   begin
@@ -4945,18 +4951,25 @@ begin
       E.Free;
     end;
   end;
-end;
-
-procedure THandlerProtocolErrors.TestOtherExceptionsUnchanged;
-var
-  Response: TJSONObject;
-begin
-  // BoomHandler raises a plain Exception: still an in-band isError.
-  Response := Call(ToolCallLine('boom', '{}'));
-  Expect<Boolean>(Response.Find('error') = nil).ToBe(True);
-  Expect<Boolean>(TJSONData(Response.FindPath('result.isError')).AsBoolean)
-    .ToBe(True);
-  Response.Free;
+  // -32021 needs its requiredCapabilities data (#88 review).
+  Raised := False;
+  try
+    EMCPProtocolError.Create(-32021, 'missing sampling').Free;
+  except
+    on E2: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  Raised := False;
+  try
+    EMCPProtocolError.Create(-32021, 'missing',
+      TJSONObject(GetJSON('{"requiredCapabilities":{}}'))).Free;
+  except
+    on E2: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  MCPMissingCapabilityError('roots').Free;
 end;
 
 procedure THandlerProtocolErrors.SetupTests;
@@ -4968,15 +4981,13 @@ begin
   Test('typed-argument tool error', TestTypedToolError);
   Test('prompt handler error keeps its code', TestPromptError);
   Test('resource reader error keeps its code', TestResourceError);
-  Test('template reader error with an application code', TestTemplateError);
+  Test('template reader refusal with an application code', TestTemplateError);
   Test('legacy-era tools/call gets the same error', TestLegacyEraToolError);
   Test('MCPMissingCapabilityError builds -32021 with requiredCapabilities',
     TestMissingCapabilityHelper);
   Test('reserved codes refused at construction', TestReservedCodesRefused);
-  Test('JSON-RPC, -32021 and application codes accepted',
+  Test('JSON-RPC and application codes accepted; -32021 needs its data',
     TestAllowedCodesAccepted);
-  Test('other exceptions keep the isError mapping',
-    TestOtherExceptionsUnchanged);
 end;
 
 { ───────── image results ───────── }

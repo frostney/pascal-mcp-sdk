@@ -54,7 +54,7 @@ Rules live in the layer that owns them and nowhere else:
 | --- | --- | --- |
 | `MCP.JSONRPC` | Message classification (request / notification / invalid), MCP's tightened id rules (string or number, never null), batch rejection, params-must-be-object, id preservation into error replies, compact single-line serialization | MCP methods |
 | `MCP.Protocol` | The reserved `_meta` keys, the two required per-request fields (`protocolVersion`, `clientCapabilities`), `-32602` for their absence, `-32022` (+ `supported` list) for version mismatch, response-side stamping (`resultType: "complete"`, `serverInfo`) | Tools and resources |
-| `MCP.Server` | Method dispatch (`server/discover`, `tools/*`, `resources/*`, `prompts/*`), frozen registries and request-visible configuration, per-connection legacy state, cooperative cancellation, in-band vs. protocol error policy (handler exceptions → `isError: true` results; dispatch faults → JSON-RPC errors), the legacy-`initialize` rejection that names supported versions | Bytes and streams |
+| `MCP.Server` | Method dispatch (`server/discover`, `tools/*`, `resources/*`, `prompts/*`), frozen registries and request-visible configuration, per-connection legacy state, cooperative cancellation, in-band vs. protocol error policy (handler exceptions → `isError: true` results; a handler's `EMCPProtocolError` and dispatch faults → JSON-RPC errors), the legacy-`initialize` rejection that names supported versions | Bytes and streams |
 | `MCP.Schema` | The fluent builder (`ObjectSchema.AddString(...)`) and the RTTI-derived `TMCPArgs` argument classes, both emitting the JSON Schema 2020-12 subset the server enforces | Dispatch, bytes, streams |
 | `MCP.Content` | The five content block shapes tool results and prompt messages carry (text, image, audio, resource link, embedded resource) and the base64 encoding of raw-bytes payloads | Dispatch, registries, bytes and streams |
 | `MCP.Transport.Stdio` | LF-terminated writes on every platform, CR tolerance on reads, blank-line skipping, stderr-only logging, EOF as the graceful-shutdown signal | Protocol decisions — it contains not a single one |
@@ -91,7 +91,7 @@ sequenceDiagram
     Core->>Handler: dispatch (era-blind TMCPRequestContext)
     Handler--)Transport: MCPReportProgress / MCPLogMessage → sink
     Note over Transport: stdio writes notification lines…<br/>…HTTP emits SSE events on the POST response
-    Handler->>Core: result (exception → isError result)
+    Handler->>Core: result (exception → isError result; EMCPProtocolError → JSON-RPC error)
     Core->>Transport: at most one response line
     Transport->>Client: notifications first, then the response
 ```

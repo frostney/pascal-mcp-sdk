@@ -90,12 +90,12 @@ expressions):
 
 Reading an unregistered URI answers the spec's era-appropriate error:
 `-32602` for stateless-era clients, `-32002` in the classic-handshake
-dialect. Reader
-exceptions become JSON-RPC internal errors, with messages subject to
-[error redaction](configuration.md#redacterrordetails). A reader that
-raises `EMCPProtocolError` answers with its own code instead, for
-example `-32602` for a template match whose variables name nothing
-(see
+dialect. A template reader whose variables name nothing that exists
+returns `nil`, and gets the same era-appropriate answer with the URI as
+data. Reader exceptions become JSON-RPC internal errors, with messages
+subject to [error redaction](configuration.md#redacterrordetails). A
+reader that must refuse for another reason, such as access, raises
+`EMCPProtocolError` with an application code (see
 [Answering with a JSON-RPC error](../reference/server.md#answering-with-a-json-rpc-error)).
 
 > Resource behaviour (`resources/list`, `resources/read`,

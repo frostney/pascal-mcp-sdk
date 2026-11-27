@@ -587,7 +587,8 @@ type
   // Raised from a tools/call, prompts/get or resources/read handler
   // (typed and template handlers included), it becomes the error
   // response with exactly this code, message and data, in both eras;
-  // it is deliberate, so RedactErrorDetails leaves it alone. Every
+  // it is deliberate, so RedactErrorDetails leaves it alone: its message
+  // and data reach the client verbatim, so keep secrets out. Every
   // other exception keeps its mapping (tools: in-band isError;
   // prompts and resources: -32603).
   //
@@ -604,13 +605,16 @@ type
     FCode: Integer;
     FData: TJSONData;
   public
-    // Takes ownership of AData (nil for none).
+    // Takes ownership of AData (nil for none). Code -32021 needs data
+    // with a non-empty requiredCapabilities object.
     constructor Create(ACode: Integer; const AMessage: string;
       AData: TJSONData = nil);
     destructor Destroy; override;
-    // Hands the data to the caller, which then owns it (nil if none).
+    // Hands the data to the caller, which then owns it (nil if none);
+    // the dispatch wrapper uses it to put the data on the wire.
     function TakeData: TJSONData;
     property Code: Integer read FCode;
+    // Borrowed: owned by the exception until TakeData; do not free.
     property Data: TJSONData read FData;
   end;
 
@@ -1581,6 +1585,20 @@ begin
   end;
 end;
 
+// -32021's data MUST list the missing capabilities (schema
+// MissingRequiredClientCapabilityError, verified 2026-11-26).
+function IsCapabilityErrorData(AData: TJSONData): Boolean;
+var
+  Required: TJSONData;
+begin
+  Result := (AData <> nil) and (AData.JSONType = jtObject);
+  if not Result then
+    Exit;
+  Required := TJSONObject(AData).Find('requiredCapabilities');
+  Result := (Required <> nil) and (Required.JSONType = jtObject) and
+    (Required.Count > 0);
+end;
+
 constructor EMCPProtocolError.Create(ACode: Integer; const AMessage: string;
   AData: TJSONData);
 begin
@@ -1590,6 +1608,13 @@ begin
     raise EMCPServer.CreateFmt('EMCPProtocolError code %d is reserved: ' +
       'use a JSON-RPC code (-32700, -32600 to -32603), -32021, or an ' +
       'application code outside -32768..-32000', [ACode]);
+  end;
+  if (ACode = MCP_ERROR_MISSING_CLIENT_CAPABILITY) and
+    not IsCapabilityErrorData(AData) then
+  begin
+    AData.Free;
+    raise EMCPServer.Create('EMCPProtocolError -32021 needs data with a ' +
+      'non-empty requiredCapabilities object; use MCPMissingCapabilityError');
   end;
   inherited Create(AMessage);
   FCode := ACode;

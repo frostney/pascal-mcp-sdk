@@ -258,21 +258,33 @@ Raised from a `tools/call`, `prompts/get` or `resources/read` handler
 (typed and template handlers included), it becomes the error response
 with exactly that code, message and data, in both eras. It is
 deliberate, so [`RedactErrorDetails`](../guides/configuration.md#redacterrordetails)
-leaves it alone. Every other exception keeps its mapping: an `isError`
-result from a tool, `-32603` from a prompt or a resource reader.
+leaves it alone: its message and data reach the client verbatim, so
+keep secrets out of them. Every other exception keeps its mapping: an
+`isError` result from a tool, `-32603` from a prompt or a resource
+reader. `Data` is owned by the exception; do not free it.
 
 | Code | Use it for |
 | --- | --- |
-| `-32602` | Invalid params the handler rejects itself, such as an argument out of range or a `requestState` that fails verification |
-| `-32021` | A client capability the request needs and did not declare; `MCPMissingCapabilityError('sampling')` adds the spec's `data.requiredCapabilities` |
+| `-32602` | Invalid params of a prompt or resource request that the handler rejects itself, or a `requestState` the handler cannot accept. A tool's argument errors stay in-band (`MCPErrorResult`), so the model can correct them |
+| `-32021` | A client capability the request needs and did not declare; it must carry `data.requiredCapabilities`, so build it with `MCPMissingCapabilityError('sampling')` (the constructor refuses `-32021` without that data) |
 | `-32700`, `-32600`, `-32601`, `-32603` | The other JSON-RPC codes, with their JSON-RPC meanings |
 | outside `-32768..-32000` | Your application's own codes |
 
 Any other code is reserved, by the
 [specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/index#error-codes)
-or for legacy use, and the constructor raises `EMCPServer` for it. On
-the Streamable HTTP binding the status follows the code, so a
-handler-raised `-32021` answers 400.
+or for legacy use, and the constructor raises `EMCPServer` for it.
+
+A resource that does not exist is not an error to raise: return `nil`
+from the reader, and the server answers with the code the client's
+protocol revision expects (`-32602`, or `-32002` for classic-handshake
+clients) and the URI as data.
+
+On the Streamable HTTP binding the status follows the code, so a
+handler-raised `-32021` answers 400, as long as nothing has been
+streamed yet. A request that opted into progress becomes a `200` event
+stream with its first notification; an error raised after that can
+only be the stream's last event. Check capabilities before reporting
+progress.
 
 ```pascal
 if not ACtx.HasCapability('sampling') then

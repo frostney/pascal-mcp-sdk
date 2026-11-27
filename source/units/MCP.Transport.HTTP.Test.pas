@@ -95,6 +95,7 @@ type
     procedure SetupTests; override;
     procedure TestSingleJSONResponse;
     procedure TestHandlerRaisedMissingCapability400;
+    procedure TestRefusalAfterProgressEndsTheStream;
     procedure TestBareDiscoverProbe;
     procedure TestNotificationAccepted;
     procedure TestMalformedNotificationAccepted;
@@ -149,6 +150,15 @@ function QuietHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
   Result := MCPTextResult('quiet');
+end;
+
+// Reports progress, then raises -32021: the stream is open by then.
+function ProgressThenRefuseHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  MCPReportProgress(ACtx, 0.5, 1.0, 'halfway');
+  Result := Default(TMCPToolResult);
+  raise MCPMissingCapabilityError('sampling');
 end;
 
 // Raises the -32021 a handler decides itself (#88).
@@ -227,6 +237,8 @@ begin
   FServer.RegisterTool('quiet', 'Quiet', '{"type":"object"}', QuietHandler);
   FServer.RegisterTool('needs_sampling', 'Needs sampling', '{"type":"object"}',
     NeedsSamplingHandler);
+  FServer.RegisterTool('late_refusal', 'Refuses late', '{"type":"object"}',
+    ProgressThenRefuseHandler);
   FTransport := TMCPHTTPServer.Create(FServer);
   FTransport.Port := FindFreePort;
   FBaseUrl := 'http://127.0.0.1:' + IntToStr(FTransport.Port);
@@ -411,6 +423,23 @@ begin
     'needs_sampling', Body);
   Expect<Integer>(Status).ToBe(400);
   Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32021);
+end;
+
+procedure THTTPBinding.TestRefusalAfterProgressEndsTheStream;
+var
+  Body, ContentType: string;
+  Status: Integer;
+begin
+  // Once progress has opened the stream the status is 200 for good:
+  // the error is its last event (documented; check capabilities first).
+  Status := Exchange('POST', '/mcp',
+    CallLine(3, 'late_refusal', META_MODERN_STREAMING),
+    [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+     HeaderPair('Mcp-Method', 'tools/call'),
+     HeaderPair('Mcp-Name', 'late_refusal')], Body, ContentType);
+  Expect<Integer>(Status).ToBe(200);
+  Expect<string>(ContentType).ToBe('text/event-stream');
+  Expect<Boolean>(Pos('"code" : -32021', Body) > 0).ToBe(True);
 end;
 
 procedure THTTPBinding.TestBareDiscoverProbe;
@@ -864,6 +893,8 @@ begin
   Test('bare server/discover probe served without headers',
     TestBareDiscoverProbe);
   Test('handler-raised -32021 → 400', TestHandlerRaisedMissingCapability400);
+  Test('refusal after streamed progress → last SSE event under 200',
+    TestRefusalAfterProgressEndsTheStream);
   Test('notification → 202, no body', TestNotificationAccepted);
   Test('malformed notification dropped → 202',
     TestMalformedNotificationAccepted);
