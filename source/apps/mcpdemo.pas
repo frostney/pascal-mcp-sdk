@@ -39,7 +39,7 @@ uses
 const
   // A minimal MCP App view. It opens with the View handshake the host
   // waits for (ui/initialize, then ui/notifications/initialized once the
-  // host accepts it, a failure line if it refuses; ext-apps
+  // host answers with a result, a failure line otherwise; ext-apps
   // specification 2026-01-26, lifecycle, verified 2026-11-27), shows the
   // text of the tool result the host sends
   // (ui/notifications/tool-result), and answers ui/resource-teardown.
@@ -53,7 +53,9 @@ const
     'const send=m=>parent.postMessage(Object.assign({jsonrpc:"2.0"},m),"*");' +
     'addEventListener("message",e=>{const m=e.data;' +
     'if(e.source!==parent||!m)return;' +
-    'if(m.id===1&&!ready&&!m.method){if(m.error){' +
+    'if(m.id===1&&!ready&&!m.method){' +
+    'const r=m.result;if(m.jsonrpc!=="2.0"||!r||typeof r!=="object"||' +
+    'typeof r.protocolVersion!=="string"){' +
     'out.textContent="The host refused this view";return;}' +
     'ready=true;send({method:"ui/notifications/initialized",params:{}});' +
     'return;}' +

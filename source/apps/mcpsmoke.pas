@@ -764,8 +764,8 @@ begin
     Check((Pos('ui/initialize', ResponseLine) > 0) and
       (Pos('ui/notifications/initialized', ResponseLine) > 0) and
       (Pos('ui/resource-teardown', ResponseLine) > 0),
-      'MCP Apps: the card sends ui/initialize, then initialized, and ' +
-      'answers teardown');
+      'MCP Apps: the served card names ui/initialize, initialized and ' +
+      'teardown (its behavior runs only in a host)');
     Response.Free;
 
     // resources/list + read.

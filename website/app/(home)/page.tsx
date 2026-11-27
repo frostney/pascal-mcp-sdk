@@ -206,13 +206,15 @@ export default async function HomePage() {
         </div>
         <p className="mt-3 text-sm text-fd-muted-foreground text-center">
           The 2026-07-28 protocol surface — everything except
-          subscriptions — is implemented and interop-tested against both
-          official MCP TypeScript clients; see{' '}
+          subscriptions — is implemented, and its core operations are
+          interop-tested against both official MCP TypeScript clients;
+          see{' '}
           <Link href="/docs/reference/protocol-coverage" className="underline">
             protocol coverage
           </Link>
-          . MCP Apps interactive UIs come on top, checked by unit and stdio
-          tests of the wire data and the served page:{' '}
+          . Extension negotiation and MCP Apps interactive UIs are checked
+          by the library&apos;s own unit and stdio tests of the wire data
+          and the served page, not by a rendering host:{' '}
           <Link href="/docs/guides/mcp-apps" className="underline">
             Interactive UIs →
           </Link>

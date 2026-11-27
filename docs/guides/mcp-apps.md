@@ -31,10 +31,12 @@ Server.RegisterTool('get_weather', 'Current weather for a city',
 ```
 
 - `RegisterAppResource` registers a resource with the media type
-  `text/html;profile=mcp-app`. The URI must use `ui://`. Its
-  `_meta.ui` goes on the resource's declaration and on what
-  `resources/read` returns. A second overload takes a reader that builds
-  its contents with `MCPAppContents`.
+  `text/html;profile=mcp-app`. The URI must use `ui://`. For static
+  HTML, its `_meta.ui` goes on the resource's declaration and on what
+  `resources/read` returns. A second overload takes a reader instead;
+  there the `_meta.ui` you register goes on the declaration only, so
+  the reader passes the `_meta.ui` its read result should carry to
+  `MCPAppContents`.
 - `MCPAppUiMeta` builds `_meta.ui`: the content security policy's
   domain lists (empty lists keep the client's restrictive default:
   no external connections, scripts and styles only from the page),
@@ -56,7 +58,10 @@ unless you declared it with your own settings already; nothing is
 declared otherwise. A tool linked with `.AppResource` to a `ui://` URI
 that is not registered, or registered with another media type than
 `text/html;profile=mcp-app`, fails when the server starts. Linking the
-same tool again replaces its earlier link.
+same tool again replaces its earlier link. Startup checks the link as
+`tools/list` sends it, so a later `.Meta('ui', ...)` or
+`.Meta('ui/resourceUri', ...)` on that tool must name the same
+registered resource in both keys.
 
 ## Keep the text result
 

@@ -58,6 +58,7 @@ type
     procedure TestEachOptInDeclares;
     procedure TestLinkedResourceMediaType;
     procedure TestRelinkReplacesRequirement;
+    procedure TestLaterMetaChecked;
   end;
 
 function WeatherHandler(AArguments: TJSONObject;
@@ -84,6 +85,23 @@ begin
   Result := MCPTextResult(BoolToStr(MCPClientRendersApps(ACtx), 'renders',
     'does not render') + '|' + BoolToStr(ACtx.HasExtension(MCP_APPS_EXTENSION),
     'declared', 'undeclared'));
+end;
+
+// What a handler sees of the client's Apps declaration: the first of
+// its mimeTypes, or 'no ui'.
+function SettingsHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Types: TJSONArray;
+begin
+  if not ACtx.HasExtension(MCP_APPS_EXTENSION) then
+    Exit(MCPTextResult('no ui'));
+  Types := ACtx.ExtensionSettings(MCP_APPS_EXTENSION).Get('mimeTypes',
+    TJSONArray(nil));
+  if (Types = nil) or (Types.Count = 0) then
+    Result := MCPTextResult('ui without mimeTypes')
+  else
+    Result := MCPTextResult('ui ' + Types.Items[0].AsString);
 end;
 
 function DynamicReader(const AUri: string;
@@ -273,6 +291,48 @@ begin
   Options.AppResource('ui://old', []);
   Options.AppResource('ui://new', []);
   Expect<string>(StartupError(FServer)).ToBe('');
+  // Both keys go out with the final link.
+  Expect<Boolean>(Pos('"_meta" : { "ui" : { "resourceUri" : "ui://new" }, ' +
+    '"ui/resourceUri" : "ui://new" }', Send('{"jsonrpc":"2.0","id":1,' +
+    '"method":"tools/list","params":{' + META_PLAIN_CLIENT + '}}')) > 0)
+    .ToBe(True);
+end;
+
+// Startup checks the link as it goes out: a later .Meta that changes
+// either key is checked too (#98 review).
+procedure TAppsSuite.TestLaterMetaChecked;
+var
+  Server: TMCPServer;
+begin
+  RegisterAppResource(FServer, 'ui://a', 'a', HTML);
+  FServer.RegisterTool('split', 'Split', '{"type":"object"}', PlainHandler)
+    .AppResource('ui://a', [])
+    .Meta('ui', TJSONObject(GetJSON('{"resourceUri":"ui://b"}')));
+  Expect<string>(StartupError(FServer)).ToBe('Tool "split" links "ui://b" ' +
+    'at _meta.ui.resourceUri but "ui://a" at _meta.ui/resourceUri');
+  Server := TMCPServer.Create('moved', '1');
+  try
+    RegisterAppResource(Server, 'ui://a', 'a', HTML);
+    Server.RegisterTool('moved', 'Moved', '{"type":"object"}', PlainHandler)
+      .AppResource('ui://a', [])
+      .Meta('ui', TJSONObject(GetJSON('{"resourceUri":"ui://b"}')))
+      .Meta('ui/resourceUri', TJSONString.Create('ui://b'));
+    Expect<string>(StartupError(Server)).ToBe('Tool "moved" needs resource ' +
+      '"ui://b", which is not registered');
+  finally
+    Server.Free;
+  end;
+  Server := TMCPServer.Create('dropped', '1');
+  try
+    RegisterAppResource(Server, 'ui://a', 'a', HTML);
+    Server.RegisterTool('dropped', 'Dropped', '{"type":"object"}', PlainHandler)
+      .AppResource('ui://a', [])
+      .Meta('ui', TJSONObject(GetJSON('{"prefersBorder":true}')));
+    Expect<string>(StartupError(Server)).ToBe('Tool "dropped" has no link ' +
+      'at _meta.ui.resourceUri');
+  finally
+    Server.Free;
+  end;
 end;
 
 procedure TAppsSuite.TestClientExtensionSettings;
@@ -323,12 +383,32 @@ begin
   GuardServer.DeclareExtension('no-prefix');
 end;
 
+procedure EmptyPrefixLabel;
+begin
+  GuardServer.DeclareExtension('com..example/feature');
+end;
+
+procedure SlashInName;
+begin
+  GuardServer.DeclareExtension('com.example/feature/name');
+end;
+
+procedure NameStartsWithHyphen;
+begin
+  GuardServer.DeclareExtension('com.example/-feature');
+end;
+
 procedure TAppsSuite.TestGuards;
 begin
   GuardServer := FServer;
   Expect<Boolean>(RaisesServerError(NonUiUri)).ToBe(True);
   Expect<Boolean>(RaisesServerError(BadVisibility)).ToBe(True);
   Expect<Boolean>(RaisesServerError(BadExtensionId)).ToBe(True);
+  // A bad prefix label, and a name with a character the _meta rules
+  // leave out, each on its own.
+  Expect<Boolean>(RaisesServerError(EmptyPrefixLabel)).ToBe(True);
+  Expect<Boolean>(RaisesServerError(SlashInName)).ToBe(True);
+  Expect<Boolean>(RaisesServerError(NameStartsWithHyphen)).ToBe(True);
   GuardServer := nil;
 end;
 
@@ -371,8 +451,10 @@ const
   end;
 
 begin
-  FServer.RegisterTool('plain', 'Plain', '{"type":"object"}', PlainHandler);
-  Expect<Boolean>(Pos('"text" : "ui"', Classic(Self, '{"extensions":{' +
+  FServer.RegisterTool('plain', 'Plain', '{"type":"object"}', SettingsHandler);
+  // The settings reach the handler, not just the declaration.
+  Expect<Boolean>(Pos('"text" : "ui text/html;profile=mcp-app"', Classic(Self,
+    '{"extensions":{' +
     '"io.modelcontextprotocol/ui":{"mimeTypes":["text/html;profile=mcp-app"]}}}')) > 0)
     .ToBe(True);
   Expect<Boolean>(Pos('"text" : "no ui"', Classic(Self, '{}')) > 0).ToBe(True);
@@ -491,6 +573,8 @@ begin
     TestLinkedResourceMediaType);
   Test('linking a tool again replaces its earlier link',
     TestRelinkReplacesRequirement);
+  Test('a later .Meta that changes the link is checked at startup',
+    TestLaterMetaChecked);
   Test('non-ui:// URIs, bad visibility and bad extension ids refused',
     TestGuards);
 end;

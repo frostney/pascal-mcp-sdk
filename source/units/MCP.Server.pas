@@ -366,6 +366,15 @@ type
     function Icon(const ASrc: string; const AMimeType: string = '';
       const ASizes: string = ''; const ATheme: string = ''): TMCPToolOptions;
     function Meta(const AKey: string; AValue: TJSONData): TMCPToolOptions;
+    // Makes startup (the first CreateSession) require that each of
+    // AMetaPaths ('.'-separated keys under the tool's _meta) holds the
+    // same string, the URI of a registered resource declared with media
+    // type AMimeType unless that is ''. Startup reads the tool's final
+    // _meta, so it checks the link that goes out, after any later .Meta.
+    // A second call replaces the first. MCP.Apps requires each linked UI
+    // resource this way.
+    function RequireLinkedResource(const AMetaPaths: array of string;
+      const AMimeType: string = ''): TMCPToolOptions;
     // The server the tool belongs to and the tool's name, for helpers
     // that extend these options (MCP.Apps).
     property Server: TMCPServer read FServer;
@@ -465,8 +474,11 @@ type
     FIdentity: TJSONObject; // owned: holds the server's icons (#96)
     FExtensions: TJSONObject; // owned: capabilities.extensions (#98)
     // Resources that must be registered at startup, and who needs each.
+    // Tool links startup checks (TMCPToolOptions.RequireLinkedResource).
     FRequiredResources: array of record
-      Uri, Who, MimeType: string;
+      Definition: TJSONObject; // borrowed: the tool's, owned by FTools
+      Paths: TStringArray;
+      MimeType: string;
     end;
     FInstructions: string;
     FCacheTtlMs: Integer;
@@ -634,14 +646,6 @@ type
     // that opts in never replaces settings set with DeclareExtension
     // (#98 review).
     procedure EnsureExtension(const AId: string);
-    // At startup (the first CreateSession), AUri must be a registered
-    // resource, declared with media type AMimeType unless that is '';
-    // AWho names what needs it in the error EMCPServer raises
-    // otherwise. A second call with the same AWho replaces the first, so
-    // a corrected link is what startup checks. MCP.Apps requires each
-    // tool's linked UI resource, with the app media type.
-    procedure RequireResource(const AUri, AWho: string;
-      const AMimeType: string = '');
     // Static text read contents for resource AUri carry AMeta (owned)
     // as their _meta (MCP.Apps puts _meta.ui there).
     procedure SetResourceContentMeta(const AUri: string; AMeta: TJSONObject);
@@ -2224,17 +2228,28 @@ begin
       Reason);
 end;
 
-// Only the links a helper declared (RequireResource): a tool's own
-// _meta may hold any URI. MCP Apps says the linked resource "MUST exist
-// on the server" (ext-apps specification 2026-01-26, verified
+// Only the links a helper declared (RequireLinkedResource): a tool's
+// own _meta may hold any URI. MCP Apps says the linked resource "MUST
+// exist on the server" (ext-apps specification 2026-01-26, verified
 // 2026-11-26).
 procedure TMCPServer.CheckRequiredResources;
 var
-  I, Index: Integer;
+  I, J, Index: Integer;
+  Who, Uri, Value: string;
 begin
   for I := 0 to High(FRequiredResources) do
     with FRequiredResources[I] do
     begin
+      Who := 'Tool "' + Definition.Get('name', '') + '"';
+      for J := 0 to High(Paths) do
+        if not MetaPathString(Definition, Paths[J], Value) then
+          raise EMCPServer.CreateFmt('%s has no link at _meta.%s',
+            [Who, Paths[J]])
+        else if J = 0 then
+          Uri := Value
+        else if Value <> Uri then
+          raise EMCPServer.CreateFmt('%s links "%s" at _meta.%s but "%s" ' +
+            'at _meta.%s', [Who, Uri, Paths[0], Value, Paths[J]]);
       Index := FindResource(Uri);
       if Index < 0 then
         raise EMCPServer.CreateFmt('%s needs resource "%s", which is not ' +
@@ -2249,20 +2264,29 @@ begin
     end;
 end;
 
-procedure TMCPServer.RequireResource(const AUri, AWho, AMimeType: string);
+function TMCPToolOptions.RequireLinkedResource(
+  const AMetaPaths: array of string; const AMimeType: string): TMCPToolOptions;
 var
-  Slot: Integer;
+  Slot, I: Integer;
 begin
-  EnsureMutable;
+  FServer.EnsureMutable;
+  if Length(AMetaPaths) = 0 then
+    raise EMCPServer.Create('RequireLinkedResource needs a _meta path');
   Slot := 0;
-  while (Slot < Length(FRequiredResources)) and
-    (FRequiredResources[Slot].Who <> AWho) do
+  while (Slot < Length(FServer.FRequiredResources)) and
+    (FServer.FRequiredResources[Slot].Definition <> FDefinition) do
     Inc(Slot);
-  if Slot = Length(FRequiredResources) then
-    SetLength(FRequiredResources, Slot + 1);
-  FRequiredResources[Slot].Uri := AUri;
-  FRequiredResources[Slot].Who := AWho;
-  FRequiredResources[Slot].MimeType := AMimeType;
+  if Slot = Length(FServer.FRequiredResources) then
+    SetLength(FServer.FRequiredResources, Slot + 1);
+  with FServer.FRequiredResources[Slot] do
+  begin
+    Definition := FDefinition;
+    SetLength(Paths, Length(AMetaPaths));
+    for I := 0 to High(AMetaPaths) do
+      Paths[I] := AMetaPaths[I];
+    MimeType := AMimeType;
+  end;
+  Result := Self;
 end;
 
 function TMCPToolOptions.ToolName: string;

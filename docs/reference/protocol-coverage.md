@@ -41,7 +41,7 @@ Spec facts verified against the official
 resources, versioning, `server/discover` — are collected in the
 architecture page's
 [Spec grounding](../internals/architecture.md#spec-grounding)), and
-the implemented surface **interop-tested against both
+the core protocol surface **interop-tested against both
 official MCP TypeScript clients**: the stable v2 client
 (`@modelcontextprotocol/client` 2.0.0, pinned + auto-probe modes, over
 stdio and Streamable HTTP, including MRTR auto-fulfilment) and the v1
@@ -57,8 +57,9 @@ the grounding notes.
 Paging, which `mcpdemo` leaves off by default, is covered by the server
 unit suite and the `mcpsmoke` pagination battery, which runs
 `mcpdemo --page-size 2` over stdio.
-The TypeScript batteries exercise the transports and the core protocol,
-not MCP Apps. Apps and extension negotiation are covered by the
+The TypeScript batteries exercise the transports and the core protocol;
+they assert neither extension negotiation nor MCP Apps. Those are
+covered by the
 `MCP.Apps` unit suite and the `mcpsmoke` checks of `mcpdemo`'s card
 over stdio: the wire data and the served HTML. No host renders the card
 in these checks.

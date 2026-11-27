@@ -148,8 +148,6 @@ end;
 // so static and reader-backed apps serialize alike.
 function MCPAppContents(const AUri, AHtml: string;
   AUiMeta: TJSONObject): TJSONArray;
-var
-  Meta: TJSONObject;
 begin
   try
     Result := MCPTextContents(AUri, MCP_APP_MIME_TYPE, AHtml);
@@ -157,12 +155,8 @@ begin
     AUiMeta.Free;
     raise;
   end;
-  if AUiMeta = nil then
-    Exit;
-  Meta := TJSONObject.Create;
-  TJSONObject(Result.Items[0]).Add('_meta', Meta);
-  NilChildrenToNull(AUiMeta);
-  Meta.Add('ui', AUiMeta);
+  if AUiMeta <> nil then
+    SetMetaEntry(TJSONObject(Result.Items[0]), 'ui', AUiMeta);
 end;
 
 function MCPClientRendersApps(const ACtx: TMCPRequestContext): Boolean;
@@ -264,9 +258,11 @@ begin
     end;
     Ui.Add('visibility', Visibility);
   end;
-  Result := Meta('ui', Ui).Meta('ui/resourceUri', TJSONString.Create(AUri));
-  // This link, not any _meta.ui a tool carries, is what startup checks.
-  Server.RequireResource(AUri, 'Tool "' + ToolName + '"', MCP_APP_MIME_TYPE);
+  // Startup checks both keys as they finally go out; a tool's own
+  // _meta.ui, without this link, is not checked.
+  Result := Meta('ui', Ui).Meta('ui/resourceUri', TJSONString.Create(AUri))
+    .RequireLinkedResource(['ui.resourceUri', 'ui/resourceUri'],
+    MCP_APP_MIME_TYPE);
   Server.EnsureExtension(MCP_APPS_EXTENSION);
 end;
 
