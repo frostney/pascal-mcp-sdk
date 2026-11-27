@@ -25,8 +25,8 @@ Server.RegisterTool('greet', 'Greet someone by name',
 The schema can be declared four ways — pick per tool, they coexist on
 one server:
 
-- **Fluent builder** — `ObjectSchema.AddString(...).AddNumber(...)`
-  for the flat object schemas most tools need. See
+- **Fluent builder** — `ObjectSchema.AddString(...).AddNumber(...)`,
+  with enums, defaults, arrays and nested objects. See
   [Schemas](schemas.md).
 - **Typed argument class** — a `TMCPArgs` descendant whose published
   properties *are* the schema; the handler receives a populated,

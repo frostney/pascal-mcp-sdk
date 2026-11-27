@@ -3,10 +3,10 @@
 ## Executive Summary
 
 Tool schemas are written in Pascal, not JSON. The fluent builder
-(`ObjectSchema.AddString(...)`) covers the flat object schemas most
-tools need; **argument classes** (`TMCPArgs` descendants) go further —
-the class *is* the schema, expanded via RTTI, and your handler
-receives a populated, validated instance. Richer schemas use the raw
+(`ObjectSchema.AddString(...)`) covers scalars, enums, defaults,
+arrays and nested objects; **argument classes** (`TMCPArgs`
+descendants) go further — the class *is* the schema, expanded via
+RTTI, and your handler receives a populated, validated instance. Richer schemas use the raw
 JSON-string or definition-object overloads, validated at registration
 against the subset the server can enforce.
 
@@ -25,10 +25,33 @@ Server.RegisterTool('search', 'Search the product catalog',
 
 - `AddString`, `AddNumber`, `AddInteger`, `AddBoolean` — one call per
   property, each with an optional description.
-- Properties are **required by default**; pass `False` as the third
-  argument to make one optional.
-- The builder emits the JSON Schema 2020-12 subset the server
-  enforces, so calls are validated against exactly what you declared.
+- `AddEnum('mode', ['fast', 'thorough'])` — a string limited to the
+  listed values.
+- `AddArray('tags', 'string')` — an array of a primitive type
+  (`string`, `number`, `integer`, `boolean`); `AddArray('points',
+  ObjectSchema.AddNumber('x').AddNumber('y'))` — an array of objects.
+- `AddObject('opts', ObjectSchema.AddBoolean('dry'))` — a nested
+  object, built from another builder.
+- `.WithDefault(...)` after a primitive property gives it a default
+  (string, integer, float or boolean) and makes it optional; the server
+  seeds the default into arguments that leave it out. A default that
+  does not fit its property (another type, a value outside the enum, a
+  second default, or an array or object property) raises `EMCPSchema`.
+- Properties are **required by default**; pass `False` as the
+  `ARequired` argument to make one optional: the third argument of
+  `AddString`, `AddNumber`, `AddInteger` and `AddBoolean`, the fourth of
+  `AddEnum`, `AddArray` and `AddObject`, after their description.
+
+```pascal
+ObjectSchema
+  .AddString('query', 'Search terms')
+  .AddEnum('sort', ['relevance', 'date']).WithDefault('relevance')
+  .AddArray('tags', 'string', 'Only results with these tags', False)
+  .AddObject('page', ObjectSchema.AddInteger('size').WithDefault(20), '', False)
+```
+
+The builder emits the JSON Schema 2020-12 subset the server enforces,
+so calls are validated against exactly what you declared.
 
 An output schema can be passed alongside the input schema — the
 two-schema `RegisterTool` overloads — declaring the shape of your
@@ -75,7 +98,45 @@ results before the handler runs; unknown keys are ignored.
 **Type mapping.** Published properties map to JSON Schema types:
 string kinds → `string`, floats → `number`, integer kinds →
 `integer`, `Boolean` → `boolean`, and enums → `string` with the enum
-names as allowed values.
+names as allowed values. A dynamic array of `string`, `Integer`,
+`Int64`, `Double` or `Boolean` (for example `TStringArray`) → an
+`array` of that type, and a property whose type is another `TMCPArgs`
+descendant → a nested `object`, bound recursively:
+
+```pascal
+type
+  TPaging = class(TMCPArgs)
+  private
+    FSize: Integer;
+  published
+    property size: Integer read FSize write FSize default 20;
+  end;
+
+  TSearchArgs = class(TMCPArgs)
+  private
+    FQuery: string;
+    FTags: TStringArray;
+    FPage: TPaging;
+  published
+    property query: string read FQuery write FQuery;
+    property tags: TStringArray read FTags write FTags stored False;
+    property page: TPaging read FPage write FPage stored False;
+  end;
+```
+
+The instance owns its nested objects and frees them. Array and nested
+object properties must read and write the same field (`read FTags write
+FTags`), not a method or two different fields. Integer elements of a
+subrange type (`-100..100`) bind only inside it, as integer properties
+do. Binding replaces a nested object your
+constructor made, freeing it unless another property still holds it;
+an optional nested property the client left out keeps what your
+constructor put there, which is `nil` unless it made one. An explicit
+`null` is refused, as the schema says `object`. Integer properties and
+elements accept a number with no fractional part (`2.0`), as the
+schema subset does. `SchemaFrom`, binding and `MCPSerialize` all stop
+at 16 levels of nesting. Binding errors name the path, such as
+`Argument "page.size" must be an integer`.
 
 **Optionality** uses the standard property directives:
 
@@ -119,9 +180,9 @@ Server.RegisterTool('add', 'Add two numbers', TAddArgs, TSumResult,
 ## Raw schemas
 
 For schemas beyond what the builder or RTTI can express — `$ref`,
-nested objects, titles and annotations, per-property descriptions —
-register the JSON directly, as a string or a `TJSONObject`
-definition:
+composition (`anyOf`, `oneOf`), formats, patterns, titles and other
+annotations — register the JSON directly, as a string or a
+`TJSONObject` definition:
 
 ```pascal
 Server.RegisterTool('greet_user',

@@ -1,8 +1,8 @@
 unit MCP.Schema;
 
 // Tool schemas expressed as Pascal instead of hand-written JSON
-// strings — a JSON Schema 2020-12 subset (type/properties/
-// description/required) via two paths:
+// strings — a JSON Schema 2020-12 subset (type, properties, required,
+// items, enum, default, description) via two paths:
 //
 // 1. The fluent builder, when you want descriptions or optionals:
 //
@@ -31,7 +31,9 @@ unit MCP.Schema;
 //    {a,b: number}, required:[a,b]} from the published properties:
 //    string kinds → "string", floats → "number", integer kinds →
 //    "integer", Boolean → "boolean", enums → "string" with the enum
-//    names as allowed values. All published properties are required.
+//    names as allowed values, field-backed dynamic arrays → "array",
+//    TMCPArgs properties → nested objects (#95). Published properties
+//    are required unless a directive says otherwise (see SchemaFrom).
 //
 //    Classes, not records: FPC 3.2.2 record RTTI enumerates every
 //    field's offset and type (verified empirically) but carries NO
@@ -88,6 +90,9 @@ type
   TMCPArgs = class(TObject)
   public
     constructor Create; virtual;
+    // Frees the nested TMCPArgs objects its published properties hold
+    // (#95); do not free those yourself.
+    destructor Destroy; override;
   end;
 
   TMCPArgsClass = class of TMCPArgs;
@@ -105,6 +110,8 @@ type
     FRoot: TJSONObject;
     FProperties: TJSONObject; // borrowed: owned by FRoot
     FRequired: TJSONArray;    // owned here until Build attaches it
+    FLast: TJSONObject;       // borrowed: the property added last
+    FLastName: string;
   public
     destructor Destroy; override;
   end;
@@ -120,6 +127,10 @@ type
     function ActiveCore: TMCPSchemaCore;
     function AddProperty(const AName, AJsonType, ADescription: string;
       ARequired: Boolean): TMCPSchema;
+    // Adds AProperty (ownership transfers) under AName.
+    function AddPropertySchema(const AName: string; AProperty: TJSONObject;
+      const ADescription: string; ARequired: Boolean): TMCPSchema;
+    function SetDefault(AValue: TJSONData): TMCPSchema;
   public
     function AddString(const AName: string; const ADescription: string = '';
       ARequired: Boolean = True): TMCPSchema;
@@ -129,6 +140,24 @@ type
       ARequired: Boolean = True): TMCPSchema;
     function AddBoolean(const AName: string; const ADescription: string = '';
       ARequired: Boolean = True): TMCPSchema;
+    // A string limited to AValues (#95).
+    function AddEnum(const AName: string; const AValues: array of string;
+      const ADescription: string = ''; ARequired: Boolean = True): TMCPSchema;
+    // An array of AItemType ('string', 'number', 'integer' or 'boolean').
+    function AddArray(const AName, AItemType: string;
+      const ADescription: string = ''; ARequired: Boolean = True): TMCPSchema; overload;
+    // An array of objects shaped by AItems (built and consumed here).
+    function AddArray(const AName: string; constref AItems: TMCPSchema;
+      const ADescription: string = ''; ARequired: Boolean = True): TMCPSchema; overload;
+    // A nested object shaped by ASchema (built and consumed here).
+    function AddObject(const AName: string; constref ASchema: TMCPSchema;
+      const ADescription: string = ''; ARequired: Boolean = True): TMCPSchema;
+    // A default for the property added last, which then becomes
+    // optional: the server seeds the default into arguments that omit it.
+    function WithDefault(const AValue: string): TMCPSchema; overload;
+    function WithDefault(AValue: Int64): TMCPSchema; overload;
+    function WithDefault(AValue: Double): TMCPSchema; overload;
+    function WithDefault(AValue: Boolean): TMCPSchema; overload;
 
     // Finalizes the schema (attaches "required" when non-empty) and
     // transfers ownership. The record must not be used afterwards.
@@ -140,7 +169,8 @@ function ObjectSchema: TMCPSchema;
 
 // Derive a schema from AClass's published properties (see the unit
 // header for the type mapping). Raises EMCPSchema for property kinds
-// with no JSON Schema mapping (objects, arrays, sets, ...).
+// with no JSON Schema mapping (sets, records, classes that are not
+// TMCPArgs, arrays of other element types or behind methods, ...).
 //
 // Optionality comes from standard property directives:
 //   property retries: Integer ... default 3;   → optional, "default": 3
@@ -161,6 +191,15 @@ function MCPPropIsOptional(AInstance: TObject; AProp: PPropInfo): Boolean;
 // structured-output path — MCPStructuredResult(text, instance) —
 // pairs this with SchemaFrom(outputClass).
 function MCPSerialize(AObj: TMCPArgs): TJSONObject;
+
+// Instantiate AClass and fill its published properties from
+// AArguments, nested argument objects and arrays included (#95).
+// Missing required or mistyped arguments give False with AError set,
+// naming the nested path ('Argument "opts.limit" must be an integer');
+// the caller turns that into an in-band isError result. AArguments is
+// borrowed; AInstance belongs to the caller on success.
+function MCPBindArguments(AClass: TMCPArgsClass; AArguments: TJSONObject;
+  out AInstance: TMCPArgs; out AError: string): Boolean;
 
 // Compact JSON number node for wire output. fpjson's default float
 // serialization is full-precision exponent form
@@ -278,8 +317,187 @@ begin
   Result := QWord(LongWord(GetOrdProp(AInstance, AProp)));
 end;
 
-function SchemaFrom(AClass: TMCPArgsClass): TMCPSchema;
+// The JSON item type a published dynamic array maps to: 'string',
+// 'number', 'boolean', 'integer' (LongInt elements) or 'int64' (Int64
+// elements, also JSON integers); '' for an element type with no
+// mapping.
+function ArrayItemType(AArrayType: PTypeInfo): string; forward;
+
+// Whether AProp reads and writes one and the same field: no accessor
+// method runs, and what binding writes is what a handler reads (#95
+// review).
+function ReadsAndWritesOneField(AProp: PPropInfo): Boolean;
+begin
+  Result := ((AProp^.PropProcs and 3) = ptField) and
+    (((AProp^.PropProcs shr 2) and 3) = ptField) and
+    (AProp^.GetProc = AProp^.SetProc);
+end;
+
+// The JSON item type of the published dynamic-array property AProp,
+// checked for every use (schema, binding, serialization, #95 review):
+// the element type must have a mapping, and the property must read and
+// write the same field (ReadsAndWritesOneField), since a getter method's
+// fresh array is finalized before its pointer can be used (FPC 3.2.2
+// GetDynArrayProp). Raises EMCPSchema otherwise.
+function CheckedArrayItemType(AProp: PPropInfo;
+  const AClassName: string): string;
+begin
+  Result := ArrayItemType(AProp^.PropType);
+  if Result = '' then
+    raise EMCPSchema.CreateFmt('Array property "%s" of %s has no JSON ' +
+      'Schema mapping (element types: string, Integer, Int64, Double, ' +
+      'Boolean)', [AProp^.Name, AClassName]);
+  if not ReadsAndWritesOneField(AProp) then
+    raise EMCPSchema.CreateFmt('Array property "%s" of %s must read and ' +
+      'write the same field, not a method', [AProp^.Name, AClassName]);
+end;
+
+// The nested argument class of the published class property AProp;
+// raises EMCPSchema when it is not a TMCPArgs descendant.
+function CheckedArgsClass(AProp: PPropInfo;
+  const AClassName: string): TMCPArgsClass;
 var
+  PropClass: TClass;
+begin
+  PropClass := GetTypeData(AProp^.PropType)^.ClassType;
+  if not PropClass.InheritsFrom(TMCPArgs) then
+    raise EMCPSchema.CreateFmt('Object property "%s" of %s must be a ' +
+      'TMCPArgs descendant', [AProp^.Name, AClassName]);
+  // The instance owns its nested objects; a field read and written
+  // directly keeps replacement and destruction to one rule (#95 review).
+  if not ReadsAndWritesOneField(AProp) then
+    raise EMCPSchema.CreateFmt('Object property "%s" of %s must read and ' +
+      'write the same field, not a method', [AProp^.Name, AClassName]);
+  Result := TMCPArgsClass(PropClass);
+end;
+
+function ArrayItemType(AArrayType: PTypeInfo): string;
+var
+  Element: PTypeInfo;
+begin
+  Result := '';
+  Element := GetTypeData(AArrayType)^.ElType2;
+  if Element = nil then
+    Exit;
+  case Element^.Kind of
+    tkAString:
+      Result := 'string';
+    tkFloat:
+      if GetTypeData(Element)^.FloatType = ftDouble then
+        Result := 'number';
+    tkBool:
+      if GetTypeData(Element)^.OrdType = otUByte then
+        Result := 'boolean';
+    tkInteger:
+      if GetTypeData(Element)^.OrdType = otSLong then
+        Result := 'integer';
+    tkInt64:
+      Result := 'int64';
+  end;
+end;
+
+// Whether AProp holds a nested argument object its instance owns: a
+// TMCPArgs-descendant property backed by one field (CheckedArgsClass's
+// rule). Only these are read during ownership scans, so no getter runs
+// and no foreign object is freed (#95 review).
+function OwnsNested(AProp: PPropInfo): Boolean;
+begin
+  Result := (AProp^.PropType^.Kind = tkClass) and
+    GetTypeData(AProp^.PropType)^.ClassType.InheritsFrom(TMCPArgs) and
+    ReadsAndWritesOneField(AProp);
+end;
+
+// Whether an owned nested property of AInstance before AIndex holds
+// AObject. Compares references only: AObject may already be freed.
+function HeldByEarlier(AInstance: TObject; AProps: PPropList; AIndex: Integer;
+  AObject: TObject): Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to AIndex - 1 do
+    if OwnsNested(AProps^[I]) and
+      (GetObjectProp(AInstance, AProps^[I]) = AObject) then
+      Exit(True);
+  Result := False;
+end;
+
+// Whether an owned nested property of AInstance other than AProp holds
+// AObject.
+function HeldElsewhere(AInstance: TObject; AProp: PPropInfo;
+  AObject: TObject): Boolean;
+var
+  Info: PTypeInfo;
+  Props: PPropList;
+  Count, I: Integer;
+begin
+  Result := False;
+  Info := PTypeInfo(AInstance.ClassInfo);
+  Count := GetTypeData(Info)^.PropCount;
+  GetMem(Props, Count * SizeOf(Pointer));
+  try
+    GetPropInfos(Info, Props);
+    for I := 0 to Count - 1 do
+      if (Props^[I] <> AProp) and OwnsNested(Props^[I]) and
+        (GetObjectProp(AInstance, Props^[I]) = AObject) then
+        Exit(True);
+  finally
+    FreeMem(Props);
+  end;
+end;
+
+destructor TMCPArgs.Destroy;
+var
+  Info: PTypeInfo;
+  Props: PPropList;
+  Count, I: Integer;
+  Nested: TObject;
+begin
+  // Nested argument objects (#95) belong to the instance that holds
+  // them: the binder creates them, so the parent frees them.
+  Info := PTypeInfo(ClassInfo);
+  Count := GetTypeData(Info)^.PropCount;
+  if Count > 0 then
+  begin
+    GetMem(Props, Count * SizeOf(Pointer));
+    try
+      GetPropInfos(Info, Props);
+      for I := 0 to Count - 1 do
+        if OwnsNested(Props^[I]) then
+        begin
+          Nested := GetObjectProp(Self, Props^[I]);
+          // Freed once even when two properties hold the same object:
+          // the earlier-reference check runs first, on the reference
+          // alone, before anything touches the object.
+          if (Nested <> nil) and not HeldByEarlier(Self, Props, I,
+            Nested) then
+            Nested.Free;
+        end;
+    finally
+      FreeMem(Props);
+    end;
+  end;
+  inherited Destroy;
+end;
+
+const
+  // Guards against an argument class that contains itself.
+  MAX_NESTING = 16;
+
+function SchemaFromAt(AClass: TMCPArgsClass; ADepth: Integer): TMCPSchema; forward;
+
+function NestedSchema(AClass: TMCPArgsClass; ADepth: Integer): TJSONObject;
+begin
+  Result := SchemaFromAt(AClass, ADepth).Build;
+end;
+
+function SchemaFrom(AClass: TMCPArgsClass): TMCPSchema;
+begin
+  Result := SchemaFromAt(AClass, 0);
+end;
+
+function SchemaFromAt(AClass: TMCPArgsClass; ADepth: Integer): TMCPSchema;
+var
+  ItemType: string;
   Info: PTypeInfo;
   Props: PPropList;
   Count, I, E: Integer;
@@ -288,6 +506,7 @@ var
   EnumValues: TJSONArray;
   PropObj: TJSONObject;
   Probe: TMCPArgs;
+  NestedClass: TMCPArgsClass;
   Req: Boolean;
 begin
   Result := ObjectSchema;
@@ -316,6 +535,23 @@ begin
           Result := Result.AddInteger(Prop^.Name, '', Req);
         tkBool:
           Result := Result.AddBoolean(Prop^.Name, '', Req);
+        tkDynArray:
+          begin
+            ItemType := CheckedArrayItemType(Prop, AClass.ClassName);
+            if ItemType = 'int64' then
+              ItemType := 'integer';
+            Result := Result.AddArray(Prop^.Name, ItemType, '', Req);
+          end;
+        tkClass:
+          begin
+            NestedClass := CheckedArgsClass(Prop, AClass.ClassName);
+            if ADepth >= MAX_NESTING then
+              raise EMCPSchema.CreateFmt('Argument classes nest deeper ' +
+                'than %d levels at "%s" of %s', [MAX_NESTING, Prop^.Name,
+                AClass.ClassName]);
+            Result := Result.AddPropertySchema(Prop^.Name,
+              NestedSchema(NestedClass, ADepth + 1), '', Req);
+          end;
         tkEnumeration:
           begin
             // Enums map to a string with the enum names as the
@@ -335,7 +571,8 @@ begin
         // result record goes out of scope during unwinding.
         raise EMCPSchema.CreateFmt(
           'Property "%s" of %s has no JSON Schema mapping ' +
-          '(supported: string, float, integer, boolean, enum)',
+          '(supported: string, float, integer, boolean, enum, ' +
+          'dynamic array, TMCPArgs object)',
           [Prop^.Name, AClass.ClassName]);
       end;
       if MCPPropHasDefault(Prop) then
@@ -742,8 +979,40 @@ begin
     Result := TMCPWireFloat.Create(AValue);
 end;
 
-function MCPSerialize(AObj: TMCPArgs): TJSONObject;
+// A published dynamic array as a JSON array.
+function SerializeArray(AObj: TMCPArgs; AProp: PPropInfo): TJSONArray;
 var
+  Raw: Pointer;
+  ItemType: string;
+  I: Integer;
+begin
+  // Checked first: a field-backed property's array outlives the read,
+  // and an unmapped element type is never read as another (#95 review).
+  ItemType := CheckedArrayItemType(AProp, AObj.ClassName);
+  Raw := GetDynArrayProp(AObj, AProp);
+  Result := TJSONArray.Create;
+  try
+    for I := 0 to DynArraySize(Raw) - 1 do
+      if ItemType = 'string' then
+        Result.Add(PAnsiString(Raw)[I])
+      else if ItemType = 'number' then
+        Result.Add(WireFloatNode(PDouble(Raw)[I]))
+      else if ItemType = 'boolean' then
+        Result.Add(PBoolean(Raw)[I])
+      else if ItemType = 'integer' then
+        Result.Add(PLongInt(Raw)[I])
+      else
+        Result.Add(PInt64(Raw)[I]);
+  except
+    // A NaN element has no JSON form: free the partial array.
+    Result.Free;
+    raise;
+  end;
+end;
+
+function SerializeAt(AObj: TMCPArgs; ADepth: Integer): TJSONObject;
+var
+  Nested: TObject;
   Info: PTypeInfo;
   Props: PPropList;
   Count, I: Integer;
@@ -783,6 +1052,25 @@ begin
             Result.Add(Prop^.Name, GetOrdProp(AObj, Prop) <> 0);
           tkEnumeration:
             Result.Add(Prop^.Name, GetEnumProp(AObj, Prop));
+          tkDynArray:
+            Result.Add(Prop^.Name, SerializeArray(AObj, Prop));
+          tkClass:
+            begin
+              // Checked as SchemaFrom and the binder check it, so an
+              // unmapped class raises instead of vanishing (#95 review);
+              // read once, and an absent (nil) one is left out.
+              CheckedArgsClass(Prop, AObj.ClassName);
+              Nested := GetObjectProp(AObj, Prop);
+              if Nested <> nil then
+              begin
+                if ADepth >= MAX_NESTING then
+                  raise EMCPSchema.CreateFmt('Argument objects nest deeper ' +
+                    'than %d levels at "%s" of %s', [MAX_NESTING, Prop^.Name,
+                    AObj.ClassName]);
+                Result.Add(Prop^.Name, SerializeAt(TMCPArgs(Nested),
+                  ADepth + 1));
+              end;
+            end;
         else
           raise EMCPSchema.CreateFmt(
             'Property "%s" of %s has no JSON mapping',
@@ -798,6 +1086,11 @@ begin
   finally
     FreeMem(Props);
   end;
+end;
+
+function MCPSerialize(AObj: TMCPArgs): TJSONObject;
+begin
+  Result := SerializeAt(AObj, 0);
 end;
 
 destructor TMCPSchemaCore.Destroy;
@@ -839,21 +1132,154 @@ end;
 function TMCPSchema.AddProperty(const AName, AJsonType, ADescription: string;
   ARequired: Boolean): TMCPSchema;
 var
-  Core: TMCPSchemaCore;
   Prop: TJSONObject;
 begin
-  Core := ActiveCore;
-  if Core.FProperties.IndexOfName(AName) >= 0 then
-    raise EMCPSchema.CreateFmt(
-      'Schema property "%s" is already defined', [AName]);
   Prop := TJSONObject.Create;
   Prop.Add('type', AJsonType);
-  if ADescription <> '' then
-    Prop.Add('description', ADescription);
-  Core.FProperties.Add(AName, Prop);
+  // One place for the name, required and last-property rules.
+  Result := AddPropertySchema(AName, Prop, ADescription, ARequired);
+end;
+
+function TMCPSchema.AddPropertySchema(const AName: string;
+  AProperty: TJSONObject; const ADescription: string;
+  ARequired: Boolean): TMCPSchema;
+var
+  Core: TMCPSchemaCore;
+begin
+  Core := FCore;
+  if (Core = nil) or (Core.FRoot = nil) then
+  begin
+    AProperty.Free;
+    Core := ActiveCore; // raises
+  end;
+  if Core.FProperties.IndexOfName(AName) >= 0 then
+  begin
+    AProperty.Free;
+    raise EMCPSchema.CreateFmt(
+      'Schema property "%s" is already defined', [AName]);
+  end;
+  if (ADescription <> '') and (AProperty.Find('description') = nil) then
+    AProperty.Add('description', ADescription);
+  Core.FProperties.Add(AName, AProperty);
   if ARequired then
     Core.FRequired.Add(AName);
+  Core.FLast := AProperty;
+  Core.FLastName := AName;
   Result := Self;
+end;
+
+function TMCPSchema.AddEnum(const AName: string; const AValues: array of string;
+  const ADescription: string; ARequired: Boolean): TMCPSchema;
+var
+  Prop: TJSONObject;
+  Values: TJSONArray;
+  I: Integer;
+begin
+  if Length(AValues) = 0 then
+    raise EMCPSchema.CreateFmt('Enum property "%s" needs values', [AName]);
+  Values := TJSONArray.Create;
+  for I := 0 to High(AValues) do
+    Values.Add(AValues[I]);
+  Prop := TJSONObject.Create;
+  Prop.Add('type', 'string');
+  Prop.Add('enum', Values);
+  Result := AddPropertySchema(AName, Prop, ADescription, ARequired);
+end;
+
+function TMCPSchema.AddArray(const AName, AItemType: string;
+  const ADescription: string; ARequired: Boolean): TMCPSchema;
+var
+  Prop, Items: TJSONObject;
+begin
+  if (AItemType <> 'string') and (AItemType <> 'number') and
+    (AItemType <> 'integer') and (AItemType <> 'boolean') then
+    raise EMCPSchema.CreateFmt('Array property "%s" item type "%s" must be ' +
+      'string, number, integer or boolean', [AName, AItemType]);
+  Items := TJSONObject.Create;
+  Items.Add('type', AItemType);
+  Prop := TJSONObject.Create;
+  Prop.Add('type', 'array');
+  Prop.Add('items', Items);
+  Result := AddPropertySchema(AName, Prop, ADescription, ARequired);
+end;
+
+function TMCPSchema.AddArray(const AName: string; constref AItems: TMCPSchema;
+  const ADescription: string; ARequired: Boolean): TMCPSchema;
+var
+  Prop, Items: TJSONObject;
+begin
+  // Built first: if AItems was already built, nothing is left over.
+  Items := AItems.Build;
+  Prop := TJSONObject.Create;
+  Prop.Add('type', 'array');
+  Prop.Add('items', Items);
+  Result := AddPropertySchema(AName, Prop, ADescription, ARequired);
+end;
+
+function TMCPSchema.AddObject(const AName: string; constref ASchema: TMCPSchema;
+  const ADescription: string; ARequired: Boolean): TMCPSchema;
+begin
+  Result := AddPropertySchema(AName, ASchema.Build, ADescription, ARequired);
+end;
+
+function TMCPSchema.SetDefault(AValue: TJSONData): TMCPSchema;
+var
+  Core: TMCPSchemaCore;
+  I: Integer;
+  Problem: string;
+begin
+  Core := FCore;
+  if (Core = nil) or (Core.FRoot = nil) or (Core.FLast = nil) then
+  begin
+    AValue.Free;
+    if (Core <> nil) and (Core.FRoot <> nil) then
+      raise EMCPSchema.Create('WithDefault needs a property added before it');
+    Core := ActiveCore; // raises
+  end;
+  // The default must fit its property, or the server either refuses
+  // the schema at startup or silently skips seeding it (#95 review).
+  Problem := '';
+  if (Core.FLast.Get('type', '') = 'object') or
+    (Core.FLast.Get('type', '') = 'array') then
+    Problem := 'defaults apply to primitive properties'
+  else if Core.FLast.Find('default') <> nil then
+    Problem := 'it already has a default'
+  else if not MCPValidateAgainstSchema(Core.FLast, AValue, 'default', False,
+    Problem) then
+    Problem := 'the default does not fit it (' + Problem + ')'
+  else
+    Problem := '';
+  if Problem <> '' then
+  begin
+    AValue.Free;
+    raise EMCPSchema.CreateFmt('Property "%s": %s', [Core.FLastName,
+      Problem]);
+  end;
+  Core.FLast.Add('default', AValue);
+  for I := Core.FRequired.Count - 1 downto 0 do
+    if Core.FRequired[I].AsString = Core.FLastName then
+      Core.FRequired.Delete(I);
+  Result := Self;
+end;
+
+function TMCPSchema.WithDefault(const AValue: string): TMCPSchema;
+begin
+  Result := SetDefault(TJSONString.Create(AValue));
+end;
+
+function TMCPSchema.WithDefault(AValue: Int64): TMCPSchema;
+begin
+  Result := SetDefault(TJSONInt64Number.Create(AValue));
+end;
+
+function TMCPSchema.WithDefault(AValue: Double): TMCPSchema;
+begin
+  Result := SetDefault(MCPWireNumber(AValue));
+end;
+
+function TMCPSchema.WithDefault(AValue: Boolean): TMCPSchema;
+begin
+  Result := SetDefault(TJSONBoolean.Create(AValue));
 end;
 
 function TMCPSchema.AddString(const AName: string; const ADescription: string;
@@ -895,6 +1321,414 @@ begin
   Core.FRoot := nil;
   Core.FProperties := nil;
   Core.FRequired := nil;
+  Core.FLast := nil;
+end;
+
+
+{ ───────── argument binding (moved from MCP.Server; #95) ───────── }
+
+function BindObject(AClass: TMCPArgsClass; AArguments: TJSONObject;
+  const APrefix: string; ADepth: Integer; out AInstance: TMCPArgs;
+  out AError: string): Boolean; forward;
+function IsFiniteNumber(AValue: TJSONData): Boolean; forward;
+function MemberIndex(AObject: TJSONObject; const AName: string): Integer;
+  forward;
+
+function JoinPath(const APath, AName: string): string; forward;
+function IsIntegralNumber(AValue: TJSONData): Boolean; forward;
+function MatchesType(AValue: TJSONData; const AType: string): Boolean;
+  forward;
+
+// A JSON integer as Int64. A float with no fractional part (2.0, 2e0)
+// counts as JSON Schema's integer does, within +-2^53 (IsIntegralNumber),
+// so binding agrees with the subset validator (#95 review).
+function ReadSignedInteger(AValue: TJSONData; out AResult: Int64): Boolean;
+var
+  UnsignedValue: QWord;
+begin
+  Result := (AValue.JSONType = jtNumber) and IsIntegralNumber(AValue);
+  if not Result then
+    Exit;
+  if TJSONNumber(AValue).NumberType = ntFloat then
+  begin
+    AResult := Trunc(AValue.AsFloat); // within 2^53: exact, no overflow
+    Exit;
+  end;
+  if TJSONNumber(AValue).NumberType = ntQWord then
+  begin
+    UnsignedValue := AValue.AsQWord;
+    if UnsignedValue > QWord(High(Int64)) then
+      Exit(False);
+    AResult := Int64(UnsignedValue);
+  end
+  else
+    AResult := AValue.AsInt64;
+end;
+
+function ReadUnsignedInteger(AValue: TJSONData; out AResult: QWord): Boolean;
+var
+  SignedValue: Int64;
+begin
+  Result := (AValue.JSONType = jtNumber) and IsIntegralNumber(AValue);
+  if not Result then
+    Exit;
+  if TJSONNumber(AValue).NumberType = ntFloat then
+  begin
+    SignedValue := Trunc(AValue.AsFloat); // within 2^53
+    if SignedValue < 0 then
+      Exit(False);
+    AResult := QWord(SignedValue);
+    Exit;
+  end;
+  if TJSONNumber(AValue).NumberType = ntQWord then
+    AResult := AValue.AsQWord
+  else
+  begin
+    SignedValue := AValue.AsInt64;
+    if SignedValue < 0 then
+      Exit(False);
+    AResult := QWord(SignedValue);
+  end;
+end;
+
+function Mismatch(const APath, AExpected: string; out AError: string): Boolean;
+begin
+  AError := Format('Argument "%s" must be %s', [APath, AExpected]);
+  Result := False;
+end;
+
+// 'a string', 'an integer', ... for an ArrayItemType result.
+function ItemPhrase(const AItemType: string): string;
+begin
+  if (AItemType = 'integer') or (AItemType = 'int64') then
+    Result := 'an integer'
+  else
+    Result := 'a ' + AItemType;
+end;
+
+// Whether a JSON array item fits AItemType (an ArrayItemType result); an
+// integer item's value comes back in ASigned. An item stored as nil is a
+// null: wrong for every element type.
+function ItemAccepted(AItem: TJSONData; const AItemType: string;
+  const AMinimum, AMaximum: Int64; out ASigned: Int64): Boolean;
+begin
+  ASigned := 0;
+  if AItem = nil then
+    Exit(False);
+  if (AItemType <> 'integer') and (AItemType <> 'int64') then
+    Exit(MatchesType(AItem, AItemType));
+  Result := ReadSignedInteger(AItem, ASigned) and (ASigned >= AMinimum) and
+    (ASigned <= AMaximum);
+end;
+
+// The declared bounds of an integer element type, so a subrange such as
+// -100..100 binds only values inside it, as a flat property does (#95
+// review).
+procedure ElementBounds(AProp: PPropInfo; const AItemType: string;
+  out AMinimum, AMaximum: Int64);
+var
+  Element: PTypeData;
+begin
+  AMinimum := Low(Int64);
+  AMaximum := High(Int64);
+  Element := GetTypeData(GetTypeData(AProp^.PropType)^.ElType2);
+  if AItemType = 'integer' then
+  begin
+    AMinimum := Element^.MinValue;
+    AMaximum := Element^.MaxValue;
+  end
+  else if AItemType = 'int64' then
+  begin
+    AMinimum := Element^.MinInt64Value;
+    AMaximum := Element^.MaxInt64Value;
+  end;
+end;
+
+type
+  // The bound items of one array, in the field its element type uses.
+  TBoundItems = record
+    ItemType: string;
+    Strings: array of string;
+    Integers: array of LongInt;
+    Int64s: array of Int64;
+    Doubles: array of Double;
+    Booleans: array of Boolean;
+  end;
+
+// Sized once for the item count (#95 review).
+procedure SizeItems(var AItems: TBoundItems; ACount: Integer);
+begin
+  if AItems.ItemType = 'string' then
+    SetLength(AItems.Strings, ACount)
+  else if AItems.ItemType = 'number' then
+    SetLength(AItems.Doubles, ACount)
+  else if AItems.ItemType = 'boolean' then
+    SetLength(AItems.Booleans, ACount)
+  else if AItems.ItemType = 'integer' then
+    SetLength(AItems.Integers, ACount)
+  else
+    SetLength(AItems.Int64s, ACount);
+end;
+
+// Store one item that ItemAccepted passed.
+procedure StoreItem(var AItems: TBoundItems; AIndex: Integer; AItem: TJSONData;
+  ASigned: Int64);
+begin
+  if AItems.ItemType = 'string' then
+    AItems.Strings[AIndex] := AItem.AsString
+  else if AItems.ItemType = 'number' then
+    AItems.Doubles[AIndex] := AItem.AsFloat
+  else if AItems.ItemType = 'boolean' then
+    AItems.Booleans[AIndex] := AItem.AsBoolean
+  else if AItems.ItemType = 'integer' then
+    AItems.Integers[AIndex] := LongInt(ASigned)
+  else // 'int64', the one type left after CheckedArrayItemType
+    AItems.Int64s[AIndex] := ASigned;
+end;
+
+procedure PublishItems(AInstance: TMCPArgs; AProp: PPropInfo;
+  const AItems: TBoundItems);
+begin
+  if AItems.ItemType = 'string' then
+    SetDynArrayProp(AInstance, AProp, Pointer(AItems.Strings))
+  else if AItems.ItemType = 'number' then
+    SetDynArrayProp(AInstance, AProp, Pointer(AItems.Doubles))
+  else if AItems.ItemType = 'boolean' then
+    SetDynArrayProp(AInstance, AProp, Pointer(AItems.Booleans))
+  else if AItems.ItemType = 'integer' then
+    SetDynArrayProp(AInstance, AProp, Pointer(AItems.Integers))
+  else
+    SetDynArrayProp(AInstance, AProp, Pointer(AItems.Int64s));
+end;
+
+// A JSON array into a published dynamic array of one of the supported
+// element types (see ArrayItemType).
+function BindArray(AInstance: TMCPArgs; AProp: PPropInfo; AValue: TJSONData;
+  const APath: string; out AError: string): Boolean;
+var
+  Items: TBoundItems;
+  I: Integer;
+  Signed, Minimum, Maximum: Int64;
+begin
+  Result := True;
+  Items.ItemType := CheckedArrayItemType(AProp, AInstance.ClassName);
+  if AValue.JSONType <> jtArray then
+    Exit(Mismatch(APath, 'an array', AError));
+  ElementBounds(AProp, Items.ItemType, Minimum, Maximum);
+  SizeItems(Items, AValue.Count);
+  for I := 0 to AValue.Count - 1 do
+  begin
+    if not ItemAccepted(AValue.Items[I], Items.ItemType, Minimum, Maximum,
+      Signed) then
+      Exit(Mismatch(Format('%s[%d]', [APath, I]), ItemPhrase(Items.ItemType),
+        AError));
+    StoreItem(Items, I, AValue.Items[I], Signed);
+  end;
+  PublishItems(AInstance, AProp, Items);
+end;
+
+procedure SetQWordProperty(AInstance: TMCPArgs; AProp: PPropInfo;
+  const AValue: QWord);
+var
+  SignedBits: Int64;
+begin
+  // FPC 3.2.2 has tkQWord RTTI but exposes only signed Int64 property
+  // accessors. Pass the unsigned value's bits through unchanged.
+  Move(AValue, SignedBits, SizeOf(SignedBits));
+  SetInt64Prop(AInstance, AProp, SignedBits);
+end;
+
+// An integer property of any width, inside its declared range.
+function BindInteger(AInstance: TMCPArgs; AProp: PPropInfo; AValue: TJSONData;
+  const APath: string; out AError: string): Boolean;
+var
+  TypeData: PTypeData;
+  SignedValue: Int64;
+  UnsignedValue, Minimum, Maximum: QWord;
+begin
+  Result := True;
+  case AProp^.PropType^.Kind of
+    tkInteger:
+      begin
+        TypeData := GetTypeData(AProp^.PropType);
+        if TypeData^.OrdType in [otUByte, otUWord, otULong] then
+        begin
+          if not ReadUnsignedInteger(AValue, UnsignedValue) then
+            Exit(Mismatch(APath, 'an integer', AError));
+          Minimum := QWord(LongWord(TypeData^.MinValue));
+          Maximum := QWord(LongWord(TypeData^.MaxValue));
+          if (UnsignedValue < Minimum) or (UnsignedValue > Maximum) then
+            Exit(Mismatch(APath, 'an integer', AError));
+          SetOrdProp(AInstance, AProp, Int64(UnsignedValue));
+        end
+        else
+        begin
+          if not ReadSignedInteger(AValue, SignedValue) or
+            (SignedValue < TypeData^.MinValue) or
+            (SignedValue > TypeData^.MaxValue) then
+            Exit(Mismatch(APath, 'an integer', AError));
+          SetOrdProp(AInstance, AProp, SignedValue);
+        end;
+      end;
+    tkInt64:
+      // Inside the declared range, as tkInteger is (#95 review).
+      if ReadSignedInteger(AValue, SignedValue) and
+        (SignedValue >= GetTypeData(AProp^.PropType)^.MinInt64Value) and
+        (SignedValue <= GetTypeData(AProp^.PropType)^.MaxInt64Value) then
+        SetInt64Prop(AInstance, AProp, SignedValue)
+      else
+        Exit(Mismatch(APath, 'an integer', AError));
+    tkQWord:
+      if ReadUnsignedInteger(AValue, UnsignedValue) then
+        SetQWordProperty(AInstance, AProp, UnsignedValue)
+      else
+        Exit(Mismatch(APath, 'an integer', AError));
+  end;
+end;
+
+// Populate one published property from its JSON argument. False (with
+// AError set) on a type mismatch. APath names the argument in errors.
+function BindProperty(AInstance: TMCPArgs; AProp: PPropInfo;
+  AValue: TJSONData; const APath: string; ADepth: Integer;
+  out AError: string): Boolean;
+var
+  Nested: TMCPArgs;
+  NestedClass: TMCPArgsClass;
+  Previous: TObject;
+begin
+  Result := True;
+  case AProp^.PropType^.Kind of
+    tkSString, tkLString, tkAString, tkWString, tkUString:
+      if AValue.JSONType = jtString then
+        SetStrProp(AInstance, AProp, AValue.AsString)
+      else
+        Exit(Mismatch(APath, 'a string', AError));
+    tkFloat:
+      // A built NaN or infinity is no JSON number (#95 review).
+      if (AValue.JSONType = jtNumber) and IsFiniteNumber(AValue) then
+        SetFloatProp(AInstance, AProp, AValue.AsFloat)
+      else
+        Exit(Mismatch(APath, 'a number', AError));
+    tkInteger, tkInt64, tkQWord:
+      Exit(BindInteger(AInstance, AProp, AValue, APath, AError));
+    tkBool:
+      if AValue.JSONType = jtBoolean then
+        SetOrdProp(AInstance, AProp, Ord(AValue.AsBoolean))
+      else
+        Exit(Mismatch(APath, 'a boolean', AError));
+    tkEnumeration:
+      if (AValue.JSONType = jtString) and
+        (GetEnumValue(AProp^.PropType, AValue.AsString) >= 0) then
+        SetEnumProp(AInstance, AProp, AValue.AsString)
+      else
+        Exit(Mismatch(APath, 'a string from the declared enum values', AError));
+    tkDynArray:
+      Exit(BindArray(AInstance, AProp, AValue, APath, AError));
+    tkClass:
+      begin
+        NestedClass := CheckedArgsClass(AProp, AInstance.ClassName);
+        if AValue.JSONType <> jtObject then
+          Exit(Mismatch(APath, 'an object', AError));
+        if not BindObject(NestedClass, TJSONObject(AValue), APath,
+          ADepth + 1, Nested, AError) then
+          Exit(False);
+        // The instance owns its nested objects (TMCPArgs.Destroy): one
+        // its constructor made is replaced and freed unless another
+        // property still holds it. Field-backed (CheckedArgsClass), so
+        // neither the read nor the write runs code that could raise.
+        Previous := GetObjectProp(AInstance, AProp);
+        SetObjectProp(AInstance, AProp, Nested);
+        if (Previous <> nil) and (Previous <> Nested) and
+          not HeldElsewhere(AInstance, AProp, Previous) then
+          Previous.Free;
+      end;
+  else
+    // Unmappable kinds cannot get here: SchemaFrom rejected them at
+    // registration.
+    Exit(Mismatch(APath, 'a supported type', AError));
+  end;
+end;
+
+// BindProperty for a member or item that may be stored as nil, which
+// is a JSON null and goes through the same checks as a parsed one.
+function BindValue(AInstance: TMCPArgs; AProp: PPropInfo; AValue: TJSONData;
+  const APath: string; ADepth: Integer; out AError: string): Boolean;
+var
+  Null: TJSONNull;
+begin
+  if AValue <> nil then
+    Exit(BindProperty(AInstance, AProp, AValue, APath, ADepth, AError));
+  Null := TJSONNull.Create;
+  try
+    Result := BindProperty(AInstance, AProp, Null, APath, ADepth, AError);
+  finally
+    Null.Free;
+  end;
+end;
+
+function BindObject(AClass: TMCPArgsClass; AArguments: TJSONObject;
+  const APrefix: string; ADepth: Integer; out AInstance: TMCPArgs;
+  out AError: string): Boolean;
+var
+  Info: PTypeInfo;
+  Props: PPropList;
+  Count, I, Index: Integer;
+  Value: TJSONData;
+begin
+  Result := False;
+  AError := '';
+  AInstance := nil;
+  // The same bound SchemaFrom puts on registered classes, for direct
+  // callers too.
+  if ADepth > MAX_NESTING then
+    raise EMCPSchema.CreateFmt('Argument classes nest deeper than %d ' +
+      'levels at "%s"', [MAX_NESTING, APrefix]);
+  AInstance := AClass.Create;
+  Info := PTypeInfo(AClass.ClassInfo);
+  Count := GetTypeData(Info)^.PropCount;
+  if Count = 0 then
+    Exit(True);
+  GetMem(Props, Count * SizeOf(Pointer));
+  try
+    GetPropInfos(Info, Props);
+    for I := 0 to Count - 1 do
+    begin
+      // A present null is a value, not an omission: for a nested object
+      // it fails the type check like any other non-object (#95 review).
+      // MemberIndex also sees a member stored as nil, a built null.
+      Index := MemberIndex(AArguments, Props^[I]^.Name);
+      if Index < 0 then
+      begin
+        // The `default` directive is streaming metadata, not field
+        // initialization — seed it explicitly. `stored False`
+        // properties simply stay zero-initialized.
+        if MCPPropHasDefault(Props^[I]) then
+          SetOrdProp(AInstance, Props^[I], Props^[I]^.Default)
+        else if IsStoredProp(AInstance, Props^[I]) then
+        begin
+          AError := Format('Missing required argument "%s"',
+            [JoinPath(APrefix, Props^[I]^.Name)]);
+          Exit(False);
+        end;
+        Continue;
+      end;
+      Value := AArguments.Items[Index];
+      if not BindValue(AInstance, Props^[I], Value,
+        JoinPath(APrefix, Props^[I]^.Name), ADepth, AError) then
+        Exit(False);
+    end;
+    Result := True;
+  finally
+    FreeMem(Props);
+    if not Result then
+      FreeAndNil(AInstance);
+  end;
+end;
+
+function MCPBindArguments(AClass: TMCPArgsClass; AArguments: TJSONObject;
+  out AInstance: TMCPArgs; out AError: string): Boolean;
+begin
+  Result := BindObject(AClass, AArguments, '', 0, AInstance, AError);
 end;
 
 
@@ -1225,28 +2059,22 @@ begin
     (not IsNan(AValue.AsFloat) and not IsInfinite(AValue.AsFloat));
 end;
 
+const
+  // The schema type each JSON type satisfies; 'integer' is checked apart.
+  JSON_TYPE_NAMES: array[TJSONtype] of string = ('', 'number', 'string',
+    'boolean', 'null', 'array', 'object');
+
 // AValue nil is a member or item stored as nil, which fpjson writes as
-// null: it is JSON null here too.
+// null: it is JSON null here too. AType is one of the subset's types.
 function MatchesType(AValue: TJSONData; const AType: string): Boolean;
 begin
   if AValue = nil then
-    Result := AType = 'null'
-  else if AType = 'string' then
-    Result := AValue.JSONType = jtString
-  else if AType = 'number' then
-    Result := (AValue.JSONType = jtNumber) and IsFiniteNumber(AValue)
-  else if AType = 'integer' then
-    Result := (AValue.JSONType = jtNumber) and IsIntegralNumber(AValue)
-  else if AType = 'boolean' then
-    Result := AValue.JSONType = jtBoolean
-  else if AType = 'null' then
-    Result := AValue.JSONType = jtNull
-  else if AType = 'object' then
-    Result := AValue.JSONType = jtObject
-  else
-    Result := AValue.JSONType = jtArray;
+    Exit(AType = 'null');
+  if AType = 'integer' then
+    Exit((AValue.JSONType = jtNumber) and IsIntegralNumber(AValue));
+  Result := (AType <> '') and (JSON_TYPE_NAMES[AValue.JSONType] = AType) and
+    ((AValue.JSONType <> jtNumber) or IsFiniteNumber(AValue));
 end;
-
 // Equal primitive JSON values: same JSON type and the same text (for
 // numbers, the same numeric value).
 function SamePrimitive(A, B: TJSONData): Boolean;

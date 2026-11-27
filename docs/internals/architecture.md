@@ -176,8 +176,8 @@ and class-based hosts (lantaarn) register naturally.
 Tool schemas come from `MCP.Schema` in two forms:
 
 - **The fluent builder** — `ObjectSchema.AddString(...)...`, a JSON
-  Schema 2020-12 subset covering the flat object schemas most tools
-  need, with input and output schema overloads.
+  Schema 2020-12 subset covering scalars, enums, defaults, arrays and
+  nested objects, with input and output schema overloads.
 - **Argument classes** — `TMCPArgs` descendants whose published
   properties expand into the schema via RTTI (`SchemaFrom`), with the
   server binding, validating, and populating a typed instance per call
