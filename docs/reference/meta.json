@@ -5,7 +5,7 @@
     "server",
     "results",
     "client-requests",
-    "testing",
+    "test-client",
     "protocol-coverage"
   ]
 }

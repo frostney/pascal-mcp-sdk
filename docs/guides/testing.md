@@ -131,12 +131,14 @@ FClient.ClientName := 'my-suite';
 
 `Notifications` holds the lines the last call emitted, in order,
 across every input round it answered. Set `ProgressToken` or `LogLevel`
-to opt every request into progress or log messages:
+to opt every request into progress or log messages. With the
+cookbook's [`echo`](cookbook.md#a-tool-with-progress-and-log-notifications)
+registered, which reports progress twice and logs once:
 
 ```pascal
 FClient.ProgressToken := 't1';
 FClient.LogLevel := 'info';
-Response := FClient.CallTool('import');
+Response := FClient.CallTool('echo', '{"message":"hi"}');
 Response.Free;
 Expect<Integer>(FClient.Notifications.Count).ToBe(3);
 ```
@@ -149,18 +151,26 @@ asserting bytes on the wire.
 A tool that asks for input returns `input_required`. Give the client
 canned answers, keyed like the tool's input requests, and `CallTool`
 or `GetPrompt` answers each round and retries with the echoed
-`requestState` until the result is complete, at most ten times:
+`requestState` until the result is complete, at most ten times. With
+the cookbook's [`greet_user`](cookbook.md#a-tool-that-asks-the-user-something-mrtr)
+registered:
 
 ```pascal
 FClient.SetClientCapabilities('{"elicitation":{}}');
 FClient.AnswerInput('who', '{"action":"accept","content":{"name":"Ada"}}');
-Response := FClient.CallTool('greet_user');   // "Hello, Ada!"
+Response := FClient.CallTool('greet_user');
+try
+  Expect<string>(Response.FindPath('result.content[0].text').AsString)
+    .ToBe('Hello, Ada!');
+finally
+  Response.Free;
+end;
 ```
 
 Without an answer for a requested key, or after ten rounds, the latest
 `input_required` response comes back as it is, so you can assert on
 what the tool asked for. The full API is in the
-[test client reference](../reference/testing.md).
+[test client reference](../reference/test-client.md).
 
 ## What it does not cover
 

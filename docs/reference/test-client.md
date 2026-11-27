@@ -41,9 +41,9 @@ property Session: TMCPSession;             // owned by the client
 | `AnswerInput` | A canned response for the input request `AKey` of an `input_required` round, as the response JSON a client would send; replaces an earlier one for the key |
 | `ClearInputAnswers` | Forgets every canned response |
 | `Request` | One request with the `_meta` envelope added to `AParamsJson` (an object); a key of yours in `_meta` wins over the envelope's |
-| `CallTool`, `GetPrompt` | Answer `input_required` rounds from the canned responses and retry with the echoed `requestState`, while every requested key has an answer, at most ten times; then, or without an answer, they return the latest response |
+| `CallTool`, `GetPrompt` | Answer `input_required` rounds from the canned responses and retry with the echoed `requestState`, while every requested key has an answer, at most ten times; then, or without an answer, they return the latest response. A round that asks for nothing is retried with its `requestState` alone |
 | `Discover`, the list methods, `ReadResource`, `Complete` | One request each |
-| `Notifications` | The notification lines the last call emitted, in order, across every round it answered; cleared when the next call starts |
+| `Notifications` | The notification lines the last call emitted, in order, across every round it answered; cleared when a call starts, before it checks its arguments |
 | `LastResponseLine` | The raw response line of the last round, for byte-exact assertions |
 | `Session` | The client's session, for a hand-written `HandleMessage` line |
 

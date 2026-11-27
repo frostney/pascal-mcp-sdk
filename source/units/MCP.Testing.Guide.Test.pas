@@ -1,7 +1,8 @@
 { MCP.Testing.Guide.Test — the example of docs/guides/testing.md
   ("A first test"), compiled and run by lwpt test so the guide cannot
   drift from code that works (#97 review). MCP.Testing.Test checks that
-  the guide still shows this program from its uses clause on. }
+  the guide still shows this program, under its own name and mode
+  line. }
 
 program MCP.Testing.Guide.Test;
 

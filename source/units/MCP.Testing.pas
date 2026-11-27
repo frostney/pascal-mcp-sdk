@@ -52,9 +52,12 @@ type
     FLogLevel: string;
     function Envelope(const AParamsJson: string): TJSONObject;
     // One round: sends AMethod with AParams (consumed) and returns the
-    // parsed response. Notifications accumulate; Begin clears them.
+    // parsed response. Notifications accumulate across a call's rounds.
     function Send(const AMethod: string; AParams: TJSONObject): TJSONObject;
-    function FirstRound(const AMethod: string; AParams: TJSONObject): TJSONObject;
+    // Every public call starts here, before it checks its arguments, so
+    // a call that raises leaves no earlier notifications behind.
+    procedure StartCall;
+    function AnswersFor(ARequests: TJSONObject): TJSONObject;
     function SendAnsweringInput(const AMethod: string;
       AParams: TJSONObject): TJSONObject;
   public
@@ -209,29 +212,36 @@ var
   Meta, Info: TJSONObject;
 begin
   Result := ParseObject(AParamsJson, 'params');
-  if Result.Find('_meta') = nil then
-    Result.Add('_meta', TJSONObject.Create);
-  if Result.Find('_meta').JSONType <> jtObject then
-  begin
+  try
+    if Result.Find('_meta') = nil then
+      Result.Add('_meta', TJSONObject.Create);
+    if Result.Find('_meta').JSONType <> jtObject then
+      raise EMCPTesting.Create('params._meta must be an object');
+    Meta := TJSONObject(Result.Find('_meta'));
+    if Meta.Find(META_KEY_PROTOCOL_VERSION) = nil then
+      Meta.Add(META_KEY_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION);
+    if Meta.Find(META_KEY_CLIENT_CAPABILITIES) = nil then
+      Meta.Add(META_KEY_CLIENT_CAPABILITIES, FCapabilities.Clone);
+    if Meta.Find(META_KEY_CLIENT_INFO) = nil then
+    begin
+      Info := TJSONObject.Create;
+      Meta.Add(META_KEY_CLIENT_INFO, Info);
+      Info.Add('name', FClientName);
+      Info.Add('version', FClientVersion);
+    end;
+    if (FProgressToken <> '') and (Meta.Find('progressToken') = nil) then
+      Meta.Add('progressToken', FProgressToken);
+    if (FLogLevel <> '') and (Meta.Find(META_KEY_LOG_LEVEL) = nil) then
+      Meta.Add(META_KEY_LOG_LEVEL, FLogLevel);
+  except
     Result.Free;
-    raise EMCPTesting.Create('params._meta must be an object');
+    raise;
   end;
-  Meta := TJSONObject(Result.Find('_meta'));
-  if Meta.Find(META_KEY_PROTOCOL_VERSION) = nil then
-    Meta.Add(META_KEY_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION);
-  if Meta.Find(META_KEY_CLIENT_CAPABILITIES) = nil then
-    Meta.Add(META_KEY_CLIENT_CAPABILITIES, FCapabilities.Clone);
-  if Meta.Find(META_KEY_CLIENT_INFO) = nil then
-  begin
-    Info := TJSONObject.Create;
-    Info.Add('name', FClientName);
-    Info.Add('version', FClientVersion);
-    Meta.Add(META_KEY_CLIENT_INFO, Info);
-  end;
-  if (FProgressToken <> '') and (Meta.Find('progressToken') = nil) then
-    Meta.Add('progressToken', FProgressToken);
-  if (FLogLevel <> '') and (Meta.Find(META_KEY_LOG_LEVEL) = nil) then
-    Meta.Add(META_KEY_LOG_LEVEL, FLogLevel);
+end;
+
+procedure TMCPTestClient.StartCall;
+begin
+  FNotifications.Clear;
 end;
 
 function TMCPTestClient.Send(const AMethod: string;
@@ -243,10 +253,16 @@ begin
   Inc(FNextId);
   Message := TJSONObject.Create;
   try
+    Message.Add('params', AParams);
+  except
+    Message.Free;
+    AParams.Free;
+    raise;
+  end;
+  try
     Message.Add('jsonrpc', JSONRPC_VERSION);
     Message.Add('id', FNextId);
     Message.Add('method', AMethod);
-    Message.Add('params', AParams);
     Line := Message.AsJSON;
   finally
     Message.Free;
@@ -258,29 +274,79 @@ begin
   Result := ParseObject(Response, 'the response');
 end;
 
-// The first round of a helper call: its notifications start empty and
-// collect across every round the call answers (#97 review).
-function TMCPTestClient.FirstRound(const AMethod: string;
-  AParams: TJSONObject): TJSONObject;
+// The canned answers for every key of ARequests, or nil when one has
+// none. A round that asks for nothing gets an empty object.
+function TMCPTestClient.AnswersFor(ARequests: TJSONObject): TJSONObject;
+var
+  I: Integer;
+  Answer: TJSONData;
 begin
-  FNotifications.Clear;
-  Result := Send(AMethod, AParams);
+  Result := TJSONObject.Create;
+  try
+    if ARequests <> nil then
+      for I := 0 to ARequests.Count - 1 do
+      begin
+        Answer := FInputResponses.Find(ARequests.Names[I]);
+        if Answer = nil then
+        begin
+          FreeAndNil(Result);
+          Exit;
+        end;
+        Result.Add(ARequests.Names[I], Answer.Clone);
+      end;
+  except
+    Result.Free;
+    raise;
+  end;
+end;
+
+// The params of a retry: ARetry's, with AAnswers (consumed) as
+// inputResponses when it has any, and the echoed requestState of
+// AResult when it carries one.
+function RetryParams(ARetry, AAnswers, AResult: TJSONObject): TJSONObject;
+var
+  StateData: TJSONData;
+begin
+  Result := nil;
+  try
+    Result := TJSONObject(ARetry.Clone);
+    Result.Delete('inputResponses');
+    Result.Delete('requestState');
+    // A round that asked for nothing is retried with its state alone,
+    // as a client would (#97 review).
+    if AAnswers.Count > 0 then
+    begin
+      Result.Add('inputResponses', AAnswers);
+      AAnswers := nil;
+    end;
+    StateData := AResult.Find('requestState');
+    if (StateData <> nil) and (StateData.JSONType = jtString) then
+      Result.Add('requestState', StateData.AsString);
+  except
+    Result.Free;
+    AAnswers.Free;
+    raise;
+  end;
+  AAnswers.Free;
 end;
 
 // Sends AMethod and answers input_required rounds from the canned
-// answers while every requested key has one.
+// answers while every requested key has one, at most MAX_INPUT_ROUNDS
+// times. AParams is consumed.
 function TMCPTestClient.SendAnsweringInput(const AMethod: string;
   AParams: TJSONObject): TJSONObject;
 var
-  Round, I: Integer;
-  ResultObj, Requests, Answers: TJSONObject;
-  Retry: TJSONObject;
-  StateData: TJSONData;
-  Answerable: Boolean;
+  Round: Integer;
+  ResultObj, Requests, Answers, Retry: TJSONObject;
 begin
-  Retry := TJSONObject(AParams.Clone);
   try
-    Result := FirstRound(AMethod, AParams);
+    Retry := TJSONObject(AParams.Clone);
+  except
+    AParams.Free;
+    raise;
+  end;
+  try
+    Result := Send(AMethod, AParams);
     for Round := 1 to MAX_INPUT_ROUNDS do
     begin
       if (Result.FindPath('result.resultType') = nil) or
@@ -292,27 +358,10 @@ begin
       if (ResultObj.Find('inputRequests') <> nil) and
         (ResultObj.Find('inputRequests').JSONType = jtObject) then
         Requests := TJSONObject(ResultObj.Find('inputRequests'));
-      Answers := TJSONObject.Create;
-      Answerable := True;
-      if Requests <> nil then
-        for I := 0 to Requests.Count - 1 do
-          if FInputResponses.Find(Requests.Names[I]) = nil then
-            Answerable := False
-          else
-            Answers.Add(Requests.Names[I],
-              FInputResponses.Find(Requests.Names[I]).Clone);
-      if not Answerable then
-      begin
-        Answers.Free;
+      Answers := AnswersFor(Requests);
+      if Answers = nil then
         Exit;
-      end;
-      AParams := TJSONObject(Retry.Clone);
-      AParams.Delete('inputResponses');
-      AParams.Delete('requestState');
-      AParams.Add('inputResponses', Answers);
-      StateData := ResultObj.Find('requestState');
-      if (StateData <> nil) and (StateData.JSONType = jtString) then
-        AParams.Add('requestState', StateData.AsString);
+      AParams := RetryParams(Retry, Answers, ResultObj);
       FreeAndNil(Result);
       Result := Send(AMethod, AParams);
     end;
@@ -324,7 +373,8 @@ end;
 function TMCPTestClient.Request(const AMethod: string;
   const AParamsJson: string): TJSONObject;
 begin
-  Result := FirstRound(AMethod, Envelope(AParamsJson));
+  StartCall;
+  Result := Send(AMethod, Envelope(AParamsJson));
 end;
 
 function TMCPTestClient.Discover: TJSONObject;
@@ -342,8 +392,8 @@ function NamedCallParams(AClient: TMCPTestClient; const AName,
   AArgumentsJson: string): TJSONObject;
 begin
   Result := AClient.Envelope('{}');
-  Result.Add('name', AName);
   try
+    Result.Add('name', AName);
     Result.Add('arguments', ParseObject(AArgumentsJson, 'arguments'));
   except
     Result.Free;
@@ -354,6 +404,7 @@ end;
 function TMCPTestClient.CallTool(const AName: string;
   const AArgumentsJson: string): TJSONObject;
 begin
+  StartCall;
   Result := SendAnsweringInput('tools/call',
     NamedCallParams(Self, AName, AArgumentsJson));
 end;
@@ -367,9 +418,15 @@ function TMCPTestClient.ReadResource(const AUri: string): TJSONObject;
 var
   Params: TJSONObject;
 begin
+  StartCall;
   Params := Envelope('{}');
-  Params.Add('uri', AUri);
-  Result := FirstRound('resources/read', Params);
+  try
+    Params.Add('uri', AUri);
+  except
+    Params.Free;
+    raise;
+  end;
+  Result := Send('resources/read', Params);
 end;
 
 function TMCPTestClient.ListPrompts: TJSONObject;
@@ -380,6 +437,7 @@ end;
 function TMCPTestClient.GetPrompt(const AName: string;
   const AArgumentsJson: string): TJSONObject;
 begin
+  StartCall;
   Result := SendAnsweringInput('prompts/get',
     NamedCallParams(Self, AName, AArgumentsJson));
 end;
@@ -389,18 +447,19 @@ function TMCPTestClient.Complete(const ARefJson, AArgument,
 var
   Params, Argument: TJSONObject;
 begin
+  StartCall;
   Params := Envelope('{}');
   try
     Params.Add('ref', ParseObject(ARefJson, 'ref'));
+    Argument := TJSONObject.Create;
+    Params.Add('argument', Argument);
+    Argument.Add('name', AArgument);
+    Argument.Add('value', AValue);
   except
     Params.Free;
     raise;
   end;
-  Argument := TJSONObject.Create;
-  Argument.Add('name', AArgument);
-  Argument.Add('value', AValue);
-  Params.Add('argument', Argument);
-  Result := FirstRound('completion/complete', Params);
+  Result := Send('completion/complete', Params);
 end;
 
 end.
