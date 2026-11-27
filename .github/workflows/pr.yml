@@ -181,13 +181,13 @@ jobs:
         if: matrix.fpc-install == 'apt'   # platform-independent; one runner
         run: lwpt duplication
 
-      - name: lwpt build (mcpdemo + mcpsmoke)
+      - name: lwpt build (every [build] target)
         run: lwpt build
 
-      - name: lwpt test (five co-located unit suites)
+      - name: lwpt test (co-located unit suites)
         run: lwpt test
 
-      - name: mcpsmoke (example-server E2E battery over real pipes)
+      - name: mcpsmoke (E2E battery over real pipes, mcpdemo and mcpconformance)
         run: ./build/mcpsmoke${{ matrix.exe }}
 
       # The zero-install path the README promises: a plain fpc build
@@ -231,8 +231,9 @@ jobs:
           npm run interop
 
   # Official MCP conformance suite (modelcontextprotocol/conformance,
-  # exact npm pin in tools/conformance/baseline.json) against mcpdemo's
-  # Streamable HTTP binding. NON-BLOCKING and not a required context.
+  # exact npm pin in tools/conformance/baseline.json) against the
+  # conformance fixture (build/mcpconformance: the suite's reference
+  # surface, registered through the public API) over Streamable HTTP. NON-BLOCKING and not a required context.
   # run.mjs compares each scenario with the committed baseline and fails
   # when they differ (a regression, a stale expected failure or skip, a
   # scenario added or removed, an unreadable result), and on usage
@@ -262,8 +263,8 @@ jobs:
       - name: conformance runner and comparator tests
         run: node --test tools/conformance/compare.test.mjs tools/conformance/run.test.mjs
 
-      - name: conformance suite (server mode, mcpdemo --http)
-        run: node tools/conformance/run.mjs build/mcpdemo
+      - name: conformance suite (server mode, mcpconformance --http)
+        run: node tools/conformance/run.mjs build/mcpconformance
 
       - name: Upload conformance results
         if: always()

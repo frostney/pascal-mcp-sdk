@@ -9,7 +9,13 @@ program mcpsmoke;
 // process-level complement to the in-process *.Test.pas suites; CI
 // runs it as the "example-server smoke test" leg.
 //
-// Usage: mcpsmoke [path-to-mcpdemo]   (default: ./build/mcpdemo)
+// A second battery launches the conformance fixture (mcpconformance,
+// next to mcpdemo) the same way and checks the content types mcpdemo
+// does not register: audio, resource links, embedded resources and
+// mixed results, and non-text prompt messages (#87).
+//
+// Usage: mcpsmoke [path-to-mcpdemo]   (default: ./build/mcpdemo; the
+// fixture is always the mcpconformance next to mcpsmoke)
 
 {$I MCP.inc}
 
@@ -184,6 +190,145 @@ begin
     Result := Data.AsInteger
   else
     Result := 0;
+end;
+
+// The conformance fixture lwpt builds next to mcpsmoke itself, so a
+// demo given from elsewhere does not move it.
+function FixtureBinary: string;
+begin
+  Result := ExtractFilePath(ParamStr(0)) + 'mcpconformance';
+  {$IFDEF WINDOWS}
+  Result := Result + '.exe';
+  {$ENDIF}
+end;
+
+// Closes stdin and waits for a clean exit, as a client does at the end.
+procedure Shutdown(AProcess: TProcess; const ALabel: string);
+var
+  WaitedMs: Integer;
+begin
+  AProcess.CloseInput;
+  WaitedMs := 0;
+  while AProcess.Running and (WaitedMs < 5000) do
+  begin
+    Sleep(50);
+    Inc(WaitedMs, 50);
+  end;
+  Check(not AProcess.Running, ALabel + ': exits on stdin EOF');
+  if AProcess.Running then
+    AProcess.Terminate(1)
+  else
+    Check(AProcess.ExitStatus = 0, ALabel + ': exit status 0');
+end;
+
+// Content types over stdio, against the conformance fixture (#87).
+// Shapes verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/tools#tool-result
+// and .../server/prompts#embedded-resources (an embedded resource in a
+// prompt message MUST carry a URI and a MIME type).
+procedure FixtureContentBattery;
+const
+  // The fixture's complete one-frame WAV, written out literally.
+  ONE_FRAME_WAV_BASE64 =
+    'UklGRiYAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQIAAAAAAA==';
+var
+  Fixture: TProcess;
+  Response: TJSONObject;
+  ResponseLine: string;
+begin
+  Fixture := TProcess.Create(nil);
+  try
+    Fixture.Executable := FixtureBinary;
+    Fixture.Options := [poUsePipes];
+    try
+      Fixture.Execute;
+    except
+      on E: Exception do
+      begin
+        Check(False, 'content: launch ' + FixtureBinary + ': ' + E.Message);
+        Exit;
+      end;
+    end;
+
+    Response := RoundTripWithLine(Fixture,
+      '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{' +
+      '"name":"test_audio_content",' + META_MODERN + '}}', ResponseLine);
+    Check((PathString(Response, 'result.content[0].type') = 'audio') and
+      (PathString(Response, 'result.content[0].mimeType') = 'audio/wav') and
+      (Pos('"data" : "' + ONE_FRAME_WAV_BASE64 + '"', ResponseLine) > 0),
+      'content: audio block (MCPAudioResult), payload byte-exact');
+    Response.Free;
+
+    Response := RoundTripWithLine(Fixture,
+      '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{' +
+      '"name":"test_multiple_content_types",' + META_MODERN + '}}',
+      ResponseLine);
+    Check((PathString(Response, 'result.content[0].type') = 'text') and
+      (PathString(Response, 'result.content[1].type') = 'image') and
+      (PathString(Response, 'result.content[2].type') = 'resource') and
+      (PathString(Response, 'result.content[2].resource.mimeType') =
+      'application/json'),
+      'content: mixed text, image and embedded resource, in order');
+    Response.Free;
+
+    Response := RoundTripWithLine(Fixture,
+      '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{' +
+      '"name":"fixture_resource_link",' + META_MODERN + '}}', ResponseLine);
+    Check((PathString(Response, 'result.content[1].type') = 'resource_link') and
+      (Pos('"uri" : "test://static-text", "name" : "static-text ' +
+      #$E4#$B8#$96 + '", "description" : "Caf' + #$C3#$A9 + ' ' +
+      #$F0#$9F#$98#$80 + '", "mimeType" : "text/plain"', ResponseLine) > 0),
+      'content: resource link (MCPResourceLink), UTF-8 byte-exact');
+    Response.Free;
+
+    Response := RoundTripWithLine(Fixture,
+      '{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{' +
+      '"name":"test_prompt_with_embedded_resource","arguments":{' +
+      '"resourceUri":"test://embedded/%E4%B8%96%E7%95%8C"},' + META_MODERN +
+      '}}', ResponseLine);
+    Check((PathString(Response, 'result.messages[0].content.type') =
+      'resource') and (Pos('"uri" : "test://embedded/%E4%B8%96%E7%95%8C"',
+      ResponseLine) > 0) and
+      (PathString(Response, 'result.messages[0].content.resource.mimeType') =
+      'text/plain'),
+      'content: prompt message with an embedded resource and its MIME type');
+    Response.Free;
+
+    // The fixture's ApplicationValidated tools check their own arguments.
+    Response := RoundTrip(Fixture,
+      '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{' +
+      '"name":"json_schema_2020_12_tool","arguments":{' +
+      '"contactMethod":"phone","email":"a@example.com"},' + META_MODERN + '}}');
+    Check((FindPath(Response, 'result.isError') <> nil) and
+      FindPath(Response, 'result.isError').AsBoolean,
+      'content: json_schema_2020_12_tool refuses phone without a phone');
+    Response.Free;
+    Response := RoundTrip(Fixture,
+      '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{' +
+      '"name":"test_custom_headers","arguments":{},' + META_MODERN + '}}');
+    Check((FindPath(Response, 'result.isError') <> nil) and
+      FindPath(Response, 'result.isError').AsBoolean,
+      'content: test_custom_headers refuses a missing region');
+    Response.Free;
+
+    Response := RoundTrip(Fixture,
+      '{"jsonrpc":"2.0","id":4,"method":"prompts/get","params":{' +
+      '"name":"test_prompt_with_embedded_resource",' + META_MODERN + '}}');
+    Check(PathInt(Response, 'error.code') = -32602,
+      'content: prompt missing its required argument → -32602');
+    Response.Free;
+    Response := RoundTrip(Fixture,
+      '{"jsonrpc":"2.0","id":8,"method":"prompts/get","params":{' +
+      '"name":"test_prompt_with_embedded_resource","arguments":{' +
+      '"resourceUri":"not a URI"},' + META_MODERN + '}}');
+    Check((Response <> nil) and (Response.Find('error') <> nil),
+      'content: prompt refuses a malformed resource URI');
+    Response.Free;
+
+    Shutdown(Fixture, 'content');
+  finally
+    Fixture.Free;
+  end;
 end;
 
 var
@@ -565,21 +710,12 @@ begin
     Response.Free;
 
     // EOF on stdin → prompt exit (the graceful-shutdown contract).
-    Demo.CloseInput;
-    WaitedMs := 0;
-    while Demo.Running and (WaitedMs < 5000) do
-    begin
-      Sleep(50);
-      Inc(WaitedMs, 50);
-    end;
-    Check(not Demo.Running, 'shutdown: exits on stdin EOF');
-    if Demo.Running then
-      Demo.Terminate(1)
-    else
-      Check(Demo.ExitStatus = 0, 'shutdown: exit status 0');
+    Shutdown(Demo, 'shutdown');
   finally
     Demo.Free;
   end;
+
+  FixtureContentBattery;
 
   WriteLn;
   if Failures = 0 then

@@ -8,10 +8,10 @@ the README links here.
 | --- | --- |
 | `server/discover` | ✅ mandatory entry point, capabilities + instructions |
 | `tools/list` | ✅ registered tool definitions, whole list in registration order (deterministic; no pagination cursor) |
-| `tools/call` | ✅ text / image / structured content, in-band execution errors, server-side subset validation of arguments |
+| `tools/call` | ✅ text / image / audio / resource-link / embedded-resource / structured content, in-band execution errors, server-side subset validation of arguments |
 | `resources/list`, `resources/read` | ✅ static + dynamic, text + blob builders |
 | `resources/templates/list` + template matching | ✅ RFC 6570 level-1 (`{var}`), exact resources win, vars passed to readers |
-| `prompts/list`, `prompts/get` | ✅ fluent argument declaration, message builders, spec error codes |
+| `prompts/list`, `prompts/get` | ✅ fluent argument declaration, message builders for every content type, spec error codes |
 | MRTR `input_required` (SEP-2322) | ✅ on `tools/call` + `prompts/get`: elicitation (form + url), sampling, roots entry builders; capability-gated; stateless re-entry |
 | Cancellation | ✅ `notifications/cancelled` and, on Streamable HTTP, a closed connection reach a running handler through `ACtx.IsCancelled`; nothing more is sent for a cancelled request |
 | `notifications/progress`, `notifications/message` | ✅ `MCPReportProgress` / `MCPLogMessage` from any handler; strictly opt-in per request (`progressToken` / `logLevel`), severity-filtered, emitted before the response |
@@ -42,7 +42,12 @@ official MCP TypeScript clients**: the stable v2 client
 (`@modelcontextprotocol/client` 2.0.0, pinned + auto-probe modes, over
 stdio and Streamable HTTP, including MRTR auto-fulfilment) and the v1
 SDK (`@modelcontextprotocol/sdk`, the handshake era Claude Code
-speaks). See [tools/interop-ts/](../../tools/interop-ts/) and the
+speaks). Those batteries drive `mcpdemo`. The content types `mcpdemo`
+does not return (audio, resource links, embedded resources, mixed
+results and non-text prompt messages) are covered by the unit suites,
+the `mcpsmoke` content battery and the official conformance suite
+against the conformance fixture. See
+[tools/interop-ts/](../../tools/interop-ts/) and the
 [architecture page](../internals/architecture.md#spec-grounding) for
 the grounding notes.
 
