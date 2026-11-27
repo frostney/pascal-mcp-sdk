@@ -246,8 +246,7 @@ and dropped (keeping your error text) when it does not conform. An
 output schema outside the subset is published unchanged and not
 checked: honouring it is the handler's job.
 
-> [!NOTE]
-> Upgrading (breaking):
+> **Note.** Upgrading (breaking):
 >
 > - A tool that declares an output schema inside the subset but returns
 >   only text now gets an `isError` result. Return conforming structured

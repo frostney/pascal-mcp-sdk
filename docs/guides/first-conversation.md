@@ -1,23 +1,23 @@
 # Your First Conversation
 
-What talking to an MCP client *actually looks like* — a complete
-session between an AI agent and the
-[demo server](../../source/apps/mcpdemo.pas), shown twice: as the
-user saw it, and as your server saw it on the wire. The wire
-transcript is Claude Code 2.1.332's, captured on 2026-11-27; the
-terminal view and the classic handshake further down are from
-2026-08-10, with the client releases current then.
+What talking to an MCP client *actually looks like*: an AI agent and
+the [demo server](../../source/apps/mcpdemo.pas), seen as the user saw
+it and as your server saw it on the wire. These are two recordings of
+the same request, adding 19 and 23 with the demo's `add` tool: the
+terminal view is Codex 0.145.0's, recorded on 2026-08-10, and the wire
+transcript is Claude Code 2.1.332's, captured on 2026-11-27. The
+classic handshake further down is from the August recording.
 
 ## The user's view
 
-The demo server was registered with the Codex CLI (v0.145.0) and
-asked one question:
+The demo server was registered with the Codex CLI (v0.145.0, on
+2026-08-10) and asked to add 19 and 23 with its `add` tool:
 
 ![Terminal capture: Codex CLI calling the demo server's add tool — "The result is 42."](../images/codex-add-session.svg)
 
-The agent decided on its own that the `add` tool fit the question,
-called it, and used the answer. That's the whole consumer experience:
-your tool became something the model reaches for.
+The agent called the `add` tool and used the answer. That's the whole
+consumer experience: your tool became something the model can reach
+for.
 
 Claude Code works the same way — register and check with:
 
@@ -28,12 +28,12 @@ claude mcp list        # → demo: … - ✔ Connected
 
 ## The same session on the wire
 
-Claude Code 2.1.332 was asked to add 19 and 23 with the demo's `add`
-tool. Five requests travelled over the server's stdin and stdout, all
-at the stateless `2026-07-28` revision: there is no handshake, and
-every request carries its own `_meta`. Everything below your handler's
-one line of arithmetic was produced by the library. The client's
-`_meta` is shown once and elided after that.
+Claude Code 2.1.332 was asked the same, on 2026-11-27. Five requests
+travelled over the server's stdin and stdout, all at the stateless
+`2026-07-28` revision: there is no handshake, and every request carries
+its own `_meta`. Everything below your handler's one line of
+arithmetic was produced by the library. The excerpts are abridged:
+`"…"` marks what is left out, and the client's `_meta` is shown once.
 
 **1. The client asks what the server is** — `server/discover`, with
 its identity and capabilities in `_meta`:
@@ -45,9 +45,9 @@ its identity and capabilities in `_meta`:
     "io.modelcontextprotocol/clientCapabilities":{"roots":{"listChanged":true},"elicitation":{"form":{},"url":{}}}}}}
 ```
 
-The server answers with the revisions it serves, its capabilities and
-extensions, its identity and the `Instructions` you set — the text the
-model reads to learn when to use your server:
+The server answers with the stateless revision it serves, its
+capabilities and extensions, its identity and the `Instructions` you
+set — the text the model reads to learn when to use your server:
 
 ```json
 {"jsonrpc":"2.0","id":"server-discover-probe-1","result":{
@@ -99,7 +99,7 @@ plus the `structuredContent` matching the tool's output schema:
   "_meta":{"io.modelcontextprotocol/serverInfo":{"name":"pascal-mcp-sdk-demo","version":"0.1.0"}}}}
 ```
 
-Then the model answered "42" — and when the session ended, the host
+Claude Code then replied "42". When the session ended, the host
 closed the server's stdin and the process exited. That
 EOF-means-shutdown contract is why a pascal-mcp-sdk server needs no
 signal handling and no restart loop.
@@ -119,12 +119,13 @@ Clients that predate the stateless revision open with the classic
 The server answers in that revision's dialect, and the client confirms
 with `notifications/initialized` before its first request. Claude Code
 2.1.226 still opened this way on 2026-08-10, at `2025-11-25`.
-On stdio the library serves both: it speaks each classic revision it
-supports (`2024-11-05`, `2025-06-18`, `2025-11-25`) *and* the
-stateless `2026-07-28` revision, and picks per connection by how the
-client opens — so as clients move to the stateless revision, your
-server needs no change (see [Configuration](configuration.md#dualera)).
-The Streamable HTTP binding serves `2026-07-28` only.
+On stdio the library serves both: a classic handshake is negotiated to
+one of the classic revisions it supports (`2024-11-05`, `2025-06-18`,
+`2025-11-25`), and a request carrying `2026-07-28` in its `_meta` is
+answered in that revision, so as clients move to the stateless
+revision, your server needs no change (see
+[Configuration](configuration.md#dualera)). The Streamable HTTP
+binding serves `2026-07-28` only.
 
 ## The same conversation, stateless style
 
@@ -148,7 +149,7 @@ surface this way.
 - Your handler ran **once**, with validated typed arguments; the
   library produced every other byte on this page.
 - Model-facing text matters: the tool `description` and the server
-  `Instructions` are what made the model pick `add` unprompted.
+  `Instructions` are what the model reads when it chooses a tool.
 - Clients move between protocol revisions at their own pace — the
   dual-era default on stdio absorbs that, so you never have to ask
   which client your users run.

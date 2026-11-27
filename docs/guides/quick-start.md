@@ -102,12 +102,12 @@ Key behaviours you get for free:
   in-band error channel models can self-correct against — except an
   `EMCPProtocolError`, which answers with the JSON-RPC error it carries.
 - **`resultType` and `serverInfo`** are stamped on every result.
-- **Today's clients work out of the box**: the server is dual-era by
-  default, so a client opening with the classic `initialize`
-  handshake — which current releases of Claude Code, Claude Desktop,
-  and Codex all still speak (see
-  [Your first conversation](first-conversation.md)) — is served that
-  era faithfully, while stateless 2026-07-28 `_meta` requests are
+- **Today's clients work out of the box over stdio**: the server is
+  dual-era by default, so a client opening with the classic
+  `initialize` handshake, as Codex 0.145.0 and Claude Code 2.1.226 did
+  in August 2026 (see [Your first conversation](first-conversation.md);
+  Claude Code 2.1.332 opens at 2026-07-28), is served that era
+  faithfully, while stateless 2026-07-28 `_meta` requests are
   served natively — same registries, same handlers. Set
   `Server.DualEra := False` for a strict modern-only server that
   rejects `initialize` naming its supported versions.

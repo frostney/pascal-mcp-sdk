@@ -34,8 +34,7 @@ preferences. The token round-trips verbatim into
 
 ## Log messages
 
-> [!WARNING]
-> Logging is deprecated as of protocol revision `2026-07-28`
+> **Deprecated.** Logging is deprecated as of protocol revision `2026-07-28`
 > ([SEP-2577](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2577)).
 > It keeps working during the deprecation window, which is at least
 > twelve months, but new servers should not rely on it: log to stderr

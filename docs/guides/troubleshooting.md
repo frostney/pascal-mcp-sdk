@@ -30,13 +30,15 @@ clients do this for you. Over HTTP the same rule holds — the mirrored
 
 ## `-32022: unsupported protocol version`
 
-The client asked for a protocol revision the server does not speak;
-the error's data lists `supported` versions. A client speaking
-`2025-03-26` hits this — that revision requires JSON-RPC batch
-support the library deliberately omits (see
-[Spec grounding](../internals/architecture.md#spec-grounding)); the
-adjacent `2024-11-05`, `2025-06-18`, and `2025-11-25`, the classic
-revisions clients open with, all work via the dual-era default.
+A stateless request named a protocol revision in its `_meta` that the
+server does not speak; the error's data lists `supported` versions.
+The classic handshake works differently: an `initialize` asking for a
+revision the server does not speak, such as `2025-03-26` (which
+requires JSON-RPC batch support the library deliberately omits, see
+[Spec grounding](../internals/architecture.md#spec-grounding)), is
+answered with the newest classic revision it does speak, `2025-11-25`,
+and the client either goes on in it or disconnects. `2024-11-05`,
+`2025-06-18` and `2025-11-25` all work via the dual-era default.
 
 ## `EMCPServer` at startup
 

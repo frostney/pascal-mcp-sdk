@@ -31,7 +31,7 @@ const FAQ: { q: string; a: string; extra?: React.ReactNode }[] = [
   },
   {
     q: 'Does Claude Code work with a Pascal MCP server?',
-    a: 'Yes — and so does Codex. Servers are dual-era by default: they answer the stateless 2026-07-28 revision Claude Code now opens with, and the classic initialize handshake older clients still speak, picking per connection. No configuration needed on either side.',
+    a: 'Yes — and so does Codex. Servers are dual-era by default: registered over stdio, they answer the stateless 2026-07-28 revision Claude Code now opens with, and the classic initialize handshake older clients still speak, each request in its own revision. Beyond registering the server with the client, there is nothing to configure.',
   },
   {
     q: 'How do I build an MCP server in Pascal?',
@@ -39,7 +39,7 @@ const FAQ: { q: string; a: string; extra?: React.ReactNode }[] = [
   },
   {
     q: 'Which parts of the MCP specification are implemented?',
-    a: 'Tools, resources with RFC 6570 templates, prompts, multi-round-trip input requests (elicitation, sampling, roots), progress and log notifications, caching hints, extension negotiation with MCP Apps interactive UIs, Skills and Events poll and push delivery, stdio and Streamable HTTP transports, plus the classic initialize handshake era that older clients speak. Deliberately out: subscriptions/listen and list-changed notifications, since registries are static after startup.',
+    a: 'The 2026-07-28 server surface: tools, resources and templates, prompts, completion, input requests, progress, caching hints, extension negotiation with MCP Apps, Skills and Events, over stdio and Streamable HTTP, plus the classic handshake on stdio. Not served: subscriptions/listen and list-changed notifications, the Tasks extension and authorization. The protocol coverage page has the full table.',
   },
   {
     q: 'Is this the same as tina4stack/pascal-mcp (claude-pascal-mcp) or @pascal-app/mcp?',
@@ -158,8 +158,8 @@ export default async function HomePage() {
           </a>{' '}
           before the handler runs, turns exceptions into errors the model
           can correct against, and speaks both the newest stateless
-          protocol revision and the classic handshake today&apos;s clients
-          use.{' '}
+          protocol revision and, over stdio, the classic handshake older
+          clients use.{' '}
           <Link href="/docs/guides/tools" className="underline">
             How tools work →
           </Link>
@@ -205,9 +205,10 @@ export default async function HomePage() {
           </p>
         </div>
         <p className="mt-3 text-sm text-fd-muted-foreground text-center">
-          The 2026-07-28 protocol surface — everything except
-          subscriptions — is implemented, and its core operations are
-          interop-tested against both official MCP TypeScript clients;
+          The 2026-07-28 server surface is implemented except
+          subscriptions, the Tasks extension and authorization, and its
+          core operations are interop-tested against both official MCP
+          TypeScript clients;
           see{' '}
           <Link href="/docs/reference/protocol-coverage" className="underline">
             protocol coverage

@@ -107,8 +107,8 @@ function BuildErrorResponse(AId: TJSONData; ACode: Integer;
 function MCPParseJSON(const AText: string): TJSONData;
 
 // Single-line serialization: fpjson's AsJSON, which escapes embedded
-// newlines (what keeps the stdio framing invariant) and puts spaces
-// around ":" and after ",". The name predates that wording; it is kept
+// newlines (what keeps the stdio framing invariant) and, by default,
+// puts spaces around ":" and after ",". The name predates that wording; it is kept
 // as public API.
 function SerializeCompact(AData: TJSONData): string;
 

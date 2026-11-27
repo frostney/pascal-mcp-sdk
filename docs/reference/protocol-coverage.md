@@ -27,8 +27,8 @@ the README links here.
 | Streamable HTTP transport | ✅ `MCP.Transport.HTTP`: single POST endpoint, SSE response streams, mirrored-header validation (`Mcp-Name`, and `Mcp-Param-*` for `x-mcp-header` parameters), Origin allowlist |
 | Classic handshake era (`initialize`: 2024-11-05, 2025-06-18, 2025-11-25) | ✅ dual-era default on stdio: era-faithful dialect (unstamped results, `-32002`, `ping`); `DualEra := False` for strict modern-only. The Streamable HTTP binding is modern-only |
 | `subscriptions/listen`, list-changed | ⏳ not implemented (registries are static after startup) |
-| Tasks (`io.modelcontextprotocol/tasks`) | ⏳ not implemented ([#82](https://github.com/frostney/pascal-mcp-sdk/issues/82)); its conformance scenarios are expected failures in the baseline |
-| Authorization (OAuth 2.1 for HTTP transports) | ⏳ not in the library, deliberately: beyond loopback, a reverse proxy or the platform's edge authenticates and terminates TLS in front of the Streamable HTTP binding (see [Deployment](../guides/deployment.md#tls-auth-and-the-proxy-in-front)) |
+| Tasks (`io.modelcontextprotocol/tasks`) | ⏳ not implemented ([#82](https://github.com/frostney/pascal-mcp-sdk/issues/82)); in the conformance baseline nine of its scenarios are expected failures and one, `tasks-status-notifications`, an expected skip |
+| Authorization (OAuth 2.1 for HTTP transports) | ⏳ not in the library, deliberately: beyond loopback the operator must put authentication in front of the Streamable HTTP binding, for example in a reverse proxy; a platform's edge terminates TLS but authenticates nothing by itself (see [Deployment](../guides/deployment.md#tls-auth-and-the-proxy-in-front)) |
 
 Resource-template matching is intentionally limited to simple `{var}`
 expressions. Variables must be non-empty and separated by literal
@@ -49,8 +49,7 @@ the core protocol surface **interop-tested against both
 official MCP TypeScript clients**: the stable v2 client
 (`@modelcontextprotocol/client` 2.0.0, pinned + auto-probe modes, over
 stdio and Streamable HTTP, including MRTR auto-fulfilment) and the v1
-SDK (`@modelcontextprotocol/sdk`, the handshake era Claude Code
-speaks). Those batteries drive `mcpdemo`. The content types `mcpdemo`
+SDK (`@modelcontextprotocol/sdk`, the classic handshake era). Those batteries drive `mcpdemo`. The content types `mcpdemo`
 does not return (audio, resource links, embedded resources, mixed
 results and non-text prompt messages) are covered by the unit suites,
 the `mcpsmoke` content battery and the official conformance suite
@@ -83,6 +82,6 @@ checks.
 A wire capture from 2026-11-27 shows Claude Code 2.1.332 opening with
 `server/discover` and sending every request at `2026-07-28`, over
 stdio. Captures from 2026-08-10 show the classic handshake: Claude Code
-2.1.226 with `2025-11-25`, Codex 0.145.0 with `2025-06-18`. The
-transcripts are in
-[Your first conversation](../guides/first-conversation.md).
+2.1.226 with `2025-11-25`, Codex 0.145.0 with `2025-06-18`.
+[Your first conversation](../guides/first-conversation.md) shows the
+November Claude Code session and the August Codex `initialize`.

@@ -80,10 +80,11 @@ handshake (protocol revisions `2024-11-05`, `2025-06-18`,
 Clients move to the stateless revision at their own pace: Claude Code
 2.1.332 opens with `2026-07-28`, while Claude Code 2.1.226 and Codex
 0.145.0 opened with the classic handshake in August 2026 (see the wire
-captures in [Your first conversation](first-conversation.md)). Era
-selection follows how each client opens; handlers are era-blind, so
-the spec's transition to the stateless revision costs you nothing
-either way.
+captures in [Your first conversation](first-conversation.md)). A
+classic `initialize` is negotiated to a classic revision, and a request
+carrying `2026-07-28` in its `_meta` is answered in that revision;
+handlers are era-blind, so the spec's transition to the stateless
+revision costs you nothing either way.
 
 Set `DualEra := False` for a strict modern-only server: `initialize`
 is rejected with a diagnostic naming the supported versions. The

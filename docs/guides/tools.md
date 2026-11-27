@@ -165,8 +165,7 @@ its list
 verified 2026-11-26). Header values are visible to every intermediary,
 so do not mark secrets or personal data.
 
-> [!NOTE]
-> Upgrading (breaking): `=?base64?...?=` values in `Mcp-Name`, sent for
+> **Note.** Upgrading (breaking): `=?base64?...?=` values in `Mcp-Name`, sent for
 > every tool, prompt and resource whether annotated or not, now decode
 > strictly too. A custom client that left the base64 padding off gets
 > 400; send standard base64 with its `=` padding, as the spec's Value
