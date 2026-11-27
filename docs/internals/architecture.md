@@ -155,8 +155,11 @@ whenever the handler asks `IsCancelled` and before each in-request
 notification, on the handler's own thread. On a plain file input the
 stdio loop reads stdin into its own buffer; its poll checks the lines
 already queued, then reads at most one chunk that is waiting, without
-blocking, and hands the core the `notifications/cancelled` it accepts
-for the running request (`TMCPSession.CancelsActiveRequest`). Other
+blocking. A `notifications/cancelled` the core accepts for the running
+request (`MCPCancellationTarget`, classified once per line, matched
+with `TMCPSession.IsActiveRequestId`) is taken out of the queue and the
+poll reports it, which cancels the request; it is not dispatched, so no
+reason is logged from inside the handler's `IsCancelled`. Other
 lines, cancellations for queued requests included, stay queued in
 order, and once about one line's budget is queued the poll stops
 reading, so a cancellation behind that backlog waits its turn. The

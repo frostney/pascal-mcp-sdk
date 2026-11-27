@@ -3479,6 +3479,7 @@ end;
 procedure TCancellationDispatch.TestActiveRequestIdMatches;
 var
   Response: TJSONObject;
+  Target: TJSONData;
 begin
   FSession.SetCancellationPoll(RecordingPoll, nil);
   Response := Call('{"jsonrpc":"2.0","id":9,"method":"tools/call",' +
@@ -3488,6 +3489,17 @@ begin
   // No request running: nothing is active.
   Expect<Boolean>(FSession.CancelsActiveRequest(CANCEL_PROBES[0]))
     .ToBe(False);
+  Expect<Boolean>(FSession.IsActiveRequestId(TJSONData(nil))).ToBe(False);
+  // MCPCancellationTarget: the requestId of an accepted cancellation
+  // only.
+  Target := MCPCancellationTarget(CANCEL_PROBES[2]);
+  try
+    Expect<string>(Target.AsJSON).ToBe('9.0000000000000000E+000');
+  finally
+    Target.Free;
+  end;
+  Expect<Boolean>(MCPCancellationTarget(CANCEL_PROBES[4]) = nil).ToBe(True);
+  Expect<Boolean>(MCPCancellationTarget(CANCEL_PROBES[6]) = nil).ToBe(True);
 end;
 
 // A progress or log call the client did not opt into (no progressToken,

@@ -30,9 +30,9 @@ unit MCP.Transport.Stdio;
 // asks ACtx.IsCancelled, the session's cancellation poll checks the
 // lines already queued, then reads at most one chunk that is waiting,
 // without blocking (poll on Unix, PeekNamedPipe on Windows), and hands
-// a notifications/cancelled naming the running request to the core,
-// which cancels it. Every other line, a cancellation for a queued
-// request included, stays queued in order. Once about one line's
+// a notifications/cancelled the core accepts for the running request
+// is taken from the queue and cancels it. Every other line, a
+// cancellation for a queued request included, stays queued in order. Once about one line's
 // budget is queued the poll stops reading and the rest waits in the
 // operating system's pipe. A Text with its own I/O driver is read
 // through Text as before, without mid-request cancellation. No thread
@@ -90,6 +90,7 @@ uses
   {$IFDEF WINDOWS}
   Windows,
   {$ENDIF}
+  fpjson,
   MCP.JSONRPC;
 
 const
@@ -104,9 +105,10 @@ type
   TQueuedLine = record
     Line: string;
     Overflow: Boolean;
-    // A notifications/cancelled line, set once the line is classified;
-    // whether it concerns the running request is the core's to say.
-    Cancellation: Boolean;
+    // The requestId of a notifications/cancelled the core would accept
+    // (MCPCancellationTarget), owned; nil for any other line. Set once,
+    // when the line is classified.
+    CancelId: TJSONData;
   end;
 
   // The loop's input (#93). On a plain file Text (stdin, a file, a
@@ -145,6 +147,7 @@ type
     procedure Compact;
   public
     constructor Create(var AInput: Text; AMax: Integer);
+    destructor Destroy; override;
     // The next line, blocking until one is complete; False at the end
     // of input. Raises EInOutError when reading failed.
     function NextLine(out ALine: string; out AOverflow: Boolean): Boolean;
@@ -167,16 +170,20 @@ procedure FindPlainFileReadFunc;
 var
   Probe: Text;
 begin
-  {$PUSH}{$I-}
   Assign(Probe, {$IFDEF WINDOWS}'NUL'{$ELSE}'/dev/null'{$ENDIF});
-  Reset(Probe);
-  if IOResult = 0 then
-  begin
-    PlainFileReadFunc := TextRec(Probe).InOutFunc;
-    Close(Probe);
-    IOResult;
+  try
+    Reset(Probe);
+  except
+    // No null device: every input is then read through Text.
+    on EInOutError do
+      Exit;
   end;
-  {$POP}
+  PlainFileReadFunc := TextRec(Probe).InOutFunc;
+  try
+    Close(Probe);
+  except
+    on EInOutError do;
+  end;
 end;
 
 // Whether AInput is a plain file Text: any other read function is a
@@ -213,6 +220,15 @@ begin
     end;
 end;
 
+destructor TStdioReader.Destroy;
+var
+  I: Integer;
+begin
+  for I := FHead to High(FQueue) do
+    FQueue[I].CancelId.Free;
+  inherited Destroy;
+end;
+
 procedure TStdioReader.Push(const ALine: string; AOverflow: Boolean);
 var
   Slot: Integer;
@@ -225,7 +241,7 @@ begin
   SetLength(FQueue, Slot + 1);
   FQueue[Slot].Line := ALine;
   FQueue[Slot].Overflow := AOverflow;
-  FQueue[Slot].Cancellation := False;
+  FQueue[Slot].CancelId := nil;
   Inc(FQueuedBytes, Length(ALine) + QUEUE_ENTRY_COST);
 end;
 
@@ -443,8 +459,11 @@ begin
   // Released as it is taken: a long queue keeps no served lines.
   FQueue[FHead].Line := '';
   Dec(FQueuedBytes, Length(ALine) + QUEUE_ENTRY_COST);
-  if FQueue[FHead].Cancellation then
+  if FQueue[FHead].CancelId <> nil then
+  begin
+    FreeAndNil(FQueue[FHead].CancelId);
     Dec(FCancelCount);
+  end;
   Inc(FHead);
   if FClassified < FHead then
     FClassified := FHead;
@@ -469,19 +488,19 @@ begin
   begin
     FQueue[I - FHead] := FQueue[I];
     FQueue[I].Line := '';
+    FQueue[I].CancelId := nil;
   end;
   SetLength(FQueue, Length(FQueue) - FHead);
   Dec(FClassified, FHead);
   FHead := 0;
 end;
 
-// Classifies the queued lines not seen yet, marking the
-// notifications/cancelled ones. The method is compared decoded, as the
-// core compares it, so an escaped spelling counts; the cheap text check
-// only skips lines with neither the plain name nor any escape.
+// Classifies the queued lines not seen yet, once each: a
+// notifications/cancelled the core would accept keeps its requestId
+// (MCPCancellationTarget, the core's rule, method compared decoded, so
+// an escaped spelling counts). The cheap text check only skips lines
+// with neither the plain name nor any escape.
 procedure TStdioReader.ClassifyQueued;
-var
-  Msg: TJSONRPCMessage;
 begin
   while FClassified < Length(FQueue) do
   begin
@@ -489,14 +508,8 @@ begin
       if not Overflow and ((Pos('notifications/cancelled', Line) > 0) or
         (Pos('\', Line) > 0)) then
       begin
-        Msg := ParseJSONRPCMessage(Line);
-        try
-          Cancellation := (Msg.Kind = jrkNotification) and
-            (Msg.Method = 'notifications/cancelled');
-        finally
-          FreeJSONRPCMessage(Msg);
-        end;
-        if Cancellation then
+        CancelId := MCPCancellationTarget(Line);
+        if CancelId <> nil then
           Inc(FCancelCount);
       end;
     Inc(FClassified);
@@ -508,11 +521,15 @@ var
   I: Integer;
 begin
   Dec(FQueuedBytes, Length(FQueue[AIndex].Line) + QUEUE_ENTRY_COST);
-  if FQueue[AIndex].Cancellation then
+  if FQueue[AIndex].CancelId <> nil then
+  begin
+    FreeAndNil(FQueue[AIndex].CancelId);
     Dec(FCancelCount);
+  end;
   for I := AIndex to High(FQueue) - 1 do
     FQueue[I] := FQueue[I + 1];
   FQueue[High(FQueue)].Line := '';
+  FQueue[High(FQueue)].CancelId := nil;
   SetLength(FQueue, Length(FQueue) - 1);
   Dec(FClassified);
 end;
@@ -525,11 +542,11 @@ begin
   ALine := '';
   ClassifyQueued;
   // The first one the core would accept for the running request: a
-  // malformed one naming it is skipped, not taken (#93 review).
+  // malformed one naming it was never classified as one (#93 review).
   if FCancelCount > 0 then
     for I := FHead to High(FQueue) do
-      if FQueue[I].Cancellation and
-        ASession.CancelsActiveRequest(FQueue[I].Line) then
+      if (FQueue[I].CancelId <> nil) and
+        ASession.IsActiveRequestId(FQueue[I].CancelId) then
       begin
         ALine := FQueue[I].Line;
         RemoveAt(I);
@@ -540,31 +557,27 @@ end;
 
 type
   TStdioPollState = record
-    Server: TMCPServer;
     Reader: TStdioReader;
   end;
   PStdioPollState = ^TStdioPollState;
 
 // The session's cancellation poll (#93). The lines already queued are
 // checked first, then at most one chunk that is waiting is read and
-// checked: a notifications/cancelled naming the running request is
-// handed to the core at once, which cancels it the ordinary way. A
-// cancellation for another request, and every other line, stays queued
-// in order for the loop.
+// checked: a notifications/cancelled the core accepts for the running
+// request is taken out of the queue and the poll reports it, which
+// cancels the request. It is not dispatched, so its reason is not
+// logged: a stderr write must not hold up the handler's IsCancelled
+// (#93 review). A cancellation for another request, and every other
+// line, stays queued in order for the loop.
 function StdioCancellationPoll(ASession: TMCPSession;
   AUserData: Pointer): Boolean;
 var
-  Line, Ignored: string;
+  Line: string;
 begin
-  Result := False;
   with PStdioPollState(AUserData)^ do
-  begin
-    if not Reader.TakeActiveCancellation(ASession, Line) and
-      not (Reader.ReadWaitingChunk and
-      Reader.TakeActiveCancellation(ASession, Line)) then
-      Exit;
-    Server.HandleMessage(ASession, Line, Ignored);
-  end;
+    Result := Reader.TakeActiveCancellation(ASession, Line) or
+      (Reader.ReadWaitingChunk and
+      Reader.TakeActiveCancellation(ASession, Line));
 end;
 
 // Notification sink: in-request notifications (progress, log
@@ -601,7 +614,6 @@ begin
     Reader := nil;
     try
       Reader := TStdioReader.Create(AInput, AMaxLineLength);
-      PollState.Server := AServer;
       PollState.Reader := Reader;
       Session.SetCancellationPoll(StdioCancellationPoll, @PollState);
       while Reader.NextLine(Line, Overflow) do

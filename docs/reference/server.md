@@ -291,7 +291,9 @@ type
 
 procedure TMCPSession.SetCancellationPoll(APoll: TMCPCancellationPoll;
   AUserData: Pointer);   // nil removes it
+function TMCPSession.IsActiveRequestId(ARequestId: TJSONData): Boolean;
 function TMCPSession.CancelsActiveRequest(const ALine: string): Boolean;
+function MCPCancellationTarget(const ALine: string): TJSONData;
 ```
 
 The session calls the poll on the handler's own thread whenever the
@@ -300,9 +302,14 @@ and only while the running request is not cancelled yet. Returning
 `True` cancels that request. A poll may instead pass a
 `notifications/cancelled` line to `HandleMessage` for the same session,
 which cancels the request the ordinary way; that is the only re-entry
-allowed. `CancelsActiveRequest` tells whether a line is a
-`notifications/cancelled` that dispatch would accept for the running
-request: well formed, with a string `reason` or none, and naming its id.
+allowed. `MCPCancellationTarget` returns the `requestId` of a line that
+is a `notifications/cancelled` dispatch would accept (well formed, with
+a string `reason` or none), as a new object the caller owns, or `nil`.
+`IsActiveRequestId` tells whether such an id names the running request,
+matched as `notifications/cancelled` matches it, and
+`CancelsActiveRequest` does both for one line. A transport that queues
+lines classifies each once with `MCPCancellationTarget` and matches the
+kept id on every poll.
 `AUserData` is borrowed and must stay valid until the poll is removed
 or the session is freed, and an exception from the poll reaches the
 handler's `IsCancelled` call. The poll stays on the session across its

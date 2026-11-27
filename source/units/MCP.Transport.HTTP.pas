@@ -1011,14 +1011,22 @@ const
   // How often a polling handler costs a system call.
   DISCONNECT_POLL_INTERVAL_MS = 50;
 
+const
+  // Bytes one disconnect check discards at most; a client sending more
+  // than this after its request is seen closed on a later check.
+  DISCONNECT_DRAIN_LIMIT = 16 * 1024;
+
 // The client closed the connection: the socket reports a hang-up or an
-// error, or is readable while a peek finds the end of the stream (an
-// orderly close) or a terminal error such as a reset. The request body
-// was read in full before dispatch, so readable data would be the
-// client's and leaves the request running; so do errors that only say
-// to try again. Receive EOF cannot tell a client that closed only its
-// sending side from one that closed both, so either counts as having
-// cancelled: the request ends and nothing more about it is sent.
+// error, or reading it finds the end of the stream (an orderly close)
+// or a terminal error such as a reset. The request body was read in
+// full before dispatch, and the binding serves one request per
+// connection, so bytes still arriving are not a request: they are read
+// and discarded, up to DISCONNECT_DRAIN_LIMIT per check, so an orderly
+// close behind them is still seen (#93 review); a peek would keep
+// finding the first of them. Errors that only say to try again leave
+// the request running. Receive EOF cannot tell a client that closed
+// only its sending side from one that closed both, so either counts as
+// having cancelled: the request ends and nothing more about it is sent.
 function SocketClosedByPeer(ASocket: THandle): Boolean;
 var
   {$IFDEF WINDOWS}
@@ -1029,45 +1037,48 @@ var
   Fd: pollfd;
   Failure: cint;
   {$ENDIF}
-  Probe: Byte;
-  Got: Integer;
+  Buffer: array[0..4095] of Byte;
+  Got, Drained: Integer;
 begin
   Result := False;
-  {$IFDEF WINDOWS}
-  // A Windows fd_set lists sockets, so any socket value fits it.
-  winsock2.FD_ZERO(ReadSet);
-  winsock2.FD_SET(ASocket, ReadSet);
-  Timeout.tv_sec := 0;
-  Timeout.tv_usec := 0;
-  if winsock2.select(0, @ReadSet, nil, nil, @Timeout) <= 0 then
-    Exit;
-  Got := winsock2.recv(ASocket, Probe, 1, winsock2.MSG_PEEK);
-  if Got = 0 then
-    Exit(True);
-  if Got < 0 then
+  Drained := 0;
+  while Drained < DISCONNECT_DRAIN_LIMIT do
   begin
-    Failure := winsock2.WSAGetLastError;
-    Result := (Failure <> WSAEWOULDBLOCK) and (Failure <> WSAEINTR) and
-      (Failure <> WSAEINPROGRESS);
+    {$IFDEF WINDOWS}
+    // A Windows fd_set lists sockets, so any socket value fits it.
+    winsock2.FD_ZERO(ReadSet);
+    winsock2.FD_SET(ASocket, ReadSet);
+    Timeout.tv_sec := 0;
+    Timeout.tv_usec := 0;
+    if winsock2.select(0, @ReadSet, nil, nil, @Timeout) <= 0 then
+      Exit;
+    Got := winsock2.recv(ASocket, Buffer, SizeOf(Buffer), 0);
+    if Got < 0 then
+    begin
+      Failure := winsock2.WSAGetLastError;
+      Exit((Failure <> WSAEWOULDBLOCK) and (Failure <> WSAEINTR) and
+        (Failure <> WSAEINPROGRESS));
+    end;
+    {$ELSE}
+    // poll, not select: a descriptor above 1023 fits no TFDSet.
+    Fd.fd := ASocket;
+    Fd.events := POLLIN;
+    Fd.revents := 0;
+    if fpPoll(@Fd, 1, 0) <= 0 then
+      Exit;
+    if Fd.revents and (POLLERR or POLLHUP or POLLNVAL) <> 0 then
+      Exit(True);
+    Got := fpRecv(ASocket, @Buffer, SizeOf(Buffer), 0);
+    if Got < 0 then
+    begin
+      Failure := fpgeterrno;
+      Exit((Failure <> ESysEAGAIN) and (Failure <> ESysEINTR));
+    end;
+    {$ENDIF}
+    if Got = 0 then
+      Exit(True);
+    Inc(Drained, Got);
   end;
-  {$ELSE}
-  // poll, not select: a descriptor above 1023 fits no TFDSet.
-  Fd.fd := ASocket;
-  Fd.events := POLLIN;
-  Fd.revents := 0;
-  if fpPoll(@Fd, 1, 0) <= 0 then
-    Exit;
-  if Fd.revents and (POLLERR or POLLHUP or POLLNVAL) <> 0 then
-    Exit(True);
-  Got := fpRecv(ASocket, @Probe, 1, MSG_PEEK);
-  if Got = 0 then
-    Exit(True);
-  if Got < 0 then
-  begin
-    Failure := fpgeterrno;
-    Result := (Failure <> ESysEAGAIN) and (Failure <> ESysEINTR);
-  end;
-  {$ENDIF}
 end;
 
 // The session's cancellation poll on HTTP (#93): closing the

@@ -385,11 +385,14 @@ type
     // session is freed.
     procedure SetCancellationPoll(APoll: TMCPCancellationPoll;
       AUserData: Pointer);
+    // Whether ARequestId (borrowed; nil gives False) names the request
+    // this session is running, matched as notifications/cancelled
+    // matches it: strings by decoded value, numbers by value. With
+    // MCPCancellationTarget, lets a transport pick out the cancellation
+    // that concerns the running request (#93).
+    function IsActiveRequestId(ARequestId: TJSONData): Boolean;
     // Whether ALine is a notifications/cancelled that HandleMessage
-    // would accept for the request this session is running: well formed
-    // (a string reason or none) and naming that request's id, strings
-    // by decoded value and numbers by value. Lets a transport pick out
-    // the cancellation that concerns the running request (#93).
+    // would accept for the request this session is running.
     function CancelsActiveRequest(const ALine: string): Boolean;
   end;
 
@@ -891,6 +894,13 @@ function MCPMessages(const AMessages: array of TJSONObject): TJSONArray;
 // in their given order: the completion a static list gives (#81).
 function MCPCompleteFrom(const AValue: string;
   const ACandidates: array of string): TMCPCompletion;
+
+// The requestId of ALine when it is a notifications/cancelled that
+// HandleMessage would accept (params present, a string reason or none),
+// as a new object the caller owns; nil for any other line. A transport
+// that classifies queued lines once keeps the result and matches it
+// with TMCPSession.IsActiveRequestId (#93).
+function MCPCancellationTarget(const ALine: string): TJSONData;
 
 // In-request notifications, callable from any handler. Both are
 // silent no-ops when the precondition is missing, so handlers can
@@ -1822,18 +1832,39 @@ begin
     Result := AMessage.Params.Find('requestId');
 end;
 
-function TMCPSession.CancelsActiveRequest(const ALine: string): Boolean;
+function MCPCancellationTarget(const ALine: string): TJSONData;
 var
   Msg: TJSONRPCMessage;
+  Target: TJSONData;
+begin
+  Result := nil;
+  Msg := ParseJSONRPCMessage(ALine);
+  try
+    Target := CancellationRequestId(Msg);
+    if Target <> nil then
+      Result := Target.Clone;
+  finally
+    FreeJSONRPCMessage(Msg);
+  end;
+end;
+
+function TMCPSession.IsActiveRequestId(ARequestId: TJSONData): Boolean;
+begin
+  Result := (FCurrentRequestToken <> nil) and
+    TMCPRequestCancellationToken(FCurrentRequestToken).Matches(ARequestId);
+end;
+
+function TMCPSession.CancelsActiveRequest(const ALine: string): Boolean;
+var
+  Target: TJSONData;
 begin
   if FCurrentRequestToken = nil then
     Exit(False);
-  Msg := ParseJSONRPCMessage(ALine);
+  Target := MCPCancellationTarget(ALine);
   try
-    Result := TMCPRequestCancellationToken(FCurrentRequestToken).Matches(
-      CancellationRequestId(Msg));
+    Result := IsActiveRequestId(Target);
   finally
-    FreeJSONRPCMessage(Msg);
+    Target.Free;
   end;
 end;
 

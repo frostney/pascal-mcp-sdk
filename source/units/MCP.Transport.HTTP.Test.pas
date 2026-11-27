@@ -144,8 +144,9 @@ type
     procedure TestOversizedBody;
     procedure TestDeclaredCapabilityRefusedBeforeStreaming;
     procedure TestUndeclaredCapabilityStillEndsTheStream;
-    function AbandonWaiter(AReset: Boolean;
+    function AbandonWaiter(AReset: Boolean; const AExtra: string;
       out ASawOpen, AResetSet: Boolean): string;
+    procedure TestBytesBeforeCloseStillCancel;
     procedure TestDisconnectCancelsSilentHandler;
     procedure TestResetCancelsSilentHandler;
     procedure TestSSEStream;
@@ -1358,7 +1359,7 @@ end;
 // Sends a waiter call, waits until the handler's first poll found the
 // connection open, then gives up on it: an orderly close, or with
 // AReset a reset (SO_LINGER 0). Returns how the handler ended.
-function THTTPBinding.AbandonWaiter(AReset: Boolean;
+function THTTPBinding.AbandonWaiter(AReset: Boolean; const AExtra: string;
   out ASawOpen, AResetSet: Boolean): string;
 type
   {$IFDEF WINDOWS}
@@ -1392,6 +1393,10 @@ begin
   try
     Sock.WriteBuffer(Request[1], Length(Request));
     RTLEventWaitFor(WaiterEntered, 5000);
+    // Bytes after the request, sent once the handler is running, then
+    // the close behind them.
+    if AExtra <> '' then
+      Sock.WriteBuffer(AExtra[1], Length(AExtra));
     if AReset then
     begin
       Linger.OnOff := 1;
@@ -1418,7 +1423,19 @@ var
 begin
   // The handler first saw the connection open, then cancelled: the
   // close caused it.
-  Expect<string>(AbandonWaiter(False, SawOpen, ResetSet)).ToBe('cancelled');
+  Expect<string>(AbandonWaiter(False, '', SawOpen, ResetSet))
+    .ToBe('cancelled');
+  Expect<Boolean>(SawOpen).ToBe(True);
+end;
+
+// Bytes the client sends after its request do not hide the close
+// behind them (#93 review).
+procedure THTTPBinding.TestBytesBeforeCloseStillCancel;
+var
+  SawOpen, ResetSet: Boolean;
+begin
+  Expect<string>(AbandonWaiter(False, 'extra bytes', SawOpen, ResetSet))
+    .ToBe('cancelled');
   Expect<Boolean>(SawOpen).ToBe(True);
 end;
 
@@ -1427,7 +1444,7 @@ procedure THTTPBinding.TestResetCancelsSilentHandler;
 var
   SawOpen, ResetSet: Boolean;
 begin
-  Expect<string>(AbandonWaiter(True, SawOpen, ResetSet)).ToBe('cancelled');
+  Expect<string>(AbandonWaiter(True, '', SawOpen, ResetSet)).ToBe('cancelled');
   Expect<Boolean>(SawOpen).ToBe(True);
   Expect<Boolean>(ResetSet).ToBe(True);
 end;
@@ -1507,6 +1524,8 @@ begin
     TestDisconnectCancelsSilentHandler);
   Test('a reset connection cancels a handler that never writes',
     TestResetCancelsSilentHandler);
+  Test('bytes sent before an orderly close do not hide it',
+    TestBytesBeforeCloseStillCancel);
   Test('notification-opted request → SSE stream, response last',
     TestSSEStream);
   Test('notification-opted protocol error → 400 JSON, -32022',
