@@ -2,8 +2,8 @@
 
 ## Executive Summary
 
-Add pascal-mcp-sdk to your project (`lwpt add` or vendor seven
-files), register tools with a name, description, schema, and a
+Add pascal-mcp-sdk to your project (`lwpt add`, or vendor its
+library units and `MCP.inc`), register tools with a name, description, schema, and a
 handler function, and call `RunMCPStdioServer` — or serve the same
 registrations over Streamable HTTP with `TMCPHTTPServer`. Wire the
 binary into any MCP client.
@@ -37,11 +37,10 @@ Your program's `uses MCP.Server` resolves through the nested manifest;
 the library's `*.Test.pas` files do not leak into your `lwpt test`
 discovery.
 
-Without lwpt, vendor the seven files —
-`source/units/MCP.JSONRPC.pas`, `MCP.Protocol.pas`, `MCP.Schema.pas`,
-`MCP.Server.pas`, `MCP.Transport.Stdio.pas`, `MCP.Transport.HTTP.pas`,
-`MCP.inc` — into your unit path and compile with
-`-Fu<that-path> -Fi<that-path>`.
+Without lwpt, vendor the library: every `MCP.*.pas` unit in
+`source/units/` except the `*.Test.pas` suites, plus `MCP.inc`, into
+your unit path, and compile with `-Fu<that-path> -Fi<that-path>`.
+`MCP.Server` uses the other units, so copy them all.
 
 ## Write your own server
 

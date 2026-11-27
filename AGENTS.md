@@ -46,23 +46,25 @@ The command surface itself is documented in the machine-written
 [`lwpt` command reference](#lwpt-command-reference) block below — repo-specific context the
 generator can't know: `lwpt install --frozen` is the CI mode (verify
 lockfile + committed modules, no network), `lwpt build` produces
-`mcpdemo` + `mcpsmoke`, `lwpt test` runs the co-located unit suites, and
-`lwpt run smoke` drives the built E2E battery (mcpsmoke spawns mcpdemo
-the way a real client does).
+`mcpdemo`, `mcpsmoke` and `mcpconformance`, `lwpt test` runs the co-located unit suites, and
+`lwpt run smoke` drives the built E2E battery (mcpsmoke spawns mcpdemo,
+then mcpconformance, the way a real client does).
 
 ## Code Organization
 
 | Path | Role |
 | --- | --- |
-| `source/units/` | Library: `MCP.JSONRPC` (JSON-RPC 2.0 profile), `MCP.Protocol` (per-request `_meta` model), `MCP.Schema` (fluent schema builder + RTTI-derived argument classes), `MCP.Server` (sans-I/O dispatch core; tool/resource/prompt registries), `MCP.Transport.Stdio` (newline-delimited stdio binding), `MCP.Transport.HTTP` (Streamable HTTP binding: single POST endpoint, SSE response streams) |
-| `source/apps/` | Programs: `mcpdemo` (example stdio server), `mcpsmoke` (subprocess E2E battery) |
+| `source/units/` | Library: `MCP.JSONRPC` (JSON-RPC 2.0 profile), `MCP.Protocol` (per-request `_meta` model), `MCP.Schema` (fluent schema builder + RTTI-derived argument classes), `MCP.Content` (content blocks for tool results and prompt messages), `MCP.Server` (sans-I/O dispatch core; tool/resource/prompt registries), `MCP.Transport.Stdio` (newline-delimited stdio binding), `MCP.Transport.HTTP` (Streamable HTTP binding: single POST endpoint, SSE response streams) |
+| `source/apps/` | Programs: `mcpdemo` (example stdio server), `mcpsmoke` (subprocess E2E battery), `mcpconformance` (conformance fixture: the official suite's reference surface, registered through the public API) |
 | `scripts/` | Self-contained `lwpt run` wrappers (`smoke.pas` → runs the built `mcpsmoke`; `conformance.pas` → runs `tools/conformance/run.mjs`) |
-| `tools/` | Cross-implementation checks: `interop-ts/` (official MCP TypeScript clients vs `mcpdemo` over stdio, the legacy era, and Streamable HTTP); `conformance/` (official MCP conformance suite vs `mcpdemo --http`, non-blocking) |
+| `tools/` | Cross-implementation checks: `interop-ts/` (official MCP TypeScript clients vs `mcpdemo` over stdio, the legacy era, and Streamable HTTP); `conformance/` (official MCP conformance suite vs `mcpconformance --http`, non-blocking) |
 | `docs/` | Consumer-first tree rendered by the website: `guides/` (quick start, tools, images, schemas, prompts, resources, configuration, notifications, shipping, deployment, troubleshooting, cookbook), `reference/` (public API, gated by `.github/scripts/check-reference-docs.sh`), `internals/` (architecture, contributing, tooling, code style, releasing — contributor pages), `adr/` (decision records, repo-only — excluded from the website), `casts/` (committed terminal recordings served by the site) |
 | `website/` | GitHub Pages site: Fumadocs static export rendering `docs/` directly — contributor/CI tooling, not part of the library |
 
 Layering is strictly bottom-up: `MCP.JSONRPC` → `MCP.Protocol` →
-`MCP.Server` → `MCP.Transport.Stdio` / `MCP.Transport.HTTP`. The server
+`MCP.Server` → `MCP.Transport.Stdio` / `MCP.Transport.HTTP`, with
+`MCP.Schema` and `MCP.Content` beside the chain as helpers
+`MCP.Server` consumes. The server
 core performs no I/O (`HandleMessage`: line in, line out) — both
 transports wrap the same core without changes, mirroring duetto's
 sans-I/O discipline. See
@@ -74,7 +76,9 @@ sans-I/O discipline. See
   with the unit they cover and must keep providing regression value.
 - `mcpsmoke` is the in-repo E2E battery: it launches `mcpdemo` the way a
   real MCP client does (subprocess, pipes) and drives the full v1
-  surface including error paths and the EOF shutdown contract.
+  surface including error paths and the EOF shutdown contract, then
+  launches the conformance fixture `mcpconformance` for the content
+  types `mcpdemo` does not return.
 - Nothing in the test stack touches the **external** network; everything
   runs against local pipes, loopback (127.0.0.1) sockets, and temp
   files. The one exception is the non-blocking conformance run
