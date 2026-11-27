@@ -90,7 +90,12 @@ unit MCP.Transport.HTTP;
 //     the core converts it into a response the transport can no
 //     longer deliver, and nothing further is sent for that request
 //     — subscriptions/listen streams do not arise because the core
-//     advertises no subscription capability.
+//     advertises no subscription capability;
+//   - a push stream a handler parks (events/stream, #126) is answered
+//     as an SSE stream at once and stepped in the request's thread
+//     until it ends; a closed connection, checked at least every 50 ms,
+//     or a failed write cancels it with nothing more sent, and Stop
+//     closes it with its final frame.
 //
 // Era posture: this binding is modern-only. The constructor turns off
 // DualEra, so 2026-07-28 requests are served statelessly and a legacy
@@ -121,7 +126,8 @@ uses
   MCP.JSONRPC,
   MCP.Protocol,
   MCP.Schema,
-  MCP.Server;
+  MCP.Server,
+  MCP.Streams;
 
 const
   // Default inbound body cap in bytes (same budget as the stdio line
@@ -168,6 +174,8 @@ type
       ACode: Integer; const ABody: string);
     // AMalformedRequest: the request lacked a required per-request
     // field, so a -32602 answer maps to 400 (#79).
+    procedure DriveStream(AStream: TMCPStream; ASession: TMCPSession;
+      ASSE: Pointer; APoll: Pointer);
     procedure AnswerRequest(ARequest: TFPHTTPConnectionRequest;
       AResponse: TFPHTTPConnectionResponse; const ABody: string;
       AStream, AMalformedRequest: Boolean);
@@ -1138,9 +1146,53 @@ begin
   end;
 end;
 
+// Steps AStream (owned) in this request's thread until it ends (#126):
+// its frames are SSE events, the first one opening the stream. A
+// closed connection, checked at least every 50 ms, or a failed write
+// cancels it, and nothing more is sent (events.mdx, Lifecycle); Stop
+// closes it with its final frame. No cap on concurrent requests counts
+// it: each stream holds only its own connection's thread.
+procedure TMCPHTTPServer.DriveStream(AStream: TMCPStream;
+  ASession: TMCPSession; ASSE: Pointer; APoll: Pointer);
+var
+  Due, Now: Int64;
+begin
+  try
+    try
+      repeat
+        Due := AStream.Step(MCPNowMs, @SSESink, ASSE);
+        while not AStream.Finished do
+        begin
+          if FStopPending then
+            AStream.Close(@SSESink, ASSE)
+          else if HTTPDisconnectPoll(ASession, APoll) then
+            AStream.Cancel
+          else
+          begin
+            Now := MCPNowMs;
+            if Now >= Due then
+              Break;
+            if Due - Now < 50 then
+              Sleep(Due - Now)
+            else
+              Sleep(50);
+          end;
+        end;
+      until AStream.Finished;
+    except
+      // A write to a client that went away: the end of the stream.
+      on EStreamError do
+        AStream.Cancel;
+    end;
+  finally
+    AStream.Free;
+  end;
+end;
+
 // Dispatch one request body through the core and answer it — a
 // single JSON object, or an SSE stream when AStream is set and the
-// handler actually emits a notification.
+// handler actually emits a notification, or when it parks a push
+// stream (#126).
 procedure TMCPHTTPServer.AnswerRequest(ARequest: TFPHTTPConnectionRequest;
   AResponse: TFPHTTPConnectionResponse; const ABody: string;
   AStream, AMalformedRequest: Boolean);
@@ -1150,22 +1202,26 @@ var
   ResponseLine: string;
   Produced: Boolean;
   Poll: THTTPDisconnectPoll;
+  Host: TMCPStreamHost;
+  Parked: TMCPStream;
 begin
   Session := FServer.CreateSession;
+  Host := TMCPStreamHost.Create;
   try
     Poll.Socket := ARequest.Connection.Socket.Handle;
     Poll.LastCheck := 0;
     Poll.Closed := False;
     Session.SetCancellationPoll(HTTPDisconnectPoll, @Poll);
+    Session.StreamHost := Host;
+    Stream.Response := AResponse;
+    Stream.Socket := ARequest.Connection.Socket;
+    Stream.HeadersSent := False;
     if AStream then
     begin
       // Nothing is committed up front: the sink opens the stream on
       // its first event, so a request that fails at protocol level —
       // which no notification ever precedes — still gets the status
       // the mapping prescribes instead of a 200 SSE stream.
-      Stream.Response := AResponse;
-      Stream.Socket := ARequest.Connection.Socket;
-      Stream.HeadersSent := False;
       Produced := False;
       try
         Produced := FServer.HandleMessage(Session, ABody, @SSESink,
@@ -1187,6 +1243,18 @@ begin
     else
       Produced := FServer.HandleMessage(Session, ABody, nil, nil,
         ResponseLine);
+    // A push stream's handler answers with a placeholder: the stream
+    // writes its own frames from here on.
+    Parked := Host.TakeParked;
+    if Parked <> nil then
+    begin
+      DriveStream(Parked, Session, @Stream, @Poll);
+      if Stream.HeadersSent then
+        Exit;
+      // Nothing could be written: the client is gone.
+      AResponse.Code := 202;
+      Exit;
+    end;
     // One place answers every non-streamed request (#79 review).
     if Produced then
       AnswerJSON(AResponse, HTTPStatusForResponse(ResponseLine,
@@ -1197,6 +1265,7 @@ begin
       AResponse.Code := 202;
   finally
     Session.Free;
+    Host.Free;
   end;
 end;
 

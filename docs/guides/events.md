@@ -7,10 +7,17 @@ happened, such as a new email or an incident
 (`io.modelcontextprotocol/events`, at the Beta stage, defined by
 [SEP-3415](https://github.com/modelcontextprotocol/ext-events/blob/c77b84395eff0ae32f53b0516c2214fe276ed050/specification/beta/events/events.mdx)).
 A server lists the event types it offers, and a client subscribes to
-one with a name, arguments and a cursor. `MCP.Events` serves poll
-delivery: the client calls `events/poll` with its cursor, and the
-server answers with what happened since and a new cursor. The server
-holds no state per client, which fits this library's stateless design.
+one with a name, arguments and a cursor. `MCP.Events` serves two
+delivery modes from the same check:
+
+- **Poll**: the client calls `events/poll` with its cursor, and the
+  server answers with what happened since and a new cursor. The server
+  holds no state per client, which fits this library's stateless
+  design.
+- **Push**: the client opens a long-lived `events/stream`, and the
+  server sends each occurrence as it finds it, until the client
+  cancels. Only the open stream holds state, and it ends with the
+  stream.
 
 ## Register an event type
 
@@ -89,23 +96,68 @@ stays `{}` whatever `DeclareExtension` sets, since `listChanged` needs
 `subscriptions/listen`. It serves:
 
 - `events/list`: each type with its description, `"delivery":
-  ["poll"]`, and its input and payload schemas, paged with `PageSize`.
+  ["poll", "push"]`, and its input and payload schemas, paged with
+  `PageSize`.
 - `events/poll`: one subscription per request. An unknown name answers
   `-32023` with `data.kind` `"event"`, and bad parameters or arguments
   answer `-32602`.
+- `events/stream`: one push subscription per request, described below.
 
 The extension is defined for the 2026-07-28 revision, so the classic
 `initialize` does not declare it, and a client on the classic handshake
-that calls these methods anyway gets `-32601`. On Streamable HTTP, `events/poll`
-carries the `Mcp-Name` header for the event name and an `Mcp-Param-*`
+that calls these methods anyway gets `-32601`. On Streamable HTTP,
+`events/poll` and `events/stream` carry the `Mcp-Name` header for the event name and an `Mcp-Param-*`
 header for each argument marked `x-mcp-header`. Both are checked as for
 `tools/call`. `Mcp-Name` must arrive once, and a name that is not plain
 ASCII must be base64-encoded.
 
+## Push delivery
+
+The server polls the check on the stream's behalf, asking for one
+occurrence at a time (`MaxEvents` 1), so each event carries the exact
+cursor after it. `HasMore` reads on at once, and otherwise the next
+call waits `NextPollMs`, or the registration's interval. The check
+needs nothing new; a type without replay keeps its position for the
+stream's lifetime and sends `cursor: null`.
+
+The first check call runs inside the request, so an error it raises,
+such as `-32024`, answers at once and opens no stream, as do an unknown
+name and bad arguments. Then the stream sends, each message tagged with
+`_meta["io.modelcontextprotocol/subscriptionId"]`, the request's id:
+
+- `notifications/events/active` first, with the client's cursor (or a
+  fresh one), `truncated` and the granted `heartbeatMs`, and again with
+  `truncated: true` after a gap.
+- `notifications/events/event` for each occurrence, with its cursor.
+- `notifications/events/heartbeat` whenever `heartbeatMs` passes
+  without another message, with the position checked up to. The grant
+  is 30 seconds, or the client's suggestion clamped to 1 second to 5
+  minutes.
+- `notifications/events/error` (`-32603`) when the check fails with an
+  ordinary exception. The stream retries at the next interval.
+- `notifications/events/terminated` when the check raises
+  `EMCPProtocolError`, such as `-32024` for revoked access, or returns
+  occurrences that break the rules (`-32603`). The final frame, the
+  `StreamEventsResult`, follows, and the stream ends.
+
+On Streamable HTTP the response is an SSE stream that opens at once,
+and the client cancels by closing the connection, which the server
+notices within 50 ms. Each stream holds its connection's thread, and no
+cap on concurrent requests counts it. `Stop` closes open streams with
+their final frame.
+
+On stdio the loop stays single-threaded: it waits for input no longer
+than the next stream is due, and steps the streams between lines, so
+other requests, and other streams, carry on. A `notifications/cancelled`
+for the stream's id ends it, and nothing more is sent for it. The end
+of input ends every stream. A request that runs long delays the streams
+until it returns. A loop over a Text with its own driver, or a Windows
+console, cannot wait with a time limit, and `events/stream` then
+answers `-32026` (Unsupported, `data.feature` `"deliveryMode"`), as it
+does over the in-process test client.
+
 ## Not served
 
-- **Push delivery** (`events/stream`) needs a response stream that
-  stays open, and comes later.
 - **Webhooks** need subscriptions the server keeps, outbound HTTPS
   calls and an authenticated caller.
 - **`notifications/events/list_changed`** needs `subscriptions/listen`.
@@ -116,7 +168,8 @@ without `listChanged` is accurate.
 ## Related pages
 
 - [Server API reference](../reference/server.md#extensions), for
-  `RegisterEvent`, the query and poll records, and the error codes.
+  `RegisterEvent`, the query and poll records, the push constants and
+  `MCP.Streams`, and the error codes.
 - [Tools](tools.md#routing-headers-x-mcp-header), for the `x-mcp-header`
   annotation event arguments share.
 - [Skills](skills.md), the other extension built on the same hooks.

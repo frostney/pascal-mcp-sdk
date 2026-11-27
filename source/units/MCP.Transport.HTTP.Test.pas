@@ -126,6 +126,8 @@ type
     procedure TestMissingClientCapabilities400;
     procedure TestInBandInvalidParamsStays200;
     procedure TestEventRouting;
+    procedure TestEventStream;
+    procedure TestEventStreamClientClose;
     procedure TestStreamingOptInMissingCapabilities400;
     procedure TestNotificationAccepted;
     procedure TestMalformedNotificationAccepted;
@@ -402,6 +404,31 @@ begin
   Result := MCPEventPoll('now');
 end;
 
+var
+  // Check calls by the push fixtures (#126), read across threads.
+  EndingCalls, EndlessCalls: Integer;
+
+// Opens, then the second call revokes access: the server ends the
+// stream with terminated and the final frame.
+function EndingCheck(const AQuery: TMCPEventQuery;
+  const ACtx: TMCPRequestContext): TMCPEventPoll;
+begin
+  Inc(EndingCalls);
+  if EndingCalls >= 2 then
+    raise EMCPProtocolError.Create(-32024, 'Forbidden');
+  Result := MCPEventPoll('0');
+  Result.NextPollMs := 50;
+end;
+
+// Never ends by itself: asks again every 50 ms.
+function EndlessCheck(const AQuery: TMCPEventQuery;
+  const ACtx: TMCPRequestContext): TMCPEventPoll;
+begin
+  Inc(EndlessCalls);
+  Result := MCPEventPoll('0');
+  Result.NextPollMs := 50;
+end;
+
 procedure THTTPBinding.BeforeEach;
 var
   Attempt: Integer;
@@ -445,6 +472,12 @@ begin
     TJSONObject(GetJSON('{"type":"object","properties":{"region":' +
     '{"type":"string","x-mcp-header":"Region"}}}')), ObjectSchema.Build,
     TickCheck);
+  RegisterEvent(FServer, 'ending', 'Ends', ObjectSchema, ObjectSchema,
+    EndingCheck);
+  RegisterEvent(FServer, 'endless', 'Never ends', ObjectSchema,
+    ObjectSchema, EndlessCheck);
+  EndingCalls := 0;
+  EndlessCalls := 0;
   FServer.RegisterRoute('example/route', 'target', FRouteFixture.Headers);
   FTransport := TMCPHTTPServer.Create(FServer);
   FTransport.Port := FindFreePort;
@@ -554,6 +587,56 @@ begin
     ABody := Copy(Response, HeaderEnd + 4, MaxInt)
   else
     ABody := '';
+end;
+
+// An events/stream POST for event AName, with Mcp-Name unless
+// AWithName is false.
+function StreamRequest(APort: Word; const AName: string;
+  AWithName: Boolean = True): string;
+var
+  Payload: string;
+begin
+  Payload := '{"jsonrpc":"2.0","id":5,"method":"events/stream","params":{' +
+    '"name":"' + AName + '",' + META_MODERN + '}}';
+  Result := 'POST /mcp HTTP/1.1'#13#10 +
+    'Host: 127.0.0.1:' + IntToStr(APort) + #13#10 +
+    'Content-Type: application/json'#13#10 +
+    'Accept: application/json, text/event-stream'#13#10 +
+    'MCP-Protocol-Version: ' + MCP_PROTOCOL_VERSION + #13#10 +
+    'Mcp-Method: events/stream'#13#10;
+  if AWithName then
+    Result := Result + 'Mcp-Name: ' + AName + #13#10;
+  Result := Result + 'Connection: close'#13#10 +
+    'Content-Length: ' + IntToStr(Length(Payload)) + #13#10#13#10 + Payload;
+end;
+
+// Sends ARequest and reads until the first SSE frame is complete, then
+// closes the connection: what the response held by then.
+function ReadFirstFrameThenClose(APort: Word;
+  const ARequest: string): string;
+var
+  Sock: TInetSocket;
+  Buf: array[0..4095] of Byte;
+  Got, HeaderEnd: Integer;
+begin
+  Result := '';
+  Sock := TInetSocket.Create('127.0.0.1', APort);
+  try
+    Sock.IOTimeout := 5000;
+    Sock.WriteBuffer(ARequest[1], Length(ARequest));
+    repeat
+      Got := Sock.Read(Buf[0], SizeOf(Buf));
+      if Got > 0 then
+      begin
+        SetLength(Result, Length(Result) + Got);
+        Move(Buf[0], Result[Length(Result) - Got + 1], Got);
+      end;
+      HeaderEnd := Pos(#13#10#13#10, Result);
+    until (Got <= 0) or ((HeaderEnd > 0) and
+      (Pos(#10#10, Copy(Result, HeaderEnd + 4, MaxInt)) > 0));
+  finally
+    Sock.Free;
+  end;
 end;
 
 function THTTPBinding.PostRoutedRaw(const AArguments,
@@ -1018,6 +1101,49 @@ begin
     'Connection: close'#13#10 +
     'Content-Length: ' + IntToStr(Length(Payload)) + #13#10#13#10 + Payload;
   Result := RawExchange(FTransport.Port, Request, ABody);
+end;
+
+// events/stream answers with an SSE stream at once (events.mdx,
+// Push-Based Delivery): active first, and when the server ends the
+// subscription, terminated and the final frame, then the close.
+procedure THTTPBinding.TestEventStream;
+var
+  Body: string;
+begin
+  Expect<Integer>(RawExchange(FTransport.Port, StreamRequest(
+    FTransport.Port, 'ending'), Body)).ToBe(200);
+  Expect<Integer>(Pos('data: { "jsonrpc" : "2.0", "method" : ' +
+    '"notifications/events/active"', Body)).ToBe(1);
+  Expect<Boolean>(Pos('data: { "jsonrpc" : "2.0", "method" : ' +
+    '"notifications/events/terminated", "params" : { "error" : { "code" : ' +
+    '-32024', Body) > 0).ToBe(True);
+  Expect<Boolean>(Pos('data: { "jsonrpc" : "2.0", "id" : 5, "result" : ' +
+    '{ "resultType" : "complete"', Body) > 0).ToBe(True);
+  Expect<Integer>(EndingCalls).ToBe(2);
+  // Mcp-Name is required on events/stream as on events/poll.
+  Expect<Integer>(RawExchange(FTransport.Port, StreamRequest(
+    FTransport.Port, 'ending', False), Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+end;
+
+// A client that closes the connection cancels its stream (events.mdx,
+// Lifecycle): the server stops calling the check.
+procedure THTTPBinding.TestEventStreamClientClose;
+var
+  Response: string;
+  Calls: Integer;
+begin
+  Response := ReadFirstFrameThenClose(FTransport.Port, StreamRequest(
+    FTransport.Port, 'endless'));
+  Expect<Boolean>(Pos('Content-Type: text/event-stream', Response) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Pos('notifications/events/active', Response) > 0)
+    .ToBe(True);
+  // The close is seen within 50 ms, a check runs every 50 ms.
+  Sleep(400);
+  Calls := EndlessCalls;
+  Sleep(400);
+  Expect<Integer>(EndlessCalls).ToBe(Calls);
 end;
 
 procedure THTTPBinding.TestParamHeaderMissing;
@@ -1641,6 +1767,10 @@ begin
     TestParamHeadersMatch);
   Test('Mcp-Param header missing → 400, -32020', TestParamHeaderMissing);
   Test('events/poll carries Mcp-Name and Mcp-Param-*', TestEventRouting);
+  Test('events/stream answers an SSE stream; the server can end it',
+    TestEventStream);
+  Test('a client that closes the connection ends its stream',
+    TestEventStreamClientClose);
   Test('Mcp-Param header mismatched → 400, -32020', TestParamHeaderMismatch);
   Test('Mcp-Param base64 with bad padding or characters → 400',
     TestParamHeaderBadBase64);

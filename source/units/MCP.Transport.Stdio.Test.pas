@@ -2,7 +2,10 @@
   Text files (the seam RunMCPStdioLoop exposes): one response line per
   request line, LF-only terminators even for multi-line-ish payloads,
   CRLF input tolerated, blank lines skipped, notifications producing no
-  output line, and the loop returning cleanly at EOF. }
+  output line, and the loop returning cleanly at EOF; and push streams
+  (#126) multiplexed beside other requests, cancelled by
+  notifications/cancelled, stepped while the loop waits for input, and
+  refused over a Text with its own driver. }
 
 program MCP.Transport.Stdio.Test;
 
@@ -21,7 +24,9 @@ uses
 
   fpjson,
   jsonparser,
+  MCP.Events,
   MCP.Protocol,
+  MCP.Schema,
   MCP.Server,
   MCP.Transport.Stdio,
   TestingPascalLibrary;
@@ -67,12 +72,21 @@ type
     procedure TestTextBufferTakenOver;
     procedure TestStreamBackedInput;
     procedure TestCancelForOtherRequestIgnored;
+    procedure TestStreamsBesideRequests;
+    procedure TestStreamStepsWhileInputIdle;
+    procedure TestStreamRefusedOverTextDriver;
     procedure TestLastLineWithoutNewline;
   end;
+
+var
+  // Each beat check call by its stream's id, and |ping for each ping
+  // (#126).
+  CallLog: string;
 
 function PingHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
+  CallLog := CallLog + '|ping';
   Result := MCPTextResult('pong');
 end;
 
@@ -83,6 +97,48 @@ var
   WaiterOutcomes: string;
   // The write end of the pipe TestCancelWrittenAfterHandlerStarts feeds.
   PipeWriter: THandle;
+  // The beat upstream (#126): occurrences 1 .. BeatHead; the check asks
+  // again after BeatPollMs; on call BeatCloseAt it adds one occurrence
+  // and closes PipeWriter, ending the input.
+  BeatHead, BeatPollMs, BeatCalls, BeatCloseAt: Integer;
+
+function BeatCheck(const AQuery: TMCPEventQuery;
+  const ACtx: TMCPRequestContext): TMCPEventPoll;
+var
+  From, Last, I: Integer;
+begin
+  Inc(BeatCalls);
+  CallLog := CallLog + ACtx.RequestId.AsString;
+  if BeatCalls = BeatCloseAt then
+  begin
+    Inc(BeatHead);
+    FileClose(PipeWriter);
+  end;
+  Result := MCPEventPoll(IntToStr(BeatHead), TJSONArray.Create);
+  Result.NextPollMs := BeatPollMs;
+  // A stream that always has more is stepped on every loop turn.
+  Result.HasMore := AQuery.Arguments.Get('more', False);
+  if AQuery.FromNow then
+    Exit;
+  From := StrToInt(AQuery.Cursor) + 1;
+  Last := BeatHead;
+  if (AQuery.MaxEvents >= 0) and (From + AQuery.MaxEvents - 1 < Last) then
+  begin
+    Last := From + AQuery.MaxEvents - 1;
+    Result.HasMore := True;
+  end;
+  for I := From to Last do
+    Result.Events.Add(MCPEventOccurrence('e' + IntToStr(I),
+      '2026-11-27T10:00:00Z', TJSONObject.Create(['n', I])));
+  if Last >= From then
+    Result.Cursor := IntToStr(Last);
+end;
+
+function StreamLine(const AId, AParams: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":' + AId + ',"method":"events/stream",' +
+    '"params":{"name":"beat",' + AParams + META_MODERN + '}}';
+end;
 
 // Polls IsCancelled the way a long handler does; the cancellation, if
 // any, comes from the stdio loop's poll (#93).
@@ -159,6 +215,13 @@ begin
     '{"type":"object"}', SelfCancelHandler);
   FServer.RegisterTool('poll_once', 'Polls once', '{"type":"object"}',
     PollOnceHandler);
+  RegisterEvent(FServer, 'beat', 'Beats', ObjectSchema, ObjectSchema
+    .AddInteger('n'), BeatCheck);
+  BeatHead := 2;
+  BeatPollMs := 60000;
+  BeatCalls := 0;
+  BeatCloseAt := 0;
+  CallLog := '';
   WaiterOutcome := '';
   WaiterOutcomes := '';
   FDir := GetTempDir + 'pascal-mcp-sdk-stdio-test' + PathDelim;
@@ -651,6 +714,136 @@ begin
     .ToBe(True);
 end;
 
+// Two push streams and a request on one stdin (events.mdx, Lifecycle:
+// concurrent streams share stdout, told apart by the subscription id):
+// each stream's frames follow its request, the request is answered
+// between them, a stream request gets no response line, and a
+// cancelled stream sends nothing more.
+procedure TStdioLoop.TestStreamsBesideRequests;
+var
+  Output: string;
+  Lines: TStringList;
+begin
+  Output := RunLoop(StreamLine('"a"', '"cursor":"0",') + #10 +
+    StreamLine('"c"', '"arguments":{"more":true},') + #10 +
+    StreamLine('"b"', '') + #10 +
+    '{"jsonrpc":"2.0","method":"notifications/cancelled","params":' +
+    '{"requestId":"a"}}' + #10 +
+    '{"jsonrpc":"2.0","method":"notifications/cancelled","params":' +
+    '{"requestId":"c"}}' + #10 +
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":' +
+    '"ping",' + META_MODERN + '}}' + #10);
+  // Stream c, which always has more, was checked until its
+  // cancellation, and never after it.
+  Expect<Boolean>(Pos('c', CallLog) > 0).ToBe(True);
+  Expect<Integer>(Pos('c', Copy(CallLog, Pos('|ping', CallLog),
+    MaxInt))).ToBe(0);
+  Lines := TStringList.Create;
+  try
+    Lines.Text := Output;
+    // Stream c's active sits between a's frames and b's.
+    Lines.Delete(3);
+    Expect<Integer>(Lines.Count).ToBe(5);
+    Expect<Boolean>(Pos('notifications/events/active', Lines[0]) > 0)
+      .ToBe(True);
+    Expect<Boolean>(Pos('/subscriptionId" : "a"', Lines[0]) > 0).ToBe(True);
+    Expect<Boolean>(Pos('"eventId" : "e1"', Lines[1]) > 0).ToBe(True);
+    Expect<Boolean>(Pos('"eventId" : "e2"', Lines[2]) > 0).ToBe(True);
+    Expect<Boolean>(Pos('"cursor" : "2", "truncated" : false', Lines[3]) > 0)
+      .ToBe(True);
+    Expect<Boolean>(Pos('/subscriptionId" : "b"', Lines[3]) > 0).ToBe(True);
+    Expect<Boolean>(Pos('"id" : 3', Lines[4]) > 0).ToBe(True);
+    Expect<Integer>(Pos('"id" : "a"', Output) + Pos('"id" : "b"', Output))
+      .ToBe(0);
+  finally
+    Lines.Free;
+  end;
+end;
+
+// The loop waits for input no longer than the stream's next check: with
+// stdin open and idle, the check runs again after nextPollMs, and its
+// occurrence goes out before the input ends.
+procedure TStdioLoop.TestStreamStepsWhileInputIdle;
+var
+  InFile, OutFile: Text;
+  PipeReader: THandle;
+  Request, Output: string;
+  Bytes: TStringStream;
+  Started: QWord;
+begin
+  BeatHead := 0;
+  BeatPollMs := 100;
+  BeatCloseAt := 2;
+  Request := StreamLine('9', '"cursor":"0",') + #10;
+  Bytes := TStringStream.Create('');
+  try
+    Bytes.SaveToFile(FDir + 'in.txt');
+  finally
+    Bytes.Free;
+  end;
+  OpenPipe(PipeReader, PipeWriter);
+  FileWrite(PipeWriter, Request[1], Length(Request));
+  Assign(InFile, FDir + 'in.txt');
+  Reset(InFile);
+  FileClose(TextRec(InFile).Handle);
+  TextRec(InFile).Handle := PipeReader;
+  Assign(OutFile, FDir + 'out.txt');
+  Rewrite(OutFile);
+  Started := GetTickCount64;
+  try
+    RunMCPStdioLoop(InFile, OutFile, FServer);
+  finally
+    Close(InFile);
+    Close(OutFile);
+  end;
+  Bytes := TStringStream.Create('');
+  try
+    Bytes.LoadFromFile(FDir + 'out.txt');
+    Output := Bytes.DataString;
+  finally
+    Bytes.Free;
+  end;
+  Expect<Integer>(BeatCalls).ToBe(2);
+  Expect<Boolean>(GetTickCount64 - Started >= 90).ToBe(True);
+  Expect<Integer>(Pos('{ "jsonrpc" : "2.0", "method" : ' +
+    '"notifications/events/active"', Output)).ToBe(1);
+  Expect<Boolean>(Pos('"eventId" : "e1"', Output) > 0).ToBe(True);
+end;
+
+// A Text with its own I/O driver cannot be waited on, so the loop
+// offers no stream host and events/stream answers -32026.
+procedure TStdioLoop.TestStreamRefusedOverTextDriver;
+var
+  InFile, OutFile: Text;
+  Source, Bytes: TStringStream;
+  Output: string;
+begin
+  Source := TStringStream.Create(StreamLine('4', '') + #10);
+  try
+    AssignStream(InFile, Source);
+    Reset(InFile);
+    Assign(OutFile, FDir + 'out.txt');
+    Rewrite(OutFile);
+    try
+      RunMCPStdioLoop(InFile, OutFile, FServer);
+    finally
+      Close(InFile);
+      Close(OutFile);
+    end;
+  finally
+    Source.Free;
+  end;
+  Bytes := TStringStream.Create('');
+  try
+    Bytes.LoadFromFile(FDir + 'out.txt');
+    Output := Bytes.DataString;
+  finally
+    Bytes.Free;
+  end;
+  Expect<Boolean>(Pos('"id" : 4, "error" : { "code" : -32026', Output) > 0)
+    .ToBe(True);
+end;
+
 procedure TStdioLoop.TestCancelForOtherRequestIgnored;
 var
   Output: string;
@@ -706,6 +899,12 @@ begin
   Test('a cancellation for another id leaves the handler running',
     TestCancelForOtherRequestIgnored);
   Test('a last line without LF is served', TestLastLineWithoutNewline);
+  Test('push streams share stdout with requests; a cancelled one stops',
+    TestStreamsBesideRequests);
+  Test('a stream is stepped while stdin is open and idle',
+    TestStreamStepsWhileInputIdle);
+  Test('a Text with its own driver cannot stream: -32026',
+    TestStreamRefusedOverTextDriver);
 end;
 
 begin

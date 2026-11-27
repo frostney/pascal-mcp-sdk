@@ -420,6 +420,7 @@ type
     FCurrentRequestToken: TObject; // borrowed: dispatch owns the token
     FCancellationPoll: TMCPCancellationPoll;
     FCancellationPollData: Pointer;
+    FStreamHost: TObject; // borrowed: the transport's
     // ARequestId is borrowed; the returned token is owned by dispatch.
     function BeginRequest(ARequestId: TJSONData): TObject;
     procedure EndRequest(AToken: TObject);
@@ -458,6 +459,10 @@ type
     // Whether ALine is a notifications/cancelled that HandleMessage
     // would accept for the request this session is running.
     function CancelsActiveRequest(const ALine: string): Boolean;
+    // The transport's stream host (a TMCPStreamHost, MCP.Streams;
+    // borrowed, nil for none), handed to each 2026-07-28 request's
+    // handler as ACtx.StreamHost (#126).
+    property StreamHost: TObject read FStreamHost write FStreamHost;
   end;
 
   TMCPServer = class
@@ -3685,6 +3690,8 @@ begin
     if Assigned(ASink) then
       Ctx.Notifier := Dispatch.EmitNotification;
     Ctx.CancellationProbe := Dispatch.IsCancelled;
+    Ctx.RequestId := AMessage.Id;
+    Ctx.StreamHost := ASession.StreamHost;
 
     // requestState is verified before any handler sees it (#89). Only
     // tools/call and prompts/get mint state here, so on any other

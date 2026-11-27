@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-pascal-mcp-sdk is twenty units layered strictly bottom-up. Four form the
+pascal-mcp-sdk is twenty-one units layered strictly bottom-up. Four form the
 request chain — `MCP.JSONRPC` (the JSON-RPC 2.0 profile MCP mandates),
 `MCP.Protocol` (the stateless per-request `_meta` model of spec
 revision 2026-07-28), `MCP.Server` (the sans-I/O dispatch core), and a
@@ -21,7 +21,8 @@ and list cursors for it, and `MCP.RequestState` with `MCP.Crypto` seal the MRTR
 serve through, `MCP.Apps` and `MCP.Skills` build the MCP Apps and
 Skills extensions on top of the core (`MCP.Skills` reading frontmatter
 with `MCP.Frontmatter`), `MCP.Events` builds the Events extension's poll
-delivery, `MCP.Errors` holds the exceptions every layer raises, and `MCP.Testing` sits above it as the in-process test
+and push delivery, `MCP.Streams` holds the long-lived requests a transport
+drives for push, `MCP.Errors` holds the exceptions every layer raises, and `MCP.Testing` sits above it as the in-process test
 client for server authors. The core performs no I/O, with one scoped exception: when no
 `requestState` keys are set, the first `CreateSession` reads 32 bytes
 from the operating system's random source for the instance's sealing
@@ -88,7 +89,8 @@ Rules live in the layer that owns them and nowhere else:
 | `MCP.Extensions` | The hooks an extension serves through: request methods after the core's, resolvers for unlisted resources under a URI prefix, objects the server frees | Dispatch, bytes and streams |
 | `MCP.Apps` | The MCP Apps extension on top of the core: `ui://` resources with `_meta.ui`, tool links, the extension declaration | Dispatch, bytes and streams |
 | `MCP.Skills` | The Skills extension on the hooks: the skill catalog with digests and sizes, the `SKILL.md` writer, skills loaded from a directory, `skills/list`, `skills/get` and `resources/directory/read` | Transport streams |
-| `MCP.Events` | The Events extension on the hooks: event types, `events/list`, poll delivery, occurrence checks and derived ids, the routing of `events/poll` | Bytes and streams |
+| `MCP.Events` | The Events extension on the hooks: event types, `events/list`, poll and push delivery, occurrence checks and derived ids, the routing of `events/poll` and `events/stream` | Bytes and sockets |
+| `MCP.Streams` | A long-lived request a transport drives after its handler returns, and the host a handler parks it with | Dispatch, sockets |
 | `MCP.Errors` | `EMCPServer`, `EMCPProtocolError` with the codes a handler may answer, and the response for one | Dispatch, registries |
 | `MCP.Frontmatter` | The YAML subset a `SKILL.md` frontmatter is read with, on which YAML 1.1 and 1.2 parsers agree, and the refusal of everything outside it with its line | Skills, dispatch, bytes and streams |
 | `MCP.Transport.Stdio` | LF-terminated writes on every platform, CR tolerance on reads, blank-line skipping, stderr-only logging, EOF as the graceful-shutdown signal | Protocol decisions — it contains not a single one |
@@ -186,6 +188,18 @@ most every 50 ms. No thread is involved, so a stdio-only program needs
 no thread driver; cancellation stays cooperative, as handlers already
 code it. The poll lives on the session rather than arriving with each
 call, as [ADR-0001](../adr/0001-sans-io-core.md#amendment-2026-11-27-93)
+records.
+
+A push stream (`events/stream`, #126) outlives its request. The
+handler parks a `TMCPStream` (`MCP.Streams`) with the session's stream
+host, and the transport steps it until it ends or the client cancels:
+Streamable HTTP in the request's own thread, checking for a closed
+connection at least every 50 ms, and the stdio loop between lines on
+its one thread, waiting for input no longer than the next stream is
+due. A `notifications/cancelled` for an open stream removes it there,
+and the end of input ends every stream. The frames are the stream's
+own, so the transports still decide no protocol rule, as
+[ADR-0001](../adr/0001-sans-io-core.md#amendment-2026-11-27-126)
 records.
 
 ## Registration and handler model

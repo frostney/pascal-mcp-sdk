@@ -134,6 +134,13 @@ type
     // stdin or a closed HTTP connection turns it true while the handler
     // runs.
     CancellationProbe: TMCPCancellationProbe;
+    // Set by the dispatching server for a 2026-07-28 request (#126): the
+    // request's JSON-RPC id, borrowed for the call, and the session's
+    // stream host (a TMCPStreamHost, MCP.Streams), where a handler parks
+    // a stream the transport drives after it returns; nil when the
+    // transport cannot stream.
+    RequestId: TJSONData;
+    StreamHost: TObject;
     // True when clientCapabilities declare AName. For a 2026-07-28
     // request, a capability that schema defines counts only in its
     // shape (an object; sampling's and elicitation's typed members

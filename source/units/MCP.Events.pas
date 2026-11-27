@@ -1,12 +1,14 @@
 { MCP.Events — the Events extension (io.modelcontextprotocol/events,
-  #118): event types a server declares, listed by events/list and read
-  by poll delivery (events/poll), on the 2026-07-28 revision. Verified
-  2026-11-27 against modelcontextprotocol/ext-events
-  specification/beta/events/events.mdx at c77b843 (Beta; SEP-3415).
-  The server holds no state per client: each poll carries the event
-  name, the arguments and the cursor, and the check the server author
-  registers answers it. Push and webhook delivery are not served, and
-  neither is notifications/events/list_changed, which needs
+  #118, #126): event types a server declares, listed by events/list and
+  read by poll delivery (events/poll) and push delivery (events/stream),
+  on the 2026-07-28 revision. Verified 2026-11-27 against
+  modelcontextprotocol/ext-events specification/beta/events/events.mdx
+  at c77b843 (Beta; SEP-3415). A poll holds no state per client: it
+  carries the event name, the arguments and the cursor, and the check
+  the server author registers answers it. A push stream polls the same
+  check on its own behalf, one occurrence per call, and holds its
+  position only while it is open (MCP.Streams). Webhook delivery is not
+  served, and neither is notifications/events/list_changed, which needs
   subscriptions/listen.
 
   The Events guide (docs/guides/events.md) shows a check that reads from
@@ -25,13 +27,23 @@ uses
   fpjson,
   MCP.Protocol,
   MCP.Schema,
-  MCP.Server;
+  MCP.Server,
+  MCP.Streams;
 
 const
   MCP_EVENTS_EXTENSION = 'io.modelcontextprotocol/events';
   // nextPollMs when a registration names none: the specification's
   // example interval.
   MCP_EVENT_DEFAULT_POLL_MS = 30000;
+  // A push stream's heartbeat interval (events.mdx, Lifecycle): 30
+  // seconds unless the client suggests another, which is clamped to
+  // these bounds.
+  MCP_EVENT_DEFAULT_HEARTBEAT_MS = 30000;
+  MCP_EVENT_MIN_HEARTBEAT_MS = 1000;
+  MCP_EVENT_MAX_HEARTBEAT_MS = 300000;
+  // The key every push notification carries the stream's request id
+  // under, in params._meta (events.mdx, Event delivery).
+  MCP_SUBSCRIPTION_ID_KEY = 'io.modelcontextprotocol/subscriptionId';
 
 type
   // A poll as the check sees it. Arguments is borrowed for the call ({}
@@ -131,15 +143,68 @@ type
       ALegacy: Boolean): TJSONObject;
     function Poll(AParams: TJSONObject; const ACtx: TMCPRequestContext;
       ALegacy: Boolean): TJSONObject;
+    function Stream(AParams: TJSONObject; const ACtx: TMCPRequestContext;
+      ALegacy: Boolean): TJSONObject;
     function HeaderParameters(const AName: string): TMCPHeaderParameters;
     function PollResult(AType: Integer; const AQuery: TMCPEventQuery;
       var APoll: TMCPEventPoll): TJSONObject;
+    procedure ReadSubscription(AParams: TJSONObject; out AIndex: Integer;
+      out AQuery: TMCPEventQuery; out AOwned: TJSONObject);
+    function CheckPage(AType: Integer; const AQuery: TMCPEventQuery;
+      const ACtx: TMCPRequestContext; out ACursor: string;
+      out ANoReplay: Boolean): TJSONObject;
   public
     constructor Create(AServer: TMCPServer);
     destructor Destroy; override;
     procedure Add(const AName, ADescription: string; AInputSchema,
       APayloadSchema: TJSONObject; ACheck: TMCPEventCheck;
       ACheckMethod: TMCPEventCheckMethod; ANextPollMs: Integer);
+  end;
+
+  // One push subscription (events/stream, #126): the type's check
+  // polled on the stream's behalf, one occurrence per call.
+  TEventStream = class(TMCPStream)
+  private
+    FCatalog: TEventCatalog; // borrowed
+    FType: Integer;
+    FArguments: TJSONObject; // owned
+    // The stream's position: what the check gave last, which a type
+    // without replay keeps off the wire (FNull).
+    FCursor: string;
+    FNull: Boolean;
+    FHeartbeatMs: Int64;
+    FPending: TJSONObject; // owned: the first page, sent by the first Step
+    FPendingCursor: string;
+    FPendingNoReplay: Boolean;
+    FNextCheck, FLastWrite: Int64;
+    // The check's last nextPollMs, also the retry after a failure.
+    FInterval: Int64;
+    FProtocolVersion, FClientName, FClientVersion, FLogLevel: string;
+    FCapabilities, FMeta: TJSONObject; // owned copies of the request's
+    function IsCancelled: Boolean;
+    function Context: TMCPRequestContext;
+    function WireCursor: TJSONData;
+    procedure Send(const AMethod: string; AParams: TJSONObject;
+      ANowMs: Int64; ASink: TMCPLineSink; ASinkData: Pointer);
+    procedure Terminate(ACode: Integer; const AMessage: string;
+      AData: TJSONData; ANowMs: Int64; ASink: TMCPLineSink;
+      ASinkData: Pointer);
+    procedure SendPage(APage: TJSONObject; const AAfter: string;
+      ANoReplay, AFirst: Boolean; ANowMs: Int64; ASink: TMCPLineSink;
+      ASinkData: Pointer);
+    procedure CheckAgain(ANowMs: Int64; ASink: TMCPLineSink;
+      ASinkData: Pointer);
+    procedure LogStreamFailure(E: Exception);
+  public
+    // APage (owned) is the first check's result, AAfter its cursor.
+    constructor Create(ACatalog: TEventCatalog; AType: Integer;
+      const AQuery: TMCPEventQuery; const AAfter: string;
+      ANoReplay: Boolean; AHeartbeatMs: Int64; APage: TJSONObject;
+      const ACtx: TMCPRequestContext);
+    destructor Destroy; override;
+    function Step(ANowMs: Int64; ASink: TMCPLineSink;
+      ASinkData: Pointer): Int64; override;
+    procedure Close(ASink: TMCPLineSink; ASinkData: Pointer); override;
   end;
 
 function MCPEventPoll(const ACursor: string; AEvents: TJSONArray): TMCPEventPoll;
@@ -317,7 +382,8 @@ begin
     Result.Add('events', Events);
     for I := First to Last do
       Events.Add(TJSONObject.Create(['name', FTypes[I].Name, 'description',
-        FTypes[I].Description, 'delivery', TJSONArray.Create(['poll']),
+        FTypes[I].Description, 'delivery', TJSONArray.Create(['poll',
+        'push']),
         'inputSchema', FTypes[I].InputSchema.Clone, 'payloadSchema',
         FTypes[I].PayloadSchema.Clone]));
     if Last < High(FTypes) then
@@ -447,82 +513,426 @@ begin
     Result.Add('nextPollMs', FTypes[AType].NextPollMs);
 end;
 
-// events/poll (events.mdx, Poll-Based Delivery): one subscription per
-// request, no state held; -32023 for an unknown name, -32602 for
-// arguments that do not match the input schema.
-function TEventCatalog.Poll(AParams: TJSONObject;
-  const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+// The subscription a poll or a stream names (events.mdx, Poll-Based
+// Delivery): the type's index, the query without maxEvents, and the
+// arguments the server made for an absent member (AOwned, the caller's;
+// nil when the request has them). -32023 for an unknown name, -32602
+// for bad parameters or arguments that do not match the input schema.
+procedure TEventCatalog.ReadSubscription(AParams: TJSONObject;
+  out AIndex: Integer; out AQuery: TMCPEventQuery; out AOwned: TJSONObject);
 var
   NameData, CursorData, ArgumentsData: TJSONData;
-  Index: Integer;
-  Query: TMCPEventQuery;
-  Poll: TMCPEventPoll;
-  OwnedArguments: TJSONObject;
   Violation: string;
-  Count: Int64;
 begin
-  RefuseLegacy(ALegacy, 'events/poll');
+  AOwned := nil;
   if AParams = nil then
     raise InvalidParams('params are required');
   NameData := AParams.Find('name');
   if (NameData = nil) or (NameData.JSONType <> jtString) then
     raise InvalidParams('name must be a string');
-  Index := FindType(NameData.AsString);
-  if Index < 0 then
+  AIndex := FindType(NameData.AsString);
+  if AIndex < 0 then
     raise EMCPProtocolError.Create(MCP_ERROR_NOT_FOUND, 'Event type not ' +
       'found', TJSONObject.Create(['kind', 'event']));
-  Query := Default(TMCPEventQuery);
+  AQuery := Default(TMCPEventQuery);
+  AQuery.MaxEvents := -1;
   // An absent cursor is a null one (events.mdx, Cursor Lifecycle).
   CursorData := AParams.Find('cursor');
-  Query.FromNow := (CursorData = nil) or (CursorData.JSONType = jtNull);
-  if not Query.FromNow then
+  AQuery.FromNow := (CursorData = nil) or (CursorData.JSONType = jtNull);
+  if not AQuery.FromNow then
   begin
     if CursorData.JSONType <> jtString then
       raise InvalidParams('cursor must be a string or null');
-    Query.Cursor := CursorData.AsString;
+    AQuery.Cursor := CursorData.AsString;
   end;
   // maxAgeMs is ignored for a poll from now.
-  Query.MaxAgeMs := OptionalCount(AParams, 'maxAgeMs', 0);
-  // A cap of zero could never move a cursor on: at least one (#118
-  // review).
-  Count := OptionalCount(AParams, 'maxEvents', 1);
-  if Count > MaxInt then
-    Count := MaxInt;
-  Query.MaxEvents := Count;
+  AQuery.MaxAgeMs := OptionalCount(AParams, 'maxAgeMs', 0);
   ArgumentsData := AParams.Find('arguments');
-  OwnedArguments := nil;
   if ArgumentsData = nil then
   begin
-    OwnedArguments := TJSONObject.Create;
-    ArgumentsData := OwnedArguments;
+    AOwned := TJSONObject.Create;
+    ArgumentsData := AOwned;
   end
   else if ArgumentsData.JSONType <> jtObject then
     raise InvalidParams('arguments must be an object');
   try
-    if FTypes[Index].CheckArguments and not MCPValidateAgainstSchema(
-      FTypes[Index].InputSchema, ArgumentsData, 'argument', True,
+    if FTypes[AIndex].CheckArguments and not MCPValidateAgainstSchema(
+      FTypes[AIndex].InputSchema, ArgumentsData, 'argument', True,
       Violation) then
       raise InvalidParams(Violation);
-    Query.Arguments := TJSONObject(ArgumentsData);
-    if Assigned(FTypes[Index].CheckMethod) then
-      Poll := FTypes[Index].CheckMethod(Query, ACtx)
-    else
-      Poll := FTypes[Index].Check(Query, ACtx);
-    try
-      Result := PollResult(Index, Query, Poll);
-    finally
-      Poll.Events.Free;
-    end;
-  finally
-    OwnedArguments.Free;
+  except
+    FreeAndNil(AOwned);
+    raise;
   end;
+  AQuery.Arguments := TJSONObject(ArgumentsData);
+end;
+
+// One call of type AType's check, its result checked and completed as
+// a poll result (PollResult). ACursor is the position the check gave,
+// which a type without replay keeps off the wire, and ANoReplay says so.
+function TEventCatalog.CheckPage(AType: Integer; const AQuery: TMCPEventQuery;
+  const ACtx: TMCPRequestContext; out ACursor: string;
+  out ANoReplay: Boolean): TJSONObject;
+var
+  Poll: TMCPEventPoll;
+begin
+  if Assigned(FTypes[AType].CheckMethod) then
+    Poll := FTypes[AType].CheckMethod(AQuery, ACtx)
+  else
+    Poll := FTypes[AType].Check(AQuery, ACtx);
+  try
+    Result := PollResult(AType, AQuery, Poll);
+  finally
+    Poll.Events.Free;
+  end;
+  ACursor := Poll.Cursor;
+  ANoReplay := Poll.NoReplay;
+end;
+
+// events/poll (events.mdx, Poll-Based Delivery): one subscription per
+// request, no state held.
+function TEventCatalog.Poll(AParams: TJSONObject;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+var
+  Index: Integer;
+  Query: TMCPEventQuery;
+  Owned: TJSONObject;
+  Count: Int64;
+  Cursor: string;
+  NoReplay: Boolean;
+begin
+  RefuseLegacy(ALegacy, 'events/poll');
+  ReadSubscription(AParams, Index, Query, Owned);
+  try
+    // A cap of zero could never move a cursor on: at least one (#118
+    // review).
+    Count := OptionalCount(AParams, 'maxEvents', 1);
+    if Count > MaxInt then
+      Count := MaxInt;
+    Query.MaxEvents := Count;
+    Result := CheckPage(Index, Query, ACtx, Cursor, NoReplay);
+  finally
+    Owned.Free;
+  end;
+end;
+
+// events/stream (events.mdx, Push-Based Delivery, #126): the request
+// is checked and the check called once here, so an invalid subscription
+// is the immediate JSON-RPC error; then the stream is parked for the
+// transport, which drops this placeholder result. A transport that
+// cannot stream gets -32026.
+function TEventCatalog.Stream(AParams: TJSONObject;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+var
+  Index: Integer;
+  Query: TMCPEventQuery;
+  Owned, Page: TJSONObject;
+  Heartbeat: Int64;
+  Cursor: string;
+  NoReplay: Boolean;
+begin
+  RefuseLegacy(ALegacy, 'events/stream');
+  ReadSubscription(AParams, Index, Query, Owned);
+  try
+    Heartbeat := OptionalCount(AParams, 'heartbeatMs', 0);
+    if not (ACtx.StreamHost is TMCPStreamHost) then
+      raise EMCPProtocolError.Create(MCP_ERROR_UNSUPPORTED, 'Unsupported',
+        TJSONObject.Create(['feature', 'deliveryMode', 'value', 'push']));
+    // One occurrence per call, so each event carries the exact cursor
+    // after it.
+    Query.MaxEvents := 1;
+    Page := CheckPage(Index, Query, ACtx, Cursor, NoReplay);
+    TMCPStreamHost(ACtx.StreamHost).Park(TEventStream.Create(Self, Index,
+      Query, Cursor, NoReplay, Heartbeat, Page, ACtx));
+  finally
+    Owned.Free;
+  end;
+  Result := TJSONObject.Create;
+end;
+
+{ TEventStream }
+
+constructor TEventStream.Create(ACatalog: TEventCatalog; AType: Integer;
+  const AQuery: TMCPEventQuery; const AAfter: string; ANoReplay: Boolean;
+  AHeartbeatMs: Int64; APage: TJSONObject; const ACtx: TMCPRequestContext);
+begin
+  // Own the page first: an exception in a constructor runs the
+  // destructor, which frees what is owned.
+  FPending := APage;
+  inherited Create(ACtx.RequestId);
+  FCatalog := ACatalog;
+  FType := AType;
+  FArguments := TJSONObject(AQuery.Arguments.Clone);
+  // The client's own position, which the first active notification
+  // repeats when no gap occurred; then the check's.
+  FCursor := AQuery.Cursor;
+  FNull := AQuery.FromNow;
+  FPendingCursor := AAfter;
+  FPendingNoReplay := ANoReplay;
+  FInterval := ACatalog.FTypes[AType].NextPollMs;
+  // The grant: 30 seconds unless the client suggests another, clamped
+  // to 1 second .. 5 minutes (events.mdx, Lifecycle).
+  if AHeartbeatMs < 0 then
+    FHeartbeatMs := MCP_EVENT_DEFAULT_HEARTBEAT_MS
+  else if AHeartbeatMs < MCP_EVENT_MIN_HEARTBEAT_MS then
+    FHeartbeatMs := MCP_EVENT_MIN_HEARTBEAT_MS
+  else if AHeartbeatMs > MCP_EVENT_MAX_HEARTBEAT_MS then
+    FHeartbeatMs := MCP_EVENT_MAX_HEARTBEAT_MS
+  else
+    FHeartbeatMs := AHeartbeatMs;
+  // The handler's context lasts only for its call: what later checks
+  // see is copied.
+  FProtocolVersion := ACtx.ProtocolVersion;
+  FClientName := ACtx.ClientName;
+  FClientVersion := ACtx.ClientVersion;
+  FLogLevel := ACtx.LogLevel;
+  if ACtx.ClientCapabilities <> nil then
+    FCapabilities := TJSONObject(ACtx.ClientCapabilities.Clone);
+  if ACtx.Meta <> nil then
+    FMeta := TJSONObject(ACtx.Meta.Clone);
+end;
+
+destructor TEventStream.Destroy;
+begin
+  FPending.Free;
+  FArguments.Free;
+  FCapabilities.Free;
+  FMeta.Free;
+  inherited Destroy;
+end;
+
+function TEventStream.IsCancelled: Boolean;
+begin
+  Result := Finished;
+end;
+
+function TEventStream.Context: TMCPRequestContext;
+begin
+  Result := Default(TMCPRequestContext);
+  Result.ProtocolVersion := FProtocolVersion;
+  Result.ClientName := FClientName;
+  Result.ClientVersion := FClientVersion;
+  Result.ClientCapabilities := FCapabilities;
+  Result.LogLevel := FLogLevel;
+  Result.Meta := FMeta;
+  Result.RequestId := Id;
+  Result.CancellationProbe := IsCancelled;
+end;
+
+// The cursor as the wire carries it: null for a type without replay.
+function TEventStream.WireCursor: TJSONData;
+begin
+  if FNull then
+    Result := TJSONNull.Create
+  else
+    Result := TJSONString.Create(FCursor);
+end;
+
+// One notifications/events/* message, AParams (owned) tagged with the
+// stream's subscription id (events.mdx, Event delivery).
+procedure TEventStream.Send(const AMethod: string; AParams: TJSONObject;
+  ANowMs: Int64; ASink: TMCPLineSink; ASinkData: Pointer);
+var
+  Meta: TJSONData;
+begin
+  try
+    Meta := AParams.Find('_meta');
+    if (Meta = nil) or (Meta.JSONType <> jtObject) then
+    begin
+      AParams.Delete('_meta');
+      Meta := TJSONObject.Create;
+      AParams.Add('_meta', Meta);
+    end;
+    TJSONObject(Meta).Delete(MCP_SUBSCRIPTION_ID_KEY);
+    TJSONObject(Meta).Add(MCP_SUBSCRIPTION_ID_KEY, Id.Clone);
+  except
+    AParams.Free;
+    raise;
+  end;
+  ASink(BuildNotification(AMethod, AParams), ASinkData);
+  FLastWrite := ANowMs;
+end;
+
+function ErrorObject(ACode: Integer; const AMessage: string;
+  AData: TJSONData): TJSONObject;
+begin
+  Result := TJSONObject.Create(['code', ACode, 'message', AMessage]);
+  if AData <> nil then
+    Result.Add('data', AData);
+end;
+
+// The StreamEventsResult, the final frame when the server closes the
+// stream (events.mdx, Lifecycle): resultType and the subscription id.
+procedure TEventStream.Close(ASink: TMCPLineSink; ASinkData: Pointer);
+var
+  Final: TJSONObject;
+begin
+  Final := TJSONObject.Create;
+  StampResult(Final, FCatalog.FServer.Name, FCatalog.FServer.Version);
+  Final.Objects['_meta'].Add(MCP_SUBSCRIPTION_ID_KEY, Id.Clone);
+  ASink(BuildResultResponse(Id, Final), ASinkData);
+  Finish;
+end;
+
+// The subscription ends (events.mdx, Subscription Termination): the
+// terminated notification, then the final frame, since the server
+// closes the stream.
+procedure TEventStream.Terminate(ACode: Integer; const AMessage: string;
+  AData: TJSONData; ANowMs: Int64; ASink: TMCPLineSink; ASinkData: Pointer);
+begin
+  Send('notifications/events/terminated', TJSONObject.Create(['error',
+    ErrorObject(ACode, AMessage, AData)]), ANowMs, ASink, ASinkData);
+  Close(ASink, ASinkData);
+end;
+
+// One page from the check (at most one occurrence): a gap or the first
+// page sends active, the occurrence goes out with the cursor after it,
+// and hasMore reads on at once.
+procedure TEventStream.SendPage(APage: TJSONObject; const AAfter: string;
+  ANoReplay, AFirst: Boolean; ANowMs: Int64; ASink: TMCPLineSink;
+  ASinkData: Pointer);
+var
+  Events: TJSONArray;
+  Truncated, Before: Boolean;
+  Active: TJSONObject;
+begin
+  Events := TJSONArray(APage.Find('events'));
+  Truncated := APage.Get('truncated', False);
+  // The first active repeats the client's own cursor when no gap
+  // occurred and an event follows; otherwise it is the fresh one.
+  Before := AFirst and not Truncated and (Events.Count > 0);
+  if not Before then
+  begin
+    FCursor := AAfter;
+    FNull := ANoReplay;
+  end;
+  if AFirst or Truncated then
+  begin
+    Active := TJSONObject.Create(['cursor', WireCursor, 'truncated',
+      Truncated, 'heartbeatMs', FHeartbeatMs]);
+    Send('notifications/events/active', Active, ANowMs, ASink, ASinkData);
+  end;
+  FCursor := AAfter;
+  FNull := ANoReplay;
+  while Events.Count > 0 do
+  begin
+    Active := TJSONObject(Events.Extract(0));
+    Active.Delete('cursor');
+    Active.Add('cursor', WireCursor);
+    Send('notifications/events/event', Active, ANowMs, ASink, ASinkData);
+  end;
+  FInterval := APage.Get('nextPollMs', FInterval);
+  if APage.Get('hasMore', False) then
+    FNextCheck := ANowMs
+  else
+    FNextCheck := ANowMs + FInterval;
+end;
+
+// The check again, from the stream's own cursor: a protocol error it
+// raises ends the subscription, a mistake in its result too (-32603),
+// and any other failure is reported and retried at the next interval.
+procedure TEventStream.CheckAgain(ANowMs: Int64; ASink: TMCPLineSink;
+  ASinkData: Pointer);
+var
+  Query: TMCPEventQuery;
+  Page: TJSONObject;
+  After: string;
+  NoReplay: Boolean;
+begin
+  Query := Default(TMCPEventQuery);
+  Query.Arguments := FArguments;
+  Query.Cursor := FCursor;
+  Query.MaxAgeMs := -1;
+  Query.MaxEvents := 1;
+  try
+    Page := FCatalog.CheckPage(FType, Query, Context, After, NoReplay);
+  except
+    on E: EMCPProtocolError do
+    begin
+      if E.Data <> nil then
+        Terminate(E.Code, E.Message, E.Data.Clone, ANowMs, ASink, ASinkData)
+      else
+        Terminate(E.Code, E.Message, nil, ANowMs, ASink, ASinkData);
+      Exit;
+    end;
+    on E: EMCPServer do
+    begin
+      LogStreamFailure(E);
+      Terminate(JSONRPC_INTERNAL_ERROR, 'Internal error', nil, ANowMs,
+        ASink, ASinkData);
+      Exit;
+    end;
+    on E: Exception do
+    begin
+      LogStreamFailure(E);
+      Send('notifications/events/error', TJSONObject.Create(['error',
+        ErrorObject(JSONRPC_INTERNAL_ERROR, 'Internal error', nil)]),
+        ANowMs, ASink, ASinkData);
+      FNextCheck := ANowMs + FInterval;
+      Exit;
+    end;
+  end;
+  try
+    SendPage(Page, After, NoReplay, False, ANowMs, ASink, ASinkData);
+  finally
+    Page.Free;
+  end;
+end;
+
+procedure TEventStream.LogStreamFailure(E: Exception);
+begin
+  try
+    MCPWriteStderrLine('events/stream ' + FCatalog.FTypes[FType].Name +
+      ': ' + E.ClassName + ': ' + StringReplace(StringReplace(E.Message,
+      #13, ' ', [rfReplaceAll]), #10, ' ', [rfReplaceAll]));
+  except
+    on EInOutError do;
+  end;
+end;
+
+// The first page, the checks that are due (at most STEP_BUDGET of them,
+// so a long backlog does not hold up a transport's other requests), and
+// a heartbeat when heartbeatMs passed without a message (events.mdx,
+// Lifecycle).
+function TEventStream.Step(ANowMs: Int64; ASink: TMCPLineSink;
+  ASinkData: Pointer): Int64;
+const
+  STEP_BUDGET = 50;
+var
+  Page: TJSONObject;
+  Budget: Integer;
+begin
+  if FPending <> nil then
+  begin
+    Page := FPending;
+    FPending := nil;
+    try
+      SendPage(Page, FPendingCursor, FPendingNoReplay, True, ANowMs, ASink,
+        ASinkData);
+    finally
+      Page.Free;
+    end;
+  end;
+  Budget := STEP_BUDGET;
+  while not Finished and (ANowMs >= FNextCheck) and (Budget > 0) do
+  begin
+    CheckAgain(ANowMs, ASink, ASinkData);
+    Dec(Budget);
+  end;
+  if not Finished and (ANowMs - FLastWrite >= FHeartbeatMs) then
+    Send('notifications/events/heartbeat', TJSONObject.Create(['cursor',
+      WireCursor]), ANowMs, ASink, ASinkData);
+  Result := FNextCheck;
+  if FLastWrite + FHeartbeatMs < Result then
+    Result := FLastWrite + FHeartbeatMs;
 end;
 
 procedure RegisterType(AServer: TMCPServer; const AName, ADescription: string;
   AInputSchema, APayloadSchema: TJSONObject; ACheck: TMCPEventCheck;
   ACheckMethod: TMCPEventCheckMethod; ANextPollMs: Integer);
 const
-  METHODS: array[0..1] of string = ('events/list', 'events/poll');
+  METHODS: array[0..2] of string = ('events/list', 'events/poll',
+    'events/stream');
 var
   Catalog: TEventCatalog;
   Fresh: Boolean;
@@ -560,9 +970,11 @@ begin
     AServer.Adopt(Catalog);
     AServer.RegisterMethod(METHODS[0], Catalog.List);
     AServer.RegisterMethod(METHODS[1], Catalog.Poll);
+    AServer.RegisterMethod(METHODS[2], Catalog.Stream);
     // Mcp-Name carries params.name, and Mcp-Param-* the arguments
     // (events.mdx, Streamable HTTP: Routing Headers).
     AServer.RegisterRoute(METHODS[1], 'name', Catalog.HeaderParameters);
+    AServer.RegisterRoute(METHODS[2], 'name', Catalog.HeaderParameters);
   end;
   // Settings declared first are kept; {} declares no list changes. The
   // classic initialize offers nothing a classic client could call.

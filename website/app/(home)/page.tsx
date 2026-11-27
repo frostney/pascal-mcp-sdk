@@ -39,7 +39,7 @@ const FAQ: { q: string; a: string; extra?: React.ReactNode }[] = [
   },
   {
     q: 'Which parts of the MCP specification are implemented?',
-    a: 'Tools, resources with RFC 6570 templates, prompts, multi-round-trip input requests (elicitation, sampling, roots), progress and log notifications, caching hints, extension negotiation with MCP Apps interactive UIs, Skills and Events poll delivery, stdio and Streamable HTTP transports, plus the classic initialize handshake era that current clients speak. Deliberately out: subscriptions/listen and list-changed notifications, since registries are static after startup.',
+    a: 'Tools, resources with RFC 6570 templates, prompts, multi-round-trip input requests (elicitation, sampling, roots), progress and log notifications, caching hints, extension negotiation with MCP Apps interactive UIs, Skills and Events poll and push delivery, stdio and Streamable HTTP transports, plus the classic initialize handshake era that current clients speak. Deliberately out: subscriptions/listen and list-changed notifications, since registries are static after startup.',
   },
   {
     q: 'Is this the same as tina4stack/pascal-mcp (claude-pascal-mcp) or @pascal-app/mcp?',
@@ -223,7 +223,8 @@ export default async function HomePage() {
           <Link href="/docs/guides/skills" className="underline">
             Skills →
           </Link>{' '}
-          Events poll delivery is checked by unit, HTTP and stdio tests:{' '}
+          Events poll and push delivery are checked by unit, HTTP and stdio
+          tests:{' '}
           <Link href="/docs/guides/events" className="underline">
             Events →
           </Link>
