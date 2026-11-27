@@ -355,6 +355,9 @@ type
     procedure SetDualEra(AValue: Boolean);
     function ExceptionClientMessage(const ASite, AVerbosePrefix,
       ARedactedMessage: string; E: Exception): string;
+    // E is an EMCPProtocolError, declared after this class.
+    function ProtocolErrorResponse(AMessage: TJSONRPCMessage;
+      E: Exception): string;
     function ParseSchema(const ASchemaJson, AToolName: string): TJSONObject;
     function BuildToolDefinition(const AName, ADescription,
       AInputSchemaJson: string): TJSONObject;
@@ -605,17 +608,18 @@ type
   private
     FCode: Integer;
     FData: TJSONData;
+    // Hands the data to the dispatch wrapper, which puts it on the
+    // wire and then owns it (nil if none).
+    function TakeData: TJSONData;
   public
     // Takes ownership of AData (nil for none). Code -32021 needs data
     // with a non-empty requiredCapabilities object.
     constructor Create(ACode: Integer; const AMessage: string;
       AData: TJSONData = nil);
     destructor Destroy; override;
-    // Hands the data to the caller, which then owns it (nil if none);
-    // the dispatch wrapper uses it to put the data on the wire.
-    function TakeData: TJSONData;
     property Code: Integer read FCode;
-    // Borrowed: owned by the exception until TakeData; do not free.
+    // Borrowed: owned by the exception; do not free or change it (a
+    // -32021 whose data no longer validates is sent as -32603).
     property Data: TJSONData read FData;
   end;
 
@@ -1560,18 +1564,6 @@ begin
   end;
 end;
 
-// -32021 data payload: {requiredCapabilities: {<name>: {}}} (schema
-// anchor MissingRequiredClientCapabilityError, verified 2026-08-08).
-function CapabilityErrorData(const ACapability: string): TJSONObject;
-var
-  Capabilities: TJSONObject;
-begin
-  Capabilities := TJSONObject.Create;
-  Capabilities.Add(ACapability, TJSONObject.Create);
-  Result := TJSONObject.Create;
-  Result.Add('requiredCapabilities', Capabilities);
-end;
-
 { ───────── handler-raised protocol errors (#88) ───────── }
 
 function IsAllowedHandlerErrorCode(ACode: Integer): Boolean;
@@ -1586,47 +1578,23 @@ begin
   end;
 end;
 
-// -32021's data MUST list the missing capabilities (schema
-// MissingRequiredClientCapabilityError, verified 2026-11-26).
-function IsCapabilityErrorData(AData: TJSONData): Boolean;
-var
-  Required: TJSONData;
-  I: Integer;
-begin
-  Result := (AData <> nil) and (AData.JSONType = jtObject);
-  if not Result then
-    Exit;
-  Required := TJSONObject(AData).Find('requiredCapabilities');
-  Result := (Required <> nil) and (Required.JSONType = jtObject) and
-    (Required.Count > 0);
-  // Each named capability is an object in the ClientCapabilities schema
-  // (sampling, elicitation, roots, experimental and extensions alike).
-  if Result then
-    for I := 0 to Required.Count - 1 do
-      if Required.Items[I].JSONType <> jtObject then
-        Exit(False);
-end;
-
 constructor EMCPProtocolError.Create(ACode: Integer; const AMessage: string;
   AData: TJSONData);
 begin
-  if not IsAllowedHandlerErrorCode(ACode) then
-  begin
-    AData.Free;
-    raise EMCPServer.CreateFmt('EMCPProtocolError code %d is reserved: ' +
-      'use a JSON-RPC code (-32700, -32600 to -32603), -32021, or an ' +
-      'application code outside -32768..-32000', [ACode]);
-  end;
-  if (ACode = MCP_ERROR_MISSING_CLIENT_CAPABILITY) and
-    not IsCapabilityErrorData(AData) then
-  begin
-    AData.Free;
-    raise EMCPServer.Create('EMCPProtocolError -32021 needs data with a ' +
-      'non-empty requiredCapabilities object; use MCPMissingCapabilityError');
-  end;
+  // Own AData first, so every rejection below frees it: an exception in
+  // a constructor runs the destructor.
   inherited Create(AMessage);
   FCode := ACode;
   FData := AData;
+  if not IsAllowedHandlerErrorCode(ACode) then
+    raise EMCPServer.CreateFmt('EMCPProtocolError code %d is reserved: ' +
+      'use a JSON-RPC code (-32700, -32600 to -32603), -32021, or an ' +
+      'application code outside -32768..-32000', [ACode]);
+  if (ACode = MCP_ERROR_MISSING_CLIENT_CAPABILITY) and
+    not IsMissingCapabilityData(AData) then
+    raise EMCPServer.Create('EMCPProtocolError -32021 needs data whose ' +
+      'requiredCapabilities names at least one capability, each shaped ' +
+      'as in ClientCapabilities; use MCPMissingCapabilityError');
 end;
 
 destructor EMCPProtocolError.Destroy;
@@ -1645,7 +1613,7 @@ function MCPMissingCapabilityError(const ACapability: string): EMCPProtocolError
 begin
   Result := EMCPProtocolError.Create(MCP_ERROR_MISSING_CLIENT_CAPABILITY,
     'Missing required client capability: ' + ACapability,
-    CapabilityErrorData(ACapability));
+    BuildMissingCapabilityData(ACapability));
 end;
 
 function MCPTextResult(const AText: string): TMCPToolResult;
@@ -2190,6 +2158,28 @@ begin
   TryLogToStderr(ErrorReference + ' ' + ASite + ': ' + E.ClassName + ': ' +
     SanitizeLogText(E.Message));
   Result := ARedactedMessage + ' (ref ' + ErrorReference + ')';
+end;
+
+// The response for a handler's EMCPProtocolError (#88). Its data is
+// borrowed until here, so a -32021 whose data a handler changed after
+// construction is checked again and, if it no longer validates, sent
+// as -32603 rather than as a refusal clients would reject.
+function TMCPServer.ProtocolErrorResponse(AMessage: TJSONRPCMessage;
+  E: Exception): string;
+var
+  Err: EMCPProtocolError;
+begin
+  Err := E as EMCPProtocolError;
+  if (Err.Code = MCP_ERROR_MISSING_CLIENT_CAPABILITY) and
+    not IsMissingCapabilityData(Err.Data) then
+  begin
+    TryLogToStderr('dispatch/' + AMessage.Method + ': -32021 data no ' +
+      'longer names valid requiredCapabilities; sent as -32603');
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
+      'Internal error'));
+  end;
+  Result := BuildErrorResponse(AMessage.Id, Err.Code, Err.Message,
+    Err.TakeData);
 end;
 
 destructor TMCPServer.Destroy;
@@ -3147,8 +3137,7 @@ begin
             except
               // A handler's deliberate JSON-RPC error (#88).
               on E: EMCPProtocolError do
-                AResponse := BuildErrorResponse(Msg.Id, E.Code, E.Message,
-                  E.TakeData);
+                AResponse := ProtocolErrorResponse(Msg, E);
               on E: Exception do
                 AResponse := BuildErrorResponse(Msg.Id,
                   JSONRPC_INTERNAL_ERROR,
@@ -3504,7 +3493,7 @@ begin
       MCP_ERROR_MISSING_CLIENT_CAPABILITY,
       ASubjectKind + ' "' + ASubjectName + '" requires the client ' +
       'capability "' + MissingCapability + '"',
-      CapabilityErrorData(MissingCapability)));
+      BuildMissingCapabilityData(MissingCapability)));
   end;
   InterimResult := TJSONObject.Create;
   InterimResult.Add('resultType', RESULT_TYPE_INPUT_REQUIRED);

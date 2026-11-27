@@ -380,6 +380,8 @@ type
     procedure TestMissingCapabilityHelper;
     procedure TestReservedCodesRefused;
     procedure TestAllowedCodesAccepted;
+    procedure TestCapabilityDataShape;
+    procedure TestChangedDataSentAsInternalError;
   end;
 
   // MCPImageResult: the spec's image content block, the raw-bytes
@@ -4769,6 +4771,19 @@ begin
     raise MCPMissingCapabilityError('sampling');
 end;
 
+// Changes the borrowed data after construction, which the dispatch
+// check catches (#88 review round 3).
+function ChangedRefusalHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  E: EMCPProtocolError;
+begin
+  Result := Default(TMCPToolResult);
+  E := MCPMissingCapabilityError('sampling');
+  TJSONObject(E.Data).Clear;
+  raise E;
+end;
+
 function RefusingPromptHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TJSONArray;
 begin
@@ -4802,6 +4817,8 @@ begin
     RefusingTypedHandler);
   FServer.RegisterTool('needs_sampling', 'Needs sampling',
     '{"type":"object"}', NeedsSamplingHandler);
+  FServer.RegisterTool('changed_refusal', 'Changes its refusal',
+    '{"type":"object"}', ChangedRefusalHandler);
   FServer.RegisterPrompt('refuse_prompt', 'Refuses', RefusingPromptHandler);
   FServer.RegisterResource('mem://refuse', 'refuse', 'text/plain',
     RefusingReader);
@@ -4982,6 +4999,57 @@ begin
   MCPMissingCapabilityError('roots').Free;
 end;
 
+// True when constructing -32021 with AData raises EMCPServer (and no
+// other exception: the constructor owns AData on every path).
+function CapabilityDataRefused(AData: TJSONData): Boolean;
+begin
+  Result := False;
+  try
+    EMCPProtocolError.Create(-32021, 'missing', AData).Free;
+  except
+    on E: EMCPServer do
+      Result := True;
+  end;
+end;
+
+// requiredCapabilities is a ClientCapabilities object: the members the
+// schema types must be objects too. Verified 2026-11-27 against
+// schema/2026-07-28/schema.json (ClientCapabilities,
+// MissingRequiredClientCapabilityError).
+procedure THandlerProtocolErrors.TestCapabilityDataShape;
+var
+  WithNil, Capabilities: TJSONObject;
+begin
+  Expect<Boolean>(CapabilityDataRefused(GetJSON(
+    '{"requiredCapabilities":{"sampling":{"tools":false}}}'))).ToBe(True);
+  Expect<Boolean>(CapabilityDataRefused(GetJSON(
+    '{"requiredCapabilities":{"elicitation":{"form":1}}}'))).ToBe(True);
+  Expect<Boolean>(CapabilityDataRefused(GetJSON(
+    '{"requiredCapabilities":{"extensions":{"io.example/x":true}}}')))
+    .ToBe(True);
+  Expect<Boolean>(CapabilityDataRefused(GetJSON(
+    '{"requiredCapabilities":{"experimental":{"x":null}}}'))).ToBe(True);
+  // A nil member serializes as null; it is refused, not dereferenced.
+  Capabilities := TJSONObject.Create;
+  Capabilities.Add('sampling', TJSONData(nil));
+  WithNil := TJSONObject.Create;
+  WithNil.Add('requiredCapabilities', Capabilities);
+  Expect<Boolean>(CapabilityDataRefused(WithNil)).ToBe(True);
+  EMCPProtocolError.Create(-32021, 'missing', GetJSON(
+    '{"requiredCapabilities":{"sampling":{"tools":{}},' +
+    '"extensions":{"io.modelcontextprotocol/ui":{}}}}')).Free;
+end;
+
+procedure THandlerProtocolErrors.TestChangedDataSentAsInternalError;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(ToolCallLine('changed_refusal', '{}'), Response))
+    .ToBe(True);
+  Expect<string>(Response).ToBe('{ "jsonrpc" : "2.0", "id" : 7, "error" : ' +
+    '{ "code" : -32603, "message" : "Internal error" } }');
+end;
+
 procedure THandlerProtocolErrors.SetupTests;
 begin
   Test('tool error line is byte-exact (code, message, data)',
@@ -4998,6 +5066,10 @@ begin
   Test('reserved codes refused at construction', TestReservedCodesRefused);
   Test('JSON-RPC and application codes accepted; -32021 needs its data',
     TestAllowedCodesAccepted);
+  Test('-32021 data follows the ClientCapabilities shapes; nil refused',
+    TestCapabilityDataShape);
+  Test('-32021 data changed after construction is sent as -32603',
+    TestChangedDataSentAsInternalError);
 end;
 
 { ───────── image results ───────── }
