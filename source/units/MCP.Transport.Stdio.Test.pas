@@ -43,6 +43,7 @@ type
     procedure TestCrLfInputTolerated;
     procedure TestBlankLinesSkipped;
     procedure TestNotificationNoOutput;
+    procedure TestCallerCodePageRestored;
     procedure TestMultipleRequests;
     procedure TestUtf8RoundTrip;
     procedure TestOversizedLineRejected;
@@ -240,8 +241,31 @@ begin
   Expect<Boolean>(Pos('"supportedVersions"', Output) > 0).ToBe(True);
 end;
 
+// The output file is the caller's: the loop writes UTF-8 to it and puts
+// its code page back on return (#102 review).
+procedure TStdioLoop.TestCallerCodePageRestored;
+var
+  InFile, OutFile: Text;
+begin
+  Assign(InFile, FDir + 'in.txt');
+  Rewrite(InFile);
+  Close(InFile);
+  Reset(InFile);
+  Assign(OutFile, FDir + 'out.txt');
+  Rewrite(OutFile);
+  SetTextCodePage(OutFile, 1252);
+  try
+    RunMCPStdioLoop(InFile, OutFile, FServer, MCP_STDIO_DEFAULT_MAX_LINE);
+    Expect<Integer>(GetTextCodePage(OutFile)).ToBe(1252);
+  finally
+    Close(InFile);
+    Close(OutFile);
+  end;
+end;
+
 procedure TStdioLoop.SetupTests;
 begin
+  Test('the caller''s output code page is restored', TestCallerCodePageRestored);
   Test('one request line → one response line', TestOneLineInOneLineOut);
   Test('LF-only line terminators', TestLfOnlyTerminators);
   Test('CRLF input tolerated', TestCrLfInputTolerated);

@@ -26,8 +26,8 @@ declaration.
 
 ## FPC pitfalls
 
-Two traps this codebase has already hit — both carry in-repo precedent,
-so follow the existing pattern rather than rediscovering it:
+Three traps this codebase has already hit — each carries in-repo
+precedent, so follow the existing pattern rather than rediscovering it:
 
 - **`const` record parameters may pass by value.** FPC is free to pass
   small records in registers, so `const` gives no aliasing guarantee: a
@@ -42,6 +42,15 @@ so follow the existing pattern rather than rediscovering it:
   stored handler against a sentinel needs the raw pointer: read it
   through the field's address as `PPointer(@Field)^` — see the
   `SIG_DFL` comparison in `EnsureSigPipeIgnored` (`MCP.Server`).
+- **Strings are UTF-8 under any locale, process-wide.** `MCP.JSONRPC`
+  pins the string and file-system code pages to UTF-8 at
+  initialization (#102), as Lazarus's UTF-8 RTL mode does, because
+  under a non-UTF-8 locale (`LC_ALL=C`) the RTL would otherwise turn
+  every non-ASCII character into `?`. A host program that uses the
+  library gets the same setting. Bytes headed for the wire never pass
+  through string concatenation with literals of another code page:
+  build them by byte copies, as `MCP.Crypto`'s padding does, and test
+  them under `LC_ALL=C`, which CI does.
 
 ## Naming and layout
 

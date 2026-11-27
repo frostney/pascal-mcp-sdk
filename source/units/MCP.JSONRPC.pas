@@ -218,10 +218,58 @@ begin
   SetLength(Result, OutputIndex);
 end;
 
+// The 1-based offset of the first byte that is not well-formed UTF-8
+// (RFC 3629: no overlong forms, no surrogates, nothing past U+10FFFF),
+// 0 when the whole text is.
+function InvalidUTF8Offset(const AText: RawByteString): Integer;
+var
+  I, Need, K: Integer;
+  B, Lo, Hi: Byte;
+begin
+  I := 1;
+  while I <= Length(AText) do
+  begin
+    B := Byte(AText[I]);
+    Lo := $80;
+    Hi := $BF;
+    case B of
+      $00..$7F: Need := 0;
+      $C2..$DF: Need := 1;
+      $E0: begin Need := 2; Lo := $A0; end;
+      $E1..$EC, $EE, $EF: Need := 2;
+      $ED: begin Need := 2; Hi := $9F; end;
+      $F0: begin Need := 3; Lo := $90; end;
+      $F1..$F3: Need := 3;
+      $F4: begin Need := 3; Hi := $8F; end;
+    else
+      Exit(I);
+    end;
+    if I + Need > Length(AText) then
+      Exit(I);
+    for K := 1 to Need do
+    begin
+      B := Byte(AText[I + K]);
+      if (B < Lo) or (B > Hi) then
+        Exit(I);
+      Lo := $80;
+      Hi := $BF;
+    end;
+    Inc(I, Need + 1);
+  end;
+  Result := 0;
+end;
+
 function ParseJson(const ALine: string): TJSONData;
 var
   Parser: TJSONParser;
+  Offset: Integer;
 begin
+  // JSON-RPC messages MUST be UTF-8 (transports#messages, verified
+  // 2026-11-27): a line that is not is a parse error, never text to
+  // echo back (#102).
+  Offset := InvalidUTF8Offset(ALine);
+  if Offset > 0 then
+    raise EJSONParser.CreateFmt('invalid UTF-8 at byte %d', [Offset]);
   Parser := TJSONParser.Create(DecodeNonASCIIUnicodeEscapes(ALine),
     [joUTF8, joStrict]);
   try
@@ -377,10 +425,16 @@ begin
   Result := AData.AsJSON;
 end;
 
-// Every platform: on Unix cwstring would otherwise take the conversion
-// code page from the locale, and under a non-UTF-8 one (LC_ALL=C) each
-// non-ASCII character would become '?' (#102).
+// Every platform: strings are UTF-8 in a program built with this
+// library, whatever the locale. On Unix cwstring would otherwise take
+// the code page from the locale, and under a non-UTF-8 one (LC_ALL=C)
+// each non-ASCII character would become '?' (#102). The file-system
+// code pages follow, so a UTF-8 path (from the environment, say) still
+// reaches the OS as the same bytes. This is what Lazarus's UTF-8 RTL
+// mode (LazUTF8) sets too.
 initialization
   SetMultiByteConversionCodePage(CP_UTF8);
+  DefaultFileSystemCodePage := CP_UTF8;
+  DefaultRTLFileSystemCodePage := CP_UTF8;
 
 end.

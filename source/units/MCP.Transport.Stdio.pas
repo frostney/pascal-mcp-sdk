@@ -74,6 +74,11 @@ procedure MCPLogToStderr(const AMessage: string);
 
 implementation
 
+{$IFDEF WINDOWS}
+uses
+  Windows;
+{$ENDIF}
+
 // Read one LF-terminated line, storing at most AMax bytes. True when
 // a line (possibly empty) was read; False on EOF with nothing read.
 // AOverflow reports that the line exceeded AMax — the excess is
@@ -130,38 +135,44 @@ var
   Line, Response: string;
   Overflow: Boolean;
   Session: TMCPSession;
+  SavedCodePage: TSystemCodePage;
 begin
   // The wire is UTF-8 whatever the locale: a Text file converts what
   // it writes to its own code page, which the RTL took from the locale
   // at startup (US-ASCII under LC_ALL=C, turning every non-ASCII byte
-  // into '?').
-  SetTextCodePage(AInput, CP_UTF8);
+  // into '?'). AOutput is the caller's, so its code page is restored on
+  // return. AInput needs none: the loop reads it byte by byte.
+  SavedCodePage := GetTextCodePage(AOutput);
   SetTextCodePage(AOutput, CP_UTF8);
-  Session := AServer.CreateSession;
   try
-    while ReadBoundedLine(AInput, AMaxLineLength, Line, Overflow) do
-    begin
-      if Overflow then
+    Session := AServer.CreateSession;
+    try
+      while ReadBoundedLine(AInput, AMaxLineLength, Line, Overflow) do
       begin
-        Write(AOutput, AServer.OversizedLineResponse(AMaxLineLength), #10);
-        Flush(AOutput);
-        Continue;
+        if Overflow then
+        begin
+          Write(AOutput, AServer.OversizedLineResponse(AMaxLineLength), #10);
+          Flush(AOutput);
+          Continue;
+        end;
+        // A client writing CRLF line endings leaves a trailing CR on
+        // non-Windows reads; it is insignificant whitespace either way.
+        while (Line <> '') and (Line[Length(Line)] in [#13, #10]) do
+          SetLength(Line, Length(Line) - 1);
+        if Line = '' then
+          Continue;
+        if AServer.HandleMessage(Session, Line, StdioNotificationSink,
+          @AOutput, Response) then
+        begin
+          Write(AOutput, Response, #10);
+          Flush(AOutput);
+        end;
       end;
-      // A client writing CRLF line endings leaves a trailing CR on
-      // non-Windows reads; it is insignificant whitespace either way.
-      while (Line <> '') and (Line[Length(Line)] in [#13, #10]) do
-        SetLength(Line, Length(Line) - 1);
-      if Line = '' then
-        Continue;
-      if AServer.HandleMessage(Session, Line, StdioNotificationSink,
-        @AOutput, Response) then
-      begin
-        Write(AOutput, Response, #10);
-        Flush(AOutput);
-      end;
+    finally
+      Session.Free;
     end;
   finally
-    Session.Free;
+    SetTextCodePage(AOutput, SavedCodePage);
   end;
 end;
 
@@ -170,9 +181,23 @@ begin
   RunMCPStdioLoop(Input, Output, AServer, AMaxLineLength);
 end;
 
+function StderrIsWindowsConsole: Boolean;
+begin
+  {$IFDEF WINDOWS}
+  Result := GetFileType(GetStdHandle(STD_ERROR_HANDLE)) = FILE_TYPE_CHAR;
+  {$ELSE}
+  Result := False;
+  {$ENDIF}
+end;
+
 procedure MCPLogToStderr(const AMessage: string);
 begin
-  SetTextCodePage(ErrOutput, CP_UTF8); // log lines are UTF-8 too (#102)
+  // Log lines are UTF-8 when stderr goes to a pipe or file, as an MCP
+  // client capturing it reads them (#102). A Windows console keeps the
+  // code page the RTL chose for it, so a person reading it there sees
+  // the right characters.
+  if not StderrIsWindowsConsole then
+    SetTextCodePage(ErrOutput, CP_UTF8);
   Write(ErrOutput, AMessage, #10);
   Flush(ErrOutput);
 end;

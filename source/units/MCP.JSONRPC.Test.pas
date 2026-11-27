@@ -47,6 +47,8 @@ type
     procedure TestInvalidNotificationShapeFlagged;
     procedure TestInvalidRequestShapeNotFlagged;
     procedure TestNullIdIsRequestShaped;
+    procedure TestInvalidUTF8IsParseError;
+    procedure TestUTF8FileNameRoundTrip;
   end;
 
   TUnicodeEscapeInput = class(TTestSuite)
@@ -290,6 +292,65 @@ begin
   FreeJSONRPCMessage(Msg);
 end;
 
+// JSON-RPC messages MUST be UTF-8 (transports#messages, verified
+// 2026-11-27): ill-formed input is a parse error, not text to echo.
+procedure TParseInvalid.TestInvalidUTF8IsParseError;
+const
+  BAD: array[0..5] of string = (
+    #$C3,                   // truncated two-byte sequence
+    #$C0#$AF,               // overlong '/'
+    #$ED#$A0#$80,           // UTF-16 surrogate D800
+    #$F4#$90#$80#$80,       // past U+10FFFF
+    #$80,                   // lone continuation byte
+    #$FF);
+var
+  I: Integer;
+  Msg: TJSONRPCMessage;
+begin
+  for I := Low(BAD) to High(BAD) do
+  begin
+    Msg := ParseJSONRPCMessage('{"jsonrpc":"2.0","id":1,"method":"x",' +
+      '"params":{"v":"a' + BAD[I] + 'b"}}');
+    Expect<Integer>(Msg.ErrorCode).ToBe(JSONRPC_PARSE_ERROR);
+    FreeJSONRPCMessage(Msg);
+  end;
+  Msg := ParseJSONRPCMessage('{"jsonrpc":"2.0","id":1,"method":"x",' +
+    '"params":{"v":"' + UTF8_PAYLOAD + UTF8_GRINNING_FACE + #$F4#$8F#$BF#$BF +
+    '"}}');
+  Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkRequest));
+  FreeJSONRPCMessage(Msg);
+end;
+
+// A UTF-8 file name reaches the OS as the same bytes (#102 review): the
+// library pins the file-system code pages with the string one. CI runs
+// this suite under LC_ALL=C too, where the locale's code page is ASCII.
+procedure TParseInvalid.TestUTF8FileNameRoundTrip;
+var
+  Dir, Path: string;
+  Handle: THandle;
+  Found: TSearchRec;
+begin
+  Dir := IncludeTrailingPathDelimiter(GetTempDir(False)) +
+    'mcp-utf8-' + IntToStr(GetProcessID) + PathDelim;
+  ForceDirectories(Dir);
+  Path := Dir + 'Z' + #$C3#$BC + 'rich.conf';
+  Handle := FileCreate(Path);
+  Expect<Boolean>(Handle <> THandle(-1)).ToBe(True);
+  FileClose(Handle);
+  try
+    Expect<Boolean>(FileExists(Path)).ToBe(True);
+    Expect<Integer>(FindFirst(Dir + '*.conf', faAnyFile, Found)).ToBe(0);
+    try
+      Expect<string>(Found.Name).ToBe('Z' + #$C3#$BC + 'rich.conf');
+    finally
+      FindClose(Found);
+    end;
+  finally
+    DeleteFile(Path);
+    RemoveDir(Dir);
+  end;
+end;
+
 procedure TParseInvalid.SetupTests;
 begin
   Test('unparseable input → -32700', TestGarbage);
@@ -306,6 +367,10 @@ begin
   Test('invalid request shape stays answerable',
     TestInvalidRequestShapeNotFlagged);
   Test('null id counts as request-shaped', TestNullIdIsRequestShaped);
+  Test('ill-formed UTF-8 → -32700; well-formed four-byte accepted',
+    TestInvalidUTF8IsParseError);
+  Test('a UTF-8 file name keeps its bytes on any locale',
+    TestUTF8FileNameRoundTrip);
 end;
 
 { ───────── Unicode escape input ───────── }
