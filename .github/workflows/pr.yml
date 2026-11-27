@@ -8,7 +8,7 @@ name: PR
 #            mcpsmoke E2E battery on Linux, macOS, and win64 (the stdio
 #            transport is pure RTL, so unlike duetto there are no
 #            platform-specific transport legs to stage — all three OSes
-#            run the full battery pre-merge). The Linux leg alone adds
+#            run the full battery pre-merge). The linux-x64 leg alone adds
 #            format --check, agents --check, the reference-docs check,
 #            health and duplication.
 #   ci.yml — push to main and manual dispatch: the wider per-arch
@@ -48,6 +48,14 @@ jobs:
             runner: macos-latest
             lwpt-asset: macos-arm64
             fpc-install: brew
+          # The next FPC release, ahead of the package managers (#130):
+          # build, unit suites and mcpsmoke on 3.2.4-rc2. Not a required
+          # check.
+          - name: linux-x64-fpc-3.2.4
+            runner: ubuntu-latest
+            lwpt-asset: linux-x64
+            fpc-install: toolchain
+            fpc-version: 3.2.4-rc2-b1
           - name: win64
             runner: windows-latest
             lwpt-asset: windows-x64
@@ -76,6 +84,20 @@ jobs:
         run: |
           brew install fpc
           fpc -iV
+
+      # frostney/fpc-toolchain's release build, pinned by commit (main
+      # on 2026-11-25; it has no v1 tag), with its fpc first on PATH.
+      - name: Install FPC (fpc-toolchain)
+        if: matrix.fpc-install == 'toolchain'
+        uses: frostney/fpc-toolchain@79cc1c6be79befe3393979d3c64a42345f0d0814
+        with:
+          version: ${{ matrix.fpc-version }}
+
+      - name: FPC version (fpc-toolchain)
+        if: matrix.fpc-install == 'toolchain'
+        run: |
+          fpc -iV
+          fpc -iW
 
       # One official installer carries native win32 and the win64 cross
       # set (choco's package is i386-only and downloads.freepascal.org
@@ -197,7 +219,7 @@ jobs:
       # and mcpsmoke again under LC_ALL=C, where the RTL's code page is
       # US-ASCII.
       - name: unit suites and mcpsmoke under LC_ALL=C
-        if: matrix.fpc-install == 'apt'
+        if: matrix.fpc-install == 'apt' || matrix.fpc-install == 'toolchain'
         env:
           LC_ALL: C
         run: |

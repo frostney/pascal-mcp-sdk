@@ -35,7 +35,9 @@ flowchart LR
   library targets **exactly 3.2.2**, with its compiler flags in
   `source/units/MCP.inc` (`fpc -iV` prints yours). CI's Windows leg
   installs 3.2.2 itself; the Linux and macOS legs take the package
-  manager's FPC and print its version.
+  manager's FPC and print its version. One more Linux leg builds and
+  tests with FPC 3.2.4-rc2, the next release, so its changes show
+  before it ships.
 - **lwpt** — the canonical build/test/format entry point, at the
   release this repository pins: the exact `testing` version in
   `lwpt.toml` (`bash .github/scripts/lwpt-version.sh` prints it; a
@@ -194,7 +196,12 @@ registry.
 
 - Not required: `pages.yml` builds the website when a PR touches
   `docs/` or `website/`, and fails on broken internal doc links, so
-  fix a red build there before merging.
+  fix a red build there before merging. `build-and-test
+  (linux-x64-fpc-3.2.4)` builds and runs the unit suites and mcpsmoke
+  with FPC 3.2.4-rc2. The `main` ruleset does not require it, so a red
+  run does not block a merge, but look at the step that failed: it may
+  be a change in the next FPC release, the toolchain install, or a
+  regression of the change itself.
 
 - Reverting via GitHub's Revert button produces a `Revert "..."`
   title git-cliff cannot parse — retitle it

@@ -14,6 +14,7 @@ uses
   {$IFDEF UNIX}
   BaseUnix,
   {$ENDIF}
+  Classes,
   SysUtils,
 
   fpjson,
@@ -408,14 +409,48 @@ begin
   ExpectParsedValue('\ud83d\ude00', UTF8_GRINNING_FACE);
 end;
 
+// A high surrogate with no low one, then a pair: the library leaves
+// surrogate escapes to fpjson, so it does what the fpjson it was built
+// with does. FPC 3.2.2's drops the whole run; FPC 3.2.4's rejects it,
+// and the message is then a parse error (verified 2026-11-27 with
+// 3.2.2 and 3.2.4-rc2).
 procedure TUnicodeEscapeInput.TestHighHighLowMatchesFPJSON;
+const
+  RUN = '\ud83d\ud83d\ude00';
 var
   Baseline: TJSONObject;
+  Msg: TJSONRPCMessage;
+  Value: TJSONData;
 begin
-  Baseline := ParseObj('{"value":"\ud83d\ud83d\ude00"}');
   try
-    ExpectParsedValue('\ud83d\ud83d\ude00', Baseline.Get('value', ''));
+    Baseline := ParseObj('{"value":"' + RUN + '"}');
+  except
+    // 3.2.4 rejects this run with EScannerError; EParserError is also
+    // the base of 3.2.2's EJSONParser, which it raises for invalid
+    // JSON, though it accepts this run.
+    on EParserError do
+      Baseline := nil;
+  end;
+  Msg := ParseJSONRPCMessage('{"jsonrpc":"2.0","id":1,"method":"x",' +
+    '"params":{"value":"' + RUN + '"}}');
+  try
+    if Baseline <> nil then
+    begin
+      // A string member, so a parser that dropped it or nulled it
+      // would not pass for fpjson's empty string.
+      Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkRequest));
+      Value := Msg.Params.Find('value', jtString);
+      Expect<Boolean>(Value <> nil).ToBe(True);
+      if Value <> nil then
+        Expect<string>(Value.AsString).ToBe(Baseline.Get('value', ''));
+    end
+    else
+    begin
+      Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkInvalid));
+      Expect<Integer>(Msg.ErrorCode).ToBe(JSONRPC_PARSE_ERROR);
+    end;
   finally
+    FreeJSONRPCMessage(Msg);
     Baseline.Free;
   end;
 end;
@@ -464,7 +499,7 @@ begin
     TestAfterEscapedBackslash);
   Test('surrogate pair round-trips as four-byte UTF-8 via fpjson',
     TestSurrogatePair);
-  Test('high-high-low run keeps baseline fpjson behavior',
+  Test('high-high-low run follows the fpjson it is built with',
     TestHighHighLowMatchesFPJSON);
   Test('non-surrogate BMP before surrogate pair stays correct',
     TestBMPBeforeSurrogatePair);
