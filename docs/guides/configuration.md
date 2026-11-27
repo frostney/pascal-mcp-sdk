@@ -48,7 +48,9 @@ Set it to `True` for servers whose error messages could leak
 internals: the client instead receives a generic message with a
 correlation reference (`... (ref e-000001)`), and the full exception —
 class, message, site — is logged to stderr under that reference for
-you to match up. (Best-effort on Unix: the first stderr emission
+you to match up. Deliberate errors are not redacted: an
+`MCPErrorResult` text and an `EMCPProtocolError`'s message and data
+reach the client as written, so keep secrets out of them. (Best-effort on Unix: the first stderr emission
 upgrades a default SIGPIPE disposition to ignore, so a closed stderr
 cannot kill the process; a host's own SIGPIPE handling is left
 untouched.)
