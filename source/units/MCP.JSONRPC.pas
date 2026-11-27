@@ -103,7 +103,20 @@ function BuildErrorResponse(AId: TJSONData; ACode: Integer;
 // which is what keeps the stdio framing invariant).
 function SerializeCompact(AData: TJSONData): string;
 
+// One diagnostic line on stderr, for every library logger: written and
+// flushed under one lock, so threads cannot splice lines. The line goes
+// out as UTF-8 unless stderr is a Windows console, which keeps the code
+// page the RTL chose for it; the file's code page is restored exactly
+// afterwards, so a host's own writes are not affected (#102). I/O
+// errors propagate.
+procedure MCPWriteStderrLine(const AText: string);
+
 implementation
+
+{$IFDEF WINDOWS}
+uses
+  Windows;
+{$ENDIF}
 
 function HexDigitValue(AChar: Char): Integer;
 begin
@@ -264,9 +277,10 @@ var
   Parser: TJSONParser;
   Offset: Integer;
 begin
-  // JSON-RPC messages MUST be UTF-8 (transports#messages, verified
-  // 2026-11-27): a line that is not is a parse error, never text to
-  // echo back (#102).
+  // JSON-RPC messages MUST be UTF-8 on every transport (verified
+  // 2026-11-27 against
+  // https://modelcontextprotocol.io/specification/2026-07-28/basic/transports#messages):
+  // a line that is not is a parse error, never text to echo (#102).
   Offset := InvalidUTF8Offset(ALine);
   if Offset > 0 then
     raise EJSONParser.CreateFmt('invalid UTF-8 at byte %d', [Offset]);
@@ -425,6 +439,46 @@ begin
   Result := AData.AsJSON;
 end;
 
+var
+  StderrWriteLock: TRTLCriticalSection;
+
+// True when the handle ErrOutput really writes to is a Windows console
+// (GetConsoleMode succeeds only for one); never on other platforms.
+function StderrIsConsole: Boolean;
+{$IFDEF WINDOWS}
+var
+  Mode: DWORD;
+{$ENDIF}
+begin
+  {$IFDEF WINDOWS}
+  Result := GetConsoleMode(TextRec(ErrOutput).Handle, Mode);
+  {$ELSE}
+  Result := False;
+  {$ENDIF}
+end;
+
+procedure MCPWriteStderrLine(const AText: string);
+var
+  Saved: TSystemCodePage;
+begin
+  System.EnterCriticalSection(StderrWriteLock);
+  try
+    // The raw field, not GetTextCodePage: SetTextCodePage would turn a
+    // saved 0 into DefaultSystemCodePage.
+    Saved := TextRec(ErrOutput).CodePage;
+    try
+      if not StderrIsConsole then
+        SetTextCodePage(ErrOutput, CP_UTF8);
+      Write(ErrOutput, AText, #10);
+      Flush(ErrOutput);
+    finally
+      TextRec(ErrOutput).CodePage := Saved;
+    end;
+  finally
+    System.LeaveCriticalSection(StderrWriteLock);
+  end;
+end;
+
 // Every platform: strings are UTF-8 in a program built with this
 // library, whatever the locale. On Unix cwstring would otherwise take
 // the code page from the locale, and under a non-UTF-8 one (LC_ALL=C)
@@ -436,5 +490,9 @@ initialization
   SetMultiByteConversionCodePage(CP_UTF8);
   DefaultFileSystemCodePage := CP_UTF8;
   DefaultRTLFileSystemCodePage := CP_UTF8;
+  InitCriticalSection(StderrWriteLock);
+
+finalization
+  DoneCriticalSection(StderrWriteLock);
 
 end.

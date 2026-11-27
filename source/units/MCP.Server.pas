@@ -819,14 +819,12 @@ var
   // read-modify-write is guarded by ErrorSequenceLock (a plain
   // critical section, portable across 32- and 64-bit targets, rather
   // than a 64-bit atomic intrinsic that FPC 3.2.2 only declares for
-  // cpu64), and StderrLock serializes the write+flush pair so
-  // concurrent diagnostics cannot interleave within a line. The two
-  // locks are kept separate so error-ref allocation never waits on
-  // logging latency. All three are process-wide, matching the lifetime
-  // of the stderr handle itself.
+  // cpu64). Stderr writes are serialized by MCPWriteStderrLine's own
+  // lock (MCP.JSONRPC), kept separate so error-ref allocation never
+  // waits on logging latency. Both are process-wide, matching the
+  // lifetime of the stderr handle itself.
   ErrorSequence: Int64 = 0;
   ErrorSequenceLock: TRTLCriticalSection;
-  StderrLock: TRTLCriticalSection;
 
 type
   TMCPRequestCancellationToken = class
@@ -1031,21 +1029,16 @@ begin
   {$IFDEF UNIX}
   EnsureSigPipeIgnored;
   {$ENDIF}
-  // Write and Flush are one indivisible diagnostic: without the lock,
-  // two connection threads can splice their text into a single line
-  // and make the redacted reference unreadable.
-  System.EnterCriticalSection(StderrLock);
+  // MCPWriteStderrLine writes and flushes under one lock (two
+  // connection threads cannot splice their text into one line and make
+  // the redacted reference unreadable) and as UTF-8 under any locale
+  // (#102). Logging is best effort: a closed stderr is ignored.
   try
-    try
-      Write(ErrOutput, AMessage, #10);
-      Flush(ErrOutput);
-    except
-      on EInOutError do
-      begin
-      end;
+    MCPWriteStderrLine(AMessage);
+  except
+    on EInOutError do
+    begin
     end;
-  finally
-    System.LeaveCriticalSection(StderrLock);
   end;
 end;
 
@@ -3938,14 +3931,12 @@ end;
 
 initialization
   // RTL-only mutual exclusion for the process-wide diagnostic state;
-  // both outlive every session, so unit lifetime is the right scope.
+  // it outlives every session, so unit lifetime is the right scope.
   // ErrorSequenceLock guards the error-reference counter (portable in
-  // place of a 64-bit atomic); StderrLock serializes stderr writes.
+  // place of a 64-bit atomic).
   InitCriticalSection(ErrorSequenceLock);
-  InitCriticalSection(StderrLock);
 
 finalization
-  DoneCriticalSection(StderrLock);
   DoneCriticalSection(ErrorSequenceLock);
 
 end.

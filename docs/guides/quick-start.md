@@ -119,11 +119,13 @@ Key behaviours you get for free:
   responses on `ACtx` — see
   [Tools](tools.md#asking-the-client-for-more-input-mrtr) and the
   worked example in the [cookbook](cookbook.md#a-tool-that-asks-the-user-something-mrtr).
-- **UTF-8 everywhere:** a program that uses the library treats its
-  strings, and file names, as UTF-8 under any locale, `LC_ALL=C`
-  included, because the wire must be UTF-8. The library sets this when
-  it loads; if your program needs another code page for its own
-  strings, convert at your own boundary.
+- **UTF-8 everywhere:** a program that links `MCP.JSONRPC`, as every
+  program using `MCP.Server` or a transport does, treats its strings
+  and file names as UTF-8 under any locale, `LC_ALL=C` included,
+  because the wire must be UTF-8. The unit sets this when it loads; if
+  your program needs another code page for its own strings, convert at
+  your own boundary. A program using only `MCP.Schema` or
+  `MCP.Content` keeps the locale's code page.
 
 > These protocol behaviours — MRTR, Streamable HTTP/SSE, the per-request
 > `_meta` model, and the EOF shutdown contract — implement spec revision

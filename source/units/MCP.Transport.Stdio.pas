@@ -74,10 +74,8 @@ procedure MCPLogToStderr(const AMessage: string);
 
 implementation
 
-{$IFDEF WINDOWS}
 uses
-  Windows;
-{$ENDIF}
+  MCP.JSONRPC;
 
 // Read one LF-terminated line, storing at most AMax bytes. True when
 // a line (possibly empty) was read; False on EOF with nothing read.
@@ -142,7 +140,9 @@ begin
   // at startup (US-ASCII under LC_ALL=C, turning every non-ASCII byte
   // into '?'). AOutput is the caller's, so its code page is restored on
   // return. AInput needs none: the loop reads it byte by byte.
-  SavedCodePage := GetTextCodePage(AOutput);
+  // The raw field: restoring through SetTextCodePage would turn a saved
+  // 0 into DefaultSystemCodePage.
+  SavedCodePage := TextRec(AOutput).CodePage;
   SetTextCodePage(AOutput, CP_UTF8);
   try
     Session := AServer.CreateSession;
@@ -172,7 +172,7 @@ begin
       Session.Free;
     end;
   finally
-    SetTextCodePage(AOutput, SavedCodePage);
+    TextRec(AOutput).CodePage := SavedCodePage;
   end;
 end;
 
@@ -181,25 +181,11 @@ begin
   RunMCPStdioLoop(Input, Output, AServer, AMaxLineLength);
 end;
 
-function StderrIsWindowsConsole: Boolean;
-begin
-  {$IFDEF WINDOWS}
-  Result := GetFileType(GetStdHandle(STD_ERROR_HANDLE)) = FILE_TYPE_CHAR;
-  {$ELSE}
-  Result := False;
-  {$ENDIF}
-end;
-
 procedure MCPLogToStderr(const AMessage: string);
 begin
-  // Log lines are UTF-8 when stderr goes to a pipe or file, as an MCP
-  // client capturing it reads them (#102). A Windows console keeps the
-  // code page the RTL chose for it, so a person reading it there sees
-  // the right characters.
-  if not StderrIsWindowsConsole then
-    SetTextCodePage(ErrOutput, CP_UTF8);
-  Write(ErrOutput, AMessage, #10);
-  Flush(ErrOutput);
+  // The library's one stderr writer: locked, UTF-8 unless stderr is a
+  // Windows console, and the host's code page restored afterwards.
+  MCPWriteStderrLine(AMessage);
 end;
 
 end.

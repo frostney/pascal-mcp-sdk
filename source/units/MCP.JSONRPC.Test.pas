@@ -11,6 +11,9 @@ program MCP.JSONRPC.Test;
 {$I MCP.inc}
 
 uses
+  {$IFDEF UNIX}
+  BaseUnix,
+  {$ENDIF}
   SysUtils,
 
   fpjson,
@@ -292,12 +295,14 @@ begin
   FreeJSONRPCMessage(Msg);
 end;
 
-// JSON-RPC messages MUST be UTF-8 (transports#messages, verified
-// 2026-11-27): ill-formed input is a parse error, not text to echo.
+// JSON-RPC messages MUST be UTF-8 on every transport, verified
+// 2026-11-27 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/transports#messages:
+// ill-formed input is a parse error, not text to echo.
 procedure TParseInvalid.TestInvalidUTF8IsParseError;
 const
   BAD: array[0..5] of string = (
-    #$C3,                   // truncated two-byte sequence
+    #$C3#$41,               // lead byte, then no continuation
     #$C0#$AF,               // overlong '/'
     #$ED#$A0#$80,           // UTF-16 surrogate D800
     #$F4#$90#$80#$80,       // past U+10FFFF
@@ -314,6 +319,13 @@ begin
     Expect<Integer>(Msg.ErrorCode).ToBe(JSONRPC_PARSE_ERROR);
     FreeJSONRPCMessage(Msg);
   end;
+  // Truncated at the very end of the input: the length check, not a
+  // bad continuation byte, refuses it, at the lead byte's offset.
+  Msg := ParseJSONRPCMessage('{"jsonrpc":"2.0","id":1,"method":"x"}' + #$E4#$B8);
+  Expect<Integer>(Msg.ErrorCode).ToBe(JSONRPC_PARSE_ERROR);
+  Expect<Boolean>(Pos('invalid UTF-8 at byte 38', Msg.ErrorMessage) > 0)
+    .ToBe(True);
+  FreeJSONRPCMessage(Msg);
   Msg := ParseJSONRPCMessage('{"jsonrpc":"2.0","id":1,"method":"x",' +
     '"params":{"v":"' + UTF8_PAYLOAD + UTF8_GRINNING_FACE + #$F4#$8F#$BF#$BF +
     '"}}');
@@ -339,6 +351,12 @@ begin
   FileClose(Handle);
   try
     Expect<Boolean>(FileExists(Path)).ToBe(True);
+    {$IFDEF UNIX}
+    // At the OS boundary the name is the UTF-8 bytes themselves, as
+    // another process creating it would have written them.
+    Expect<Integer>(FpAccess(PAnsiChar(RawByteString(Dir + 'Z' + #$C3#$BC +
+      'rich.conf')), F_OK)).ToBe(0);
+    {$ENDIF}
     Expect<Integer>(FindFirst(Dir + '*.conf', faAnyFile, Found)).ToBe(0);
     try
       Expect<string>(Found.Name).ToBe('Z' + #$C3#$BC + 'rich.conf');
