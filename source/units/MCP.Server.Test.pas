@@ -403,6 +403,8 @@ type
     procedure TestErrorWithBadStructuredDropsIt;
     procedure TestErrorWithGoodStructuredKeepsIt;
     procedure TestRicherSchemaPublishedUnchanged;
+    procedure TestNonFiniteOutputRefused;
+    procedure TestNonFiniteClassicIsAnError;
   end;
 
   // MCPImageResult: the spec's image content block, the raw-bytes
@@ -5158,6 +5160,24 @@ begin
   Result.IsError := True;
 end;
 
+// NaN has no JSON form; the two-argument builder takes it as given.
+function NaNHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult('nan', TJSONFloatNumber.Create(NaN));
+end;
+
+// A wire number set to NaN after construction: serializing it raises.
+function WireNaNHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Value: TJSONData;
+begin
+  Value := MCPWireNumber(1.5);
+  Value.AsFloat := NaN;
+  Result := MCPStructuredResult('nan', Value);
+end;
+
 function ErrorWithGoodStructuredHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
@@ -5184,6 +5204,10 @@ begin
     ErrorWithBadStructuredHandler);
   FServer.RegisterTool(OutputTool('error_good', USERS_SCHEMA),
     ErrorWithGoodStructuredHandler);
+  FServer.RegisterTool(OutputTool('nan_number', '{"type":"number"}'),
+    NaNHandler);
+  FServer.RegisterTool('nan_unchecked', 'NaN, no output schema',
+    '{"type":"object"}', WireNaNHandler);
 end;
 
 function OutputCall(const ATool: string): string;
@@ -5197,7 +5221,9 @@ var
   Response: string;
 begin
   Expect<Boolean>(Dispatch(OutputCall('users'), Response)).ToBe(True);
-  // The text block carries the serialized JSON (SHOULD, SEP-2106).
+  // The text block carries the serialized JSON (SHOULD, SEP-2106),
+  // verified 2026-11-26 against
+  // https://modelcontextprotocol.io/specification/2026-07-28/server/tools#structured-content
   Expect<Boolean>(Pos('"content" : [{ "type" : "text", "text" : ' +
     '"[{ \"id\" : \"1\", \"name\" : \"Ada\" }]" }], "isError" : false, ' +
     '"structuredContent" : [{ "id" : "1", "name" : "Ada" }]', Response) > 0)
@@ -5275,7 +5301,9 @@ begin
   SendNotification(
     '{"jsonrpc":"2.0","method":"notifications/initialized"}');
   // The tool stays in the classic listing, without its non-object
-  // outputSchema (2025-11-25 schema, Tool.outputSchema).
+  // outputSchema (2025-11-25 schema, Tool.outputSchema), verified
+  // 2026-11-27 against
+  // https://modelcontextprotocol.io/specification/2025-11-25/schema#tool
   Found := False;
   Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}');
   Tools := TJSONArray(Response.FindPath('result.tools'));
@@ -5288,7 +5316,9 @@ begin
     end;
   Expect<Boolean>(Found).ToBe(True);
   Response.Free;
-  // ...and its array output travels in the text block only.
+  // ...and its array output travels in the text block only
+  // (CallToolResult.structuredContent is an object there, same source,
+  // https://modelcontextprotocol.io/specification/2025-11-25/schema#calltoolresult).
   Response := Call('{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
     '"params":{"name":"users","arguments":{}}}');
   Expect<Boolean>(Response.FindPath('result.structuredContent') = nil)
@@ -5358,6 +5388,37 @@ begin
   Response.Free;
 end;
 
+procedure TStructuredOutput.TestNonFiniteOutputRefused;
+var
+  Response: TJSONObject;
+begin
+  // Parseable: the bad value never reaches the wire.
+  Response := Call(OutputCall('nan_number'));
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Tool "nan_number" produced output that does not match its ' +
+    'outputSchema: Structured output must be a number');
+  Response.Free;
+end;
+
+// The classic text fallback serializes the value; when that raises,
+// the call answers -32603 and frees the result (no leak under heaptrc).
+procedure TStructuredOutput.TestNonFiniteClassicIsAnError;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Response := Call('{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+    '"params":{"name":"nan_unchecked","arguments":{}}}');
+  Expect<Integer>(TJSONData(Response.FindPath('error.code')).AsInteger)
+    .ToBe(-32603);
+  Response.Free;
+end;
+
 procedure TStructuredOutput.SetupTests;
 begin
   Test('array output is sent, with its JSON as the text block',
@@ -5381,6 +5442,10 @@ begin
     TestErrorWithGoodStructuredKeepsIt);
   Test('an out-of-subset output schema is listed unchanged',
     TestRicherSchemaPublishedUnchanged);
+  Test('NaN output under a number schema becomes isError',
+    TestNonFiniteOutputRefused);
+  Test('classic fallback of a NaN value answers -32603',
+    TestNonFiniteClassicIsAnError);
 end;
 
 { ───────── image results ───────── }

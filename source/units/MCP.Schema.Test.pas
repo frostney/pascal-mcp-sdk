@@ -117,6 +117,9 @@ type
     procedure TestIntegralFloats;
     procedure TestExactNumericEnums;
     procedure TestDeclaredDialect;
+    procedure TestBuiltValues;
+    procedure TestKeywordShapes;
+    procedure TestOnlyConformingDefaultsSeeded;
   end;
 
   TWireNumber = class(TTestSuite)
@@ -870,6 +873,94 @@ begin
     .ToBe('declares $schema other than JSON Schema 2020-12');
 end;
 
+// '' when the built AValue (consumed) conforms to ASchema, else the
+// error. Built values reach shapes parsing never produces: QWord nodes
+// for small values, nil members and items, non-finite floats.
+function CheckBuilt(const ASchema: string; AValue: TJSONData): string;
+var
+  Schema: TJSONObject;
+begin
+  Schema := ObjectOf(ASchema);
+  try
+    if MCPValidateAgainstSchema(Schema, AValue, 'structured output', False,
+      Result) then
+      Result := '';
+  finally
+    AValue.Free;
+    Schema.Free;
+  end;
+end;
+
+function WithNilMember(const AName: string): TJSONObject;
+begin
+  Result := TJSONObject.Create;
+  Result.Add(AName, TJSONData(nil));
+end;
+
+function NilItemArray: TJSONArray;
+begin
+  Result := TJSONArray.Create;
+  Result.Add(TJSONData(nil));
+end;
+
+procedure TSubsetSchemas.TestBuiltValues;
+begin
+  // A small value in a QWord node equals the integral float 2.0.
+  Expect<string>(CheckBuilt('{"type":"integer","enum":[2.0]}',
+    TJSONQWordNumber.Create(2))).ToBe('');
+  Expect<Boolean>(CheckBuilt('{"type":"integer","enum":[3.0]}',
+    TJSONQWordNumber.Create(2)) <> '').ToBe(True);
+  // A nil member is a present null, not an absent one.
+  Expect<string>(CheckBuilt('{"type":"object","properties":{"a":{"type":' +
+    '"null"}},"required":["a"]}', WithNilMember('a'))).ToBe('');
+  Expect<string>(CheckBuilt('{"type":"object","properties":{"a":{"type":' +
+    '"string"}}}', WithNilMember('a')))
+    .ToBe('Structured output "a" must be a string');
+  // A nil item is null: checked, not dereferenced.
+  Expect<string>(CheckBuilt('{"type":"array","items":{"type":"null"}}',
+    NilItemArray)).ToBe('');
+  Expect<string>(CheckBuilt('{"type":"array","items":{"type":"string"}}',
+    NilItemArray)).ToBe('Structured output "[0]" must be a string');
+  // NaN and infinities have no JSON form.
+  Expect<string>(CheckBuilt('{"type":"number"}',
+    TJSONFloatNumber.Create(NaN))).ToBe('Structured output must be a number');
+  Expect<string>(CheckBuilt('{"type":"number"}',
+    TJSONFloatNumber.Create(Infinity))).ToBe('Structured output must be a number');
+end;
+
+procedure TSubsetSchemas.TestKeywordShapes;
+begin
+  Expect<string>(Violation('{"type":"object","required":[7]}'))
+    .ToBe('required must list property names');
+  Expect<string>(Violation('{"type":"string","title":7}'))
+    .ToBe('title must be a string');
+  Expect<string>(Violation('{"type":"object","properties":{"a":{"type":' +
+    '"string","description":true}}}'))
+    .ToBe('property "a" description must be a string');
+end;
+
+// A default that breaks its own schema is not seeded: omitting the
+// property stays valid, and the handler never sees the bad value.
+procedure TSubsetSchemas.TestOnlyConformingDefaultsSeeded;
+var
+  Schema, Value: TJSONObject;
+  Error: string;
+begin
+  Schema := ObjectOf('{"type":"object","properties":{' +
+    '"a":{"type":"string","default":null},' +
+    '"b":{"type":"string","enum":["x"],"default":"y"},' +
+    '"c":{"type":"string","default":"ok"}}}');
+  Value := ObjectOf('{}');
+  try
+    Expect<Boolean>(MCPValidateAgainstSchema(Schema, Value, 'argument', True,
+      Error)).ToBe(True);
+    Expect<string>(Value.AsJSON).ToBe('{ "c" : "ok" }');
+  finally
+    Value.Free;
+    Schema.Free;
+  end;
+end;
+
 procedure TSubsetSchemas.SetupTests;
 begin
   Test('nested objects, arrays, enums, defaults and null accepted',
@@ -890,6 +981,12 @@ begin
   Test('numeric enums compare exactly, integers without rounding',
     TestExactNumericEnums);
   Test('only a 2020-12 $schema is inside the subset', TestDeclaredDialect);
+  Test('built values: small QWords, nil members and items, non-finite',
+    TestBuiltValues);
+  Test('required names, title and description need their shapes',
+    TestKeywordShapes);
+  Test('only defaults that conform are seeded',
+    TestOnlyConformingDefaultsSeeded);
 end;
 
 begin

@@ -169,7 +169,9 @@ function MCPWireNumber(AValue: Double): TJSONData;
 //
 // The server validates arguments and structured output itself only for
 // schemas inside this JSON Schema 2020-12 subset; anything else is the
-// handler's job (.ApplicationValidated). Every schema node carries a
+// handler's job (.ApplicationValidated for input; an output schema
+// outside it is not checked). integer accepts integral floats within
+// +-2^53; number excludes NaN and the infinities. Every schema node carries a
 // "type" of object, array, string, number, integer, boolean or null,
 // and may use:
 //   object      properties (each a node), required (names)
@@ -918,44 +920,94 @@ begin
     (Uri = 'http://json-schema.org/draft/2020-12/schema');
 end;
 
+// properties: an object of node schemas, each checked in turn.
+function PropertiesViolation(AValue: TJSONData; const APath: string): string;
+var
+  I: Integer;
+  Member: TJSONData;
+begin
+  if AValue.JSONType <> jtObject then
+    Exit(NodeLabel(APath) + 'properties must be an object');
+  for I := 0 to AValue.Count - 1 do
+  begin
+    Member := TJSONObject(AValue).Items[I];
+    if (Member = nil) or (Member.JSONType <> jtObject) then
+      Exit(Format('property "%s" must be an object schema',
+        [JoinPath(APath, TJSONObject(AValue).Names[I])]));
+    Result := NodeViolation(TJSONObject(Member),
+      JoinPath(APath, TJSONObject(AValue).Names[I]), False);
+    if Result <> '' then
+      Exit;
+  end;
+  Result := '';
+end;
+
+type
+  TJSONTypeSet = set of TJSONType;
+
+// True when every item of AValue (an array) is non-nil with a JSON
+// type in ATypes; AAllowNil lets a nil item (written as null) pass.
+function ItemsOfTypes(AValue: TJSONData; ATypes: TJSONTypeSet;
+  AAllowNil: Boolean): Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to AValue.Count - 1 do
+    if AValue.Items[I] = nil then
+    begin
+      if not AAllowNil then
+        Exit(False);
+    end
+    else if not (AValue.Items[I].JSONType in ATypes) then
+      Exit(False);
+  Result := True;
+end;
+
+// The annotation keywords any node may carry; False when Key is none.
+function AnnotationViolation(const AKey: string; AValue: TJSONData;
+  const APath: string; ARoot: Boolean; out AViolation: string): Boolean;
+begin
+  AViolation := '';
+  Result := True;
+  if (AKey = 'description') or (AKey = 'title') then
+  begin
+    if AValue.JSONType <> jtString then
+      AViolation := NodeLabel(APath) + AKey + ' must be a string';
+  end
+  else if ARoot and (AKey = '$schema') then
+  begin
+    if not IsDefaultDialect(AValue) then
+      AViolation := 'declares $schema other than JSON Schema 2020-12';
+  end
+  else
+    Result := AKey = 'type';
+end;
+
+const
+  PRIMITIVE_JSON: TJSONTypeSet = [jtString, jtNumber, jtBoolean, jtNull];
+
 // The keyword ANode[AIndex] is allowed for a node of AType.
 function KeywordViolation(ANode: TJSONObject; AIndex: Integer;
   const AType, APath: string; ARoot: Boolean): string;
 var
   Key: string;
   Value: TJSONData;
-  I: Integer;
 begin
   Result := '';
   Key := ANode.Names[AIndex];
   Value := ANode.Items[AIndex];
-  if (Key = 'type') or (Key = 'description') or (Key = 'title') then
+  if Value = nil then
+    Exit(NodeLabel(APath) + Key + ' must not be nil');
+  if AnnotationViolation(Key, Value, APath, ARoot, Result) then
     Exit;
-  if ARoot and (Key = '$schema') then
-  begin
-    if not IsDefaultDialect(Value) then
-      Result := 'declares $schema other than JSON Schema 2020-12';
-    Exit;
-  end;
   if (Key = 'properties') and (AType = 'object') then
-  begin
-    if Value.JSONType <> jtObject then
-      Exit(NodeLabel(APath) + 'properties must be an object');
-    for I := 0 to Value.Count - 1 do
-    begin
-      if TJSONObject(Value).Items[I].JSONType <> jtObject then
-        Exit(Format('property "%s" must be an object schema',
-          [JoinPath(APath, TJSONObject(Value).Names[I])]));
-      Result := NodeViolation(TJSONObject(TJSONObject(Value).Items[I]),
-        JoinPath(APath, TJSONObject(Value).Names[I]), False);
-      if Result <> '' then
-        Exit;
-    end;
-  end
+    Result := PropertiesViolation(Value, APath)
   else if (Key = 'required') and (AType = 'object') then
   begin
     if Value.JSONType <> jtArray then
-      Exit(NodeLabel(APath) + 'required must be an array');
+      Result := NodeLabel(APath) + 'required must be an array'
+    else if not ItemsOfTypes(Value, [jtString], False) then
+      Result := NodeLabel(APath) + 'required must list property names';
   end
   else if (Key = 'items') and (AType = 'array') then
   begin
@@ -966,16 +1018,14 @@ begin
   else if (Key = 'enum') and IsPrimitiveType(AType) then
   begin
     if Value.JSONType <> jtArray then
-      Exit(NodeLabel(APath) + 'enum must be an array');
-    for I := 0 to Value.Count - 1 do
-      if not (Value.Items[I].JSONType in
-        [jtString, jtNumber, jtBoolean, jtNull]) then
-        Exit(NodeLabel(APath) + 'enum values must be primitives');
+      Result := NodeLabel(APath) + 'enum must be an array'
+    else if not ItemsOfTypes(Value, PRIMITIVE_JSON, True) then
+      Result := NodeLabel(APath) + 'enum values must be primitives';
   end
   else if (Key = 'default') and IsPrimitiveType(AType) then
   begin
-    if not (Value.JSONType in [jtString, jtNumber, jtBoolean, jtNull]) then
-      Exit(NodeLabel(APath) + 'default must be a primitive');
+    if not (Value.JSONType in PRIMITIVE_JSON) then
+      Result := NodeLabel(APath) + 'default must be a primitive';
   end
   else
     Result := NodeLabel(APath) + 'uses unsupported keyword "' + Key + '"';
@@ -1077,18 +1127,32 @@ begin
     Integral := B;
     Other := A;
   end;
-  if not IsIntegralNumber(Other) or
-    (TJSONNumber(Integral).NumberType = ntQWord) then
+  if not IsIntegralNumber(Other) then
     Exit(False);
+  // A QWord node holds small values too (CreateJSON(QWord(2))).
+  if TJSONNumber(Integral).NumberType = ntQWord then
+    Exit((Other.AsFloat >= 0) and
+      (Integral.AsQWord = QWord(Trunc(Other.AsFloat))));
   Result := Integral.AsInt64 = Trunc(Other.AsFloat);
 end;
 
+// A float node can hold NaN or an infinity, which has no JSON form.
+function IsFiniteNumber(AValue: TJSONData): Boolean;
+begin
+  Result := (TJSONNumber(AValue).NumberType <> ntFloat) or
+    (not IsNan(AValue.AsFloat) and not IsInfinite(AValue.AsFloat));
+end;
+
+// AValue nil is a member or item stored as nil, which fpjson writes as
+// null: it is JSON null here too.
 function MatchesType(AValue: TJSONData; const AType: string): Boolean;
 begin
-  if AType = 'string' then
+  if AValue = nil then
+    Result := AType = 'null'
+  else if AType = 'string' then
     Result := AValue.JSONType = jtString
   else if AType = 'number' then
-    Result := AValue.JSONType = jtNumber
+    Result := (AValue.JSONType = jtNumber) and IsFiniteNumber(AValue)
   else if AType = 'integer' then
     Result := (AValue.JSONType = jtNumber) and IsIntegralNumber(AValue)
   else if AType = 'boolean' then
@@ -1105,6 +1169,9 @@ end;
 // numbers, the same numeric value).
 function SamePrimitive(A, B: TJSONData): Boolean;
 begin
+  if (A = nil) or (B = nil) then
+    Exit(((A = nil) or (A.JSONType = jtNull)) and
+      ((B = nil) or (B.JSONType = jtNull)));
   if A.JSONType <> B.JSONType then
     Exit(False);
   case A.JSONType of
@@ -1129,20 +1196,34 @@ function ValidateNode(ANode: TJSONObject; AValue: TJSONData;
   const AKind, APath: string; ASeedDefaults: Boolean;
   out AError: string): Boolean; forward;
 
+// The index of member AName, -1 when absent. fpjson's IndexOfName
+// misses a member stored as nil (FPC 3.2.2), which is a present null.
+function MemberIndex(AObject: TJSONObject; const AName: string): Integer;
+begin
+  Result := AObject.IndexOfName(AName);
+  if Result >= 0 then
+    Exit;
+  for Result := 0 to AObject.Count - 1 do
+    if AObject.Names[Result] = AName then
+      Exit;
+  Result := -1;
+end;
+
 function ValidateMembers(ANode, AValue: TJSONObject;
   const AKind, APath: string; ASeedDefaults: Boolean;
   out AError: string): Boolean;
 var
   Data, Member, DefaultData: TJSONData;
   Properties: TJSONObject;
-  I: Integer;
+  I, Index: Integer;
+  Ignored: string;
 begin
   Result := False;
   Data := ANode.Find('required');
   if (Data <> nil) and (Data.JSONType = jtArray) then
     for I := 0 to Data.Count - 1 do
       if (Data.Items[I].JSONType = jtString) and
-        (AValue.Find(Data.Items[I].AsString) = nil) then
+        (MemberIndex(AValue, Data.Items[I].AsString) < 0) then
       begin
         AError := Format('Missing required %s "%s"',
           [AKind, JoinPath(APath, Data.Items[I].AsString)]);
@@ -1154,14 +1235,20 @@ begin
     Properties := TJSONObject(Data);
     for I := 0 to Properties.Count - 1 do
     begin
-      Member := AValue.Find(Properties.Names[I]);
-      if Member = nil then
+      // Present (a nil member is a present null) versus absent.
+      Index := MemberIndex(AValue, Properties.Names[I]);
+      if Index < 0 then
       begin
+        // Only a default that conforms is seeded, so the handler sees
+        // a value its schema allows.
         DefaultData := TJSONObject(Properties.Items[I]).Find('default');
-        if ASeedDefaults and (DefaultData <> nil) then
+        if ASeedDefaults and (DefaultData <> nil) and
+          ValidateNode(TJSONObject(Properties.Items[I]), DefaultData, AKind,
+          '', False, Ignored) then
           AValue.Add(Properties.Names[I], DefaultData.Clone);
         Continue;
       end;
+      Member := AValue.Items[Index];
       if not ValidateNode(TJSONObject(Properties.Items[I]), Member, AKind,
         JoinPath(APath, Properties.Names[I]), ASeedDefaults, AError) then
         Exit;

@@ -147,12 +147,18 @@ schema node has one `type` (`object`, `array`, `string`, `number`,
 | any | `description`, `title`; `$schema` at the root, naming JSON Schema 2020-12 |
 
 Objects and arrays nest to any depth. `integer` means a number with no
-fractional part, so `2.0` counts, and numeric `enum` values compare
-exactly. A schema whose `$schema` names another dialect is outside the
-subset, since the server could only check it by 2020-12 rules
+fractional part, so `2.0` counts, for floats up to 2^53 in magnitude
+(past that a double cannot tell neighbouring integers apart). Numeric
+`enum` values compare exactly between integers; a value parsed as a
+float compares at double precision. `number` excludes NaN and the
+infinities, which have no JSON form. A default is seeded only when it
+fits its own property schema. A schema whose `$schema` names another
+dialect is outside the subset, since the server could only check it by
+2020-12 rules
 ([JSON Schema usage](https://modelcontextprotocol.io/specification/2026-07-28/basic#json-schema-usage),
 verified 2026-11-27).
- Input schemas have an `object`
+
+Input schemas have an `object`
 root, as the specification requires; output schemas can have any root.
 Every raw input schema is checked against the subset at startup: a
 schema using a keyword outside it **fails at registration, naming the
@@ -173,16 +179,24 @@ output schema outside the subset is published unchanged and not
 checked: honouring it is the handler's job.
 
 > [!NOTE]
-> Upgrading: a tool that declares an output schema inside the subset
-> but returns only text now gets an `isError` result. Return conforming
-> structured content, or drop the schema the tool does not use.
+> Upgrading (breaking):
+>
+> - A tool that declares an output schema inside the subset but returns
+>   only text now gets an `isError` result. Return conforming structured
+>   content, or drop the schema the tool does not use.
+> - A raw input schema whose `$schema` names a dialect other than
+>   2020-12 is now outside the subset, so the server refuses it when the
+>   configuration freezes (the first session). Move the schema to
+>   2020-12, or mark the tool `.ApplicationValidated` and validate its
+>   arguments in the handler.
 
 Clients on a classic-handshake revision (2025-11-25 and earlier) accept
 only an `object` output schema. A tool with another root stays in their
 `tools/list`, so they can still call it, but without the schema, and its
 non-object output reaches them as a text block of its JSON.
 
-The escape hatch is `.ApplicationValidated`:
+For input, the escape hatch is `.ApplicationValidated` (output has
+none: an output schema outside the subset is simply not checked):
 
 ```pascal
 Server.RegisterTool('complex', 'Tool with a rich schema',

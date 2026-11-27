@@ -3399,6 +3399,7 @@ var
   Block: TJSONData;
 begin
   Text := SerializeCompact(AResult.StructuredContent);
+  // Freed only once serialized: if that raises, the caller frees it.
   FreeAndNil(AResult.StructuredContent);
   for I := 0 to AResult.Content.Count - 1 do
   begin
@@ -3517,20 +3518,28 @@ begin
 
   if ToolResult.Content = nil then
     ToolResult.Content := TJSONArray.Create;
-  if FTools[Index].OutputValidate then
-    CheckStructuredOutput(ToolName,
-      TJSONObject(FTools[Index].Definition.Find('outputSchema')), ToolResult);
+  // The result trees stay ours until CallResult takes them: free them
+  // if checking or converting raises (serializing a non-finite number).
+  try
+    if FTools[Index].OutputValidate then
+      CheckStructuredOutput(ToolName,
+        TJSONObject(FTools[Index].Definition.Find('outputSchema')), ToolResult);
+    // The classic dialect's structuredContent is an object (2025-11-25
+    // schema, CallToolResult, verified 2026-11-27 against
+    // https://modelcontextprotocol.io/specification/2025-11-25/schema#calltoolresult);
+    // any other value travels as a text block of its JSON (#91).
+    if (ToolResult.StructuredContent <> nil) and ALegacy and
+      (ToolResult.StructuredContent.JSONType <> jtObject) then
+      MoveStructuredToText(ToolResult);
+  except
+    ToolResult.Content.Free;
+    ToolResult.StructuredContent.Free;
+    raise;
+  end;
 
   CallResult := TJSONObject.Create;
   CallResult.Add('content', ToolResult.Content);
   CallResult.Add('isError', ToolResult.IsError);
-  // The classic dialect's structuredContent is an object (2025-11-25
-  // schema, CallToolResult, verified 2026-11-27 against
-  // https://modelcontextprotocol.io/specification/2025-11-25/schema#calltoolresult);
-  // any other value travels as a text block of its JSON (#91).
-  if (ToolResult.StructuredContent <> nil) and ALegacy and
-    (ToolResult.StructuredContent.JSONType <> jtObject) then
-    MoveStructuredToText(ToolResult);
   if ToolResult.StructuredContent <> nil then
     CallResult.Add('structuredContent', ToolResult.StructuredContent);
 
