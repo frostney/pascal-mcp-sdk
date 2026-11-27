@@ -147,7 +147,8 @@ argument validation to your handler).
 
 Results are built with `MCPTextResult` / `MCPErrorResult` /
 `MCPStructuredResult` / `MCPImageResult`; handler exceptions become
-in-band `isError: true` tool results automatically. `MCPImageResult`
+in-band `isError: true` tool results automatically, and a handler that
+must refuse with a JSON-RPC error raises `EMCPProtocolError`. `MCPImageResult`
 takes either raw bytes (encoded to base64 for you) or data that is
 already base64, plus the image's media type:
 
