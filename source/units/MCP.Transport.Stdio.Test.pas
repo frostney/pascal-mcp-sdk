@@ -121,6 +121,8 @@ var
   BeatSawCancel: Boolean;
   // 1 while PipeWriter is open, for ClosePipeOnce.
   PipeOpen: LongInt;
+  // When the beat check last ran (GetTickCount64; 0 for never).
+  BeatLastCallAt: QWord;
 
 // Closes PipeWriter once, whoever gets there first: the check, or the
 // script thread that bounds a test.
@@ -132,17 +134,23 @@ end;
 
 type
   // Writes AData (if any) to PipeWriter after ADelayMs, then closes it
-  // when AClose: input that arrives while the loop waits.
+  // when AClose: input that arrives while the loop waits. ADelayMs is
+  // a lower bound: a slow runner sleeps longer, so a test that depends
+  // on when the data arrived reads WroteAt.
   TPipeScript = class(TThread)
   private
     FDelayMs: Integer;
     FData: string;
     FClose: Boolean;
+    FWroteAt: QWord;
   protected
     procedure Execute; override;
   public
     constructor Create(ADelayMs: Integer; const AData: string;
       AClose: Boolean);
+    // When AData was written (GetTickCount64; 0 for not written). Read
+    // it after WaitFor.
+    property WroteAt: QWord read FWroteAt;
   end;
 
 constructor TPipeScript.Create(ADelayMs: Integer; const AData: string;
@@ -166,7 +174,10 @@ begin
     Inc(Waited, 10);
   end;
   if (FData <> '') and (PipeOpen = 1) then
+  begin
+    FWroteAt := GetTickCount64;
     FileWrite(PipeWriter, FData[1], Length(FData));
+  end;
   if FClose then
     ClosePipeOnce;
 end;
@@ -177,6 +188,7 @@ var
   From, Last, I: Integer;
 begin
   Inc(BeatCalls);
+  BeatLastCallAt := GetTickCount64;
   CallLog := CallLog + ACtx.RequestId.AsString;
   if BeatCalls = BeatCloseAt then
   begin
@@ -360,6 +372,7 @@ begin
   BeatCloseAt := 0;
   BeatGrowAt := 0;
   BeatSawCancel := False;
+  BeatLastCallAt := 0;
   CallLog := '';
   WaiterOutcome := '';
   WaiterOutcomes := '';
@@ -1008,7 +1021,9 @@ end;
 
 // A cancellation that arrives while its stream is not due is read by
 // the loop itself, and the stream is dropped there: it is not checked
-// again when it would have been due.
+// again when it would have been due. The stream is due every 400 ms
+// until the input closes, so a stream the loop failed to drop is
+// checked well after the cancellation was written (#132).
 procedure TStdioLoop.TestStreamCancelledBetweenSteps;
 var
   InFile, OutFile: Text;
@@ -1016,8 +1031,10 @@ var
   Request: string;
   Bytes: TStringStream;
   Cancel, Closer: TPipeScript;
+  CancelAt: QWord;
 begin
   BeatPollMs := 400;
+  CancelAt := 0;
   Request := StreamLine('5', '"cursor":"2",') + #10;
   Bytes := TStringStream.Create('');
   try
@@ -1036,19 +1053,25 @@ begin
   Rewrite(OutFile);
   Cancel := TPipeScript.Create(100, '{"jsonrpc":"2.0","method":' +
     '"notifications/cancelled","params":{"requestId":5}}' + #10, False);
-  Closer := TPipeScript.Create(900, '', True);
+  Closer := TPipeScript.Create(2000, '', True);
   try
     RunMCPStdioLoop(InFile, OutFile, FServer);
   finally
     Close(InFile);
     Close(OutFile);
     Cancel.WaitFor;
+    CancelAt := Cancel.WroteAt;
     Cancel.Free;
     Closer.WaitFor;
     Closer.Free;
   end;
-  // The handler's check only: none at 400 ms.
-  Expect<string>(CallLog).ToBe('5');
+  // The handler's check opened the stream.
+  Expect<Integer>(Pos('5', CallLog)).ToBe(1);
+  Expect<Boolean>(CancelAt > 0).ToBe(True);
+  // A runner slow enough to write the cancellation after the stream was
+  // due again checks it more than once before then: only a check that
+  // started well after it was written is wrong.
+  Expect<Boolean>(BeatLastCallAt <= CancelAt + 1000).ToBe(True);
 end;
 
 // A cancellation that a cooperative first check sees: no stream opens
