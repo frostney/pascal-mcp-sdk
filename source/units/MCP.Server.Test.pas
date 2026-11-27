@@ -350,7 +350,8 @@ type
   protected
     procedure BeforeEach; override;
     function Ask(const AKind, ACapabilities: string): string;
-    procedure ExpectSent(const AKind, ACapabilities: string);
+    procedure ExpectSent(const AKind, ACapabilities, AMethod, APath,
+      AValue: string);
     procedure ExpectRefused(const AKind, ACapabilities, AName,
       AData: string);
   public
@@ -5038,6 +5039,8 @@ end;
 const
   // "fråga", raw UTF-8 bytes.
   ASK_UTF8 = 'fr' + #$C3#$A5 + 'ga';
+  ELICIT = 'elicitation/create';
+  SAMPLE = 'sampling/createMessage';
 
 // One input request per call, picked by the "kind" argument.
 function AskHandler(AArguments: TJSONObject;
@@ -5099,33 +5102,21 @@ begin
     Result);
 end;
 
-// Sent as the handler built it: the interim result carries the entry.
-procedure TInputMembers.ExpectSent(const AKind, ACapabilities: string);
+// Sent as the handler built it: the interim result carries the entry,
+// with AMethod and AValue at APath under its params.
+procedure TInputMembers.ExpectSent(const AKind, ACapabilities, AMethod, APath,
+  AValue: string);
 var
   Response: TJSONObject;
-  Method: string;
 begin
   Response := TJSONObject(GetJSON(Ask(AKind, ACapabilities)));
   try
     Expect<string>(TJSONData(Response.FindPath('result.resultType')).AsString)
       .ToBe('input_required');
-    if (AKind = 'form') or (AKind = 'bare') or (AKind = 'url') then
-      Method := 'elicitation/create'
-    else
-      Method := 'sampling/createMessage';
     Expect<string>(TJSONData(Response.FindPath('result.inputRequests.q.method'))
-      .AsString).ToBe(Method);
-    if AKind = 'url' then
-      Expect<string>(TJSONData(Response.FindPath(
-        'result.inputRequests.q.params.url')).AsString)
-        .ToBe('https://example.com/sign-in');
-    if AKind = 'tools' then
-      Expect<string>(TJSONData(Response.FindPath(
-        'result.inputRequests.q.params.tools[0].name')).AsString).ToBe('t');
-    if AKind = 'choice' then
-      Expect<string>(TJSONData(Response.FindPath(
-        'result.inputRequests.q.params.toolChoice.mode')).AsString)
-        .ToBe('none');
+      .AsString).ToBe(AMethod);
+    Expect<string>(TJSONData(Response.FindPath(
+      'result.inputRequests.q.params.' + APath)).AsString).ToBe(AValue);
   finally
     Response.Free;
   end;
@@ -5151,18 +5142,18 @@ const
   NEEDS_URL = '{ "elicitation" : { "url" : {} } }';
   NEEDS_FORM = '{ "elicitation" : { "form" : {} } }';
 begin
-  ExpectSent('form', FORM_ONLY);
-  ExpectSent('bare', FORM_ONLY);
+  ExpectSent('form', FORM_ONLY, ELICIT, 'mode', 'form');
+  ExpectSent('bare', FORM_ONLY, ELICIT, 'message', 'Name?');
   ExpectRefused('url', FORM_ONLY, 'elicitation.url', NEEDS_URL);
-  ExpectSent('url', URL_ONLY);
+  ExpectSent('url', URL_ONLY, ELICIT, 'url', 'https://example.com/sign-in');
   ExpectRefused('form', URL_ONLY, 'elicitation.form', NEEDS_FORM);
   ExpectRefused('bare', URL_ONLY, 'elicitation.form', NEEDS_FORM);
   // The empty object declares form only.
-  ExpectSent('form', EMPTY);
-  ExpectSent('bare', EMPTY);
+  ExpectSent('form', EMPTY, ELICIT, 'mode', 'form');
+  ExpectSent('bare', EMPTY, ELICIT, 'message', 'Name?');
   ExpectRefused('url', EMPTY, 'elicitation.url', NEEDS_URL);
-  ExpectSent('form', BOTH);
-  ExpectSent('url', BOTH);
+  ExpectSent('form', BOTH, ELICIT, 'mode', 'form');
+  ExpectSent('url', BOTH, ELICIT, 'mode', 'url');
 end;
 
 // The member refusal keeps a non-ASCII subject name byte-exact.
@@ -5199,9 +5190,10 @@ begin
   ExpectRefused('choice', '{"sampling":{"context":{}}}', 'sampling.tools',
     NEEDS_TOOLS);
   ExpectRefused('tools', '{}', 'sampling.tools', NEEDS_TOOLS);
-  ExpectSent('tools', '{"sampling":{"tools":{}}}');
-  ExpectSent('choice', '{"sampling":{"tools":{}}}');
-  ExpectSent('plain', '{"sampling":{}}');
+  ExpectSent('tools', '{"sampling":{"tools":{}}}', SAMPLE, 'tools[0].name', 't');
+  ExpectSent('choice', '{"sampling":{"tools":{}}}', SAMPLE, 'toolChoice.mode',
+    'none');
+  ExpectSent('plain', '{"sampling":{}}', SAMPLE, 'maxTokens', '10');
   ExpectRefused('niltools', '{"sampling":{}}', 'sampling.tools', NEEDS_TOOLS);
 end;
 
