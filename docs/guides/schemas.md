@@ -135,14 +135,70 @@ call time.
 
 ## The enforced subset
 
-The server enforces a deliberate subset of JSON Schema 2020-12 —
-`type`, `description`, `title`, `properties`, `required`, `enum`,
-`default` — exactly the dialect the builders emit. Every raw-schema
-registration is checked against that subset at startup: a schema using
-a keyword outside it **fails at registration, naming the keyword**,
-instead of being silently under-validated at call time.
+The server enforces a deliberate subset of JSON Schema 2020-12. Every
+schema node has one `type` (`object`, `array`, `string`, `number`,
+`integer`, `boolean` or `null`) and may use:
 
-The escape hatch is `.ApplicationValidated`:
+| Node type | Keywords |
+| --- | --- |
+| `object` | `properties` (each a node), `required` |
+| `array` | `items` (a node) |
+| primitives | `enum` (entries of another type never match), `default` (a primitive) |
+| any | `description`, `title`; `$schema` at the root, naming JSON Schema 2020-12 |
+
+Objects and arrays nest to any depth. `integer` means a number with no
+fractional part, so `2.0` counts, for floats up to 2^53 in magnitude
+(past that a double cannot tell neighbouring integers apart). Numeric
+`enum` values compare exactly: integers as integers, and an integral
+float equals the integer it holds at any magnitude; other floats
+compare at double precision. `number` excludes NaN and the infinities,
+which have no JSON form, and a checked value may not hold one anywhere,
+even where no keyword constrains it. A default is seeded only when it
+fits its own property schema. A schema whose `$schema` names another
+dialect is outside the subset, since the server could only check it by
+2020-12 rules
+([JSON Schema usage](https://modelcontextprotocol.io/specification/2026-07-28/basic#json-schema-usage),
+verified 2026-11-27).
+
+Input schemas have an `object`
+root, as the specification requires; output schemas can have any root.
+Every raw input schema is checked against the subset at startup: a
+schema using a keyword outside it **fails at registration, naming the
+keyword and its path**, instead of being silently under-validated at
+call time.
+
+Output schemas inside the subset are enforced too: before a result
+leaves the server, its `structuredContent` is checked against the
+tool's `outputSchema`. The specification makes conforming output a
+server duty
+([Output Schema](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#output-schema),
+verified 2026-11-26), so a handler that returns the wrong shape, or no
+structured content at all, gets an `isError` result naming the first
+mismatch instead of sending it. A handler's own `isError` result may
+leave structured content out; if it carries some, that is checked too,
+and dropped (keeping your error text) when it does not conform. An
+output schema outside the subset is published unchanged and not
+checked: honouring it is the handler's job.
+
+> [!NOTE]
+> Upgrading (breaking):
+>
+> - A tool that declares an output schema inside the subset but returns
+>   only text now gets an `isError` result. Return conforming structured
+>   content, or drop the schema the tool does not use.
+> - A raw input schema whose `$schema` names a dialect other than
+>   2020-12 is now outside the subset, so the server refuses it when the
+>   configuration freezes (the first session). Move the schema to
+>   2020-12, or mark the tool `.ApplicationValidated` and validate its
+>   arguments in the handler.
+
+Clients on a classic-handshake revision (2025-11-25 and earlier) accept
+only an `object` output schema. A tool with another root stays in their
+`tools/list`, so they can still call it, but without the schema, and its
+non-object output reaches them as a text block of its JSON.
+
+For input, the escape hatch is `.ApplicationValidated` (output has
+none: an output schema outside the subset is simply not checked):
 
 ```pascal
 Server.RegisterTool('complex', 'Tool with a rich schema',
@@ -153,3 +209,10 @@ That publishes the full schema to clients unchanged, skips server-side
 argument validation, and hands the job to your handler — report
 violations as in-band `MCPErrorResult`s so the model can correct
 itself.
+
+The checks the server runs are public in `MCP.Schema`, so a handler can
+reuse them, for example on a part of its arguments that does fit the
+subset: `MCPSchemaSubsetViolation` classifies a schema and
+`MCPValidateAgainstSchema` checks a value against one inside the
+subset. Their signatures and contracts are in the
+[server reference](../reference/server.md#schema-checks).

@@ -385,6 +385,30 @@ type
     procedure TestChangedDataSentAsInternalError;
   end;
 
+  // #91: any outputSchema root, structured output checked against a
+  // subset output schema before it is sent, and the classic dialect's
+  // object-only structuredContent.
+  TStructuredOutput = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestArrayOutputSent;
+    procedure TestScalarOutputSent;
+    procedure TestMismatchBecomesIsError;
+    procedure TestMissingStructuredContent;
+    procedure TestHandlerIsErrorNotChecked;
+    procedure TestOutOfSubsetOutputNotChecked;
+    procedure TestLegacyDialect;
+    procedure TestLegacyKeepsCustomText;
+    procedure TestErrorWithBadStructuredDropsIt;
+    procedure TestErrorWithGoodStructuredKeepsIt;
+    procedure TestRicherSchemaPublishedUnchanged;
+    procedure TestNonFiniteOutputRefused;
+    procedure TestNonFiniteClassicIsAnError;
+    procedure TestNilSchemaChildListedInBothEras;
+  end;
+
   // MCPImageResult: the spec's image content block, the raw-bytes
   // overload's base64 encoding (asserted against literal fixtures, not
   // against a decode of what we just encoded), mimeType passthrough,
@@ -1894,10 +1918,13 @@ begin
   Server := TMCPServer.Create('t', '1');
   try
     Definition := TJSONObject.Create;
+    // Any root type is fine since SEP-2106 (#91), verified 2026-11-26
+    // against https://modelcontextprotocol.io/specification/2026-07-28/server/tools#output-schema.
     Definition.Add('name', 'array-output');
     Definition.Add('inputSchema', GetJSON('{"type":"object"}'));
     Definition.Add('outputSchema', GetJSON('{"type":"array"}'));
-    ExpectToolDefinitionRejected(Server, Definition);
+    Server.RegisterTool(Definition, EchoHandler);
+    Expect<Integer>(Server.ToolCount).ToBe(1);
   finally
     Server.Free;
   end;
@@ -2507,11 +2534,12 @@ begin
   Test('non-object definition inputSchema rejected',
     TestNonObjectDefinitionInputSchema);
   Test('inputSchema without root type rejected', TestMissingInputSchemaRoot);
-  Test('inputSchema array root rejected', TestWrongInputSchemaRoot);
-  Test('non-object outputSchema rejected', TestNonObjectOutputSchema);
-  Test('outputSchema array root rejected', TestWrongOutputSchemaRoot);
   Test('invalid x-mcp-header annotation rejected at registration',
     TestBadHeaderAnnotationRejected);
+  Test('inputSchema array root rejected', TestWrongInputSchemaRoot);
+  Test('non-object outputSchema rejected', TestNonObjectOutputSchema);
+  Test('outputSchema with an array root accepted',
+    TestWrongOutputSchemaRoot);
   Test('object inputSchema and outputSchema accepted',
     TestValidInputAndOutputSchemaRoots);
   Test('duplicate resource uri rejected', TestDuplicateResource);
@@ -4712,8 +4740,10 @@ procedure TSubsetValidation.TestOutOfSubsetSchemaFailsFreeze;
 var
   ErrorMessage, Response: string;
 begin
-  FServer.RegisterTool('rich', 'Array-typed input',
-    '{"type":"object","properties":{"data":{"type":"array"}}}',
+  // "format" is outside the enforced subset (#91 added arrays and
+  // nesting, not string formats).
+  FServer.RegisterTool('rich', 'Formatted input',
+    '{"type":"object","properties":{"data":{"type":"string","format":"uri"}}}',
     ArgsMirrorHandler);
   ErrorMessage := '';
   try
@@ -5100,6 +5130,393 @@ begin
     TestChangedDataSentAsInternalError);
 end;
 
+{ ───────── structured output (#91) ───────── }
+
+const
+  USERS_SCHEMA = '{"type":"array","items":{"type":"object","properties":' +
+    '{"id":{"type":"string"},"name":{"type":"string"}},"required":["id"]}}';
+
+function OutputTool(const AName, AOutputSchema: string): TJSONObject;
+begin
+  Result := TJSONObject.Create;
+  Result.Add('name', AName);
+  Result.Add('inputSchema', GetJSON('{"type":"object"}'));
+  Result.Add('outputSchema', GetJSON(AOutputSchema));
+end;
+
+function UsersHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult(GetJSON('[{"id":"1","name":"Ada"}]'));
+end;
+
+function BadUsersHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult(GetJSON('[{"id":"1"},{"name":"no id"}]'));
+end;
+
+function NoStructuredHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPTextResult('forgot the structured part');
+end;
+
+function FailingOutputHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPErrorResult('upstream unavailable');
+end;
+
+function CountHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult(TJSONIntegerNumber.Create(42));
+end;
+
+// Custom text beside non-object output: classic clients get both.
+function LabelledUsersHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult('Found ' + #$C3#$BC + 'sers',
+    GetJSON('[{"id":"1","name":"Ada"}]'));
+end;
+
+function ErrorWithBadStructuredHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult('quota exceeded', GetJSON('"not users"'));
+  Result.IsError := True;
+end;
+
+// NaN has no JSON form; the two-argument builder takes it as given.
+function NaNHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult('nan', TJSONFloatNumber.Create(NaN));
+end;
+
+// A wire number set to NaN after construction: serializing it raises.
+function WireNaNHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Value: TJSONData;
+begin
+  Value := MCPWireNumber(1.5);
+  Value.AsFloat := NaN;
+  Result := MCPStructuredResult('nan', Value);
+end;
+
+function ErrorWithGoodStructuredHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult('partial', GetJSON('[{"id":"1"}]'));
+  Result.IsError := True;
+end;
+
+procedure TStructuredOutput.BeforeEach;
+begin
+  inherited BeforeEach;
+  FServer.RegisterTool(OutputTool('users', USERS_SCHEMA), UsersHandler);
+  FServer.RegisterTool(OutputTool('bad_users', USERS_SCHEMA), BadUsersHandler);
+  FServer.RegisterTool(OutputTool('no_structured', USERS_SCHEMA),
+    NoStructuredHandler);
+  FServer.RegisterTool(OutputTool('failing', USERS_SCHEMA),
+    FailingOutputHandler);
+  FServer.RegisterTool(OutputTool('count', '{"type":"integer"}'), CountHandler);
+  // "format" is outside the subset: the output is the handler's to honour.
+  FServer.RegisterTool(OutputTool('formatted',
+    '{"type":"string","format":"uri"}'), CountHandler);
+  FServer.RegisterTool(OutputTool('labelled', USERS_SCHEMA),
+    LabelledUsersHandler);
+  FServer.RegisterTool(OutputTool('error_bad', USERS_SCHEMA),
+    ErrorWithBadStructuredHandler);
+  FServer.RegisterTool(OutputTool('error_good', USERS_SCHEMA),
+    ErrorWithGoodStructuredHandler);
+  FServer.RegisterTool(OutputTool('nan_number', '{"type":"number"}'),
+    NaNHandler);
+  FServer.RegisterTool('nan_unchecked', 'NaN, no output schema',
+    '{"type":"object"}', WireNaNHandler);
+end;
+
+function OutputCall(const ATool: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{' +
+    '"name":"' + ATool + '",' + META_MODERN + '}}';
+end;
+
+procedure TStructuredOutput.TestArrayOutputSent;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(OutputCall('users'), Response)).ToBe(True);
+  // The text block carries the serialized JSON (SHOULD, SEP-2106),
+  // verified 2026-11-26 against
+  // https://modelcontextprotocol.io/specification/2026-07-28/server/tools#structured-content
+  Expect<Boolean>(Pos('"content" : [{ "type" : "text", "text" : ' +
+    '"[{ \"id\" : \"1\", \"name\" : \"Ada\" }]" }], "isError" : false, ' +
+    '"structuredContent" : [{ "id" : "1", "name" : "Ada" }]', Response) > 0)
+    .ToBe(True);
+end;
+
+procedure TStructuredOutput.TestScalarOutputSent;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(OutputCall('count'));
+  Expect<Integer>(TJSONData(Response.FindPath('result.structuredContent'))
+    .AsInteger).ToBe(42);
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestMismatchBecomesIsError;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(OutputCall('bad_users'));
+  Expect<Boolean>(TJSONData(Response.FindPath('result.isError')).AsBoolean)
+    .ToBe(True);
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Tool "bad_users" produced output that does not match its ' +
+    'outputSchema: Missing required structured output "[1].id"');
+  Expect<Boolean>(Response.FindPath('result.structuredContent') = nil)
+    .ToBe(True);
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestMissingStructuredContent;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(OutputCall('no_structured'));
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Tool "no_structured" produced output that does not match its ' +
+    'outputSchema: no structuredContent was returned');
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestHandlerIsErrorNotChecked;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(OutputCall('failing'));
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('upstream unavailable');
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestOutOfSubsetOutputNotChecked;
+var
+  Response: TJSONObject;
+begin
+  // 42 is not a string, but the schema is outside the subset.
+  Response := Call(OutputCall('formatted'));
+  Expect<Boolean>(TJSONData(Response.FindPath('result.isError')).AsBoolean)
+    .ToBe(False);
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestLegacyDialect;
+var
+  Response: TJSONObject;
+  Tools: TJSONArray;
+  I: Integer;
+  Found: Boolean;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  // The tool stays in the classic listing, without its non-object
+  // outputSchema (2025-11-25 schema, Tool.outputSchema), verified
+  // 2026-11-27 against
+  // https://modelcontextprotocol.io/specification/2025-11-25/schema#tool
+  Found := False;
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}');
+  Tools := TJSONArray(Response.FindPath('result.tools'));
+  for I := 0 to Tools.Count - 1 do
+    if TJSONObject(Tools[I]).Get('name', '') = 'users' then
+    begin
+      Found := True;
+      Expect<Boolean>(TJSONObject(Tools[I]).Find('outputSchema') = nil)
+        .ToBe(True);
+    end;
+  Expect<Boolean>(Found).ToBe(True);
+  Response.Free;
+  // ...and its array output travels in the text block only
+  // (CallToolResult.structuredContent is an object there, same source,
+  // https://modelcontextprotocol.io/specification/2025-11-25/schema#calltoolresult).
+  Response := Call('{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+    '"params":{"name":"users","arguments":{}}}');
+  Expect<Boolean>(Response.FindPath('result.structuredContent') = nil)
+    .ToBe(True);
+  Expect<Boolean>(Pos('Ada', TJSONData(Response.FindPath(
+    'result.content[0].text')).AsString) > 0).ToBe(True);
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestLegacyKeepsCustomText;
+var
+  Response: TJSONObject;
+  Line: string;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+    '"params":{"name":"labelled","arguments":{}}}', Line)).ToBe(True);
+  Expect<Boolean>(Pos('"content" : [{ "type" : "text", "text" : "Found ' +
+    #$C3#$BC + 'sers" }, { "type" : "text", "text" : "[{ \"id\" : \"1\", ' +
+    '\"name\" : \"Ada\" }]" }], "isError" : false }', Line) > 0).ToBe(True);
+end;
+
+procedure TStructuredOutput.TestErrorWithBadStructuredDropsIt;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(OutputCall('error_bad'), Response)).ToBe(True);
+  Expect<Boolean>(Pos('"content" : [{ "type" : "text", "text" : ' +
+    '"quota exceeded" }], "isError" : true', Response) > 0).ToBe(True);
+  Expect<Boolean>(Pos('structuredContent', Response) = 0).ToBe(True);
+end;
+
+procedure TStructuredOutput.TestErrorWithGoodStructuredKeepsIt;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(OutputCall('error_good'));
+  Expect<string>(TJSONData(Response.FindPath('result.structuredContent[0].id'))
+    .AsString).ToBe('1');
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestRicherSchemaPublishedUnchanged;
+var
+  Response: TJSONObject;
+  Tools: TJSONArray;
+  I: Integer;
+  Found: Boolean;
+begin
+  Found := False;
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{' +
+    META_MODERN + '}}');
+  Tools := TJSONArray(Response.FindPath('result.tools'));
+  for I := 0 to Tools.Count - 1 do
+    if TJSONObject(Tools[I]).Get('name', '') = 'formatted' then
+    begin
+      Found := True;
+      Expect<string>(TJSONObject(Tools[I]).Find('outputSchema').AsJSON)
+        .ToBe('{ "type" : "string", "format" : "uri" }');
+    end;
+  Expect<Boolean>(Found).ToBe(True);
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestNonFiniteOutputRefused;
+var
+  Response: TJSONObject;
+begin
+  // Parseable: the bad value never reaches the wire.
+  Response := Call(OutputCall('nan_number'));
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Tool "nan_number" produced output that does not match its ' +
+    'outputSchema: Structured output must be a number');
+  Response.Free;
+end;
+
+// The classic text fallback serializes the value; when that raises,
+// the call answers -32603 and frees the result (no leak under heaptrc).
+procedure TStructuredOutput.TestNonFiniteClassicIsAnError;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Response := Call('{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+    '"params":{"name":"nan_unchecked","arguments":{}}}');
+  Expect<Integer>(TJSONData(Response.FindPath('error.code')).AsInteger)
+    .ToBe(-32603);
+  Response.Free;
+end;
+
+// A raw definition whose enum holds a nil item (null on the wire):
+// listing clones every definition, which fpjson cannot do with a nil
+// child, so registration stores a JSON null instead.
+procedure TStructuredOutput.TestNilSchemaChildListedInBothEras;
+var
+  Definition, Schema, Prop, Props: TJSONObject;
+  Enum: TJSONArray;
+  Response: TJSONObject;
+begin
+  Enum := TJSONArray.Create;
+  Enum.Add(TJSONData(nil));
+  Prop := TJSONObject.Create;
+  Prop.Add('type', 'null');
+  Prop.Add('enum', Enum);
+  Props := TJSONObject.Create;
+  Props.Add('n', Prop);
+  Schema := TJSONObject.Create;
+  Schema.Add('type', 'object');
+  Schema.Add('properties', Props);
+  Definition := TJSONObject.Create;
+  Definition.Add('name', 'nil_enum');
+  Definition.Add('inputSchema', Schema);
+  FServer.RegisterTool(Definition, NaNHandler);
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{' +
+    META_MODERN + '}}');
+  Expect<Boolean>(Pos('"enum" : [null]', Response.AsJSON) > 0).ToBe(True);
+  Response.Free;
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Response := Call('{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}');
+  Expect<Boolean>(Response.FindPath('result.tools') <> nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TStructuredOutput.SetupTests;
+begin
+  Test('array output is sent, with its JSON as the text block',
+    TestArrayOutputSent);
+  Test('scalar output is sent', TestScalarOutputSent);
+  Test('output that breaks the schema becomes isError, naming the path',
+    TestMismatchBecomesIsError);
+  Test('missing structuredContent becomes isError',
+    TestMissingStructuredContent);
+  Test('a handler''s own isError may omit structured output',
+    TestHandlerIsErrorNotChecked);
+  Test('an output schema outside the subset is not checked',
+    TestOutOfSubsetOutputNotChecked);
+  Test('classic dialect: no non-object outputSchema or structuredContent',
+    TestLegacyDialect);
+  Test('classic dialect: custom text kept, output JSON added as text',
+    TestLegacyKeepsCustomText);
+  Test('isError with non-conforming structured output drops it',
+    TestErrorWithBadStructuredDropsIt);
+  Test('isError with conforming structured output keeps it',
+    TestErrorWithGoodStructuredKeepsIt);
+  Test('an out-of-subset output schema is listed unchanged',
+    TestRicherSchemaPublishedUnchanged);
+  Test('NaN output under a number schema becomes isError',
+    TestNonFiniteOutputRefused);
+  Test('classic fallback of a NaN value answers -32603',
+    TestNonFiniteClassicIsAnError);
+  Test('a nil schema child is listed as null in both eras',
+    TestNilSchemaChildListedInBothEras);
+end;
+
 { ───────── image results ───────── }
 
 const
@@ -5440,6 +5857,8 @@ begin
     TImageResults.Create('Server: image tool results'));
   TestRunnerProgram.AddSuite(
     TContentResults.Create('Server: content tool results and prompt messages'));
+  TestRunnerProgram.AddSuite(
+    TStructuredOutput.Create('Server: structured output'));
   TestRunnerProgram.AddSuite(
     THandlerProtocolErrors.Create('Server: handler-raised protocol errors'));
   TestRunnerProgram.Run;
