@@ -180,7 +180,6 @@ client connects to it over Streamable HTTP when it sends per-request
 official TypeScript client (v2), which
 [tools/interop-ts/http-interop.mjs](../../tools/interop-ts/http-interop.mjs)
 drives against `mcpdemo --http`. Clients that open with the classic
-`initialize` handshake, which current releases of Claude Code, Claude
-Desktop and Codex do, register the same binary over stdio instead
+`initialize` handshake register the same binary over stdio instead
 ([Quick Start](quick-start.md)); nothing stops one binary from
 serving stdio locally and HTTP remotely.

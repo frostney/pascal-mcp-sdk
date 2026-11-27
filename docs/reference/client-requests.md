@@ -101,9 +101,10 @@ content directly. The raw payload is also available as
 
 ## Era and capability notes
 
-MRTR is modern-era (`2026-07-28`) only — a classic-handshake client calling
-an MRTR-answering tool or prompt receives a JSON-RPC error naming the
-limitation. Sampling and roots are deprecated in the final spec
+MRTR is modern-era (`2026-07-28`) only. A classic-handshake client
+calling a tool that answers `input_required` gets an in-band error
+result (`isError: true`) naming the limitation; one calling such a
+prompt gets a `-32603` JSON-RPC error. Sampling and roots are deprecated in the final spec
 (SEP-2577) but deliberately carried; prefer elicitation where either
 would do. Spec grounding and interop evidence:
 [Architecture](../internals/architecture.md#registration-and-handler-model).

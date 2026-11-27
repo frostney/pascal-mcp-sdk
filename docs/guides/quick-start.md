@@ -101,13 +101,17 @@ Key behaviours you get for free:
 - **Handler exceptions** become `isError: true` tool results — the
   in-band error channel models can self-correct against — except an
   `EMCPProtocolError`, which answers with the JSON-RPC error it carries.
-- **`resultType` and `serverInfo`** are stamped on every result.
-- **Today's clients work out of the box**: the server is dual-era by
-  default, so a client opening with the classic `initialize`
-  handshake — which current releases of Claude Code, Claude Desktop,
-  and Codex all still speak (see
-  [Your first conversation](first-conversation.md)) — is served that
-  era faithfully, while stateless 2026-07-28 `_meta` requests are
+- **`resultType` and `serverInfo`** are stamped on the core 2026-07-28
+  results (`serverInfo` under `_meta`, as
+  `io.modelcontextprotocol/serverInfo`); an `events/stream` final frame
+  carries only `resultType` and its subscription id, and
+  classic-handshake responses keep their revision's shape without
+  either.
+- **Today's clients work out of the box over stdio**: the server is
+  dual-era by default, so a client opening with the classic
+  `initialize` handshake, as Codex 0.171.0 does (see
+  [Your first conversation](first-conversation.md); Claude Code 2.1.332
+  opens at 2026-07-28), is served that era faithfully, while stateless 2026-07-28 `_meta` requests are
   served natively — same registries, same handlers. Set
   `Server.DualEra := False` for a strict modern-only server that
   rejects `initialize` naming its supported versions.
