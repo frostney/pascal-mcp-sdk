@@ -145,13 +145,39 @@ begin
     'indicator are not read here; use block style or quote the value');
   Expect<string>(Parsed('d: "open^')).ToBe('REFUSED line 2: a quoted string ' +
     'must end on its line');
+  // Raw characters YAML 1.1 reads as line breaks, or no parser accepts:
+  // written as escapes they pass (#117 review).
+  Expect<Boolean>(Pos('REFUSED line 2: a control, line separator',
+    Parsed('d: "first' + #$C2#$85 + 'second"^')) = 1).ToBe(True);
+  Expect<Boolean>(Pos('REFUSED line 2: a control, line separator',
+    Parsed('d: a' + #$E2#$80#$A8 + 'b^')) = 1).ToBe(True);
+  Expect<string>(Parsed('d: "a\u0085b\u2028c"^')).ToBe('{"d":"a' + #$C2#$85 +
+    'b' + #$E2#$80#$A8 + 'c"}');
+  // A tab: separating a comment, or anywhere in a plain value.
+  Expect<string>(Parsed('d: one' + #9 + '# comment^')).ToBe('REFUSED line ' +
+    '2: a tab in a plain value; quote it');
+  Expect<string>(Parsed('d: "a' + #9 + 'b"^')).ToBe('{"d":"a\tb"}');
+  // Integers JavaScript parsers keep exactly, and no larger.
+  Expect<string>(Parsed('rank: 9007199254740991^')).ToBe(
+    '{"rank":9007199254740991}');
+  Expect<string>(Parsed('rank: 9007199254740993^')).ToBe('REFUSED line 2: ' +
+    '"9007199254740993" is not a string in every YAML version; quote it');
+  // An empty flow collection is a whole value.
+  Expect<string>(Parsed('d: []^  prose^')).ToBe('REFUSED line 3: unexpected ' +
+    'indentation');
+  // A key longer than the server keeps.
+  Expect<string>(Parsed(StringOfChar('k', 256) + ': v^')).ToBe('REFUSED line ' +
+    '2: a key longer than 255 bytes, the most the server keeps');
+  // A continuation line is named as itself.
+  Expect<string>(Parsed('d: one^  two: three^')).ToBe('REFUSED line 3: a ' +
+    'plain value with ": " or " #"; quote it');
 end;
 
 // The "---" lines around it, CRLF line ends, and nothing more.
 procedure TFrontmatterSuite.TestDocumentShape;
 var
   Frontmatter: TJSONObject;
-  Problem: string;
+  Problem, Text: string;
 begin
   Expect<Boolean>(ParseFrontmatter('---' + #13#10 + 'name: a' + #13#10 +
     '---' + #13#10 + 'Body', Frontmatter, Problem)).ToBe(True);
@@ -164,7 +190,14 @@ begin
   Expect<Boolean>(Frontmatter = nil).ToBe(True);
   Expect<Boolean>(ParseFrontmatter('---' + #10 + 'name: a' + #10,
     Frontmatter, Problem)).ToBe(False);
-  Expect<string>(Problem).ToBe('the frontmatter has no closing "---" line');
+  Expect<string>(Problem).ToBe('line 1: the frontmatter opened here has no ' +
+    'closing "---" line');
+  // Not UTF-8: a lone $FF byte, set in place at run time, since a
+  // constant or a concatenation would convert it.
+  Text := '---' + #10 + 'd: x' + #10 + '---' + #10;
+  Text[8] := Chr($FF);
+  Expect<Boolean>(ParseFrontmatter(Text, Frontmatter, Problem)).ToBe(False);
+  Expect<string>(Problem).ToBe('byte 8: a SKILL.md must be UTF-8 text');
   Expect<string>(Parsed('')).ToBe('{}');
 end;
 

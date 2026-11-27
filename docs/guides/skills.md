@@ -105,9 +105,13 @@ path below the root is the whole skill path. Folders without a
 `SKILL.md`, such as `billing` in `skills/billing/refunds`, become part
 of the path. Every file in a skill's directory is served as its exact
 bytes on disk, except those of a skill nested in it, which is
-registered on its own, as above. Names starting with `.` are left out,
-as are files outside any skill. A symbolic link is refused, since it
-could lead outside the tree.
+registered on its own, as above. Directories are listed by directory
+reads even when empty. Names starting with `.` are left out, as are
+files outside any skill. A symbolic link, the root included, is
+refused, since it could lead outside the tree, and so is anything but a
+directory or a regular file, or a directory that cannot be read. A
+skill over the limits is refused from the sizes listed, before its
+files are read.
 
 The frontmatter is read with a YAML subset on which YAML 1.1 and 1.2
 parsers agree, since a host compares what it parses with the listing:
@@ -121,9 +125,11 @@ parsers agree, since a host compares what it parses with the listing:
 A plain value the two YAML versions read differently, such as `yes`,
 `on`, `1.0`, `012` or a date, must be quoted: `version: "1.0"`. So must
 a value with a colon followed by a space, or a space followed by `#`, in it. Flow collections like `[a, b]`,
-anchors and tags are not read. Any of these, or a check `RegisterSkill`
-makes, raises `EMCPServer` naming the file and line, and then no skill
-of the tree is registered.
+anchors and tags are not read, and neither are raw control characters,
+U+2028, U+2029 or a tab in a plain value: write those as escapes in a
+double-quoted string. Each of these raises `EMCPServer` naming the file
+and line; the checks `RegisterSkill` makes name the skill instead.
+Either way no skill of the tree is registered.
 
 ## Settings
 

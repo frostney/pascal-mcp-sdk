@@ -523,9 +523,13 @@ var
   Response: TJSONObject;
   Digest: string;
 begin
-  Dir := IncludeTrailingPathDelimiter(GetTempDir(False)) + 'mcpsmoke-skills-' +
-    IntToStr(GetProcessID);
-  ForceDirectories(Dir + PathDelim + 'from-disk');
+  // A directory of its own: created new, never reused.
+  repeat
+    Dir := IncludeTrailingPathDelimiter(GetTempDir(False)) +
+      'mcpsmoke-skills-' + IntToStr(GetProcessID) + '-' +
+      IntToStr(Random(1000000));
+  until CreateDir(Dir);
+  CreateDir(Dir + PathDelim + 'from-disk');
   Stream := TFileStream.Create(Dir + PathDelim + 'from-disk' + PathDelim +
     'SKILL.md', fmCreate);
   try
@@ -554,6 +558,8 @@ begin
         '"method":"skills/get","params":{' +
         '"uri":"skill://disk/from-disk/SKILL.md",' + META_MODERN + '}}');
       Digest := PathString(Response, 'result.skill.resources[0].digest');
+      Check(PathInt(Response, 'result.skill.resources[0].size') =
+        Length(SKILL_MD), 'skills from disk: the listed size is the file''s');
       Check(PathString(Response, 'result.skill.frontmatter.description') =
         'Loaded from a directory', 'skills from disk: the folded ' +
         'description read from the YAML');

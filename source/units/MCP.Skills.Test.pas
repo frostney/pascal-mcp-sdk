@@ -40,6 +40,8 @@ const
   DIGEST_REFUNDS = 'sha256:9e1f9c19d7482d24e367227fbb5dc2fe9f289c386424bf0c75926be8e10977d8';
   DIGEST_COMMITS = 'sha256:ec6c670d5c3de3539ccc588c99ff9d82575ef9eadefe21b2fbe17e4467be5fa2';
   DIGEST_LOGO = 'sha256:d44c4eee8f72efac76c1f294e7260408825c8dad42adaaf6e9bee7e7ef4c7de3';
+  // From Python's hashlib over the disk fixture's refunds SKILL.md.
+  DIGEST_DISK_REFUNDS = 'sha256:11944996133ecad727d9276ce69d345fa9477f4e6330565f0954946ede1594cd';
   DIGEST_EMAIL = 'sha256:7b7c2be2390a57bc8874adae23a60940ac18fa1fdadca60de307406f50d1aee8';
 
 type
@@ -835,12 +837,20 @@ begin
   RemoveDir(ADir);
 end;
 
+// A new directory of the test's own: created, never reused, so cleanup
+// only ever removes what the test made (#117 review).
 function FreshDir(const AName: string): string;
+var
+  Attempt: Integer;
 begin
-  Result := IncludeTrailingPathDelimiter(GetTempDir(False)) + 'mcp-skills-' +
-    AName + '-' + IntToStr(GetProcessID);
-  RemoveTree(Result);
-  ForceDirectories(Result);
+  for Attempt := 1 to 100 do
+  begin
+    Result := IncludeTrailingPathDelimiter(GetTempDir(False)) + 'mcp-skills-' +
+      AName + '-' + IntToStr(GetProcessID) + '-' + IntToStr(Random(1000000));
+    if CreateDir(Result) then
+      Exit;
+  end;
+  raise Exception.Create('No fresh test directory');
 end;
 
 // The fixture tree: a skill with a folded description, metadata, a
@@ -868,10 +878,12 @@ begin
   WriteFile(Result + '/git-workflow/rebase/SKILL.md', '---' + #13#10 +
     'name: rebase' + #13#10 + 'description: Rebase safely' + #13#10 + '---' +
     #13#10 + 'Never force-push.' + #13#10);
+  // Literal UTF-8 in a plain value: the bytes go to the wire unchanged.
   WriteFile(Result + '/acme/billing/refunds/SKILL.md', '---' + #10 +
-    'name: refunds' + #10 +
-    'description: "Process refunds, gr\u00fc\u00dfe"' + #10 + '---' + #10 +
-    'Check the order.' + #10);
+    'name: refunds' + #10 + 'description: Process refunds, ' + GRUSSE + #10 +
+    '---' + #10 + 'Check the order.' + #10);
+  // An empty directory, listed by directory reads (#117 review).
+  ForceDirectories(Result + '/git-workflow/templates');
   WriteFile(Result + '/README.md', 'Not part of any skill.' + #10);
 end;
 
@@ -880,7 +892,7 @@ end;
 // and stray files left out.
 procedure TSkillsSuite.TestDirectory;
 var
-  Root: string;
+  Root, Line: string;
   Response: TJSONObject;
 begin
   Root := WriteFixtureTree;
@@ -895,7 +907,9 @@ begin
       Expect<string>(Str(Response, 'result.skills[0].frontmatter.description'))
         .ToBe('Process refunds, gr' + #$C3#$BC#$C3#$9F + 'e');
       Expect<string>(Str(Response, 'result.skills[0].resources[0].digest'))
-        .ToBe('sha256:866664e9f84ff149f621b5bf9a5cda236f5a3886ffd25c84673dbee8fd7b23d7');
+        .ToBe(DIGEST_DISK_REFUNDS);
+      Expect<Integer>(TJSONData(Response.FindPath(
+        'result.skills[0].resources[0].size')).AsInteger).ToBe(77);
       Expect<string>(Str(Response, 'result.skills[1].uri'))
         .ToBe('skill://team/git-workflow/SKILL.md');
       Expect<string>(Str(Response, 'result.skills[1].frontmatter.description'))
@@ -928,6 +942,29 @@ begin
       Expect<string>(Str(Response, 'result.contents[0].text')).ToBe('---' +
         #13#10 + 'name: rebase' + #13#10 + 'description: Rebase safely' +
         #13#10 + '---' + #13#10 + 'Never force-push.' + #13#10);
+    finally
+      Response.Free;
+    end;
+    // The raw UTF-8 on the wire, and the advertised size.
+    Line := Send('{"jsonrpc":"2.0","id":9,"method":"skills/get","params":' +
+      '{"uri":"skill://team/acme/billing/refunds/SKILL.md",' + META + '}}');
+    Expect<Boolean>(Pos('"description" : "Process refunds, ' + GRUSSE + '"',
+      Line) > 0).ToBe(True);
+    Response := Call('resources/directory/read',
+      '"uri":"skill://team/git-workflow"');
+    try
+      Expect<string>(Str(Response, 'result.resources[4].uri'))
+        .ToBe('skill://team/git-workflow/templates');
+      Expect<string>(Str(Response, 'result.resources[4].mimeType'))
+        .ToBe('inode/directory');
+    finally
+      Response.Free;
+    end;
+    Response := Call('resources/directory/read',
+      '"uri":"skill://team/git-workflow/templates"');
+    try
+      Expect<Integer>(TJSONArray(Response.FindPath('result.resources')).Count)
+        .ToBe(0);
     finally
       Response.Free;
     end;
@@ -1011,6 +1048,27 @@ begin
     fpSymlink(PChar('/etc/hostname'), PChar(Root + '/s/leak'));
     Expect<Boolean>(Pos('is a symbolic link', DirectoryProblem(FServer,
       Root)) > 0).ToBe(True);
+    DeleteFile(Root + '/s/leak');
+    // A root that is a link is refused before anything is read.
+    fpSymlink(PChar(Root + '/s'), PChar(Root + '/linked'));
+    Expect<Boolean>(Pos('is a symbolic link', DirectoryProblem(FServer,
+      Root + '/linked')) > 0).ToBe(True);
+    DeleteFile(Root + '/linked');
+    // A pipe would block a read: refused.
+    fpMkFifo(PChar(Root + '/s/pipe'), &600);
+    Expect<Boolean>(Pos('is no regular file', DirectoryProblem(FServer,
+      Root)) > 0).ToBe(True);
+    DeleteFile(Root + '/s/pipe');
+    // A directory that cannot be read fails the batch (not as root,
+    // who reads it anyway).
+    if fpGetUID <> 0 then
+    begin
+      ForceDirectories(Root + '/s/locked');
+      fpChmod(Root + '/s/locked', &000);
+      Expect<Boolean>(Pos('cannot be read', DirectoryProblem(FServer,
+        Root)) > 0).ToBe(True);
+      fpChmod(Root + '/s/locked', &700);
+    end;
   finally
     RemoveTree(Root);
   end;

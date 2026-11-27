@@ -43,6 +43,9 @@ function ParseFrontmatter(const AText: string; out AFrontmatter: TJSONObject;
 
 implementation
 
+uses
+  MCP.JSONRPC;
+
 type
   EFrontmatter = class(Exception);
 
@@ -68,6 +71,8 @@ type
       ALine: Integer): TJSONData;
     function ParseKey(const AText: string; ALine: Integer;
       out ARest: string): string;
+    procedure CheckPlain(const AText: string; ALine: Integer);
+    procedure CheckCharacters;
   public
     constructor Create(const ALines: array of string; AFirstLine: Integer);
     function Read: TJSONObject;
@@ -150,8 +155,51 @@ begin
     ((Text = '-') or (Copy(Text, 1, 2) = '- '));
 end;
 
+// UTF-8 code points in AText.
+function CodePoints(const AText: string): Integer;
+var
+  I: Integer;
+begin
+  Result := 0;
+  for I := 1 to Length(AText) do
+    if (Ord(AText[I]) and $C0) <> $80 then
+      Inc(Result);
+end;
+
+// Refuses raw characters YAML parsers read differently or not at all:
+// C0 controls but tab, DEL, the C1 controls (U+0085 is a line break to
+// YAML 1.1), U+2028 and U+2029 (line breaks to YAML 1.1), U+FEFF,
+// U+FFFE and U+FFFF. Escapes in double-quoted strings write them.
+procedure TFrontmatterReader.CheckCharacters;
+var
+  Line, I: Integer;
+  Text: string;
+  C: Byte;
+begin
+  for Line := 0 to High(FLines) do
+  begin
+    Text := FLines[Line];
+    for I := 1 to Length(Text) do
+    begin
+      C := Ord(Text[I]);
+      if ((C < $20) and (C <> 9)) or (C = $7F) or
+        ((C = $C2) and (I < Length(Text)) and
+        (Ord(Text[I + 1]) in [$80..$9F])) or
+        ((C = $E2) and (I + 2 <= Length(Text)) and (Ord(Text[I + 1]) = $80)
+        and (Ord(Text[I + 2]) in [$A8, $A9])) or
+        ((C = $EF) and (I + 2 <= Length(Text)) and
+        (((Ord(Text[I + 1]) = $BB) and (Ord(Text[I + 2]) = $BF)) or
+        ((Ord(Text[I + 1]) = $BF) and (Ord(Text[I + 2]) in [$BE, $BF])))) then
+        Fail(Line, 'a control, line separator or noncharacter that YAML ' +
+          'parsers read differently; write it as an escape in a ' +
+          'double-quoted string');
+    end;
+  end;
+end;
+
 function TFrontmatterReader.Read: TJSONObject;
 begin
+  CheckCharacters;
   SkipBlank;
   if FPos > High(FLines) then
     Exit(TJSONObject.Create);
@@ -276,10 +324,13 @@ begin
   if (Digits <> '') and (Digits[1] = '-') then
     Delete(Digits, 1, 1);
   Result := (Digits <> '') and ((Digits = '0') or (Digits[1] <> '0')) and
-    (Length(Digits) <= 18);
+    (Length(Digits) <= 16);
   for I := 1 to Length(Digits) do
     if not (Digits[I] in ['0'..'9']) then
       Exit(False);
+  // JavaScript parsers keep integers exactly up to 2^53 - 1 only.
+  if Result then
+    Result := StrToInt64(Digits) <= 9007199254740991;
 end;
 
 // A plain scalar as both YAML versions read it, or nil when they read
@@ -337,8 +388,9 @@ begin
     if (Colon = 0) or (AText[1] in INDICATORS) then
       Fail(ALine, 'expected "key: value"');
     Result := TrimRight(Copy(AText, 1, Colon - 1));
-    if (Result = '') or (Pos(' #', Result) > 0) or (Pos(':', Result) > 0) then
-      Fail(ALine, 'a plain key with ":" or " #"; quote it');
+    if (Result = '') or (Pos(' #', Result) > 0) or (Pos(#9 + '#', Result) > 0)
+      or (Pos(':', Result) > 0) or (Pos(#9, Result) > 0) then
+      Fail(ALine, 'a plain key with ":", "#" or a tab; quote it');
     // A key YAML 1.1 reads as a boolean, a number or null.
     Value := PlainValue(Result);
     try
@@ -353,6 +405,12 @@ begin
   if (ARest <> '') and (ARest[1] <> ' ') then
     Fail(ALine, 'expected a space after ":"');
   ARest := Trim(ARest);
+  // fpjson keeps a key to 255 bytes (FPC 3.2.2), and YAML parsers read
+  // an implicit key of at most 1024 characters: a longer one would not
+  // reach the listing as written.
+  if (Length(Result) > 255) or
+    (CodePoints(Copy(AText, 1, Length(AText) - Length(ARest))) > 1025) then
+    Fail(ALine, 'a key longer than 255 bytes, the most the server keeps');
 end;
 
 function TFrontmatterReader.ParseMapping(AIndent: Integer): TJSONObject;
@@ -446,6 +504,12 @@ begin
       Fail(ALine, Problem);
     Exit(TJSONString.Create(Value));
   end;
+  // A whole value: a more-indented line after it is refused where it
+  // stands.
+  if ARest = '{}' then
+    Exit(TJSONObject.Create);
+  if ARest = '[]' then
+    Exit(TJSONArray.Create);
   // "-", "?" and ":" start a plain value when no space follows them
   // (-7, ?x); the other indicators never do.
   if (ARest <> '{}') and (ARest <> '[]') and (ARest[1] in INDICATORS) and
@@ -457,6 +521,18 @@ begin
   Result := ParsePlain(AParentIndent, ARest, ALine);
 end;
 
+// Refuses plain text that holds a mapping or comment indicator: ":"
+// followed by whitespace or ending it, or "#" after whitespace.
+procedure TFrontmatterReader.CheckPlain(const AText: string; ALine: Integer);
+begin
+  if (Pos(': ', AText) > 0) or (Pos(' #', AText) > 0) or
+    ((AText <> '') and (AText[Length(AText)] = ':')) then
+    Fail(ALine, 'a plain value with ": " or " #"; quote it');
+  // PyYAML refuses a tab in a plain value; quoted, it is fine.
+  if Pos(#9, AText) > 0 then
+    Fail(ALine, 'a tab in a plain value; quote it');
+end;
+
 // A plain scalar, continued on more-indented lines joined by spaces.
 function TFrontmatterReader.ParsePlain(AParentIndent: Integer;
   const AFirst: string; ALine: Integer): TJSONData;
@@ -465,11 +541,13 @@ var
   Next: Integer;
 begin
   Text := AFirst;
+  CheckPlain(AFirst, ALine);
   // A comment line ends the value, as in YAML.
   while (FPos <= High(FLines)) and not IsSkippable(FPos) and
     (Indent(FPos) > AParentIndent) do
   begin
     Part := Trim(FLines[FPos]);
+    CheckPlain(Part, FPos);
     Text := Text + ' ' + Part;
     Inc(FPos);
   end;
@@ -480,9 +558,6 @@ begin
   if (Next > FPos) and (Next <= High(FLines)) and
     (Indent(Next) > AParentIndent) and not IsSkippable(Next) then
     Fail(FPos, 'a blank line inside a plain value; use a block scalar');
-  if (Pos(': ', Text) > 0) or (Pos(' #', Text) > 0) or
-    (Text[Length(Text)] = ':') then
-    Fail(ALine, 'a plain value with ": " or " #"; quote it');
   Result := PlainValue(Text);
   if Result = nil then
     Fail(ALine, Format('"%s" is not a string in every YAML version; quote ' +
@@ -578,6 +653,12 @@ begin
   AFrontmatter := nil;
   AProblem := '';
   Result := False;
+  if InvalidUTF8Offset(AText) <> 0 then
+  begin
+    AProblem := Format('byte %d: a SKILL.md must be UTF-8 text',
+      [InvalidUTF8Offset(AText)]);
+    Exit;
+  end;
   Lines := AText.Split([#10]);
   for I := 0 to High(Lines) do
     if (Lines[I] <> '') and (Lines[I][Length(Lines[I])] = #13) then
@@ -596,7 +677,8 @@ begin
     end;
   if Close = 0 then
   begin
-    AProblem := 'the frontmatter has no closing "---" line';
+    AProblem := 'line 1: the frontmatter opened here has no closing "---" ' +
+      'line';
     Exit;
   end;
   Reader := TFrontmatterReader.Create(Copy(Lines, 1, Close - 1), 2);
