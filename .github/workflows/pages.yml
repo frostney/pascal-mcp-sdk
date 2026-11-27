@@ -15,8 +15,8 @@ on:
       - "website/**"
       - "docs/**"
   # No base-branch filter on pull_request: stacked PRs target the
-  # branch below them, and every layer needs the same gates it will
-  # need after retargeting to main.
+  # branch below them, and every layer gets the same site build it
+  # will get after retargeting to main (not a required check).
   pull_request:
     paths:
       - "website/**"

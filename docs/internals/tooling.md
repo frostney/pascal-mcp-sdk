@@ -85,7 +85,9 @@ npx markdownlint-cli2 "**/*.md"
 
 ## CI
 
-Six workflows (see [.github/workflows/](../../.github/workflows/)):
+Six workflows (see [.github/workflows/](../../.github/workflows/)).
+The checks a PR needs to merge are listed in
+[Contributing § Open the PR](contributing.md#open-the-pr).
 
 - **pr.yml** — every PR: Linux + macOS + Windows legs, each doing
   checksum-verified lwpt release install, `lwpt install --frozen`,
@@ -98,13 +100,17 @@ Six workflows (see [.github/workflows/](../../.github/workflows/)):
   `.github/scripts/check-reference-docs.sh` (every
   `MCP*`/`Register*` function or procedure in the interface of
   `MCP.Server` and `MCP.Content` must appear in `docs/reference/`). Plus
-  a blocking markdownlint job, the required `interop` job, and the
-  blocking `conformance` job (both below).
-- **ci.yml** — push to main: the wider native matrix (Linux x64 and
-  arm64, macOS arm64 and x64, Win64 and Win32) as the post-merge
-  confirmation signal; it does not run the conformance job.
-- **pr-title.yml** — Conventional Commit PR-title gate (squash-merge
-  titles become the changelog).
+  the markdownlint job (the required `docs` check), and the required
+  `interop` and `conformance` jobs (both below).
+- **ci.yml** — push to main and manual dispatch: the wider native
+  matrix (Linux x64 and arm64, macOS arm64 and x64, Win64 and Win32)
+  as the post-merge confirmation signal; it does not run the
+  conformance job.
+- **pr-title.yml** — the required `conventional-title` check: the PR
+  title, and on a single-commit PR the commit subject, must be a
+  Conventional Commit (the squash commit's subject becomes the
+  changelog entry; see
+  [Contributing § Open the PR](contributing.md#open-the-pr)).
 - **pages.yml** — website build/deploy; see the Website section.
 - **lwpt-bump.yml** — weekly (Mondays) and on demand: opens a PR
   when the Homebrew tap's lwpt is newer than the pin, carrying the
@@ -223,7 +229,7 @@ the tools, prompts and resources the suite's reference fixture
 registers, by the same names and through the public API only, so a
 scenario fails only on a gap in the library.
 
-CI runs it as the **blocking** `conformance` job on every PR and
+CI runs it as the **required** `conformance` job on every PR and
 uploads the results as the `conformance-results` artifact. The job
 fails the PR workflow whenever the run differs from the baseline, in
 either direction. Every scenario the suite scores passes; the baseline

@@ -3,18 +3,20 @@ name: CI
 # Post-merge confirmation, mirroring the duetto / lwpt CI pattern.
 # Sister workflow:
 #
-#   pr.yml — every PR: Linux + macOS + win64 native gate (the
-#            authoritative pre-merge signal).
+#   pr.yml — every PR: Linux + macOS + win64 native gate, plus the
+#            docs, interop and conformance checks.
+#   pr-title.yml — every PR: the conventional-title check.
+#   Together they supply the checks the main ruleset requires.
 #
 # ci.yml runs ONLY on push to main + manual dispatch. PRs do not
-# trigger ci.yml — pr.yml owns the PR flow. Post-merge, ci.yml runs
+# trigger ci.yml — pr.yml and pr-title.yml own the PR flow. Post-merge, ci.yml runs
 # once on main to confirm the merged tree is green on the wider
 # per-arch matrix (arm64 Linux, Intel macOS, i386 Windows join here).
 # The stdio transport is pure RTL over pipes, so — unlike duetto —
 # every leg runs the identical battery: unit suites + the mcpsmoke
 # subprocess E2E battery. mcpsmoke plus the spec-cited unit tests are
 # the net here. The official MCP conformance suite runs only in pr.yml,
-# as a blocking job against the conformance fixture
+# as a required job against the conformance fixture
 # (mcpconformance --http), judged against the baseline in
 # tools/conformance/baseline.json.
 #
