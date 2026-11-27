@@ -349,6 +349,8 @@ type
     procedure TestKeyRotation;
     procedure TestResourceReadDropsState;
     procedure TestConfigurationGuards;
+    procedure TestSeededDefaultKeepsTokenValid;
+    procedure TestExplicitEmptyStateRejected;
   protected
     function Token(const ATool, AArguments: string): string;
     procedure ExpectRefused(const ALine: string);
@@ -5569,6 +5571,10 @@ begin
     StatefulHandler);
   FServer.RegisterResource('mem://state', 'state', 'text/plain',
     StateEchoReader);
+  // Validation seeds "mode" into the arguments the handler sees.
+  FServer.RegisterTool('stateful_default', 'Stateful with a default',
+    '{"type":"object","properties":{"mode":{"type":"string",' +
+    '"default":"fast"}}}', StatefulHandler);
 end;
 
 function StatefulCall(const ATool, AArguments, AState: string): string;
@@ -5621,15 +5627,36 @@ end;
 
 procedure TRequestStateSealing.TestRoundTripNonASCIIState;
 var
-  State: string;
-  Response: TJSONObject;
+  State, Line: string;
 begin
   State := Token('stateful', '{"q":"' + #$C3#$BC + '"}');
   Expect<Boolean>(Pos('v1.', State) = 1).ToBe(True);
-  Response := Call(StatefulCall('stateful', '{"q":"' + #$C3#$BC + '"}', State));
+  // The wire line itself carries the state's UTF-8 bytes unchanged.
+  Expect<Boolean>(Dispatch(StatefulCall('stateful', '{"q":"' + #$C3#$BC +
+    '"}', State), Line)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "got:st-' + #$C3#$A9#$F0#$9F#$98#$80 + '"',
+    Line) > 0).ToBe(True);
+end;
+
+// The token binds the arguments the client sent, not the ones the
+// handler saw after defaults were seeded.
+procedure TRequestStateSealing.TestSeededDefaultKeepsTokenValid;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(StatefulCall('stateful_default', '{}',
+    Token('stateful_default', '{}')));
   Expect<string>(TJSONData(Response.FindPath('result.content[0].text')).AsString)
     .ToBe('got:' + SEAL_STATE);
   Response.Free;
+end;
+
+// A supplied empty requestState is no token we issued; it is refused,
+// never handed to the handler as a fresh call.
+procedure TRequestStateSealing.TestExplicitEmptyStateRejected;
+begin
+  ExpectRefused('{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{' +
+    '"name":"stateful","arguments":{},"requestState":"",' + META_MODERN + '}}');
 end;
 
 procedure TRequestStateSealing.TestTamperedTokenRejected;
@@ -5825,6 +5852,10 @@ begin
     TestResourceReadDropsState);
   Test('short keys, a non-positive TTL and post-freeze keys refused',
     TestConfigurationGuards);
+  Test('a seeded default leaves the token valid on an unchanged retry',
+    TestSeededDefaultKeepsTokenValid);
+  Test('an explicit empty requestState → -32602, handler not run',
+    TestExplicitEmptyStateRejected);
 end;
 
 { ───────── image results ───────── }

@@ -419,9 +419,10 @@ type
     // FindPrompt; ANoun ('tool'/'prompt') names the registry in the
     // unknown-name message. Returns '' once the target resolved,
     // otherwise the error response the caller must Exit with.
-    // AArguments is never nil on success: a supplied arguments object
-    // is borrowed from AMessage and AOwnedEmpty stays nil, otherwise
-    // AOwnedEmpty is a fresh empty object the caller must free.
+    // AArguments is never nil on success: it is a copy of the supplied
+    // arguments (or an empty object), the same object as AOwnedEmpty,
+    // which the caller must free. AMessage keeps the client's original
+    // arguments for requestState sealing (#89).
     function ResolveCallTarget(const AMessage: TJSONRPCMessage;
       ALookup: TRegistryLookup; const ANoun: string;
       out AName: string; out AIndex: Integer;
@@ -3167,8 +3168,11 @@ begin
 
     // requestState is verified before any handler sees it (#89). Only
     // tools/call and prompts/get mint state here, so on any other
-    // method a client-sent value cannot be ours and is dropped.
-    if Ctx.RequestState <> '' then
+    // method a client-sent value cannot be ours and is dropped. A
+    // supplied field counts even when empty: '' is no token we issued,
+    // and must not reach the handler as a fresh call.
+    if (AMessage.Params <> nil) and
+      (AMessage.Params.Find('requestState') <> nil) then
       if (AMessage.Method = 'tools/call') or
         (AMessage.Method = 'prompts/get') then
       begin
@@ -3479,15 +3483,25 @@ begin
       BuildMissingCapabilityData(MissingCapability)));
   end;
   InterimResult := TJSONObject.Create;
-  InterimResult.Add('resultType', RESULT_TYPE_INPUT_REQUIRED);
-  if AInputRequests <> nil then
-    InterimResult.Add('inputRequests', AInputRequests);
-  // Sealed for the client (#89); the retry is verified in
-  // DispatchRequest before the handler runs again.
-  if ARequestState <> '' then
-    InterimResult.Add('requestState',
-      TMCPRequestStateSealer(FSealer).Seal(AMessage.Method, ASubjectName,
-      RequestArguments(AMessage), ARequestState));
+  try
+    InterimResult.Add('resultType', RESULT_TYPE_INPUT_REQUIRED);
+    if AInputRequests <> nil then
+      InterimResult.Add('inputRequests', AInputRequests);
+    AInputRequests := nil; // owned by InterimResult from here
+    // Sealed for the client (#89); the retry is verified in
+    // DispatchRequest before the handler runs again.
+    if ARequestState <> '' then
+      InterimResult.Add('requestState',
+        TMCPRequestStateSealer(FSealer).Seal(AMessage.Method, ASubjectName,
+        RequestArguments(AMessage), ARequestState));
+  except
+    // Sealing can raise (an argument tree it cannot serialize): the
+    // tree, the input requests included, is ours until the response
+    // builder takes it.
+    InterimResult.Free;
+    AInputRequests.Free;
+    raise;
+  end;
   Result := ResultResponse(AMessage, InterimResult, False);
 end;
 
@@ -3522,15 +3536,15 @@ begin
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
       'Invalid params: arguments must be an object'));
 
-  // Handlers always see a non-nil arguments object. A supplied one is
-  // borrowed from AMessage; the substitute is owned by the caller.
+  // Handlers always see a non-nil arguments object, and always a copy
+  // the caller owns: seeding defaults or a handler changing it must not
+  // touch AMessage, whose original arguments a sealed requestState is
+  // bound to (#89).
   if ArgsData <> nil then
-    AArguments := TJSONObject(ArgsData)
+    AOwnedEmpty := TJSONObject(ArgsData.Clone)
   else
-  begin
     AOwnedEmpty := TJSONObject.Create;
-    AArguments := AOwnedEmpty;
-  end;
+  AArguments := AOwnedEmpty;
   Result := '';
 end;
 
