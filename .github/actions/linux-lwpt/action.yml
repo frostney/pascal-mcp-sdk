@@ -2,8 +2,9 @@ name: Linux FPC + lwpt build
 description: >-
   Installs FPC from apt and the lwpt release lwpt.toml pins (checksum-
   verified), verifies the lockfile and committed modules, and builds
-  mcpdemo and mcpsmoke. Shared by the Linux jobs that need the built
-  demo server (interop, conformance); the cross-platform matrix has its
+  every [build] target (mcpdemo, mcpsmoke, mcpconformance). Shared by
+  the Linux jobs that need the built servers (interop runs mcpdemo,
+  conformance runs mcpconformance); the cross-platform matrix has its
   own per-OS setup.
 runs:
   using: composite
@@ -35,6 +36,6 @@ runs:
       shell: bash
       run: lwpt install --frozen
 
-    - name: lwpt build (mcpdemo, mcpsmoke)
+    - name: lwpt build (every [build] target)
       shell: bash
       run: lwpt build

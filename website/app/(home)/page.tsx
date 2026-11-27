@@ -35,7 +35,7 @@ const FAQ: { q: string; a: string; extra?: React.ReactNode }[] = [
   },
   {
     q: 'How do I build an MCP server in Pascal?',
-    a: 'Install FPC 3.2.2, add the library (lwpt add frostney/pascal-mcp-sdk@^2.0, or vendor its seven source files), register your tools with a name, description, and JSON Schema, and call RunMCPStdioServer. The quick start walks through a complete server in a few minutes.',
+    a: 'Install FPC 3.2.2, add the library (lwpt add frostney/pascal-mcp-sdk@^2.0, or vendor its source units), register your tools with a name, description, and JSON Schema, and call RunMCPStdioServer. The quick start walks through a complete server in a few minutes.',
   },
   {
     q: 'Which parts of the MCP specification are implemented?',
@@ -184,8 +184,8 @@ export default async function HomePage() {
             in your program.
           </p>
           <p>
-            <strong>By vendoring:</strong> the library is seven files.
-            Copy them from{' '}
+            <strong>By vendoring:</strong> copy the library units
+            (everything but the test suites) and MCP.inc from{' '}
             <code className="rounded bg-fd-muted px-1.5 py-0.5">
               source/units/
             </code>{' '}

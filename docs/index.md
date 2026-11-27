@@ -63,7 +63,7 @@ The public API surface, page by page:
 ## Contributing
 
 How the library itself is built:
-[architecture](internals/architecture.md) (the six-unit layering and
+[architecture](internals/architecture.md) (the unit layering and
 spec grounding), [tooling](internals/tooling.md),
 [code style](internals/code-style.md), and
 [releasing](internals/releasing.md). The contribution workflow —
