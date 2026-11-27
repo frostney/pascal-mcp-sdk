@@ -14,7 +14,11 @@ revision 2026-07-28), `MCP.Server` (the sans-I/O dispatch core), and a
 transport shell (`MCP.Transport.Stdio` or `MCP.Transport.HTTP`) — and
 `MCP.Schema` and `MCP.Content` sit beside the chain as the schema and
 content-block helpers `MCP.Server` consumes, and `MCP.RequestState`
-with `MCP.Crypto` seal the MRTR `requestState` for it. The core performs no I/O: `CreateSession` binds connection
+with `MCP.Crypto` seal the MRTR `requestState` for it. The core performs no I/O, with one scoped exception: when no
+`requestState` keys are set, the first `CreateSession` reads 32 bytes
+from the operating system's random source for the instance's sealing
+key (#89), and fails to start if that source is unavailable; setting
+keys with `SetRequestStateKeys` avoids the read. `CreateSession` binds connection
 state and `HandleMessage` maps one inbound line to at most one
 response line, so both transports wrap the same tested core without
 touching it. The runtime dependency set is packages that ship inside

@@ -93,13 +93,25 @@ Server.SetRequestStateKeys([LoadKey('MCP_STATE_KEY')]);  // >= 32 bytes
 Server.RequestStateTtlMs := 120000;                      // two minutes
 ```
 
-- **No keys set:** the server makes a random 32-byte key when it starts
-  serving. That is enough for one process. When several processes
-  serve the same endpoint, behind a load balancer for example, give
-  them all the same key, or a retry that lands on another process is
-  refused.
-- **Rotation:** the first key seals and every key verifies. Roll out
-  `[New, Old]`, then `[New]` once one TTL has passed.
+- **No keys set:** each `TMCPServer` makes a random 32-byte key when
+  its first session starts (reading the operating system's random
+  source then; with keys set, nothing is read). The key lives as long
+  as that instance: a token from an instance you replace, or from
+  another process serving the same endpoint behind a load balancer,
+  is refused. Give every instance the same key to keep continuations
+  working across them.
+- **Rotation:** the first key seals and every key verifies. Change keys
+  in three steps, each on every instance before the next:
+  1. `[Old, New]`: every instance can verify the new key, still
+     sealing with the old one.
+  2. `[New, Old]`: seal with the new key.
+  3. `[New]`, once one TTL has passed since the last instance switched.
+- **Replay:** a token is bound to its method, tool or prompt, arguments
+  and server, and expires after `RequestStateTtlMs`. Within that window
+  the same retry can be sent again and verifies each time. If a retry
+  has a side effect that must happen once, make the handler
+  idempotent, or record the use yourself (an id in the state, checked
+  against your own store).
 - **What it does not do:** the client can read the state, so keep
   secrets out of it. The token is not bound to a user, because the
   library has no authenticated identity to bind it to; if your state

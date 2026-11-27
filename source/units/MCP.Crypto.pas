@@ -78,12 +78,26 @@ const
 type
   TSHA256State = array[0..7] of Cardinal;
 
-// Wrapping 32-bit arithmetic is the algorithm, so overflow and range
-// checks (on in debug builds, MCP.inc) are off for the compression.
-{$PUSH}{$Q-}{$R-}
+// SHA-256 adds modulo 2^32. The sums are taken in 64 bits and masked,
+// so the compiler's overflow and range checks stay on (MCP.inc) and
+// still catch an unintended overflow anywhere else.
+function Add32(A, B: Cardinal): Cardinal; overload; inline;
+begin
+  Result := Cardinal((QWord(A) + QWord(B)) and $FFFFFFFF);
+end;
+
+function Add32(A, B, C, D, E: Cardinal): Cardinal; overload; inline;
+begin
+  Result := Cardinal((QWord(A) + QWord(B) + QWord(C) + QWord(D) +
+    QWord(E)) and $FFFFFFFF);
+end;
+
 function RotR(AValue: Cardinal; ABits: Byte): Cardinal; inline;
 begin
-  Result := (AValue shr ABits) or (AValue shl (32 - ABits));
+  // Shifts drop the bits past 32 by definition; the mask keeps the
+  // left shift inside Cardinal for the range check.
+  Result := (AValue shr ABits) or
+    Cardinal((QWord(AValue) shl (32 - ABits)) and $FFFFFFFF);
 end;
 
 procedure Compress(var AState: TSHA256State; ABlock: PByte);
@@ -100,24 +114,24 @@ begin
   begin
     S0 := RotR(W[I - 15], 7) xor RotR(W[I - 15], 18) xor (W[I - 15] shr 3);
     S1 := RotR(W[I - 2], 17) xor RotR(W[I - 2], 19) xor (W[I - 2] shr 10);
-    W[I] := W[I - 16] + S0 + W[I - 7] + S1;
+    W[I] := Add32(Add32(W[I - 16], S0), Add32(W[I - 7], S1));
   end;
   A := AState[0]; B := AState[1]; C := AState[2]; D := AState[3];
   E := AState[4]; F := AState[5]; G := AState[6]; H := AState[7];
   for I := 0 to 63 do
   begin
     S1 := RotR(E, 6) xor RotR(E, 11) xor RotR(E, 25);
-    T1 := H + S1 + ((E and F) xor ((not E) and G)) + K[I] + W[I];
+    T1 := Add32(H, S1, (E and F) xor ((not E) and G), K[I], W[I]);
     S0 := RotR(A, 2) xor RotR(A, 13) xor RotR(A, 22);
-    T2 := S0 + ((A and B) xor (A and C) xor (B and C));
-    H := G; G := F; F := E; E := D + T1;
-    D := C; C := B; B := A; A := T1 + T2;
+    T2 := Add32(S0, (A and B) xor (A and C) xor (B and C));
+    H := G; G := F; F := E; E := Add32(D, T1);
+    D := C; C := B; B := A; A := Add32(T1, T2);
   end;
-  Inc(AState[0], A); Inc(AState[1], B); Inc(AState[2], C);
-  Inc(AState[3], D); Inc(AState[4], E); Inc(AState[5], F);
-  Inc(AState[6], G); Inc(AState[7], H);
+  AState[0] := Add32(AState[0], A); AState[1] := Add32(AState[1], B);
+  AState[2] := Add32(AState[2], C); AState[3] := Add32(AState[3], D);
+  AState[4] := Add32(AState[4], E); AState[5] := Add32(AState[5], F);
+  AState[6] := Add32(AState[6], G); AState[7] := Add32(AState[7], H);
 end;
-{$POP}
 
 function SHA256(const AData: RawByteString): TSHA256Digest;
 const

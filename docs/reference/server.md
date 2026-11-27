@@ -25,7 +25,7 @@ is created, and later mutation raises `EMCPServer`.
 | `RedactErrorDetails` | `Boolean` | `False` | `True` replaces escaped exception detail with a correlation reference, logging the full error to stderr; deliberate errors (`MCPErrorResult`, `EMCPProtocolError`) are sent as written |
 | `DualEra` | `Boolean` | `True` | Answer the classic `initialize` handshake alongside stateless 2026-07-28 requests |
 | `RequestStateTtlMs` | `Integer` | `600000` | Lifetime of a sealed `requestState` token; must be > 0 |
-| `SetRequestStateKeys(Keys)` | method | random per process | HMAC keys for `requestState` sealing, each ≥ 32 bytes; the first seals, all verify |
+| `SetRequestStateKeys(Keys)` | method | random per server instance | HMAC keys for `requestState` sealing, each ≥ 32 bytes; the first seals, all verify |
 | `Name`, `Version` | `string` | — | Read-only, from `Create` |
 
 Semantics and guidance: [Configuration](../guides/configuration.md).

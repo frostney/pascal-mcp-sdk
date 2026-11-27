@@ -485,12 +485,15 @@ type
     // -32602 and the handler never sees it. Handlers keep reading and
     // writing their own plain state (ACtx.RequestState).
     //
-    // Keys: the first seals, every key verifies (rotate by adding the
-    // new key first, then dropping the old one after one TTL). Each key
-    // must be at least 32 bytes. Without keys the server seals with a
-    // random key made at freeze, which only this process can verify:
-    // set a shared key when several processes serve one endpoint. The
-    // client can read the state, so it must not carry secrets.
+    // Keys: the first seals, every key verifies. Rotate in three steps
+    // across all instances: [Old, New], then [New, Old], then [New]
+    // after one TTL. Each key must be at least 32 bytes. Without keys
+    // the server seals with a random key read from the OS at freeze,
+    // which only this instance can verify: set a shared key when
+    // several instances serve one endpoint or one replaces another.
+    // A token verifies until it expires, so it can be replayed within
+    // its TTL. The client can read the state, so it must not carry
+    // secrets.
     procedure SetRequestStateKeys(const AKeys: array of RawByteString);
     // Token lifetime in milliseconds (default 600000, ten minutes).
     property RequestStateTtlMs: Integer read FRequestStateTtlMs
