@@ -329,6 +329,9 @@ var
   Digits: string;
   I: Integer;
 begin
+  // -0 is 0 to PyYAML and negative zero to yaml (#117 review).
+  if AText = '-0' then
+    Exit(False);
   Digits := AText;
   if (Digits <> '') and (Digits[1] = '-') then
     Delete(Digits, 1, 1);

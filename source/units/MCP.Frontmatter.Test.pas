@@ -175,6 +175,9 @@ begin
   // Integers JavaScript parsers keep exactly, and no larger.
   Expect<string>(Parsed('rank: 9007199254740991^')).ToBe(
     '{"rank":9007199254740991}');
+  // Negative zero: 0 to PyYAML, -0 to yaml.
+  Expect<string>(Parsed('rank: -0^')).ToBe('REFUSED line 2: "-0" starts ' +
+    'with a digit, a sign or a dot, which is read here only quoted; quote it');
   Expect<string>(Parsed('rank: 9007199254740993^')).ToBe('REFUSED line 2: ' +
     '"9007199254740993" starts with a digit, a sign or a dot, which is read ' +
     'here only quoted; quote it');

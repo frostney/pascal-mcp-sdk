@@ -146,6 +146,9 @@ type
     function SkillCount: Integer;
     function FileCount: Integer;
     function DirCount: Integer;
+    // Skill ASkill's root and the files and bytes its manifest lists.
+    procedure SkillTotals(ASkill: Integer; out ARoot: string;
+      out AFiles: Integer; out ABytes: Int64);
   end;
 
 function MCPSkillFile(const APath: string; const AContent: RawByteString;
@@ -499,6 +502,22 @@ end;
 function TSkillCatalog.DirCount: Integer;
 begin
   Result := Length(FDirs);
+end;
+
+procedure TSkillCatalog.SkillTotals(ASkill: Integer; out ARoot: string;
+  out AFiles: Integer; out ABytes: Int64);
+var
+  I: Integer;
+begin
+  ARoot := FSkills[ASkill].Root;
+  AFiles := 0;
+  ABytes := 0;
+  for I := 0 to High(FFiles) do
+    if IsUnder(FFiles[I].Uri, ARoot) then
+    begin
+      Inc(AFiles);
+      Inc(ABytes, Length(FFiles[I].Content));
+    end;
 end;
 
 function TSkillCatalog.SkillCount: Integer;
@@ -986,6 +1005,9 @@ type
     Enclosing: Integer;
     FileTotal: Integer;
     ByteTotal: Int64;
+    // A skill registered already, standing in while a tree is read so
+    // its totals are charged too (#117 review); never registered again.
+    Registered: Boolean;
   end;
   TStagedSkillArray = array of TStagedSkill;
 
@@ -1198,6 +1220,50 @@ begin
   end;
 end;
 
+// The staged or registered skill whose path is the longest one that
+// ASkillPath lies under, or -1.
+function DeepestAncestor(const ASkills: TStagedSkillArray;
+  const ASkillPath: string): Integer;
+var
+  I: Integer;
+begin
+  Result := -1;
+  for I := 0 to High(ASkills) do
+    if IsUnder(ASkillPath, ASkills[I].Path) and ((Result < 0) or
+      (Length(ASkills[I].Path) > Length(ASkills[Result].Path))) then
+      Result := I;
+end;
+
+// The skills AServer serves already, as stand-ins with their totals, so
+// a tree below one of them is charged against its limits before reading.
+procedure AddRegistered(AServer: TMCPServer; var ASkills: TStagedSkillArray);
+var
+  Catalog: TSkillCatalog;
+  I, Slot: Integer;
+  Root: string;
+begin
+  if AServer = nil then
+    Exit;
+  Catalog := TSkillCatalog(AServer.Adopted(TSkillCatalog));
+  if Catalog = nil then
+    Exit;
+  for I := 0 to Catalog.SkillCount - 1 do
+  begin
+    Slot := Length(ASkills);
+    SetLength(ASkills, Slot + 1);
+    Catalog.SkillTotals(I, Root, ASkills[Slot].FileTotal,
+      ASkills[Slot].ByteTotal);
+    ASkills[Slot].Path := Copy(Root, Length(SKILL_SCHEME) + 1, MaxInt);
+    ASkills[Slot].Frontmatter := nil;
+    ASkills[Slot].Registered := True;
+  end;
+  for I := 0 to High(ASkills) do
+  begin
+    ASkills[I].Enclosing := -1;
+    ASkills[I].Enclosing := DeepestAncestor(ASkills, ASkills[I].Path);
+  end;
+end;
+
 // Stages the skill whose directory ADir lists AEntries, at ASkillPath,
 // inside the staged skill AEnclosing (-1 for none); its index.
 function StageSkill(const ADir, ASkillPath: string; const AEntries: TDirEntries;
@@ -1207,6 +1273,8 @@ var
   Frontmatter: TJSONObject;
 begin
   SkillFile := JoinPath(ADir, 'SKILL.md');
+  if AEnclosing < 0 then
+    AEnclosing := DeepestAncestor(ASkills, ASkillPath);
   Result := Length(ASkills);
   SetLength(ASkills, Result + 1);
   ASkills[Result].Path := ASkillPath;
@@ -1214,6 +1282,7 @@ begin
   ASkills[Result].Enclosing := AEnclosing;
   ASkills[Result].FileTotal := 0;
   ASkills[Result].ByteTotal := 0;
+  ASkills[Result].Registered := False;
   Charge(ASkills, Result, AEntries[SkillMdEntry(AEntries)].Size, SkillFile);
   ASkills[Result].SkillMd := ReadBytes(SkillFile);
   SetLength(Text, Length(ASkills[Result].SkillMd));
@@ -1276,8 +1345,18 @@ begin
   end;
 end;
 
-// Whether APath is a directory itself, not a link to one.
+// Whether APath is a directory itself, not a link to one. On Unix the
+// literal path is checked with lstat, as FindFirst would read "*" or "?"
+// in a name as wildcards (#117 review); Windows names cannot hold them.
 function IsPlainDirectory(const APath: string): Boolean;
+{$IFDEF UNIX}
+var
+  Info: Stat;
+begin
+  Result := (fpLstat(ExcludeTrailingPathDelimiter(APath), Info) = 0) and
+    fpS_ISDIR(Info.st_mode);
+end;
+{$ELSE}
 var
   Search: TSearchRec;
 begin
@@ -1290,13 +1369,14 @@ begin
     FindClose(Search);
   end;
 end;
+{$ENDIF}
 
 procedure RegisterSkillDirectory(AServer: TMCPServer; const ARoot: string;
   const APrefix: string);
 var
   Staged: TStagedSkillArray;
   Entries: TDirEntries;
-  I: Integer;
+  I, Registered: Integer;
 begin
   Staged := nil;
   try
@@ -1311,7 +1391,13 @@ begin
     if (APrefix <> '') and not IsPlainPath(APrefix) then
       raise EMCPServer.CreateFmt('Skill path prefix "%s" needs "/"-separated ' +
         'segments of letters, digits, "-", ".", "_" and "~"', [APrefix]);
+    AddRegistered(AServer, Staged);
     Walk(ARoot, APrefix, '', Entries, -1, Staged);
+    // The stand-ins come first; only the skills read are registered.
+    Registered := 0;
+    while (Registered < Length(Staged)) and Staged[Registered].Registered do
+      Inc(Registered);
+    Staged := Copy(Staged, Registered, MaxInt);
   except
     for I := 0 to High(Staged) do
       Staged[I].Frontmatter.Free;

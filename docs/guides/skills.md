@@ -111,7 +111,8 @@ files outside any skill. A symbolic link, the root included, is
 refused, since it could lead outside the tree, and so is anything but a
 directory or a regular file, or a directory that cannot be read. A
 skill over the limits, its nested skills' files counted, is refused
-from the sizes listed, before its files are read. The tree is trusted
+from the sizes listed, before its files are read; a tree below a skill
+the server serves already counts against that skill's limits too. The tree is trusted
 and must not change while it is read: each entry is checked, then
 opened again by its name.
 

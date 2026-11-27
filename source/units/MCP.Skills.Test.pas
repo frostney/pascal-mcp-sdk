@@ -81,6 +81,7 @@ type
     procedure TestDirectory;
     procedure TestDirectoryRefused;
     procedure TestDirectoryEnclosingLimit;
+    procedure TestDirectoryUnderRegistered;
     {$IFDEF UNIX}
     procedure TestDirectorySymlink;
     {$ENDIF}
@@ -854,14 +855,42 @@ begin
   raise Exception.Create('No fresh test directory');
 end;
 
-function DirectoryProblem(AServer: TMCPServer; const ARoot: string): string;
+function DirectoryProblemAt(AServer: TMCPServer; const ARoot,
+  APrefix: string): string;
 begin
   Result := '';
   try
-    RegisterSkillDirectory(AServer, ARoot);
+    RegisterSkillDirectory(AServer, ARoot, APrefix);
   except
     on E: EMCPServer do
       Result := E.Message;
+  end;
+end;
+
+function DirectoryProblem(AServer: TMCPServer; const ARoot: string): string;
+begin
+  Result := DirectoryProblemAt(AServer, ARoot, '');
+end;
+
+// A tree below a skill registered already is charged against that
+// skill's limits before it is read (#117 review): 9 MiB registered and
+// 9 MiB more below it are refused, naming the registered skill.
+procedure TSkillsSuite.TestDirectoryUnderRegistered;
+var
+  Root: string;
+begin
+  RegisterSkill(FServer, 'team', TJSONObject.Create(['name', 'team',
+    'description', 'd']), 'Body', [MCPSkillFile('big.bin', StringOfChar('x',
+    9 * 1024 * 1024))]);
+  Root := FreshDir('under');
+  try
+    WriteFile(Root + '/child/SKILL.md', '---' + #10 + 'name: child' + #10 +
+      'description: d' + #10 + '---' + #10);
+    WriteFile(Root + '/child/big.bin', StringOfChar('y', 9 * 1024 * 1024));
+    Expect<Boolean>(Pos('Skill "team" goes over', DirectoryProblemAt(FServer,
+      Root, 'team')) = 1).ToBe(True);
+  finally
+    RemoveTree(Root);
   end;
 end;
 
@@ -1080,6 +1109,7 @@ end;
 procedure TSkillsSuite.TestDirectorySymlink;
 var
   Root: string;
+  I: Integer;
 begin
   Root := FreshDir('link');
   try
@@ -1094,6 +1124,21 @@ begin
     Expect<Boolean>(Pos('is a symbolic link', DirectoryProblem(FServer,
       Root + '/linked')) > 0).ToBe(True);
     DeleteFile(Root + '/linked');
+    // A root whose name holds a wildcard is checked as written: a link
+    // named so is refused, the directory itself accepted.
+    CreateDir(Root + '/sk*lls');
+    WriteFile(Root + '/sk*lls/w/SKILL.md', '---' + #10 + 'name: w' + #10 +
+      'description: d' + #10 + '---' + #10);
+    fpSymlink(PChar(Root + '/sk*lls'), PChar(Root + '/l*nk'));
+    // Real directories the pattern l*nk would also match: a check that
+    // reads the name as a pattern finds one of them first, nearly always.
+    for I := 0 to 49 do
+      CreateDir(Root + '/l' + IntToStr(I) + 'nk');
+    Expect<Boolean>(Pos('is a symbolic link', DirectoryProblem(FServer,
+      Root + '/l*nk')) > 0).ToBe(True);
+    Expect<string>(DirectoryProblemAt(FServer, Root + '/sk*lls', 'wild'))
+      .ToBe('');
+    DeleteFile(Root + '/l*nk');
     // A pipe would block a read: refused.
     fpMkFifo(PChar(Root + '/s/pipe'), &600);
     Expect<Boolean>(Pos('is no regular file', DirectoryProblem(FServer,
@@ -1163,6 +1208,8 @@ begin
     TestDirectoryRefused);
   Test('an enclosing skill''s limit counts nested skills before reading',
     TestDirectoryEnclosingLimit);
+  Test('a tree below a registered skill counts against its limits',
+    TestDirectoryUnderRegistered);
   {$IFDEF UNIX}
   Test('a symbolic link in a skills directory is refused',
     TestDirectorySymlink);
