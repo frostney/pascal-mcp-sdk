@@ -144,6 +144,16 @@ type
 procedure ExtractProgressToken(AMeta: TJSONObject;
   var ACtx: TMCPRequestContext);
 
+// The first required per-request field AParams lacks ('_meta', or the
+// _meta key of protocolVersion or clientCapabilities, each with its
+// required JSON type), or '' when all are present. A request missing
+// one is malformed: -32602, and on HTTP 400 Bad Request (#79), verified
+// 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta
+// Transports use it to tell that rejection from other -32602 errors,
+// which stay in-band. AParams is borrowed and may be nil (no params).
+function MissingRequiredMeta(AParams: TJSONObject): string;
+
 // Validate the required per-request _meta fields and extract the
 // context. Returns False with AError filled when the request must be
 // rejected: -32602 for missing/malformed fields, -32022 (with a
@@ -221,40 +231,52 @@ begin
   Result.Add('requested', ARequested);
 end;
 
+function MissingRequiredMeta(AParams: TJSONObject): string;
+var
+  MetaData, FieldData: TJSONData;
+  Meta: TJSONObject;
+begin
+  if AParams = nil then
+    Exit('_meta');
+  MetaData := AParams.Find('_meta');
+  if (MetaData = nil) or (MetaData.JSONType <> jtObject) then
+    Exit('_meta');
+  Meta := TJSONObject(MetaData);
+  FieldData := Meta.Find(META_KEY_PROTOCOL_VERSION);
+  if (FieldData = nil) or (FieldData.JSONType <> jtString) then
+    Exit('_meta["' + META_KEY_PROTOCOL_VERSION + '"]');
+  FieldData := Meta.Find(META_KEY_CLIENT_CAPABILITIES);
+  if (FieldData = nil) or (FieldData.JSONType <> jtObject) then
+    Exit('_meta["' + META_KEY_CLIENT_CAPABILITIES + '"]');
+  Result := '';
+end;
+
 function ExtractRequestContext(AParams: TJSONObject;
   const ASupportedVersions: array of string;
   out ACtx: TMCPRequestContext; out AError: TMCPMetaError): Boolean;
 var
-  MetaData, VersionData, CapsData, InfoData, LevelData: TJSONData;
+  InfoData, LevelData: TJSONData;
   ResponsesData, StateData: TJSONData;
   Meta, Info: TJSONObject;
-  Version, Level: string;
+  Version, Level, Missing: string;
   Known: Boolean;
 begin
   ACtx := Default(TMCPRequestContext);
   AError := Default(TMCPMetaError);
 
-  if AParams = nil then
+  Missing := MissingRequiredMeta(AParams);
+  if Missing = '_meta' then
     Exit(MetaError(AError, JSONRPC_INVALID_PARAMS,
       'Invalid params: missing _meta (required on every request)'));
-
-  MetaData := AParams.Find('_meta');
-  if (MetaData = nil) or (MetaData.JSONType <> jtObject) then
+  if Missing <> '' then
     Exit(MetaError(AError, JSONRPC_INVALID_PARAMS,
-      'Invalid params: missing _meta (required on every request)'));
-  Meta := TJSONObject(MetaData);
+      'Invalid params: missing ' + Missing));
 
-  VersionData := Meta.Find(META_KEY_PROTOCOL_VERSION);
-  if (VersionData = nil) or (VersionData.JSONType <> jtString) then
-    Exit(MetaError(AError, JSONRPC_INVALID_PARAMS,
-      'Invalid params: missing _meta["' + META_KEY_PROTOCOL_VERSION + '"]'));
-  ACtx.ProtocolVersion := VersionData.AsString;
-
-  CapsData := Meta.Find(META_KEY_CLIENT_CAPABILITIES);
-  if (CapsData = nil) or (CapsData.JSONType <> jtObject) then
-    Exit(MetaError(AError, JSONRPC_INVALID_PARAMS,
-      'Invalid params: missing _meta["' + META_KEY_CLIENT_CAPABILITIES + '"]'));
-  ACtx.ClientCapabilities := TJSONObject(CapsData);
+  // MissingRequiredMeta checked presence and type of all three.
+  Meta := TJSONObject(AParams.Find('_meta'));
+  ACtx.ProtocolVersion := Meta.Find(META_KEY_PROTOCOL_VERSION).AsString;
+  ACtx.ClientCapabilities :=
+    TJSONObject(Meta.Find(META_KEY_CLIENT_CAPABILITIES));
 
   Known := False;
   for Version in ASupportedVersions do
