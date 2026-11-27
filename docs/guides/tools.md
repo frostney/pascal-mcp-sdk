@@ -141,8 +141,15 @@ validates the arguments.
 
 Over Streamable HTTP the client then sends `Mcp-Param-Region:
 us-west1` with the call, and the server checks that the header matches
-the body: a missing, extra or different header is refused with HTTP
-400 and `-32020`. At registration the server checks the annotations
+the body: a missing, extra, repeated or different header is refused
+with HTTP 400 and `-32020`. An empty header is the empty string's, and
+integers compare as numbers within the JavaScript safe range, so a
+body `42.0` matches a header `42`. The comparison goes by the declared
+type: a body value of another type, or an array or object, never
+matches. The HTTP server trims a header's leading and trailing
+whitespace before the check sees it, so a plain value with edge
+whitespace (which a client must base64-encode) is not caught; the
+decoded comparison still holds. At registration the server checks the annotations
 the way a client would: a non-empty header token, unique (ignoring
 case), only on a `string`, `integer` or `boolean` property, and only on
 properties reached through `properties` from the root. A violation

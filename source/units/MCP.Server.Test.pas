@@ -1918,6 +1918,9 @@ begin
   end;
 end;
 
+// A client drops a tool whose x-mcp-header breaks a constraint, so the
+// server refuses it at registration; verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
 procedure TRegistrationGuards.TestBadHeaderAnnotationRejected;
 var
   Server: TMCPServer;

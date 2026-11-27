@@ -200,8 +200,9 @@ function MCPWireNumber(AValue: Double): TJSONData;
 
 // '' when ASchema is inside the subset, otherwise the first violation
 // ('uses unsupported keyword "format"', 'property "a.b" has
-// unsupported type "x"', ...). AObjectRoot additionally requires the
-// root type to be object (input schemas). ASchema is borrowed.
+// unsupported type "x"', ...). AObjectRoot marks an input schema: it
+// requires the root type object and admits x-mcp-header annotations,
+// which an output schema cannot carry. ASchema is borrowed.
 function MCPSchemaSubsetViolation(ASchema: TJSONObject;
   AObjectRoot: Boolean): string;
 
@@ -226,6 +227,7 @@ function MCPValidateAgainstSchema(ASchema: TJSONObject; AValue: TJSONData;
 // conditionals, $ref or $defs). Returns '' with the annotations in
 // AParameters, or the first violation. Verified 2026-11-26 against
 // https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
+// ASchema is borrowed.
 function MCPHeaderParameters(ASchema: TJSONObject;
   out AParameters: TMCPHeaderParameters): string;
 
@@ -927,7 +929,7 @@ begin
 end;
 
 function NodeViolation(ANode: TJSONObject; const APath: string;
-  ARoot: Boolean): string; forward;
+  ARoot, AInput: Boolean): string; forward;
 
 // True for a $schema value naming JSON Schema 2020-12, the dialect the
 // subset's rules come from.
@@ -945,7 +947,8 @@ begin
 end;
 
 // properties: an object of node schemas, each checked in turn.
-function PropertiesViolation(AValue: TJSONData; const APath: string): string;
+function PropertiesViolation(AValue: TJSONData; const APath: string;
+  AInput: Boolean): string;
 var
   I: Integer;
   Member: TJSONData;
@@ -959,7 +962,7 @@ begin
       Exit(Format('property "%s" must be an object schema',
         [JoinPath(APath, TJSONObject(AValue).Names[I])]));
     Result := NodeViolation(TJSONObject(Member),
-      JoinPath(APath, TJSONObject(AValue).Names[I]), False);
+      JoinPath(APath, TJSONObject(AValue).Names[I]), False, AInput);
     if Result <> '' then
       Exit;
   end;
@@ -989,7 +992,8 @@ end;
 
 // The annotation keywords any node may carry; False when Key is none.
 function AnnotationViolation(const AKey: string; AValue: TJSONData;
-  const APath: string; ARoot: Boolean; out AViolation: string): Boolean;
+  const APath: string; ARoot, AInput: Boolean;
+  out AViolation: string): Boolean;
 begin
   AViolation := '';
   Result := True;
@@ -1004,9 +1008,10 @@ begin
       AViolation := 'declares $schema other than JSON Schema 2020-12';
   end
   else
-    // x-mcp-header names a routing header; it does not constrain the
-    // value, and MCPHeaderParameters checks its own rules (#90).
-    Result := (AKey = 'type') or (AKey = 'x-mcp-header');
+    // x-mcp-header names a routing header in an input schema; it does
+    // not constrain the value, and MCPHeaderParameters checks its own
+    // rules (#90). Anywhere else it stays outside the subset.
+    Result := (AKey = 'type') or (AInput and (AKey = 'x-mcp-header'));
 end;
 
 const
@@ -1014,7 +1019,7 @@ const
 
 // The keyword ANode[AIndex] is allowed for a node of AType.
 function KeywordViolation(ANode: TJSONObject; AIndex: Integer;
-  const AType, APath: string; ARoot: Boolean): string;
+  const AType, APath: string; ARoot, AInput: Boolean): string;
 var
   Key: string;
   Value: TJSONData;
@@ -1024,10 +1029,10 @@ begin
   Value := ANode.Items[AIndex];
   if Value = nil then
     Exit(NodeLabel(APath) + Key + ' must not be nil');
-  if AnnotationViolation(Key, Value, APath, ARoot, Result) then
+  if AnnotationViolation(Key, Value, APath, ARoot, AInput, Result) then
     Exit;
   if (Key = 'properties') and (AType = 'object') then
-    Result := PropertiesViolation(Value, APath)
+    Result := PropertiesViolation(Value, APath, AInput)
   else if (Key = 'required') and (AType = 'object') then
   begin
     if Value.JSONType <> jtArray then
@@ -1039,7 +1044,7 @@ begin
   begin
     if Value.JSONType <> jtObject then
       Exit(NodeLabel(APath) + 'items must be an object schema');
-    Result := NodeViolation(TJSONObject(Value), APath + '[]', False);
+    Result := NodeViolation(TJSONObject(Value), APath + '[]', False, AInput);
   end
   else if (Key = 'enum') and IsPrimitiveType(AType) then
   begin
@@ -1058,7 +1063,7 @@ begin
 end;
 
 function NodeViolation(ANode: TJSONObject; const APath: string;
-  ARoot: Boolean): string;
+  ARoot, AInput: Boolean): string;
 var
   TypeData: TJSONData;
   NodeType: string;
@@ -1076,7 +1081,7 @@ begin
   NodeType := TypeData.AsString;
   for I := 0 to ANode.Count - 1 do
   begin
-    Result := KeywordViolation(ANode, I, NodeType, APath, ARoot);
+    Result := KeywordViolation(ANode, I, NodeType, APath, ARoot, AInput);
     if Result <> '' then
       Exit;
   end;
@@ -1090,7 +1095,7 @@ begin
     Exit('is missing');
   if AObjectRoot and (ASchema.Get('type', '') <> 'object') then
     Exit('must have root type "object"');
-  Result := NodeViolation(ASchema, '', True);
+  Result := NodeViolation(ASchema, '', True, AObjectRoot);
 end;
 
 // 'a string', 'an integer', ... for messages.
@@ -1479,8 +1484,9 @@ begin
       'boolean, not "%s"', [PathText(APath), ParamType]));
   for I := 0 to High(AParameters) do
     if SameText(AParameters[I].Header, Value.AsString) then
-      Exit(Format('x-mcp-header "%s" is used twice (headers compare ' +
-        'case-insensitively)', [Value.AsString]));
+      Exit(Format('x-mcp-header "%s" is used twice, at "%s" and "%s" ' +
+        '(headers compare case-insensitively)', [Value.AsString,
+        PathText(AParameters[I].Path), PathText(APath)]));
   Slot := Length(AParameters);
   SetLength(AParameters, Slot + 1);
   AParameters[Slot].Header := Value.AsString;
@@ -1490,25 +1496,91 @@ begin
     AParameters[Slot].Path[I] := APath[I];
 end;
 
+type
+  TSchemaKeywordKind = (skNone, skSubschema, skSubschemaArray, skSubschemaMap);
+
+// How a JSON Schema 2020-12 keyword holds subschemas (plus the draft
+// names "definitions" and "additionalItems"). Other keywords, such as
+// examples, enum, const and default, hold data, never annotations.
+function SchemaKeywordKind(const AKey: string): TSchemaKeywordKind;
+begin
+  if (AKey = 'items') or (AKey = 'additionalProperties') or (AKey = 'not') or
+    (AKey = 'if') or (AKey = 'then') or (AKey = 'else') or
+    (AKey = 'contains') or (AKey = 'propertyNames') or
+    (AKey = 'unevaluatedItems') or (AKey = 'unevaluatedProperties') or
+    (AKey = 'additionalItems') then
+    Result := skSubschema
+  else if (AKey = 'allOf') or (AKey = 'anyOf') or (AKey = 'oneOf') or
+    (AKey = 'prefixItems') then
+    Result := skSubschemaArray
+  else if (AKey = 'properties') or (AKey = 'patternProperties') or
+    (AKey = '$defs') or (AKey = 'definitions') or
+    (AKey = 'dependentSchemas') then
+    Result := skSubschemaMap
+  else
+    Result := skNone;
+end;
+
+function CollectHeaders(AData: TJSONData; const APath: array of string;
+  AReachable: Boolean; var AParameters: TMCPHeaderParameters): string;
+  forward;
+
+// The subschemas AValue holds for a keyword of AKind, each under
+// APath.AKey; only "properties" keeps the reachable chain going.
+function CollectFromKeyword(const AKey: string; AValue: TJSONData;
+  AKind: TSchemaKeywordKind; const APath: array of string;
+  AReachable: Boolean; var AParameters: TMCPHeaderParameters): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  case AKind of
+    skSubschema:
+      if AValue.JSONType = jtArray then // items as an array (drafts)
+        Result := CollectFromKeyword(AKey, AValue, skSubschemaArray, APath,
+          False, AParameters)
+      else
+        Result := CollectHeaders(AValue, ExtendPath(APath, AKey), False,
+          AParameters);
+    skSubschemaArray:
+      if AValue.JSONType = jtArray then
+        for I := 0 to AValue.Count - 1 do
+        begin
+          Result := CollectHeaders(AValue.Items[I], ExtendPath(APath, AKey),
+            False, AParameters);
+          if Result <> '' then
+            Exit;
+        end;
+    skSubschemaMap:
+      if AValue.JSONType = jtObject then
+        for I := 0 to AValue.Count - 1 do
+        begin
+          // properties is the one chain along which annotations are
+          // allowed; $defs, patternProperties and the rest are not.
+          if (AKey = 'properties') and AReachable then
+            Result := CollectHeaders(AValue.Items[I],
+              ExtendPath(APath, TJSONObject(AValue).Names[I]), AReachable,
+              AParameters)
+          else
+            Result := CollectHeaders(AValue.Items[I],
+              ExtendPath(ExtendPath(APath, AKey),
+              TJSONObject(AValue).Names[I]), False, AParameters);
+          if Result <> '' then
+            Exit;
+        end;
+  end;
+end;
+
 function CollectHeaders(AData: TJSONData; const APath: array of string;
   AReachable: Boolean; var AParameters: TMCPHeaderParameters): string;
 var
-  I, J: Integer;
-  Obj, Properties: TJSONObject;
-  Key: string;
+  I: Integer;
+  Obj: TJSONObject;
+  Kind: TSchemaKeywordKind;
 begin
   Result := '';
-  if AData.JSONType = jtArray then
-  begin
-    for I := 0 to AData.Count - 1 do
-    begin
-      Result := CollectHeaders(AData.Items[I], APath, False, AParameters);
-      if Result <> '' then
-        Exit;
-    end;
-    Exit;
-  end;
-  if AData.JSONType <> jtObject then
+  // A nil child (programmatic schemas) holds no schema.
+  if (AData = nil) or (AData.JSONType <> jtObject) then
     Exit;
   Obj := TJSONObject(AData);
   if Obj.Find(HEADER_KEYWORD) <> nil then
@@ -1519,32 +1591,13 @@ begin
   end;
   for I := 0 to Obj.Count - 1 do
   begin
-    Key := Obj.Names[I];
-    if (Key = HEADER_KEYWORD) or not (Obj.Items[I].JSONType in
-      [jtObject, jtArray]) then
+    Kind := SchemaKeywordKind(Obj.Names[I]);
+    if (Kind = skNone) or (Obj.Items[I] = nil) then
       Continue;
-    if (Key = 'properties') and AReachable and
-      (Obj.Items[I].JSONType = jtObject) then
-    begin
-      // The one chain along which annotations are allowed.
-      Properties := TJSONObject(Obj.Items[I]);
-      for J := 0 to Properties.Count - 1 do
-      begin
-        Result := CollectHeaders(Properties.Items[J],
-          ExtendPath(APath, Properties.Names[J]), True, AParameters);
-        if Result <> '' then
-          Exit;
-      end;
-    end
-    else
-    begin
-      // items, anyOf, $defs and the rest: an annotation there is out
-      // of place.
-      Result := CollectHeaders(Obj.Items[I], ExtendPath(APath, Key), False,
-        AParameters);
-      if Result <> '' then
-        Exit;
-    end;
+    Result := CollectFromKeyword(Obj.Names[I], Obj.Items[I], Kind, APath,
+      AReachable, AParameters);
+    if Result <> '' then
+      Exit;
   end;
 end;
 

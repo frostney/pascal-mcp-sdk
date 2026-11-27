@@ -189,6 +189,7 @@ implementation
 
 uses
   base64,
+  Math,
   {$IFDEF DARWIN}
   sockets,
   {$ENDIF}
@@ -240,9 +241,10 @@ function StrictBase64(const APayload: string; out ADecoded: string): Boolean;
 var
   I, Padding: Integer;
 begin
-  Result := False;
+  // The empty payload is the empty string's encoding (#90 review).
+  Result := APayload = '';
   ADecoded := '';
-  if (APayload = '') or (Length(APayload) mod 4 <> 0) then
+  if Result or (Length(APayload) mod 4 <> 0) then
     Exit;
   Padding := 0;
   for I := 1 to Length(APayload) do
@@ -274,6 +276,7 @@ begin
 end;
 
 // The argument at APath under AArguments, or nil (absent or null).
+// Both are borrowed: the result is a node inside AArguments.
 function ArgumentAt(AArguments: TJSONData;
   const APath: array of string): TJSONData;
 var
@@ -290,43 +293,125 @@ begin
     Result := nil;
 end;
 
-// The header text a client sends for AValue (Value Encoding: strings
-// as they are, integers in decimal, booleans in lowercase).
-function HeaderText(AValue: TJSONData): string;
+const
+  // 2^53 - 1: the JavaScript safe-integer bound the spec puts on
+  // integer header values.
+  MAX_SAFE_HEADER_INTEGER = 9007199254740991;
+
+// AText as a decimal integer within the safe range: an optional minus
+// sign and digits, and an all-zero fraction ("42.0"), since the spec
+// compares integers numerically.
+function SafeHeaderInteger(const AText: string; out AValue: Int64): Boolean;
+var
+  I, Start, Stop, Dot: Integer;
 begin
-  case AValue.JSONType of
-    jtString:
-      Result := AValue.AsString;
-    jtBoolean:
-      if AValue.AsBoolean then
-        Result := 'true'
-      else
-        Result := 'false';
-  else
-    Result := AValue.AsJSON;
+  Result := False;
+  AValue := 0;
+  Start := 1;
+  if (AText <> '') and (AText[1] = '-') then
+    Start := 2;
+  Stop := Length(AText);
+  Dot := Pos('.', AText);
+  if Dot > 0 then
+  begin
+    if Dot = Length(AText) then
+      Exit;
+    for I := Dot + 1 to Length(AText) do
+      if AText[I] <> '0' then
+        Exit;
+    Stop := Dot - 1;
   end;
+  if (Start > Stop) or (Stop - Start + 1 > 16) then
+    Exit;
+  for I := Start to Stop do
+  begin
+    if not (AText[I] in ['0'..'9']) then
+      Exit;
+    AValue := AValue * 10 + (Ord(AText[I]) - Ord('0'));
+  end;
+  if Start = 2 then
+    AValue := -AValue;
+  Result := Abs(AValue) <= MAX_SAFE_HEADER_INTEGER;
+end;
+
+// The body argument AValue as the safe integer it holds: an integer
+// node, or a float with no fractional part (42.0), within the range.
+function SafeBodyInteger(AValue: TJSONData; out AInteger: Int64): Boolean;
+var
+  F: Double;
+begin
+  Result := False;
+  AInteger := 0;
+  if AValue.JSONType <> jtNumber then
+    Exit;
+  if TJSONNumber(AValue).NumberType in [ntInteger, ntInt64] then
+  begin
+    AInteger := AValue.AsInt64;
+    Exit(Abs(AInteger) <= MAX_SAFE_HEADER_INTEGER);
+  end;
+  if TJSONNumber(AValue).NumberType <> ntFloat then
+    Exit; // a QWord is past the safe range
+  F := AValue.AsFloat;
+  // Range first, so Trunc never sees a value it could overflow on.
+  if IsNan(F) or (Abs(F) > MAX_SAFE_HEADER_INTEGER) or (Frac(F) <> 0) then
+    Exit;
+  AInteger := Trunc(F);
+  Result := True;
+end;
+
+// Whether the decoded header text matches the body argument for a
+// parameter declared as AType (Value Encoding: strings as they are,
+// integers in decimal compared numerically, booleans lowercase). A
+// value of another type, or a composite, has no header form and never
+// matches (#90 review).
+function HeaderMatches(const AText, AType: string; AValue: TJSONData): Boolean;
+var
+  HeaderInt, BodyInt: Int64;
+begin
+  if AType = 'integer' then
+    Result := SafeHeaderInteger(AText, HeaderInt) and
+      SafeBodyInteger(AValue, BodyInt) and (HeaderInt = BodyInt)
+  else if AType = 'boolean' then
+    Result := (AValue.JSONType = jtBoolean) and
+      (AText = BoolToStr(AValue.AsBoolean, 'true', 'false'))
+  else
+    Result := (AValue.JSONType = jtString) and (AText = AValue.AsString);
 end;
 
 // Undo the =?base64?...?= sentinel encoding the transport spec
 // defines for header values that are not header-safe ASCII. Returns
 // False when the payload is not decodable base64.
-function DecodeHeaderValue(const AValue: string; out ADecoded: string): Boolean;
+// True when AValue is =?base64?<APayload>?= (markers case-sensitive).
+function SentinelPayload(const AValue: string; out APayload: string): Boolean;
 const
   SENTINEL_PREFIX = '=?base64?';
   SENTINEL_SUFFIX = '?=';
+begin
+  Result := (Length(AValue) >= Length(SENTINEL_PREFIX) +
+    Length(SENTINEL_SUFFIX)) and
+    (Copy(AValue, 1, Length(SENTINEL_PREFIX)) = SENTINEL_PREFIX) and
+    (Copy(AValue, Length(AValue) - Length(SENTINEL_SUFFIX) + 1,
+    Length(SENTINEL_SUFFIX)) = SENTINEL_SUFFIX);
+  if Result then
+    APayload := Copy(AValue, Length(SENTINEL_PREFIX) + 1,
+      Length(AValue) - Length(SENTINEL_PREFIX) - Length(SENTINEL_SUFFIX))
+  else
+    APayload := '';
+end;
+
+// Undo the =?base64?...?= sentinel encoding the transport spec defines
+// for header values that are not header-safe ASCII. False when the
+// payload is not strict base64. Mcp-Name and Mcp-Param values decode
+// alike since #90, so an unpadded Mcp-Name payload, which fcl-base
+// accepted before, is refused (Value Encoding names standard base64).
+function DecodeHeaderValue(const AValue: string; out ADecoded: string): Boolean;
 var
   Payload: string;
 begin
   Result := True;
   ADecoded := AValue;
-  if (Copy(AValue, 1, Length(SENTINEL_PREFIX)) <> SENTINEL_PREFIX) or
-     (Copy(AValue, Length(AValue) - Length(SENTINEL_SUFFIX) + 1,
-       Length(SENTINEL_SUFFIX)) <> SENTINEL_SUFFIX) then
-    Exit;
-  Payload := Copy(AValue, Length(SENTINEL_PREFIX) + 1,
-    Length(AValue) - Length(SENTINEL_PREFIX) - Length(SENTINEL_SUFFIX));
-  // The same strict decoding as Mcp-Param values (#90).
-  Result := StrictBase64(Payload, ADecoded);
+  if SentinelPayload(AValue, Payload) then
+    Result := StrictBase64(Payload, ADecoded);
 end;
 
 // params._meta as an object, or nil.
@@ -474,6 +559,21 @@ type
     property BodyRefused: Boolean read FBodyRefused;
   end;
 
+  // A request that remembers every custom header field it received:
+  // fcl-web keeps only the last value of a repeated field, so a check of
+  // a mirrored header could not otherwise see a conflicting earlier one
+  // (#90 review).
+  TMCPHTTPRequest = class(TFPHTTPConnectionRequest)
+  private
+    FFieldNames: TStringList;
+  public
+    constructor Create; override;
+    destructor Destroy; override;
+    procedure SetCustomHeader(const AName, AValue: string); override;
+    // How many times a field named AName (any case) arrived.
+    function FieldCount(const AName: string): Integer;
+  end;
+
   // TFPHttpServer publishes Port/Threaded/OnRequest but keeps the
   // bind address protected; surface it for the localhost default.
   TMCPHTTPListener = class(TFPHTTPServer)
@@ -482,6 +582,7 @@ type
   protected
     function CreateConnection(AData: TSocketStream): TFPHTTPConnection;
       override;
+    function CreateRequest: TFPHTTPConnectionRequest; override;
   public
     property Address;
   end;
@@ -491,6 +592,41 @@ const
   // Not declared by the 3.2.2 sockets unit on Darwin.
   MCP_SO_NOSIGPIPE = $1022;
 {$ENDIF}
+
+constructor TMCPHTTPRequest.Create;
+begin
+  inherited Create;
+  FFieldNames := TStringList.Create;
+end;
+
+destructor TMCPHTTPRequest.Destroy;
+begin
+  FFieldNames.Free;
+  inherited Destroy;
+end;
+
+procedure TMCPHTTPRequest.SetCustomHeader(const AName, AValue: string);
+begin
+  FFieldNames.Add(LowerCase(AName));
+  inherited SetCustomHeader(AName, AValue);
+end;
+
+function TMCPHTTPRequest.FieldCount(const AName: string): Integer;
+var
+  I: Integer;
+  Wanted: string;
+begin
+  Result := 0;
+  Wanted := LowerCase(AName);
+  for I := 0 to FFieldNames.Count - 1 do
+    if FFieldNames[I] = Wanted then
+      Inc(Result);
+end;
+
+function TMCPHTTPListener.CreateRequest: TFPHTTPConnectionRequest;
+begin
+  Result := TMCPHTTPRequest.Create;
+end;
 
 procedure TMCPHTTPConnection.ReadRequestContent(
   ARequest: TFPHTTPConnectionRequest);
@@ -717,14 +853,28 @@ end;
 // decoded, equals the body value; a header for an absent or null value
 // does not match either. Verified 2026-11-26 against
 // https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-behavior-for-custom-headers
+// How many times the field AName arrived on ARequest: counted by a
+// TMCPHTTPRequest, else 1 when fcl-web kept it (an empty value counts)
+// and 0 when not.
+function HeaderOccurrences(ARequest: TFPHTTPConnectionRequest;
+  const AName: string): Integer;
+begin
+  if ARequest is TMCPHTTPRequest then
+    Exit(TMCPHTTPRequest(ARequest).FieldCount(AName));
+  if ARequest.CustomHeaders.IndexOfName(AName) >= 0 then
+    Result := 1
+  else
+    Result := 0;
+end;
+
 function TMCPHTTPServer.ParamHeaderFailure(
   ARequest: TFPHTTPConnectionRequest; const AMessage: TJSONRPCMessage;
   out AFailure: string): Boolean;
 var
   Parameters: TMCPHeaderParameters;
   Arguments, Value: TJSONData;
-  HeaderName, Raw, Decoded: string;
-  I: Integer;
+  HeaderName, Raw, Payload, Decoded: string;
+  I, Occurrences: Integer;
 begin
   Result := True;
   Parameters := FServer.ToolHeaderParameters(AMessage.Params.Get('name', ''));
@@ -733,8 +883,17 @@ begin
   begin
     HeaderName := 'Mcp-Param-' + Parameters[I].Header;
     Value := ArgumentAt(Arguments, Parameters[I].Path);
-    Raw := Trim(ARequest.GetFieldByName(HeaderName));
-    if Raw = '' then
+    // Presence, not value: an empty field is present (the empty string's
+    // header), and a repeated one is refused, since an intermediary may
+    // have routed on another occurrence (#90 review).
+    Occurrences := HeaderOccurrences(ARequest, HeaderName);
+    if Occurrences > 1 then
+    begin
+      AFailure := 'Header mismatch: ' + HeaderName + ' header sent more ' +
+        'than once';
+      Exit;
+    end;
+    if Occurrences = 0 then
     begin
       if Value = nil then
         Continue;
@@ -748,10 +907,12 @@ begin
         'an argument the body does not carry';
       Exit;
     end;
-    if (Copy(Raw, 1, 9) = '=?base64?') and
-      (Copy(Raw, Length(Raw) - 1, 2) = '?=') and (Length(Raw) >= 11) then
+    // fcl-web has already trimmed the value's edges; what is left is
+    // checked as the client sent it.
+    Raw := ARequest.GetFieldByName(HeaderName);
+    if SentinelPayload(Raw, Payload) then
     begin
-      if not StrictBase64(Copy(Raw, 10, Length(Raw) - 11), Decoded) then
+      if not StrictBase64(Payload, Decoded) then
       begin
         AFailure := 'Header mismatch: ' + HeaderName + ' header value ' +
           'is not valid base64';
@@ -766,7 +927,7 @@ begin
         'has characters a header cannot carry unencoded';
       Exit;
     end;
-    if Decoded <> HeaderText(Value) then
+    if not HeaderMatches(Decoded, Parameters[I].ParamType, Value) then
     begin
       AFailure := 'Header mismatch: ' + HeaderName + ' header value does ' +
         'not match the body argument';
