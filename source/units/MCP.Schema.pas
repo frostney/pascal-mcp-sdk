@@ -1109,17 +1109,37 @@ begin
   Result := (Abs(F) <= MAX_EXACT_FLOAT_INTEGER) and IsIntegralDouble(F);
 end;
 
+// True when the integer of magnitude AMagnitude (sign apart) is exact
+// as a double: at most 53 significant bits. Bit tests only, so no
+// float-to-integer conversion can trap (AArch64 raises on those).
+function IsExactAsDouble(AMagnitude: QWord): Boolean;
+var
+  Bits: Integer;
+  Probe: QWord;
+begin
+  Bits := 0;
+  Probe := AMagnitude;
+  while Probe <> 0 do
+  begin
+    Inc(Bits);
+    Probe := Probe shr 1;
+  end;
+  if Bits <= 53 then
+    Exit(True);
+  Result := AMagnitude and ((QWord(1) shl (Bits - 53)) - 1) = 0;
+end;
+
 // Exact equality of two JSON numbers: integers compare as integers
 // (no rounding through a double), floats as floats, and a float equals
-// an integer when it is integral and the same value.
+// an integer when it is integral and the same value: the integer is
+// exact as a double and converts to exactly that float.
 function SameNumber(A, B: TJSONData): Boolean;
-const
-  TWO_POW_63 = 9223372036854775808.0;
-  TWO_POW_64 = 18446744073709551616.0;
 var
-  IntA, IntB: Boolean;
+  IntA, IntB, Negative: Boolean;
   Integral, Other: TJSONData;
-  F: Double;
+  Magnitude: QWord;
+  Signed: Int64;
+  F, Exact: Double;
 begin
   IntA := TJSONNumber(A).NumberType in [ntInteger, ntInt64, ntQWord];
   IntB := TJSONNumber(B).NumberType in [ntInteger, ntInt64, ntQWord];
@@ -1146,23 +1166,26 @@ begin
   F := Other.AsFloat;
   if not IsIntegralDouble(F) then
     Exit(False);
-  // An integral double is an exact integer at any magnitude; compare it
-  // within the integer node's range, without rounding the integer.
+  // A QWord node holds small values too (CreateJSON(QWord(2))).
   if TJSONNumber(Integral).NumberType = ntQWord then
   begin
-    // A QWord node holds small values too (CreateJSON(QWord(2))).
-    if (F < 0) or (F >= TWO_POW_64) then
-      Exit(False);
-    if F < TWO_POW_63 then
-      Exit(Integral.AsQWord = QWord(Trunc(F)));
-    // F - 2^63 is exact here: doubles in [2^63, 2^64) are 2048 apart.
-    Exit((Integral.AsQWord >= QWord(9223372036854775808)) and
-      (Integral.AsQWord - QWord(9223372036854775808) =
-      QWord(Trunc(F - TWO_POW_63))));
+    Negative := False;
+    Magnitude := Integral.AsQWord;
+  end
+  else
+  begin
+    Signed := Integral.AsInt64;
+    Negative := Signed < 0;
+    if Negative then
+      Magnitude := QWord(-(Signed + 1)) + 1
+    else
+      Magnitude := QWord(Signed);
   end;
-  if (F < -TWO_POW_63) or (F >= TWO_POW_63) then
-    Exit(False);
-  Result := Integral.AsInt64 = Trunc(F);
+  if (Negative <> (F < 0)) or not IsExactAsDouble(Magnitude) then
+    Exit((Magnitude = 0) and (F = 0));
+  // An assignment converts (a Double(...) cast would reinterpret bits).
+  Exact := Magnitude;
+  Result := Exact = Abs(F);
 end;
 
 // A float node can hold NaN or an infinity, which has no JSON form.
