@@ -487,6 +487,7 @@ type
     procedure TestMalformedDeclarationIsMissing;
     procedure TestNonASCIIToolName;
     procedure TestCustomCapabilityByPresence;
+    procedure TestClassicLookupByPresence;
     procedure TestPresentRuns;
     procedure TestLegacyEraNotChecked;
     procedure TestGuards;
@@ -5274,6 +5275,13 @@ begin
   WithNil := TJSONObject.Create;
   WithNil.Add('requiredCapabilities', Capabilities);
   Expect<Boolean>(CapabilityDataRefused(WithNil)).ToBe(True);
+  // A capability of the client's own is valid with any value, a member
+  // stored as nil included: its key is present (#84 review).
+  Capabilities := TJSONObject.Create;
+  Capabilities.Add('com.example/feature', TJSONData(nil));
+  WithNil := TJSONObject.Create;
+  WithNil.Add('requiredCapabilities', Capabilities);
+  Expect<Boolean>(CapabilityDataRefused(WithNil)).ToBe(False);
   EMCPProtocolError.Create(-32021, 'missing', GetJSON(
     '{"requiredCapabilities":{"sampling":{"tools":{}},' +
     '"extensions":{"io.modelcontextprotocol/ui":{}}}}')).Free;
@@ -6619,6 +6627,17 @@ begin
   Result := MCPTextResult('ran');
 end;
 
+var
+  SawSampling: Boolean;
+
+// Records what HasCapability says about sampling.
+function SamplingProbeHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  SawSampling := ACtx.HasCapability('sampling');
+  Result := MCPTextResult('probed');
+end;
+
 // Undeclared: asks for sampling at run time.
 function AskerHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
@@ -6645,6 +6664,8 @@ begin
     .RequiresClientCapability('sampling');
   FServer.RegisterTool('asker', 'Asks at run time', '{"type":"object"}',
     AskerHandler);
+  FServer.RegisterTool('sampling_probe', 'Reports HasCapability',
+    '{"type":"object"}', SamplingProbeHandler);
   FServer.RegisterTool('custom', 'Needs a client capability of its own',
     '{"type":"object"}', NeedyHandler)
     .RequiresClientCapability('com.example/feature');
@@ -6740,6 +6761,36 @@ begin
   Expect<Integer>(NeedyRuns).ToBe(1);
 end;
 
+// A classic client's capabilities follow its own revision's schema
+// (2025-06-18 has "sampling": {"tools": true}), so the 2026-07-28 shape
+// check does not apply: presence counts, as before #84 (review).
+procedure TDeclaredCapabilities.TestClassicLookupByPresence;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-06-18","capabilities":' +
+    '{"sampling":{"tools":true}},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification('{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  SawSampling := False;
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"sampling_probe","arguments":{}}}');
+  try
+    Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+      .AsString).ToBe('probed');
+  finally
+    Response.Free;
+  end;
+  Expect<Boolean>(SawSampling).ToBe(True);
+  // The same declaration on a 2026-07-28 request is malformed there.
+  SawSampling := True;
+  Response := Call(ToolCall('sampling_probe', '{"sampling":{"tools":true}}'));
+  Response.Free;
+  Expect<Boolean>(SawSampling).ToBe(False);
+end;
+
 // The tool name goes out byte-exact: two-byte and astral characters.
 procedure TDeclaredCapabilities.TestNonASCIIToolName;
 var
@@ -6824,6 +6875,8 @@ begin
     TestNonASCIIToolName);
   Test('a client capability of its own counts when present',
     TestCustomCapabilityByPresence);
+  Test('classic clients: HasCapability by presence, as before',
+    TestClassicLookupByPresence);
   Test('declared capabilities present → the handler runs', TestPresentRuns);
   Test('classic era: not checked (no MRTR there)', TestLegacyEraNotChecked);
   Test('an empty or repeated capability name is refused', TestGuards);

@@ -255,7 +255,7 @@ Every handler receives `TMCPRequestContext` (from `MCP.Protocol`):
 | `ProtocolVersion` | Negotiated revision for this request |
 | `ClientName`, `ClientVersion` | From `clientInfo`; `''` when absent |
 | `ClientCapabilities` | The per-request capability object |
-| `HasCapability(Name)` | Capability probe (used for MRTR gating and `RequiresClientCapability`); a capability the schema defines counts only in its shape, so `null` or `false` is not declared, while one of the client's own counts when present |
+| `HasCapability(Name)` | Capability probe (used for MRTR gating and `RequiresClientCapability`). On a 2026-07-28 request, a capability that schema defines counts only in its shape, so `null` or `false` is not declared, while one of the client's own counts when its key is present. A classic-handshake client counts by presence alone, since its capabilities follow its own revision's schema |
 | `LogLevel` | Client's requested log floor; `''` = no log opt-in |
 | `HasProgressToken`, `ProgressToken` | Progress opt-in state |
 | `InputResponses`, `RequestState` | MRTR retry payload — see [Client requests](client-requests.md) |
@@ -408,7 +408,7 @@ reader. `Data` is owned by the exception; do not free or change it.
 | Code | Use it for |
 | --- | --- |
 | `-32602` | Invalid params of a prompt or resource request that the handler rejects itself, or a `requestState` the handler cannot accept. A tool's argument errors stay in-band (`MCPErrorResult`), so the model can correct them |
-| `-32021` | A client capability the request needs and did not declare; it must carry `data.requiredCapabilities`, so build it with `MCPMissingCapabilityError('sampling')`. The constructor refuses `-32021` unless `requiredCapabilities` names at least one capability shaped as in `ClientCapabilities` (each one an object, and so are `sampling.tools`, `elicitation.form` and each `extensions` entry); data changed after that is sent as `-32603` |
+| `-32021` | A client capability the request needs and did not declare; it must carry `data.requiredCapabilities`, so build it with `MCPMissingCapabilityError('sampling')`, or for several, `EMCPProtocolError.Create(-32021, …, BuildMissingCapabilityData(['sampling', 'roots']))` from `MCP.Protocol`, which returns a fresh object the exception then owns and raises `EArgumentException` for an empty list or a repeated name. The constructor refuses `-32021` unless `requiredCapabilities` names at least one capability shaped as in `ClientCapabilities`: each capability that schema defines is an object, and so are `sampling.tools`, `elicitation.form` and each `extensions` entry, while a capability of the client's own may have any value. Data changed after that is sent as `-32603` |
 | `-32700`, `-32600`, `-32601`, `-32603` | The other JSON-RPC codes, with their JSON-RPC meanings |
 | outside `-32768..-32000` | Your application's own codes |
 

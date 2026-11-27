@@ -335,6 +335,9 @@ begin
     Expect<Boolean>(Ctx.HasCapability('com.example/feature')).ToBe(True);
     Expect<Boolean>(Ctx.HasCapability('com.example/other')).ToBe(True);
     Expect<Boolean>(Ctx.HasCapability('com.example/absent')).ToBe(False);
+    // A member stored as nil is still a present key.
+    Ctx.ClientCapabilities.Add('com.example/built', TJSONData(nil));
+    Expect<Boolean>(Ctx.HasCapability('com.example/built')).ToBe(True);
   finally
     Params.Free;
   end;
@@ -345,12 +348,27 @@ begin
   BuildMissingCapabilityData([]).Free;
 end;
 
+procedure RepeatedCapabilityData;
+begin
+  BuildMissingCapabilityData(['sampling', 'roots', 'sampling']).Free;
+end;
+
+function ArgumentRefused(AProc: TProcedure): Boolean;
+begin
+  Result := False;
+  try
+    AProc();
+  except
+    on E: EArgumentException do
+      Result := True;
+  end;
+end;
+
 // -32021 data names at least one capability, so an empty list is a
 // caller bug, not data the validator would reject later.
 procedure TMetaValidation.TestMissingCapabilityData;
 var
   Data: TJSONObject;
-  Raised: Boolean;
 begin
   Data := BuildMissingCapabilityData(['sampling', 'com.example/feature']);
   try
@@ -360,14 +378,9 @@ begin
   finally
     Data.Free;
   end;
-  Raised := False;
-  try
-    EmptyCapabilityData;
-  except
-    on E: EArgumentException do
-      Raised := True;
-  end;
-  Expect<Boolean>(Raised).ToBe(True);
+  Expect<Boolean>(ArgumentRefused(EmptyCapabilityData)).ToBe(True);
+  // A repeat is refused before anything is allocated.
+  Expect<Boolean>(ArgumentRefused(RepeatedCapabilityData)).ToBe(True);
 end;
 
 procedure TMetaValidation.SetupTests;
@@ -386,7 +399,7 @@ begin
   Test('wrong-case logLevel → -32602', TestWrongCaseLogLevelRejected);
   Test('HasCapability: defined capabilities in shape, custom by presence',
     TestHasCapability);
-  Test('BuildMissingCapabilityData lists every name and refuses none',
+  Test('BuildMissingCapabilityData lists every name, refuses none or repeats',
     TestMissingCapabilityData);
   Test('MissingRequiredMeta names the first missing field',
     TestMissingRequiredMetaNames);
