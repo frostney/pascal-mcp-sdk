@@ -29,11 +29,43 @@ uses
 
   fpjson,
 
+  MCP.Apps,
   MCP.Protocol,
   MCP.Schema,
   MCP.Server,
   MCP.Transport.HTTP,
   MCP.Transport.Stdio;
+
+const
+  // A minimal MCP App view. It opens with the View handshake the host
+  // waits for (ui/initialize, then ui/notifications/initialized once the
+  // host answers with a result, a failure line otherwise; ext-apps
+  // specification 2026-01-26, lifecycle, verified 2026-11-27), shows the
+  // text of the tool result the host sends
+  // (ui/notifications/tool-result), and answers ui/resource-teardown.
+  // It listens to its parent only.
+  ECHO_CARD_HTML =
+    '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Echo</title>' +
+    '<style>body{font:16px system-ui;margin:0;padding:16px}' +
+    'p{border:1px solid #ccc;border-radius:8px;padding:12px}</style>' +
+    '</head><body><p id="out">Waiting for the result</p><script>' +
+    'const out=document.getElementById("out");let ready=false;' +
+    'const send=m=>parent.postMessage(Object.assign({jsonrpc:"2.0"},m),"*");' +
+    'addEventListener("message",e=>{const m=e.data;' +
+    'if(e.source!==parent||!m)return;' +
+    'if(m.id===1&&!ready&&!m.method){' +
+    'const r=m.result;if(m.jsonrpc!=="2.0"||!r||typeof r!=="object"||' +
+    'typeof r.protocolVersion!=="string"){' +
+    'out.textContent="The host refused this view";return;}' +
+    'ready=true;send({method:"ui/notifications/initialized",params:{}});' +
+    'return;}' +
+    'if(m.method==="ui/resource-teardown"&&m.id!==undefined){' +
+    'send({id:m.id,result:{}});return;}' +
+    'if(ready&&m.method==="ui/notifications/tool-result"){' +
+    'const c=(m.params.content||[])[0];out.textContent=c?c.text:"";}});' +
+    'send({id:1,method:"ui/initialize",params:{appInfo:{name:"echo-card",' +
+    'version:"1.0.0"},appCapabilities:{},protocolVersion:"2026-01-26"}});' +
+    '</script></body></html>';
 
 function EchoHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
@@ -231,7 +263,7 @@ begin
 
     Server.RegisterTool('echo', 'Echo a message back to the caller',
       ObjectSchema.AddString('message', 'Text to echo back'),
-      EchoHandler);
+      EchoHandler).AppResource('ui://pascal-mcp-sdk/echo-card', []);
 
     Server.RegisterTool('add', 'Add two numbers and return the sum',
       TAddArgs, TSumResult, AddHandler)
@@ -262,6 +294,12 @@ begin
     Server.RegisterTextResource('mcp://pascal-mcp-sdk/greeting', 'greeting',
       'text/plain', 'Hello from pascal-mcp-sdk, a FreePascal MCP server.',
       'A static greeting resource').Title('Greeting');
+
+    // MCP Apps: a client that supports the extension renders echo's
+    // result in this card (linked from the echo tool above); every other client gets the plain text.
+    RegisterAppResource(Server, 'ui://pascal-mcp-sdk/echo-card', 'Echo card',
+      ECHO_CARD_HTML, MCPAppUiMeta([], [], [], [], [], '', 1),
+      'Shows the echoed message on a card');
 
     Server.RegisterResourceTemplate('mcp://pascal-mcp-sdk/shout/{text}',
       'shout', 'text/plain', ShoutReader, 'Uppercase echo of {text}');

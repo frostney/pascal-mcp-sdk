@@ -292,6 +292,69 @@ reads them from its `inputSchema`. The Streamable HTTP binding uses it
 to validate the headers; a custom transport can too. See
 [Routing headers](../guides/tools.md#routing-headers-x-mcp-header).
 
+### Extensions
+
+```pascal
+procedure DeclareExtension(const AId: string; ASettings: TJSONObject = nil);
+procedure EnsureExtension(const AId: string);
+procedure SetResourceContentMeta(const AUri: string; AMeta: TJSONObject);
+// on TMCPToolOptions:
+function RequireLinkedResource(const AMetaPaths: array of string;
+  const AMimeType: string = ''; const AUriPrefix: string = ''): TMCPToolOptions;
+```
+
+`DeclareExtension` adds `AId` to `capabilities.extensions` on
+`server/discover` and `initialize`, with `ASettings` (owned; `nil`
+gives `{}`). Identifiers need a prefix (`io.modelcontextprotocol/ui`);
+anything else raises `EMCPServer`. Extensions are opt-in
+([extension negotiation](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning#extension-negotiation),
+verified 2026-11-26), so nothing is declared until this is called.
+Declaring again replaces the settings; `EnsureExtension` declares `{}`
+only when the extension is not declared yet, which is how helpers opt
+in. A tool's `RequireLinkedResource` makes startup (the first
+`CreateSession`) raise `EMCPServer`, naming the tool, unless each of
+`AMetaPaths` (`.`-separated keys under the tool's `_meta`) holds the
+same string, the URI of a registered resource declared with media type
+`AMimeType` unless that is `''`, starting with `AUriPrefix` unless that
+is `''`. Startup reads the tool's final
+`_meta`, so a later `.Meta` that changes the link is checked too. A
+second call replaces the first.
+`SetResourceContentMeta` gives a static text resource's read contents a
+`_meta` object (owned). Settings and content `_meta` with children
+stored as nil keep JSON nulls there.
+
+From `MCP.Apps`, MCP Apps on top of these
+([Interactive UIs](../guides/mcp-apps.md)):
+
+```pascal
+const MCP_APPS_EXTENSION = 'io.modelcontextprotocol/ui';
+const MCP_APP_MIME_TYPE = 'text/html;profile=mcp-app';
+
+function RegisterAppResource(AServer: TMCPServer; const AUri, AName,
+  AHtml: string; AUiMeta: TJSONObject = nil;
+  const ADescription: string = ''): TMCPDefinitionOptions;   // static
+function RegisterAppResource(AServer: TMCPServer; const AUri, AName: string;
+  AReader: TMCPResourceReader; AUiMeta: TJSONObject = nil;
+  const ADescription: string = ''): TMCPDefinitionOptions;   // reader
+function MCPAppUiMeta(const AConnectDomains, AResourceDomains, AFrameDomains,
+  ABaseUriDomains: array of string; APermissions: TMCPAppPermissions = [];
+  const ADomain: string = ''; APrefersBorder: Integer = -1): TJSONObject;
+function MCPAppContents(const AUri, AHtml: string;
+  AUiMeta: TJSONObject = nil): TJSONArray;
+function MCPClientRendersApps(const ACtx: TMCPRequestContext): Boolean;
+// on TMCPToolOptions:
+function AppResource(const AUri: string;
+  const AVisibility: array of string): TMCPToolOptions;
+```
+
+| Member | Meaning |
+| --- | --- |
+| `RegisterAppResource` | A `ui://` resource with the app media type; `AUiMeta` (owned, `nil` for none) goes on its declaration's `_meta.ui` and, for static HTML, on its read contents. A non-`ui://` URI raises `EMCPServer`. Declares the extension unless it is declared already |
+| `MCPAppUiMeta` | A new `_meta.ui` object the caller owns until it hands it over: the CSP domain lists (empty ones left out), permissions, domain, and `APrefersBorder` (`-1` unset, `0` false, `1` true) |
+| `MCPAppContents` | A reader's contents: the HTML as text with the app media type, and `AUiMeta` (owned) as `_meta.ui`; the array is the caller's to return |
+| `MCPClientRendersApps` | Whether the request's client declared the extension with the app media type in its `mimeTypes` |
+| `.AppResource` | Links the tool to `AUri`: `_meta.ui` with `resourceUri` and `visibility` (`'model'`, `'app'`; `[]` for both), and the older flat `ui/resourceUri` key. Through `RequireLinkedResource`, startup requires both keys to name the same `ui://` resource, registered with the app media type; the extension is declared unless it is already. Linking the tool again replaces the earlier link |
+
 ### The request context
 
 Every handler receives `TMCPRequestContext` (from `MCP.Protocol`):
@@ -306,6 +369,7 @@ Every handler receives `TMCPRequestContext` (from `MCP.Protocol`):
 | `HasProgressToken`, `ProgressToken` | Progress opt-in state |
 | `InputResponses`, `RequestState` | MRTR retry payload — see [Client requests](client-requests.md) |
 | `Meta` | The request's whole `params._meta`, borrowed for the call and read-only (nil when absent, as a classic-era request may leave it), for keys the library does not interpret, such as `traceparent`; clone what you keep or change, as the server reads parts of it after the handler returns |
+| `HasExtension(Id)`, `ExtensionSettings(Id)` | Whether the client declared extension `Id` in `clientCapabilities.extensions`, and its settings object (borrowed; nil when absent) |
 | `IsCancelled` | Cooperative cancellation probe |
 
 ### Introspection and the sans-I/O seam

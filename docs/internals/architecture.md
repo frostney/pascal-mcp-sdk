@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-pascal-mcp-sdk is fourteen units layered strictly bottom-up. Four form the
+pascal-mcp-sdk is fifteen units layered strictly bottom-up. Four form the
 request chain — `MCP.JSONRPC` (the JSON-RPC 2.0 profile MCP mandates),
 `MCP.Protocol` (the stateless per-request `_meta` model of spec
 revision 2026-07-28), `MCP.Server` (the sans-I/O dispatch core), and a
@@ -17,8 +17,9 @@ content-block helpers `MCP.Server` consumes, `MCP.Completion` and
 `MCP.UriTemplate` read completion requests and match resource templates
 for it, `MCP.Metadata` and `MCP.Pagination` build definition metadata
 and list cursors for it, and `MCP.RequestState` with `MCP.Crypto` seal the MRTR
-`requestState` for it; `MCP.Testing` sits above the core as the
-in-process test client for server authors. The core performs no I/O, with one scoped exception: when no
+`requestState` for it; `MCP.Apps` builds the MCP Apps extension on
+top of the core, and `MCP.Testing` sits above it as the in-process test
+client for server authors. The core performs no I/O, with one scoped exception: when no
 `requestState` keys are set, the first `CreateSession` reads 32 bytes
 from the operating system's random source for the instance's sealing
 key (#89), and fails to start if that source is unavailable; setting
@@ -68,7 +69,7 @@ Rules live in the layer that owns them and nowhere else:
 | Unit | Owns | Knows nothing about |
 | --- | --- | --- |
 | `MCP.JSONRPC` | Message classification (request / notification / invalid), MCP's tightened id rules (string or number, never null), batch rejection, params-must-be-object, id preservation into error replies, compact single-line serialization, and request-id matching (strings by value, numbers by value) | MCP methods |
-| `MCP.Protocol` | The reserved `_meta` keys, the two required per-request fields (`protocolVersion`, `clientCapabilities`), `-32602` for their absence, `-32022` (+ `supported` list) for version mismatch, the `-32021` data payload and its shape check, response-side stamping (`resultType: "complete"`, `serverInfo`), the well-formed `notifications/cancelled` and its `requestId` | Tools and resources |
+| `MCP.Protocol` | The reserved `_meta` keys, the two required per-request fields (`protocolVersion`, `clientCapabilities`), `-32602` for their absence, `-32022` (+ `supported` list) for version mismatch, the `-32021` data payload and its shape check, response-side stamping (`resultType: "complete"`, `serverInfo`), the well-formed `notifications/cancelled` and its `requestId`, capability gating (the capability an input request needs, the ones a request lacks, the automatic `-32021`), and extension identifiers | Tools and resources |
 | `MCP.Server` | Method dispatch (`server/discover`, `tools/*`, `resources/*`, `prompts/*`, `completion/complete`), capabilities computed from the registrations, frozen registries and request-visible configuration, per-connection legacy state, cooperative cancellation, in-band vs. protocol error policy (handler exceptions → `isError: true` results; a handler's `EMCPProtocolError` and dispatch faults → JSON-RPC errors), the legacy-`initialize` rejection that names supported versions | Bytes and streams |
 | `MCP.Schema` | The fluent builder (`ObjectSchema.AddString(...)`) and the RTTI-derived `TMCPArgs` argument classes, both emitting the JSON Schema 2020-12 subset the server enforces | Dispatch, bytes, streams |
 | `MCP.Content` | The five content block shapes tool results and prompt messages carry (text, image, audio, resource link, embedded resource) and the base64 encoding of raw-bytes payloads | Dispatch, registries, bytes and streams |
@@ -79,6 +80,7 @@ Rules live in the layer that owns them and nowhere else:
 | `MCP.Pagination` | The opaque list cursor and the check of one a client sends back | Registries, dispatch |
 | `MCP.Crypto` | SHA-256, HMAC-SHA-256, constant-time comparison, the OS random source and base64url, in-tree because FPC 3.2.2 ships no SHA-256 | Everything MCP |
 | `MCP.Testing` | The in-process test client (`TMCPTestClient`): request envelopes, notification capture, canned input answers, over `HandleMessage` with no transport | Bytes and streams |
+| `MCP.Apps` | The MCP Apps extension on top of the core: `ui://` resources with `_meta.ui`, tool links, the extension declaration | Dispatch, bytes and streams |
 | `MCP.Transport.Stdio` | LF-terminated writes on every platform, CR tolerance on reads, blank-line skipping, stderr-only logging, EOF as the graceful-shutdown signal | Protocol decisions — it contains not a single one |
 
 ## The sans-I/O core

@@ -55,6 +55,11 @@ procedure SetMetaEntry(ADefinition: TJSONObject; const AKey: string;
 // cloned for every list. AData is borrowed and changed in place.
 procedure NilChildrenToNull(AData: TJSONData);
 
+// Whether APath ('.'-separated keys) under ADefinition's _meta holds a
+// string, returned in AValue ('' otherwise). ADefinition is borrowed.
+function MetaPathString(ADefinition: TJSONObject; const APath: string;
+  out AValue: string): Boolean;
+
 // Sets the string member AName of ADefinition (borrowed), replacing an
 // earlier value.
 procedure SetStringMember(ADefinition: TJSONObject; const AName,
@@ -361,6 +366,25 @@ begin
   end;
   TJSONObject(Meta).Delete(AKey);
   TJSONObject(Meta).Add(AKey, AValue);
+end;
+
+function MetaPathString(ADefinition: TJSONObject; const APath: string;
+  out AValue: string): Boolean;
+var
+  Node: TJSONData;
+  Key: string;
+begin
+  AValue := '';
+  Node := ADefinition.Find('_meta');
+  for Key in APath.Split(['.']) do
+  begin
+    if (Node = nil) or (Node.JSONType <> jtObject) then
+      Exit(False);
+    Node := TJSONObject(Node).Find(Key);
+  end;
+  Result := (Node <> nil) and (Node.JSONType = jtString);
+  if Result then
+    AValue := Node.AsString;
 end;
 
 procedure SetStringMember(ADefinition: TJSONObject; const AName,

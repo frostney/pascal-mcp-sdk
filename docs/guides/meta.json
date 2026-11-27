@@ -10,6 +10,7 @@
     "schemas",
     "prompts",
     "resources",
+    "mcp-apps",
     "configuration",
     "progress-and-logging",
     "testing",

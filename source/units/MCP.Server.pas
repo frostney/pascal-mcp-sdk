@@ -186,6 +186,9 @@ type
     StaticText: string;      // used only when HasStaticText is true
     HasStaticText: Boolean;
     TtlMs: Integer;          // reader results' ttlMs, default 0 (#96)
+    // Owned: a _meta object added to static-text read contents (#98),
+    // nil for none.
+    ContentMeta: TJSONObject;
     Reader: TMCPResourceReader;
     Method: TMCPResourceMethod;
   end;
@@ -363,6 +366,20 @@ type
     function Icon(const ASrc: string; const AMimeType: string = '';
       const ASizes: string = ''; const ATheme: string = ''): TMCPToolOptions;
     function Meta(const AKey: string; AValue: TJSONData): TMCPToolOptions;
+    // Makes startup (the first CreateSession) require that each of
+    // AMetaPaths ('.'-separated keys under the tool's _meta) holds the
+    // same string, the URI of a registered resource declared with media
+    // type AMimeType unless that is '', starting with AUriPrefix unless
+    // that is ''. Startup reads the tool's final _meta, so it checks the
+    // link that goes out, after any later .Meta. A second call replaces
+    // the first. MCP.Apps requires each linked UI resource this way.
+    function RequireLinkedResource(const AMetaPaths: array of string;
+      const AMimeType: string = '';
+      const AUriPrefix: string = ''): TMCPToolOptions;
+    // The server the tool belongs to and the tool's name, for helpers
+    // that extend these options (MCP.Apps).
+    property Server: TMCPServer read FServer;
+    function ToolName: string;
   end;
 
   // Where the server writes server-to-client notification lines
@@ -456,6 +473,14 @@ type
     FDescription: string;
     FWebsiteUrl: string;
     FIdentity: TJSONObject; // owned: holds the server's icons (#96)
+    FExtensions: TJSONObject; // owned: capabilities.extensions (#98)
+    // Resources that must be registered at startup, and who needs each.
+    // Tool links startup checks (TMCPToolOptions.RequireLinkedResource).
+    FRequiredResources: array of record
+      Definition: TJSONObject; // borrowed: the tool's, owned by FTools
+      Paths: TStringArray;
+      MimeType, UriPrefix: string;
+    end;
     FInstructions: string;
     FCacheTtlMs: Integer;
     FCacheScope: string;
@@ -477,6 +502,7 @@ type
 
     procedure EnsureMutable;
     procedure FreezeConfiguration;
+    procedure CheckRequiredResources;
     procedure SetInstructions(const AValue: string);
     procedure SetTitle(const AValue: string);
     procedure SetDescription(const AValue: string);
@@ -609,6 +635,21 @@ type
     // An icon for serverInfo; ASrc must be https: or data:.
     procedure AddIcon(const ASrc: string; const AMimeType: string = '';
       const ASizes: string = ''; const ATheme: string = '');
+
+    // Declares extension AId in capabilities.extensions on
+    // server/discover and initialize (#98). Extensions are opt-in, so
+    // nothing is declared until this is called (or a helper such as
+    // MCP.Apps calls it). AId follows the _meta key rules with a
+    // prefix ('io.modelcontextprotocol/ui'); ASettings (owned; nil = {})
+    // is the extension's settings object. Declaring again replaces it.
+    procedure DeclareExtension(const AId: string; ASettings: TJSONObject = nil);
+    // Declares AId with {} unless it is declared already, so a helper
+    // that opts in never replaces settings set with DeclareExtension
+    // (#98 review).
+    procedure EnsureExtension(const AId: string);
+    // Static text read contents for resource AUri carry AMeta (owned)
+    // as their _meta (MCP.Apps puts _meta.ui there).
+    procedure SetResourceContentMeta(const AUri: string; AMeta: TJSONObject);
 
     // CacheableResult fields (SEP-2549), required on discover/list/read
     // results. Registries are fixed after startup, so registry metadata
@@ -1581,64 +1622,7 @@ begin
     Result := TJSONObject(ContentData);
 end;
 
-// The client capability each embedded request kind requires. '' for
-// an unrecognized kind (rejected separately — the library only emits
-// the three MRTR kinds).
-function CapabilityForInputRequest(const AMethod: string): string;
-begin
-  if AMethod = 'elicitation/create' then
-    Result := 'elicitation'
-  else if AMethod = 'sampling/createMessage' then
-    Result := 'sampling'
-  else if AMethod = 'roots/list' then
-    Result := 'roots'
-  else
-    Result := '';
-end;
 
-// '' when every inputRequests entry names a kind the client declared;
-// otherwise the first missing capability. AUnknownKind carries the
-// method of an entry that is not an MRTR kind at all, and stays
-// non-empty for a malformed entry too — one that is not an object, or
-// carries no string "method" — so callers can keep testing it with a
-// single `<> ''` guard and never emit such a map on the wire.
-function MissingInputCapability(AInputRequests: TJSONObject;
-  const ACtx: TMCPRequestContext; out AUnknownKind: string): string;
-var
-  I: Integer;
-  Entry, MethodData: TJSONData;
-  Method, Capability: string;
-begin
-  Result := '';
-  AUnknownKind := '';
-  if AInputRequests = nil then
-    Exit;
-  for I := 0 to AInputRequests.Count - 1 do
-  begin
-    Entry := AInputRequests.Items[I];
-    Method := '';
-    // An entry stored as nil is malformed too (#96 review).
-    if (Entry <> nil) and (Entry.JSONType = jtObject) then
-    begin
-      MethodData := TJSONObject(Entry).Find('method');
-      if (MethodData <> nil) and (MethodData.JSONType = jtString) then
-        Method := MethodData.AsString;
-    end;
-    Capability := CapabilityForInputRequest(Method);
-    if Capability = '' then
-    begin
-      // A malformed entry has no method to quote back; the placeholder
-      // keeps the unknown-kind signal distinguishable from success.
-      if Method = '' then
-        AUnknownKind := '(missing method)'
-      else
-        AUnknownKind := Method;
-      Exit;
-    end;
-    if not ACtx.HasCapability(Capability) then
-      Exit(Capability);
-  end;
-end;
 
 { ───────── handler-raised protocol errors (#88) ───────── }
 
@@ -2156,6 +2140,7 @@ begin
   FName := AName;
   FVersion := AVersion;
   FIdentity := TJSONObject.Create;
+  FExtensions := TJSONObject.Create;
   FCacheTtlMs := 300000;
   FCacheScope := CACHE_SCOPE_PRIVATE;
   FRedactErrorDetails := False;
@@ -2244,6 +2229,79 @@ begin
       Reason);
 end;
 
+// Only the links a helper declared (RequireLinkedResource): a tool's
+// own _meta may hold any URI. MCP Apps says the linked resource "MUST
+// exist on the server" (ext-apps specification 2026-01-26, verified
+// 2026-11-26).
+procedure TMCPServer.CheckRequiredResources;
+var
+  I, J, Index: Integer;
+  Who, Uri, Value: string;
+begin
+  for I := 0 to High(FRequiredResources) do
+    with FRequiredResources[I] do
+    begin
+      Who := 'Tool "' + Definition.Get('name', '') + '"';
+      for J := 0 to High(Paths) do
+        if not MetaPathString(Definition, Paths[J], Value) then
+          raise EMCPServer.CreateFmt('%s has no link at _meta.%s',
+            [Who, Paths[J]])
+        else if J = 0 then
+          Uri := Value
+        else if Value <> Uri then
+          raise EMCPServer.CreateFmt('%s links "%s" at _meta.%s but "%s" ' +
+            'at _meta.%s', [Who, Uri, Paths[0], Value, Paths[J]]);
+      // MCP Apps links "MUST" use the ui:// scheme (ext-apps
+      // specification 2026-01-26, verified 2026-11-27).
+      if Copy(Uri, 1, Length(UriPrefix)) <> UriPrefix then
+        raise EMCPServer.CreateFmt('%s links "%s", which does not start ' +
+          'with %s', [Who, Uri, UriPrefix]);
+      Index := FindResource(Uri);
+      if Index < 0 then
+        raise EMCPServer.CreateFmt('%s needs resource "%s", which is not ' +
+          'registered', [Who, Uri]);
+      // MCP Apps resources "MUST" have the app media type (ext-apps
+      // specification 2026-01-26, content requirements, verified
+      // 2026-11-27).
+      if (MimeType <> '') and
+        (FResources[Index].Definition.Get('mimeType', '') <> MimeType) then
+        raise EMCPServer.CreateFmt('%s needs resource "%s" with media type ' +
+          '%s', [Who, Uri, MimeType]);
+    end;
+end;
+
+function TMCPToolOptions.RequireLinkedResource(
+  const AMetaPaths: array of string; const AMimeType: string;
+  const AUriPrefix: string): TMCPToolOptions;
+var
+  Slot, I: Integer;
+begin
+  FServer.EnsureMutable;
+  if Length(AMetaPaths) = 0 then
+    raise EMCPServer.Create('RequireLinkedResource needs a _meta path');
+  Slot := 0;
+  while (Slot < Length(FServer.FRequiredResources)) and
+    (FServer.FRequiredResources[Slot].Definition <> FDefinition) do
+    Inc(Slot);
+  if Slot = Length(FServer.FRequiredResources) then
+    SetLength(FServer.FRequiredResources, Slot + 1);
+  with FServer.FRequiredResources[Slot] do
+  begin
+    Definition := FDefinition;
+    SetLength(Paths, Length(AMetaPaths));
+    for I := 0 to High(AMetaPaths) do
+      Paths[I] := AMetaPaths[I];
+    MimeType := AMimeType;
+    UriPrefix := AUriPrefix;
+  end;
+  Result := Self;
+end;
+
+function TMCPToolOptions.ToolName: string;
+begin
+  Result := FDefinition.Get('name', '');
+end;
+
 procedure TMCPServer.FreezeConfiguration;
 var
   I: Integer;
@@ -2271,6 +2329,9 @@ begin
           'the registration .ApplicationValidated to take over argument ' +
           'validation', [FTools[I].Definition.Get('name', ''), Violation]);
     end;
+  // Before anything is allocated, so a failed start can be fixed and
+  // retried (#98 review).
+  CheckRequiredResources;
   FSealer := CreateSealer(FName, FRequestStateKeys, FRequestStateTtlMs);
   // Structured output is checked whenever the output schema is inside
   // the subset (#91); a richer one is the handler's to honour.
@@ -2465,13 +2526,17 @@ begin
   for I := 0 to High(FTools) do
     FTools[I].Definition.Free;
   for I := 0 to High(FResources) do
+  begin
     FResources[I].Definition.Free;
+    FResources[I].ContentMeta.Free;
+  end;
   for I := 0 to High(FTemplates) do
     FTemplates[I].Definition.Free;
   for I := 0 to High(FPrompts) do
     FPrompts[I].Definition.Free;
   FSealer.Free;
   FIdentity.Free;
+  FExtensions.Free;
   inherited Destroy;
 end;
 
@@ -2495,10 +2560,59 @@ begin
       Result.Add('prompts', TJSONObject.Create);
     if Length(FCompletions) > 0 then
       Result.Add('completions', TJSONObject.Create);
+    if FExtensions.Count > 0 then
+      Result.Add('extensions', FExtensions.Clone);
   except
     Result.Free;
     raise;
   end;
+end;
+
+procedure TMCPServer.DeclareExtension(const AId: string; ASettings: TJSONObject);
+begin
+  try
+    EnsureMutable;
+    if not IsExtensionId(AId) then
+      raise EMCPServer.CreateFmt('"%s" is not an extension identifier ' +
+        '(a prefix such as io.modelcontextprotocol/ and a name)', [AId]);
+  except
+    ASettings.Free;
+    raise;
+  end;
+  if ASettings = nil then
+    ASettings := TJSONObject.Create;
+  // Cloned for every capabilities answer, so no child stays nil.
+  NilChildrenToNull(ASettings);
+  FExtensions.Delete(AId);
+  FExtensions.Add(AId, ASettings);
+end;
+
+procedure TMCPServer.EnsureExtension(const AId: string);
+begin
+  EnsureMutable;
+  if FExtensions.Find(AId) = nil then
+    DeclareExtension(AId);
+end;
+
+procedure TMCPServer.SetResourceContentMeta(const AUri: string;
+  AMeta: TJSONObject);
+var
+  Index: Integer;
+begin
+  try
+    EnsureMutable;
+    Index := FindResource(AUri);
+    if (Index < 0) or not FResources[Index].HasStaticText then
+      raise EMCPServer.CreateFmt('"%s" is not a registered static text ' +
+        'resource', [AUri]);
+  except
+    AMeta.Free;
+    raise;
+  end;
+  // Cloned for every read, so no child stays nil.
+  NilChildrenToNull(AMeta);
+  FResources[Index].ContentMeta.Free;
+  FResources[Index].ContentMeta := AMeta;
 end;
 
 { ───────── completion (#81) ───────── }
@@ -3785,32 +3899,7 @@ begin
   Result := PagedListResponse(AMessage, ALegacy, 'tools', Length(FTools), ToolDefinitionAt);
 end;
 
-// 'capability "a"' or 'capabilities "a", "b"' for a -32021 message.
-function CapabilityList(const ANames: array of string): string;
-var
-  I: Integer;
-begin
-  if Length(ANames) = 1 then
-    Exit('capability "' + ANames[0] + '"');
-  Result := 'capabilities';
-  for I := 0 to High(ANames) do
-  begin
-    if I > 0 then
-      Result := Result + ',';
-    Result := Result + ' "' + ANames[I] + '"';
-  end;
-end;
 
-// The automatic -32021 for a subject lacking ANames (not empty), both
-// for declared needs (#84) and for a run-time input request.
-function MissingCapabilityResponse(const AMessage: TJSONRPCMessage;
-  const ASubjectKind, ASubjectName: string;
-  const ANames: array of string): string;
-begin
-  Result := BuildErrorResponse(AMessage.Id, MCP_ERROR_MISSING_CLIENT_CAPABILITY,
-    ASubjectKind + ' "' + ASubjectName + '" requires the client ' +
-    CapabilityList(ANames), BuildMissingCapabilityData(ANames));
-end;
 
 // The input_required tail shared by tools/call and prompts/get (#4).
 // Gate first, assemble second: an entry naming a kind the library
@@ -3993,20 +4082,6 @@ begin
   AResult.Meta := Meta;
 end;
 
-// The declared capabilities ACtx lacks, in declaration order (#84).
-function MissingDeclaredCapabilities(const ARequired: array of string;
-  const ACtx: TMCPRequestContext): TStringArray;
-var
-  Name: string;
-begin
-  Result := nil;
-  for Name in ARequired do
-    if not ACtx.HasCapability(Name) then
-    begin
-      SetLength(Result, Length(Result) + 1);
-      Result[High(Result)] := Name;
-    end;
-end;
 
 function TMCPServer.HandleToolsCall(const AMessage: TJSONRPCMessage;
   const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
@@ -4190,6 +4265,9 @@ begin
       MimeType := FResources[Index].Definition.Get('mimeType', 'text/plain');
       Contents := MCPTextContents(Uri, MimeType,
         FResources[Index].StaticText);
+      if FResources[Index].ContentMeta <> nil then
+        TJSONObject(Contents[0]).Add('_meta',
+          FResources[Index].ContentMeta.Clone);
       ReadTtlMs := FCacheTtlMs;
     end;
   end
