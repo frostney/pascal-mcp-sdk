@@ -1,7 +1,7 @@
 name: PR
 
-# Fast PR gate. Mirrors the duetto / lwpt pattern: ci.yml runs only on
-# push to main, so pr.yml runs a PR's build, test, docs, interop and
+# Fast PR gate. Mirrors the duetto / lwpt pattern: PRs do not trigger
+# ci.yml, so pr.yml runs a PR's build, test, docs, interop and
 # conformance checks; pr-title.yml adds its conventional-title check.
 #
 #   pr.yml — every PR: native install --frozen + build + test + the

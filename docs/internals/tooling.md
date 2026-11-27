@@ -102,12 +102,14 @@ The checks a PR needs to merge are listed in
   `MCP.Server` and `MCP.Content` must appear in `docs/reference/`). Plus
   the markdownlint job (the required `docs` check), and the required
   `interop` and `conformance` jobs (both below).
-- **ci.yml** — push to main: the wider native matrix (Linux x64 and
-  arm64, macOS arm64 and x64, Win64 and Win32) as the post-merge
-  confirmation signal; it does not run the conformance job.
+- **ci.yml** — push to main and manual dispatch: the wider native
+  matrix (Linux x64 and arm64, macOS arm64 and x64, Win64 and Win32)
+  as the post-merge confirmation signal; it does not run the
+  conformance job.
 - **pr-title.yml** — the required `conventional-title` check: the PR
   title, and on a single-commit PR the commit subject, must be a
-  Conventional Commit (squash-merge subjects become the changelog; see
+  Conventional Commit (the squash commit's subject becomes the
+  changelog entry; see
   [Contributing § Open the PR](contributing.md#open-the-pr)).
 - **pages.yml** — website build/deploy; see the Website section.
 - **lwpt-bump.yml** — weekly (Mondays) and on demand: opens a PR

@@ -188,7 +188,7 @@ registry.
 | `docs` | markdownlint: docs follow `.markdownlint-cli2.jsonc` |
 | `interop` | the official TypeScript clients still talk to `mcpdemo` — a red interop job is a real cross-implementation regression |
 | `conformance` | the official conformance suite's 2026-07-28 requirement set, run against `mcpconformance`, still matches `tools/conformance/baseline.json` |
-| `conventional-title` | the PR title is a Conventional Commit, and on a single-commit PR the commit subject too, since GitHub's squash merge may take either (`pr-title.yml`) |
+| `conventional-title` | the PR title is a Conventional Commit, and on a single-commit PR the commit subject too, which GitHub's `COMMIT_OR_PR_TITLE` squash setting would use instead of the title (`pr-title.yml`) |
 
 - Not required: `pages.yml` builds the website when a PR touches
   `docs/` or `website/`, and fails on broken internal doc links, so
