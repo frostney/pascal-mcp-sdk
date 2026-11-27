@@ -420,6 +420,7 @@ type
     FCurrentRequestToken: TObject; // borrowed: dispatch owns the token
     FCancellationPoll: TMCPCancellationPoll;
     FCancellationPollData: Pointer;
+    FStreamHost: TObject; // borrowed: the transport's
     // ARequestId is borrowed; the returned token is owned by dispatch.
     function BeginRequest(ARequestId: TJSONData): TObject;
     procedure EndRequest(AToken: TObject);
@@ -458,6 +459,10 @@ type
     // Whether ALine is a notifications/cancelled that HandleMessage
     // would accept for the request this session is running.
     function CancelsActiveRequest(const ALine: string): Boolean;
+    // The transport's stream host (a TMCPStreamHost, MCP.Streams;
+    // borrowed, nil for none), handed to each 2026-07-28 request's
+    // handler as ACtx.StreamHost (#126).
+    property StreamHost: TObject read FStreamHost write FStreamHost;
   end;
 
   TMCPServer = class
@@ -1055,6 +1060,12 @@ function MCPCompleteFrom(const AValue: string;
 // as a new object the caller owns; nil for any other line. A transport
 // that classifies queued lines once keeps the result and matches it
 // with TMCPSession.IsActiveRequestId (#93).
+// Writes AMessage to stderr as one line, best effort: a closed stderr
+// is ignored, and on Unix cannot kill the process with SIGPIPE. The
+// writer the core's own diagnostics use, for code beside it such as an
+// extension's push stream (#126 review).
+procedure MCPLogDiagnostic(const AMessage: string);
+
 function MCPCancellationTarget(const ALine: string): TJSONData;
 
 // In-request notifications, callable from any handler. Both are
@@ -2018,6 +2029,11 @@ procedure TMCPSession.SetCancellationPoll(APoll: TMCPCancellationPoll;
 begin
   FCancellationPoll := APoll;
   FCancellationPollData := AUserData;
+end;
+
+procedure MCPLogDiagnostic(const AMessage: string);
+begin
+  TryLogToStderr(SanitizeLogText(AMessage));
 end;
 
 function MCPCancellationTarget(const ALine: string): TJSONData;
@@ -3685,6 +3701,8 @@ begin
     if Assigned(ASink) then
       Ctx.Notifier := Dispatch.EmitNotification;
     Ctx.CancellationProbe := Dispatch.IsCancelled;
+    Ctx.RequestId := AMessage.Id;
+    Ctx.StreamHost := ASession.StreamHost;
 
     // requestState is verified before any handler sees it (#89). Only
     // tools/call and prompts/get mint state here, so on any other

@@ -90,7 +90,12 @@ unit MCP.Transport.HTTP;
 //     the core converts it into a response the transport can no
 //     longer deliver, and nothing further is sent for that request
 //     — subscriptions/listen streams do not arise because the core
-//     advertises no subscription capability.
+//     advertises no subscription capability;
+//   - a push stream a handler parks (events/stream, #126) is answered
+//     as an SSE stream at once and stepped in the request's thread
+//     until it ends; a closed connection, checked at least every 50 ms,
+//     or a failed write cancels it with nothing more sent, and Stop
+//     closes it with its final frame.
 //
 // Era posture: this binding is modern-only. The constructor turns off
 // DualEra, so 2026-07-28 requests are served statelessly and a legacy
@@ -121,7 +126,8 @@ uses
   MCP.JSONRPC,
   MCP.Protocol,
   MCP.Schema,
-  MCP.Server;
+  MCP.Server,
+  MCP.Streams;
 
 const
   // Default inbound body cap in bytes (same budget as the stdio line
@@ -166,6 +172,10 @@ type
       var AResponse: TFPHTTPConnectionResponse);
     procedure AnswerJSON(AResponse: TFPHTTPConnectionResponse;
       ACode: Integer; const ABody: string);
+    procedure DriveStream(AStream: TMCPStream; ASession: TMCPSession;
+      ASSE: Pointer; APoll: Pointer);
+    // Stop was called (a stream host's shutdown probe).
+    function StopRequested: Boolean;
     // AMalformedRequest: the request lacked a required per-request
     // field, so a -32602 answer maps to 400 (#79).
     procedure AnswerRequest(ARequest: TFPHTTPConnectionRequest;
@@ -1138,9 +1148,100 @@ begin
   end;
 end;
 
+type
+  // A stream's live cancellation check on HTTP: the connection's
+  // closed-socket poll, so a check that waits sees the client go
+  // (#126 review).
+  THTTPStreamProbe = class
+  private
+    FServer: TMCPHTTPServer; // borrowed
+    FSession: TMCPSession;   // borrowed
+    FPoll: Pointer;          // borrowed: the request's THTTPDisconnectPoll
+    FStopSeen: Boolean;
+  public
+    function Cancelled: Boolean;
+  end;
+
+// The client went away, or Stop was called: a check that waits stops
+// either way, and on Stop the final frame follows (#126 review).
+function TMCPHTTPServer.StopRequested: Boolean;
+begin
+  Result := FStopPending;
+end;
+
+function THTTPStreamProbe.Cancelled: Boolean;
+begin
+  if FServer.FStopPending then
+  begin
+    FStopSeen := True;
+    Exit(True);
+  end;
+  Result := HTTPDisconnectPoll(FSession, FPoll);
+end;
+
+// Steps AStream (owned) in this request's thread until it ends (#126):
+// its frames are SSE events, the first one opening the stream. A
+// closed connection, probed every 50 ms and from inside the stream's
+// checks, or a failed write cancels it, and nothing more is sent
+// (events.mdx, Lifecycle); Stop closes it with its final frame. No cap
+// on concurrent requests counts it: each stream holds only its own
+// connection's thread.
+procedure TMCPHTTPServer.DriveStream(AStream: TMCPStream;
+  ASession: TMCPSession; ASSE: Pointer; APoll: Pointer);
+var
+  Due, Now, Wait: Int64;
+  Probe: THTTPStreamProbe;
+begin
+  Probe := THTTPStreamProbe.Create;
+  try
+    Probe.FServer := Self;
+    Probe.FSession := ASession;
+    Probe.FPoll := APoll;
+    AStream.CancelProbe := Probe.Cancelled;
+    try
+      repeat
+        Due := AStream.Step(@SSESink, ASSE);
+        while not AStream.Finished do
+        begin
+          if FStopPending then
+            AStream.Close(@SSESink, ASSE)
+          else if not AStream.Cancelled then
+          begin
+            Now := MCPNowMs;
+            if Now >= Due then
+              Break;
+            // Until the stream is due or the socket is probed again,
+            // whichever comes first.
+            Wait := Due - Now;
+            if Int64(PHTTPDisconnectPoll(APoll)^.LastCheck) +
+              DISCONNECT_POLL_INTERVAL_MS - Now < Wait then
+              Wait := Int64(PHTTPDisconnectPoll(APoll)^.LastCheck) +
+                DISCONNECT_POLL_INTERVAL_MS - Now;
+            if Wait < 1 then
+              Wait := 1;
+            Sleep(Wait);
+          end;
+        end;
+      until AStream.Finished;
+      // Stop seen from inside a check: the final frame, once it has
+      // returned, to a client still connected.
+      if Probe.FStopSeen and not PHTTPDisconnectPoll(APoll)^.Closed then
+        AStream.Close(@SSESink, ASSE);
+    except
+      // A write to a client that went away: the end of the stream.
+      on EStreamError do
+        AStream.Cancel;
+    end;
+  finally
+    AStream.Free;
+    Probe.Free;
+  end;
+end;
+
 // Dispatch one request body through the core and answer it — a
 // single JSON object, or an SSE stream when AStream is set and the
-// handler actually emits a notification.
+// handler actually emits a notification, or when it parks a push
+// stream (#126).
 procedure TMCPHTTPServer.AnswerRequest(ARequest: TFPHTTPConnectionRequest;
   AResponse: TFPHTTPConnectionResponse; const ABody: string;
   AStream, AMalformedRequest: Boolean);
@@ -1150,27 +1251,38 @@ var
   ResponseLine: string;
   Produced: Boolean;
   Poll: THTTPDisconnectPoll;
+  Host: TMCPStreamHost;
+  Parked: TMCPStream;
 begin
   Session := FServer.CreateSession;
+  Host := TMCPStreamHost.Create;
   try
     Poll.Socket := ARequest.Connection.Socket.Handle;
     Poll.LastCheck := 0;
     Poll.Closed := False;
     Session.SetCancellationPoll(HTTPDisconnectPoll, @Poll);
+    Session.StreamHost := Host;
+    Stream.Response := AResponse;
+    Stream.Socket := ARequest.Connection.Socket;
+    Stream.HeadersSent := False;
+    // A handler's checks stop waiting when the transport stops (#126
+    // review).
+    Host.ShutdownProbe := StopRequested;
     if AStream then
     begin
       // Nothing is committed up front: the sink opens the stream on
       // its first event, so a request that fails at protocol level —
       // which no notification ever precedes — still gets the status
       // the mapping prescribes instead of a 200 SSE stream.
-      Stream.Response := AResponse;
-      Stream.Socket := ARequest.Connection.Socket;
-      Stream.HeadersSent := False;
       Produced := False;
+      Parked := nil;
       try
         Produced := FServer.HandleMessage(Session, ABody, @SSESink,
           @Stream, ResponseLine);
-        if Stream.HeadersSent and Produced then
+        // A parked stream goes on the response its notifications
+        // opened, in place of the placeholder (#126 review).
+        Parked := MCPTakeStream(Host, Produced, ResponseLine);
+        if Stream.HeadersSent and Produced and (Parked = nil) then
           SSESink(ResponseLine, @Stream);
       except
         // A dead client stream: the spec forbids sending anything
@@ -1181,12 +1293,26 @@ begin
       // Once the stream is open, the response went out as its last
       // event. Otherwise no notification flowed, so the opt-in changed
       // nothing about how this request is answered.
-      if Stream.HeadersSent then
+      if Stream.HeadersSent and (Parked = nil) then
         Exit;
     end
     else
+    begin
       Produced := FServer.HandleMessage(Session, ABody, nil, nil,
         ResponseLine);
+      // A push stream's handler answers with a placeholder: the stream
+      // writes its own frames from here on (MCPTakeStream's rule).
+      Parked := MCPTakeStream(Host, Produced, ResponseLine);
+    end;
+    if Parked <> nil then
+    begin
+      DriveStream(Parked, Session, @Stream, @Poll);
+      if Stream.HeadersSent then
+        Exit;
+      // Nothing could be written: the client is gone.
+      AResponse.Code := 202;
+      Exit;
+    end;
     // One place answers every non-streamed request (#79 review).
     if Produced then
       AnswerJSON(AResponse, HTTPStatusForResponse(ResponseLine,
@@ -1197,6 +1323,7 @@ begin
       AResponse.Code := 202;
   finally
     Session.Free;
+    Host.Free;
   end;
 end;
 

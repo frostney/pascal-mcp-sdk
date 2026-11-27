@@ -19,7 +19,7 @@ the README links here.
 | Extensions | ✅ `capabilities.extensions` declared on opt-in (`DeclareExtension`); client declarations readable per request |
 | MCP Apps (`io.modelcontextprotocol/ui`) | ✅ `MCP.Apps`: `ui://` HTML resources with `_meta.ui` (CSP, permissions, domain, border), tool links with visibility, startup check of links |
 | Skills (`io.modelcontextprotocol/skills`) | ✅ `MCP.Skills`: skills defined in code as `skill://` resources, `skills/list` (paged), `skills/get`, `resources/directory/read`, SHA-256 digests and sizes, nested skills, the Agent Skills name and field rules; skills loaded from a directory, their frontmatter read with a YAML subset YAML 1.1 and 1.2 parsers agree on |
-| Events (`io.modelcontextprotocol/events`) | ✅ `MCP.Events`: event types with input and payload schemas, `events/list` (paged), poll delivery (`events/poll`) with cursors, `maxEvents`/`hasMore`, truncation and types without replay, derived event ids, the SEP-3415 error codes, `Mcp-Name`/`Mcp-Param-*` on Streamable HTTP; 2026-07-28 only. Push (`events/stream`), webhooks and `list_changed`: not served |
+| Events (`io.modelcontextprotocol/events`) | ✅ `MCP.Events`: event types with input and payload schemas, `events/list` (paged), poll delivery (`events/poll`) with cursors, `maxEvents`/`hasMore`, truncation and types without replay, derived event ids, the SEP-3415 error codes, `Mcp-Name`/`Mcp-Param-*` on Streamable HTTP; push delivery (`events/stream`) from the same check, one occurrence per call: active, event, heartbeat, error and terminated notifications and the final frame, an SSE stream on Streamable HTTP, streams multiplexed in the single-threaded stdio loop and cancelled with `notifications/cancelled`; 2026-07-28 only. Webhooks and `list_changed`: not served |
 | `notifications/progress`, `notifications/message` | ✅ `MCPReportProgress` / `MCPLogMessage` from any handler; strictly opt-in per request (`progressToken` / `logLevel`), severity-filtered, emitted before the response |
 | `_meta` validation, version negotiation | ✅ `-32602` / `-32021` / `-32022` per spec |
 | `ttlMs` / `cacheScope` caching hints (SEP-2549) | ✅ on discover/list/read, tunable via `CacheTtlMs`/`CacheScope` |
@@ -66,9 +66,13 @@ outside Pascal, and by `mcpsmoke`, which reads `mcpdemo`'s skill back
 over stdio and checks its digest and size, and does the same for a
 skill `mcpdemo --skills-dir` loads from disk. The `MCP.Frontmatter`
 suite's expectations are what PyYAML (YAML 1.1) and the `yaml` package
-(YAML 1.2) read from the same text. Events is covered by the `MCP.Events` unit suite, the HTTP binding
-suite for its routing headers, and `mcpsmoke`, which polls `mcpdemo`'s
-minute clock over stdio. MCP Apps and extension negotiation are covered
+(YAML 1.2) read from the same text. Events is covered by the `MCP.Events` unit suite, poll and push
+(each notification's exact line, gaps, cancellation in a running check,
+the replay floor and the schedule on a test clock), the HTTP binding
+suite for the routing headers, the SSE stream, a client close and
+`Stop`, the stdio loop suite for streams beside requests, cancellation,
+the end of input and an idle stdin, and `mcpsmoke`, which polls
+`mcpdemo`'s minute clock over stdio and streams it over real pipes. MCP Apps and extension negotiation are covered
 by the
 `MCP.Apps` unit suite and the `mcpsmoke` checks of `mcpdemo`'s card
 over stdio: the wire data and the served HTML. No host renders the card

@@ -1,11 +1,16 @@
-{ MCP.Events.Test — the Events extension (#118): the declaration,
+{ MCP.Events.Test — the Events extension (#118, #126): the declaration,
   events/list, poll delivery from now and from a cursor, maxEvents and
   hasMore, truncation, event types without replay, derived event ids,
   the errors (-32023 for an unknown type, -32602 for bad parameters or
   arguments, -32601 for a classic client, -32603 for a check's
-  mistakes) and the registration guards. Shapes verified 2026-11-27
+  mistakes) and the registration guards; and push delivery
+  (events/stream): the active, event, heartbeat, error and terminated
+  notifications, the final frame, per-event cursors, gaps, types without
+  replay, heartbeat grants and the immediate errors. Shapes verified
+  2026-11-27
   against modelcontextprotocol/ext-events
-  specification/beta/events/events.mdx at c77b843. }
+  specification/beta/events/events.mdx at c77b843 (Push-Based Delivery,
+  Cursor Lifecycle, Subscription Termination). }
 
 program MCP.Events.Test;
 
@@ -21,6 +26,7 @@ uses
   MCP.Protocol,
   MCP.Schema,
   MCP.Server,
+  MCP.Streams,
   MCP.Testing,
   TestingPascalLibrary;
 
@@ -280,7 +286,7 @@ begin
   Line := Send('{"jsonrpc":"2.0","id":2,"method":"events/list","params":{' +
     META + '}}');
   Expect<Boolean>(Pos('{ "events" : [{ "name" : "clock.tick", "description" ' +
-    ': "Ticks of the clock, ' + GRUSSE + '", "delivery" : ["poll"], ' +
+    ': "Ticks of the clock, ' + GRUSSE + '", "delivery" : ["poll", "push"], ' +
     '"inputSchema" : { "type" : "object", "properties" : { "region" : ' +
     '{ "type" : "string", "x-mcp-header" : "Region" } } }, "payloadSchema" : ' +
     '{ "type" : "object", "properties" : { "n" : { "type" : "integer" }, ' +
@@ -298,7 +304,8 @@ begin
   Expect<string>(Send('{"jsonrpc":"2.0","id":2,"method":"events/list",' +
     '"params":{' + META + '}}')).ToBe('{ "jsonrpc" : "2.0", "id" : 2, ' +
     '"result" : { "events" : [{ "name" : "one", "description" : ' +
-    '"One event", "delivery" : ["poll"], "inputSchema" : { "type" : ' +
+    '"One event", "delivery" : ["poll", "push"], "inputSchema" : ' +
+    '{ "type" : ' +
     '"object", "properties" : {} }, "payloadSchema" : { "type" : "object", ' +
     '"properties" : { "n" : { "type" : "integer" } }, "required" : ["n"] } }' +
     '], "resultType" : "complete", "_meta" : { ' +
@@ -680,7 +687,8 @@ end;
 procedure TEventsSuite.SetupTests;
 begin
   Test('the extension is declared with {}', TestDeclaration);
-  Test('events/list: types, poll delivery, schemas, non-ASCII', TestList);
+  Test('events/list: types, poll and push delivery, schemas, non-ASCII',
+    TestList);
   Test('a poll from now: no events and a fresh cursor', TestPollFromNow);
   Test('a poll from a cursor, maxEvents and hasMore', TestPollFromCursor);
   Test('truncated, and cursor null for a type without replay',
@@ -700,7 +708,757 @@ begin
   Test('events/list for one type is one exact line', TestListLine);
 end;
 
+{ ───────── push delivery (#126) ───────── }
+
+var
+  // The push upstream: occurrences at positions 1 .. UpstreamHead, and
+  // a fault the next check call shows ('' for none; 'gap' is spent by
+  // one call).
+  UpstreamHead: Integer;
+  PushFault: string;
+  ReplayCursors: string; // the cursors the no-replay check was given
+  Captured: string;      // the lines the capture sink took
+  AgeLog: string;        // the maxAgeMs each push check call was given
+  FakeNow: Int64;        // the streams' clock in these tests
+  ProbeCancelled: Boolean; // what the test's cancel probe reports
+  SawCancel: Boolean;    // a waiting check saw IsCancelled turn true
+
+function TestClock: Int64;
+begin
+  Result := FakeNow;
+end;
+
+type
+  TTestProbe = class
+    function Cancelled: Boolean;
+  end;
+
+function TTestProbe.Cancelled: Boolean;
+begin
+  Result := ProbeCancelled;
+end;
+
+procedure CaptureSink(const ALine: string; AUserData: Pointer);
+begin
+  Captured := Captured + ALine + #10;
+end;
+
+// Faults that raise, or that make the check behave as a slow, chatty
+// or cooperative one.
+procedure PushRaise(const ACtx: TMCPRequestContext);
+var
+  I: Integer;
+begin
+  if PushFault = 'boom' then
+    raise Exception.Create('upstream 503');
+  if PushFault = 'servererr' then
+    raise EMCPServer.Create('the check''s own EMCPServer');
+  if PushFault = 'forbid' then
+    raise EMCPProtocolError.Create(-32024, 'Forbidden',
+      TJSONObject.Create(['reason', 'Access revoked']));
+  if PushFault = 'forbidarray' then
+    raise EMCPProtocolError.Create(-32024, 'Forbidden',
+      TJSONArray.Create([1]));
+  if PushFault = 'chatty' then
+    MCPLogMessage(ACtx, 'error', 'from the check');
+  if PushFault = 'slow' then
+    Inc(FakeNow, 5000);
+  // The cancellation arrives while the check runs, which then waits for
+  // IsCancelled.
+  if PushFault = 'wait' then
+    ProbeCancelled := True;
+  if PushFault = 'wait' then
+    for I := 1 to 1000 do
+      if ACtx.IsCancelled then
+      begin
+        SawCancel := True;
+        Break;
+      end;
+end;
+
+function PushCheck(const AQuery: TMCPEventQuery;
+  const ACtx: TMCPRequestContext): TMCPEventPoll;
+var
+  From, Last, I: Integer;
+begin
+  AgeLog := AgeLog + IntToStr(AQuery.MaxAgeMs) + ',';
+  PushRaise(ACtx);
+  Result := MCPEventPoll(IntToStr(UpstreamHead), TJSONArray.Create);
+  Result.NextPollMs := 1000;
+  if PushFault = 'interval5' then
+    Result.NextPollMs := 5000;
+  if AQuery.FromNow then
+    Exit;
+  // More waiting, none delivered yet: the backlog keeps draining; the
+  // slow kind takes 100 ms of the test clock per call.
+  if PushFault = 'stallslow' then
+    Inc(FakeNow, 100);
+  if (PushFault = 'stall') or (PushFault = 'stallslow') then
+  begin
+    Result.HasMore := True;
+    Result.Cursor := AQuery.Cursor;
+    Exit;
+  end;
+  if PushFault = 'gap' then
+  begin
+    PushFault := '';
+    Result.Truncated := True;
+    Exit;
+  end;
+  // A gap with the first retained occurrence after it, its resume
+  // position given (gapevent) or not (gapevent0).
+  if (PushFault = 'gapevent') or (PushFault = 'gapevent0') then
+  begin
+    if PushFault = 'gapevent' then
+      Result.GapCursor := IntToStr(UpstreamHead - 1);
+    PushFault := '';
+    Result.Truncated := True;
+    Result.Events.Add(MCPEventOccurrence('e' + IntToStr(UpstreamHead),
+      '2026-11-27T10:00:00Z', TJSONObject.Create(['n', UpstreamHead])));
+    Exit;
+  end;
+  if PushFault = 'mistake' then
+  begin
+    Result.Events.Add(MCPEventOccurrence('m', 'yesterday',
+      TJSONObject.Create(['n', 0])));
+    Exit;
+  end;
+  From := StrToInt(AQuery.Cursor) + 1;
+  Last := UpstreamHead;
+  if (AQuery.MaxEvents >= 0) and (From + AQuery.MaxEvents - 1 < Last) then
+  begin
+    Last := From + AQuery.MaxEvents - 1;
+    Result.HasMore := True;
+  end;
+  for I := From to Last do
+    Result.Events.Add(MCPEventOccurrence('e' + IntToStr(I),
+      '2026-11-27T10:0' + IntToStr(I) + ':00Z', TJSONObject.Create(['n', I])));
+  if Last >= From then
+    Result.Cursor := IntToStr(Last);
+end;
+
+// No replay: the position stays the server's (p0, p1, ...), and one
+// occurrence waits at p0.
+function NoReplayPushCheck(const AQuery: TMCPEventQuery;
+  const ACtx: TMCPRequestContext): TMCPEventPoll;
+begin
+  ReplayCursors := ReplayCursors + '[' + AQuery.Cursor + ']';
+  Result := MCPEventPoll('p0', TJSONArray.Create);
+  Result.NoReplay := True;
+  Result.NextPollMs := 1000;
+  // A cursor the client brought, with more waiting behind it.
+  if AQuery.Cursor = 'zzz' then
+  begin
+    Result.Events.Add(MCPEventOccurrence('x0', '2026-11-27T10:00:00Z',
+      TJSONObject.Create(['n', 0])));
+    Result.HasMore := True;
+  end
+  else if AQuery.Cursor = 'p0' then
+  begin
+    Result.Events.Add(MCPEventOccurrence('x', '2026-11-27T10:00:00Z',
+      TJSONObject.Create(['n', 1])));
+    Result.Cursor := 'p1';
+  end;
+end;
+
+function QuietCheck(const AQuery: TMCPEventQuery;
+  const ACtx: TMCPRequestContext): TMCPEventPoll;
+begin
+  Result := MCPEventPoll('0');
+end;
+
+// A sink as slow as three seconds of the test clock.
+procedure SlowSink(const ALine: string; AUserData: Pointer);
+begin
+  Captured := Captured + ALine + #10;
+  Inc(FakeNow, 3000);
+end;
+
+type
+  TPushSuite = class(TTestSuite)
+  private
+    FServer: TMCPServer;
+    FSession: TMCPSession;
+    FHost: TMCPStreamHost;
+    FStream: TMCPStream;
+    // events/stream with AParams; the response line, and the stream
+    // parked (nil when the request was refused).
+    function Open(const AParams: string; const AId: string = '7';
+      const AMeta: string = META): string;
+    function Step(ANowMs: Int64): Int64;
+  protected
+    procedure BeforeEach; override;
+    procedure AfterEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestOpenWithBacklog;
+    procedure TestHeartbeatThenEvent;
+    procedure TestHeartbeatGrant;
+    procedure TestGapMidStream;
+    procedure TestTransientError;
+    procedure TestTerminated;
+    procedure TestMistakeTerminates;
+    procedure TestNoReplay;
+    procedure TestImmediateErrors;
+    procedure TestStringIdAndClose;
+    procedure TestGapBeforeAnEvent;
+    procedure TestFirstCheckQuiet;
+    procedure TestCheckSeesCancellation;
+    procedure TestCheckEMCPServerRetries;
+    procedure TestReplayFloorWhileCatchingUp;
+    procedure TestNoReplayCursorAndHasMore;
+    procedure TestScheduleFromCheckCompletion;
+    procedure TestTerminatedDataIsAnObject;
+    procedure TestCutoffAnchoredWhileDraining;
+    procedure TestNoIntervalIsTheDefault;
+    procedure TestIntervalNotDelayedByWrites;
+    procedure TestCutoffFromTheOpening;
+    procedure TestOpeningAndRetrySchedule;
+    procedure TestHugeMaxAgeSaturates;
+    procedure TestHeartbeatsDuringAScan;
+    procedure TestFractionalIdRefused;
+  end;
+
+procedure TPushSuite.BeforeEach;
+begin
+  UpstreamHead := 3;
+  PushFault := '';
+  ReplayCursors := '';
+  Captured := '';
+  AgeLog := '';
+  FakeNow := 0;
+  // Streams, and the opening check's timing, run on the test clock.
+  MCPStreamClock := @TestClock;
+  ProbeCancelled := False;
+  SawCancel := False;
+  FServer := TMCPServer.Create('events', '1.0');
+  RegisterEvent(FServer, 'tick', 'Ticks',
+    ObjectSchema.AddString('region', '', False).Build,
+    ObjectSchema.AddInteger('n').Build, PushCheck);
+  RegisterEvent(FServer, 'pulse', 'No replay', ObjectSchema,
+    ObjectSchema.AddInteger('n'), NoReplayPushCheck);
+  RegisterEvent(FServer, 'quiet', 'No interval', ObjectSchema, ObjectSchema,
+    QuietCheck, 0);
+  FSession := FServer.CreateSession;
+  FHost := TMCPStreamHost.Create;
+  FSession.StreamHost := FHost;
+  FStream := nil;
+end;
+
+procedure TPushSuite.AfterEach;
+begin
+  MCPStreamClock := nil;
+  FreeAndNil(FStream);
+  FreeAndNil(FSession);
+  FreeAndNil(FHost);
+  FreeAndNil(FServer);
+end;
+
+function TPushSuite.Open(const AParams, AId, AMeta: string): string;
+begin
+  FServer.HandleMessage(FSession, '{"jsonrpc":"2.0","id":' + AId +
+    ',"method":"events/stream","params":{' + AParams + AMeta + '}}',
+    CaptureSink, nil, Result);
+  FStream := FHost.TakeParked;
+  if FStream <> nil then
+    FStream.Clock := @TestClock;
+end;
+
+function TPushSuite.Step(ANowMs: Int64): Int64;
+begin
+  Captured := '';
+  FakeNow := ANowMs;
+  Result := FStream.Step(CaptureSink, nil);
+end;
+
+const
+  SUB = '"_meta" : { "io.modelcontextprotocol/subscriptionId" : 7 }';
+
+// The first frame is active with the client's own cursor; each backlog
+// occurrence follows with the exact cursor after it (one per check
+// call, hasMore read on at once); then the check waits nextPollMs.
+procedure TPushSuite.TestOpenWithBacklog;
+begin
+  Open('"name":"tick","cursor":"1",');
+  Expect<Boolean>(FStream <> nil).ToBe(True);
+  Expect<Int64>(Step(0)).ToBe(1000);
+  Expect<string>(Captured).ToBe(
+    '{ "jsonrpc" : "2.0", "method" : "notifications/events/active", ' +
+    '"params" : { "cursor" : "1", "truncated" : false, "heartbeatMs" : ' +
+    '30000, ' + SUB + ' } }'#10 +
+    '{ "jsonrpc" : "2.0", "method" : "notifications/events/event", ' +
+    '"params" : { "eventId" : "e2", "timestamp" : "2026-11-27T10:02:00Z", ' +
+    '"data" : { "n" : 2 }, "name" : "tick", "cursor" : "2", ' + SUB +
+    ' } }'#10 +
+    '{ "jsonrpc" : "2.0", "method" : "notifications/events/event", ' +
+    '"params" : { "eventId" : "e3", "timestamp" : "2026-11-27T10:03:00Z", ' +
+    '"data" : { "n" : 3 }, "name" : "tick", "cursor" : "3", ' + SUB +
+    ' } }'#10);
+end;
+
+// A stream from now opens with the fresh cursor; nothing new until the
+// heartbeat, which carries the position checked up to; then a new
+// occurrence.
+procedure TPushSuite.TestHeartbeatThenEvent;
+begin
+  Open('"name":"tick",');
+  Step(0);
+  Expect<Boolean>(Pos('"cursor" : "3", "truncated" : false', Captured) > 0)
+    .ToBe(True);
+  Expect<Int64>(Step(1000)).ToBe(2000);
+  Expect<string>(Captured).ToBe('');
+  Step(30000);
+  Expect<string>(Captured).ToBe('{ "jsonrpc" : "2.0", "method" : ' +
+    '"notifications/events/heartbeat", "params" : { "cursor" : "3", ' + SUB +
+    ' } }'#10);
+  UpstreamHead := 4;
+  Step(31000);
+  Expect<Boolean>(Pos('"eventId" : "e4"', Captured) > 0).ToBe(True);
+  Expect<Boolean>(Pos('"cursor" : "4"', Captured) > 0).ToBe(True);
+end;
+
+// The grant is authoritative: a suggestion is clamped to 1 s .. 5 min
+// (events.mdx, Lifecycle), and the heartbeat follows the grant.
+procedure TPushSuite.TestHeartbeatGrant;
+begin
+  Open('"name":"tick","heartbeatMs":10,');
+  Step(0);
+  Expect<Boolean>(Pos('"heartbeatMs" : 1000,', Captured) > 0).ToBe(True);
+  Step(1000);
+  Expect<Boolean>(Pos('notifications/events/heartbeat', Captured) > 0)
+    .ToBe(True);
+  FreeAndNil(FStream);
+  Open('"name":"tick","heartbeatMs":1e9,');
+  Step(0);
+  Expect<Boolean>(Pos('"heartbeatMs" : 300000,', Captured) > 0).ToBe(True);
+  FreeAndNil(FStream);
+  Open('"name":"tick","heartbeatMs":5000,');
+  Step(0);
+  Expect<Boolean>(Pos('"heartbeatMs" : 5000,', Captured) > 0).ToBe(True);
+end;
+
+// A gap mid-stream is a fresh active with truncated and the position
+// the server resumed from; the stream goes on.
+procedure TPushSuite.TestGapMidStream;
+begin
+  Open('"name":"tick","cursor":"3",');
+  Step(0);
+  UpstreamHead := 6;
+  PushFault := 'gap';
+  Step(1000);
+  Expect<string>(Captured).ToBe('{ "jsonrpc" : "2.0", "method" : ' +
+    '"notifications/events/active", "params" : { "cursor" : "6", ' +
+    '"truncated" : true, "heartbeatMs" : 30000, ' + SUB + ' } }'#10);
+  Expect<Boolean>(FStream.Finished).ToBe(False);
+end;
+
+// A failure that is not a protocol error is recoverable: an error
+// notification, and the next interval tries again.
+procedure TPushSuite.TestTransientError;
+begin
+  Open('"name":"tick","cursor":"3",');
+  Step(0);
+  PushFault := 'boom';
+  Expect<Int64>(Step(1000)).ToBe(2000);
+  Expect<string>(Captured).ToBe('{ "jsonrpc" : "2.0", "method" : ' +
+    '"notifications/events/error", "params" : { "error" : { "code" : ' +
+    '-32603, "message" : "Internal error" }, ' + SUB + ' } }'#10);
+  PushFault := '';
+  UpstreamHead := 4;
+  Step(2000);
+  Expect<Boolean>(Pos('"eventId" : "e4"', Captured) > 0).ToBe(True);
+end;
+
+// A protocol error from the check ends the subscription: terminated
+// with its code, message and data, then the final frame.
+procedure TPushSuite.TestTerminated;
+begin
+  Open('"name":"tick","cursor":"3",');
+  Step(0);
+  PushFault := 'forbid';
+  Step(1000);
+  Expect<string>(Captured).ToBe('{ "jsonrpc" : "2.0", "method" : ' +
+    '"notifications/events/terminated", "params" : { "error" : { "code" : ' +
+    '-32024, "message" : "Forbidden", "data" : { "reason" : ' +
+    '"Access revoked" } }, ' + SUB + ' } }'#10 +
+    '{ "jsonrpc" : "2.0", "id" : 7, "result" : { "resultType" : ' +
+    '"complete", "_meta" : { "io.modelcontextprotocol/subscriptionId" : 7 ' +
+    '} } }'#10);
+  Expect<Boolean>(FStream.Finished).ToBe(True);
+end;
+
+// A result that breaks the occurrence rules is the server's mistake,
+// and would recur: the stream terminates with -32603.
+procedure TPushSuite.TestMistakeTerminates;
+begin
+  Open('"name":"tick","cursor":"3",');
+  Step(0);
+  PushFault := 'mistake';
+  Step(1000);
+  Expect<string>(Captured).ToBe('{ "jsonrpc" : "2.0", "method" : ' +
+    '"notifications/events/terminated", "params" : { "error" : { "code" : ' +
+    '-32603, "message" : "Internal error" }, ' + SUB + ' } }'#10 +
+    '{ "jsonrpc" : "2.0", "id" : 7, "result" : { "resultType" : ' +
+    '"complete", ' + SUB + ' } }'#10);
+  Expect<Boolean>(FStream.Finished).ToBe(True);
+end;
+
+// A type without replay sends cursor null everywhere and no truncated,
+// while the stream keeps the check's own position between calls.
+procedure TPushSuite.TestNoReplay;
+begin
+  Open('"name":"pulse",');
+  Step(0);
+  Expect<Boolean>(Pos('"cursor" : null, "truncated" : false', Captured) > 0)
+    .ToBe(True);
+  Step(1000);
+  Expect<Boolean>(Pos('"eventId" : "x"', Captured) > 0).ToBe(True);
+  Expect<Boolean>(Pos('"cursor" : null, ' + SUB, Captured) > 0).ToBe(True);
+  Expect<string>(ReplayCursors).ToBe('[][p0]');
+end;
+
+// An invalid subscription is the immediate JSON-RPC error and no stream
+// (events.mdx, Event delivery); a transport that cannot stream gets
+// -32026; a classic client -32601.
+procedure TPushSuite.TestImmediateErrors;
+var
+  Session: TMCPSession;
+  Line: string;
+begin
+  Expect<Boolean>(Pos('"code" : -32023', Open('"name":"none",')) > 0)
+    .ToBe(True);
+  Expect<Boolean>(FStream = nil).ToBe(True);
+  Expect<Boolean>(Pos('"code" : -32602', Open('"name":"tick",' +
+    '"arguments":{"region":1},')) > 0).ToBe(True);
+  Expect<Boolean>(Pos('"code" : -32602', Open('"name":"tick",' +
+    '"heartbeatMs":-1,')) > 0).ToBe(True);
+  PushFault := 'forbid';
+  Line := Open('"name":"tick","cursor":"1",');
+  Expect<string>(Line).ToBe('{ "jsonrpc" : "2.0", "id" : 7, "error" : { ' +
+    '"code" : -32024, "message" : "Forbidden", "data" : { "reason" : ' +
+    '"Access revoked" } } }');
+  Expect<Boolean>(FStream = nil).ToBe(True);
+  PushFault := '';
+  Session := FServer.CreateSession;
+  try
+    FServer.HandleMessage(Session, '{"jsonrpc":"2.0","id":8,"method":' +
+      '"events/stream","params":{"name":"tick",' + META + '}}', Line);
+  finally
+    Session.Free;
+  end;
+  Expect<string>(Line).ToBe('{ "jsonrpc" : "2.0", "id" : 8, "error" : { ' +
+    '"code" : -32026, "message" : "Unsupported", "data" : { "feature" : ' +
+    '"deliveryMode", "value" : "push" } } }');
+end;
+
+// A string id is the subscription id as it is; Close is the final frame
+// the server sends when it ends the stream.
+procedure TPushSuite.TestStringIdAndClose;
+begin
+  Open('"name":"tick",', '"s-1"');
+  Step(0);
+  Expect<Boolean>(Pos('"io.modelcontextprotocol/subscriptionId" : "s-1"',
+    Captured) > 0).ToBe(True);
+  Captured := '';
+  FStream.Close(CaptureSink, nil);
+  Expect<Boolean>(Pos('{ "jsonrpc" : "2.0", "id" : "s-1", "result" : ',
+    Captured) = 1).ToBe(True);
+  Expect<Boolean>(FStream.Finished).ToBe(True);
+end;
+
+// A gap whose first retained occurrence follows: with the check's
+// GapCursor, active carries the position before it, so a client that
+// persists it and reconnects is sent the occurrence again; without one,
+// the fresh cursor after it, the occurrence then part of the gap
+// (#126 review).
+procedure TPushSuite.TestGapBeforeAnEvent;
+begin
+  Open('"name":"tick","cursor":"3",');
+  Step(0);
+  UpstreamHead := 6;
+  PushFault := 'gapevent';
+  Step(1000);
+  Expect<Boolean>(Pos('"cursor" : "5", "truncated" : true', Captured) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Pos('"eventId" : "e6"', Captured) >
+    Pos('notifications/events/active', Captured)).ToBe(True);
+  Expect<Boolean>(Pos('"cursor" : "6", ' + SUB, Captured) > 0).ToBe(True);
+  // Without a GapCursor the cursor is the fresh one, after the event:
+  // the event is part of the gap truncated signals.
+  PushFault := 'gapevent0';
+  UpstreamHead := 8;
+  Step(2000);
+  Expect<Boolean>(Pos('"cursor" : "8", "truncated" : true', Captured) > 0)
+    .ToBe(True);
+  // Reconnecting from the gap's position delivers the occurrence.
+  FreeAndNil(FStream);
+  UpstreamHead := 6;
+  Open('"name":"tick","cursor":"5",');
+  Step(0);
+  Expect<Boolean>(Pos('"eventId" : "e6"', Captured) > 0).ToBe(True);
+end;
+
+// The first check runs without a notifier, so a check that logs cannot
+// open the transport's response before the stream does, whether the
+// subscription is accepted or refused (#126 review).
+procedure TPushSuite.TestFirstCheckQuiet;
+const
+  LOUD = '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"io.modelcontextprotocol/logLevel":"debug","progressToken":"p"}';
+var
+  Line: string;
+begin
+  PushFault := 'chatty';
+  Captured := '';
+  Open('"name":"tick","cursor":"3",', '7', LOUD);
+  Expect<string>(Captured).ToBe('');
+  Expect<Boolean>(FStream <> nil).ToBe(True);
+  FreeAndNil(FStream);
+  PushFault := 'forbid';
+  Line := Open('"name":"tick","cursor":"3",', '8', LOUD);
+  Expect<string>(Captured).ToBe('');
+  Expect<Boolean>(Pos('"code" : -32024', Line) > 0).ToBe(True);
+end;
+
+// A later check that waits on IsCancelled sees the transport's probe,
+// and nothing is written after the cancellation (#126 review).
+procedure TPushSuite.TestCheckSeesCancellation;
+var
+  Probe: TTestProbe;
+begin
+  Probe := TTestProbe.Create;
+  try
+    Open('"name":"tick","cursor":"3",');
+    FStream.CancelProbe := Probe.Cancelled;
+    Step(0);
+    // The probe turns true only once the check is running.
+    PushFault := 'wait';
+    UpstreamHead := 4;
+    Step(1000);
+    Expect<Boolean>(SawCancel).ToBe(True);
+    Expect<string>(Captured).ToBe('');
+    Expect<Boolean>(FStream.Finished).ToBe(True);
+  finally
+    FStream.CancelProbe := nil;
+    Probe.Free;
+  end;
+end;
+
+// An EMCPServer the check itself raises is an ordinary failure: an
+// error notification and a retry, not the end (#126 review).
+procedure TPushSuite.TestCheckEMCPServerRetries;
+begin
+  Open('"name":"tick","cursor":"3",');
+  Step(0);
+  PushFault := 'servererr';
+  Step(1000);
+  Expect<Boolean>(Pos('notifications/events/error', Captured) > 0)
+    .ToBe(True);
+  Expect<Boolean>(FStream.Finished).ToBe(False);
+end;
+
+// maxAgeMs bounds the whole first backlog, not only its first page,
+// and is dropped once the stream has caught up (#126 review).
+procedure TPushSuite.TestReplayFloorWhileCatchingUp;
+begin
+  Open('"name":"tick","cursor":"0","maxAgeMs":60000,');
+  Step(0);
+  Step(1000);
+  Expect<string>(AgeLog).ToBe('60000,60000,60000,-1,');
+end;
+
+// A type without replay sends null from the first frame even when the
+// client brought a cursor, and drains hasMore from its own position
+// (#126 review).
+procedure TPushSuite.TestNoReplayCursorAndHasMore;
+begin
+  Open('"name":"pulse","cursor":"zzz",');
+  Step(0);
+  Expect<Boolean>(Pos('"cursor" : null, "truncated" : false', Captured) > 0)
+    .ToBe(True);
+  Expect<Integer>(Pos('"zzz"', Captured)).ToBe(0);
+  Expect<Boolean>(Pos('"eventId" : "x0"', Captured) > 0).ToBe(True);
+  Expect<Boolean>(Pos('"eventId" : "x"', Captured) > 0).ToBe(True);
+  Expect<string>(ReplayCursors).ToBe('[zzz][p0]');
+end;
+
+// The next check is timed from when the check returned, not from when
+// the step began (#126 review).
+procedure TPushSuite.TestScheduleFromCheckCompletion;
+begin
+  Open('"name":"tick","cursor":"3",');
+  Step(0);
+  PushFault := 'slow';
+  Expect<Int64>(Step(1000)).ToBe(7000);
+end;
+
+// Error data that is no object is left out of terminated (events.mdx,
+// Subscription Termination: data?: object).
+procedure TPushSuite.TestTerminatedDataIsAnObject;
+begin
+  Open('"name":"tick","cursor":"3",');
+  Step(0);
+  PushFault := 'forbidarray';
+  Step(1000);
+  Expect<Boolean>(Pos('"error" : { "code" : -32024, "message" : ' +
+    '"Forbidden" }', Captured) > 0).ToBe(True);
+end;
+
+// The replay cutoff holds where replay began: a page drained later
+// gets an age grown by the time since (#126 review).
+procedure TPushSuite.TestCutoffAnchoredWhileDraining;
+begin
+  PushFault := 'stall';
+  Open('"name":"tick","cursor":"0","maxAgeMs":60000,');
+  Step(0);
+  Step(500);
+  Expect<Boolean>(Pos('60500,', AgeLog) > 0).ToBe(True);
+  Expect<Integer>(Pos('-1,', AgeLog)).ToBe(0);
+end;
+
+// A registration and a check with no interval do not make a quiet
+// stream ask again at once (#126 review).
+procedure TPushSuite.TestNoIntervalIsTheDefault;
+begin
+  Open('"name":"quiet",');
+  Expect<Int64>(Step(0)).ToBe(30000);
+end;
+
+// Writes that take time do not delay the next check: it is timed from
+// the check's return (#126 review).
+procedure TPushSuite.TestIntervalNotDelayedByWrites;
+begin
+  Open('"name":"tick","cursor":"3",');
+  Step(0);
+  UpstreamHead := 4;
+  PushFault := 'interval5';
+  FakeNow := 1000;
+  Captured := '';
+  Expect<Int64>(FStream.Step(SlowSink, nil)).ToBe(6000);
+  Expect<Boolean>(Pos('"eventId" : "e4"', Captured) > 0).ToBe(True);
+end;
+
+// The cutoff is anchored when the subscription opens, even when the
+// transport steps the stream later (#126 review).
+procedure TPushSuite.TestCutoffFromTheOpening;
+begin
+  // Opened at 2 s, first stepped at 7 s: the age grows by 5 s.
+  PushFault := 'stall';
+  FakeNow := 2000;
+  Open('"name":"tick","cursor":"0","maxAgeMs":60000,');
+  Step(7000);
+  Expect<Boolean>(Pos('65000,', AgeLog) > 0).ToBe(True);
+end;
+
+// The first page is scheduled from when the opening check returned,
+// and a failed check's retry from the failure (#126 review).
+procedure TPushSuite.TestOpeningAndRetrySchedule;
+begin
+  Open('"name":"tick","cursor":"3",');
+  Step(3000);
+  // Due at 1000, so the step at 3000 checked again.
+  Expect<string>(AgeLog).ToBe('-1,-1,');
+  // A 5 s interval, then a failure at 10 s whose error write takes 3 s:
+  // the retry is due at 15 s, not 18 s.
+  PushFault := 'interval5';
+  Step(4000);
+  PushFault := 'boom';
+  FakeNow := 10000;
+  Captured := '';
+  Expect<Int64>(FStream.Step(SlowSink, nil)).ToBe(15000);
+end;
+
+// A maxAgeMs as large as an Int64 saturates while the backlog drains
+// (#126 review).
+procedure TPushSuite.TestHugeMaxAgeSaturates;
+begin
+  PushFault := 'stall';
+  Open('"name":"tick","cursor":"0","maxAgeMs":9223372036854775807,');
+  Step(0);
+  Step(500);
+  Expect<Boolean>(Pos('9223372036854775807,', AgeLog) > 0).ToBe(True);
+  Expect<Integer>(Pos('-9', AgeLog)).ToBe(0);
+end;
+
+// A long backlog scan keeps the granted heartbeat between pages (#126
+// review): fifty 100 ms pages on a 1 s grant send four or more.
+procedure TPushSuite.TestHeartbeatsDuringAScan;
+var
+  Count, At: Integer;
+begin
+  PushFault := 'stallslow';
+  Open('"name":"tick","cursor":"0","heartbeatMs":1000,');
+  // The opening check took the clock to 100 ms.
+  Step(100);
+  Count := 0;
+  At := Pos('notifications/events/heartbeat', Captured);
+  while At > 0 do
+  begin
+    Inc(Count);
+    At := Pos('notifications/events/heartbeat', Copy(Captured, 1, MaxInt),
+      At + 1);
+  end;
+  Expect<Boolean>(Count >= 4).ToBe(True);
+end;
+
+// A fractional request id cannot be a subscription id: refused before
+// the opening check, with no stream (#126 review).
+procedure TPushSuite.TestFractionalIdRefused;
+begin
+  Expect<Boolean>(Pos('"code" : -32602', Open('"name":"tick",', '1.5')) > 0)
+    .ToBe(True);
+  Expect<Boolean>(FStream = nil).ToBe(True);
+  Expect<string>(AgeLog).ToBe('');
+end;
+
+procedure TPushSuite.SetupTests;
+begin
+  Test('a stream opens with active, then the backlog one cursor each',
+    TestOpenWithBacklog);
+  Test('a heartbeat carries the checked position, then a new event',
+    TestHeartbeatThenEvent);
+  Test('the heartbeat grant is clamped and followed', TestHeartbeatGrant);
+  Test('a gap mid-stream is a fresh active with truncated',
+    TestGapMidStream);
+  Test('a transient failure is an error notification and a retry',
+    TestTransientError);
+  Test('a protocol error terminates with the final frame', TestTerminated);
+  Test('a check''s mistake terminates with -32603', TestMistakeTerminates);
+  Test('a type without replay keeps its position off the wire',
+    TestNoReplay);
+  Test('invalid subscriptions answer at once; no host is -32026',
+    TestImmediateErrors);
+  Test('a string id is the subscription id; Close sends the final frame',
+    TestStringIdAndClose);
+  Test('a gap before an event resumes before it', TestGapBeforeAnEvent);
+  Test('the first check runs without a notifier', TestFirstCheckQuiet);
+  Test('a waiting check sees the transport''s cancellation',
+    TestCheckSeesCancellation);
+  Test('the check''s own EMCPServer is an error and a retry',
+    TestCheckEMCPServerRetries);
+  Test('maxAgeMs bounds the whole first backlog',
+    TestReplayFloorWhileCatchingUp);
+  Test('no replay: null from the first frame, hasMore drained',
+    TestNoReplayCursorAndHasMore);
+  Test('the next check is timed from the check''s return',
+    TestScheduleFromCheckCompletion);
+  Test('terminated carries object data only', TestTerminatedDataIsAnObject);
+  Test('the replay cutoff holds while the backlog drains',
+    TestCutoffAnchoredWhileDraining);
+  Test('no interval is the default one', TestNoIntervalIsTheDefault);
+  Test('writes do not delay the next check', TestIntervalNotDelayedByWrites);
+  Test('the cutoff is anchored at the opening', TestCutoffFromTheOpening);
+  Test('the first page and a retry are scheduled from their check',
+    TestOpeningAndRetrySchedule);
+  Test('a huge maxAgeMs saturates', TestHugeMaxAgeSaturates);
+  Test('heartbeats keep their interval during a long scan',
+    TestHeartbeatsDuringAScan);
+  Test('a fractional request id is refused', TestFractionalIdRefused);
+end;
+
 begin
   TestRunnerProgram.AddSuite(TEventsSuite.Create('Events: poll delivery'));
+  TestRunnerProgram.AddSuite(TPushSuite.Create('Events: push delivery'));
   TestRunnerProgram.Run;
 end.

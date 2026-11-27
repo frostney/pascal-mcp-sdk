@@ -648,6 +648,113 @@ begin
   end;
 end;
 
+// Push delivery over stdio (#126), the minute clock fixed 10 seconds
+// into minute M: a stream from M-2 opens with active and the two ticks,
+// each with its cursor; a second stream and a tools/list are answered
+// while it is open; its heartbeat follows the 1 s grant; once it is
+// cancelled nothing more comes for it (events.mdx, Push-Based
+// Delivery, verified 2026-11-27).
+procedure PushBattery;
+const
+  M = 29929560; // 2026-11-27T10:00:00Z in minutes since 1970
+  SUB = 'io.modelcontextprotocol/subscriptionId';
+var
+  Clock: TProcess;
+  Message: TJSONObject;
+
+  function Next: TJSONObject;
+  begin
+    FreeAndNil(Message);
+    Message := NextJson(Clock);
+    Result := Message;
+  end;
+
+  function Arrived(const AMethod: string; ASubscription: Integer): Boolean;
+  var
+    Meta, Id: TJSONData;
+  begin
+    Result := False;
+    if (Message = nil) or (PathString(Message, 'method') <> AMethod) then
+      Exit;
+    // A key with dots: looked up by name, not by path.
+    Meta := FindPath(Message, 'params._meta');
+    if (Meta = nil) or (Meta.JSONType <> jtObject) then
+      Exit;
+    Id := TJSONObject(Meta).Find(SUB);
+    Result := (Id <> nil) and (Id.JSONType = jtNumber) and
+      (Id.AsInteger = ASubscription);
+  end;
+
+begin
+  Message := nil;
+  Clock := TProcess.Create(nil);
+  try
+    Clock.Executable := DemoBinary;
+    Clock.Parameters.Add('--clock-at');
+    Clock.Parameters.Add(IntToStr(Int64(M) * 60000 + 10000));
+    Clock.Options := [poUsePipes];
+    try
+      Clock.Execute;
+    except
+      on E: Exception do
+      begin
+        Check(False, 'push: launch ' + DemoBinary + ': ' + E.Message);
+        Exit;
+      end;
+    end;
+    try
+      SendLine(Clock, '{"jsonrpc":"2.0","id":21,"method":"events/stream",' +
+        '"params":{"name":"clock.minute","cursor":"' + IntToStr(M - 2) +
+        '","heartbeatMs":1000,' + META_MODERN + '}}');
+      Next;
+      Check(Arrived('notifications/events/active', 21) and
+        (PathString(Message, 'params.cursor') = IntToStr(M - 2)) and
+        (FindPath(Message, 'params.heartbeatMs').AsInteger = 1000),
+        'events/stream: active first, with the client''s cursor and the grant');
+      Next;
+      Check(Arrived('notifications/events/event', 21) and
+        (PathString(Message, 'params.eventId') = 'minute-' + IntToStr(M - 1))
+        and (PathString(Message, 'params.cursor') = IntToStr(M - 1)),
+        'events/stream: the first tick with the cursor after it');
+      Next;
+      Check(Arrived('notifications/events/event', 21) and
+        (PathString(Message, 'params.cursor') = IntToStr(M)),
+        'events/stream: the second tick with the cursor after it');
+      SendLine(Clock, '{"jsonrpc":"2.0","id":22,"method":"events/stream",' +
+        '"params":{"name":"clock.minute",' + META_MODERN + '}}');
+      Next;
+      Check(Arrived('notifications/events/active', 22) and
+        (PathString(Message, 'params.cursor') = IntToStr(M)),
+        'events/stream: a second stream from now, beside the first');
+      SendLine(Clock, '{"jsonrpc":"2.0","id":23,"method":"tools/list",' +
+        '"params":{' + META_MODERN + '}}');
+      Next;
+      Check((Message <> nil) and (FindPath(Message, 'id') <> nil) and
+        (FindPath(Message, 'id').AsInteger = 23) and
+        (FindPath(Message, 'result.tools') <> nil),
+        'events/stream: a request is answered while streams are open');
+      Next;
+      Check(Arrived('notifications/events/heartbeat', 21) and
+        (PathString(Message, 'params.cursor') = IntToStr(M)),
+        'events/stream: a heartbeat after the granted second');
+      SendLine(Clock, '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+        '"params":{"requestId":21}}');
+      Sleep(1500);
+      SendLine(Clock, '{"jsonrpc":"2.0","id":24,"method":"tools/list",' +
+        '"params":{' + META_MODERN + '}}');
+      Next;
+      Check((Message <> nil) and (FindPath(Message, 'id') <> nil) and
+        (FindPath(Message, 'id').AsInteger = 24),
+        'events/stream: nothing more for a cancelled stream');
+    finally
+      FreeAndNil(Message);
+      Shutdown(Clock, 'push');
+    end;
+  finally
+    Clock.Free;
+  end;
+end;
+
 var
   Demo: TProcess;
   Response: TJSONObject;
@@ -1215,6 +1322,7 @@ begin
   PagedDemoBattery;
   SkillsDirBattery;
   FixedClockBattery;
+  PushBattery;
 
   WriteLn;
   if Failures = 0 then

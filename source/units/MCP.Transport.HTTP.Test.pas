@@ -30,9 +30,11 @@ uses
   ssockets,
   MCP.Events,
   MCP.Extensions,
+  MCP.JSONRPC,
   MCP.Protocol,
   MCP.Schema,
   MCP.Server,
+  MCP.Streams,
   MCP.Transport.HTTP,
   TestingPascalLibrary;
 
@@ -126,6 +128,11 @@ type
     procedure TestMissingClientCapabilities400;
     procedure TestInBandInvalidParamsStays200;
     procedure TestEventRouting;
+    procedure TestEventStream;
+    procedure TestEventStreamClientClose;
+    procedure TestStopDuringACheck;
+    procedure TestStopDuringTheOpeningCheck;
+    procedure TestProgressThenPark;
     procedure TestStreamingOptInMissingCapabilities400;
     procedure TestNotificationAccepted;
     procedure TestMalformedNotificationAccepted;
@@ -402,6 +409,126 @@ begin
   Result := MCPEventPoll('now');
 end;
 
+var
+  // Check calls by the push fixtures (#126), read across threads.
+  EndingCalls, EndlessCalls: Integer;
+
+// Opens, then the second call revokes access: the server ends the
+// stream with terminated and the final frame.
+function EndingCheck(const AQuery: TMCPEventQuery;
+  const ACtx: TMCPRequestContext): TMCPEventPoll;
+begin
+  Inc(EndingCalls);
+  if EndingCalls >= 2 then
+    raise EMCPProtocolError.Create(-32024, 'Forbidden');
+  Result := MCPEventPoll('0', TJSONArray.Create);
+  Result.NextPollMs := 50;
+  // From a cursor, one non-ASCII occurrence, which the SSE frame must
+  // carry byte-exact (#126 review).
+  if not AQuery.FromNow then
+  begin
+    Result.Events.Add(MCPEventOccurrence('u', '2026-11-27T10:00:00Z',
+      TJSONObject(MCPParseJSON('{"text":"Gr\u00fc\u00dfe"}'))));
+    Result.Cursor := '1';
+  end;
+end;
+
+var
+  WaitingSawStop: Boolean;
+
+// Asks again every 50 ms; its second call waits, up to 3 s, for
+// IsCancelled, which Stop turns true (#126 review).
+function WaitingCheck(const AQuery: TMCPEventQuery;
+  const ACtx: TMCPRequestContext): TMCPEventPoll;
+var
+  I: Integer;
+begin
+  if not AQuery.FromNow then
+    for I := 1 to 300 do
+    begin
+      if ACtx.IsCancelled then
+      begin
+        WaitingSawStop := True;
+        Break;
+      end;
+      Sleep(10);
+    end;
+  Result := MCPEventPoll('0');
+  Result.NextPollMs := 50;
+end;
+
+type
+  // A stream that writes one frame and ends.
+  TOneFrameStream = class(TMCPStream)
+  public
+    function Step(ASink: TMCPLineSink; ASinkData: Pointer): Int64; override;
+    procedure Close(ASink: TMCPLineSink; ASinkData: Pointer); override;
+  end;
+
+  // test/parkprogress: reports progress, then parks a one-frame stream.
+  TParkProgress = class
+    function Handle(AParams: TJSONObject; const ACtx: TMCPRequestContext;
+      ALegacy: Boolean): TJSONObject;
+  end;
+
+function TOneFrameStream.Step(ASink: TMCPLineSink; ASinkData: Pointer): Int64;
+begin
+  ASink('{"frame":"stream"}', ASinkData);
+  Finish;
+  Result := High(Int64);
+end;
+
+procedure TOneFrameStream.Close(ASink: TMCPLineSink; ASinkData: Pointer);
+begin
+  Finish;
+end;
+
+function TParkProgress.Handle(AParams: TJSONObject;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+begin
+  MCPReportProgress(ACtx, 1);
+  TMCPStreamHost(ACtx.StreamHost).Park(TOneFrameStream.Create(
+    ACtx.RequestId));
+  Result := TJSONObject.Create;
+end;
+
+var
+  ParkProgress: TParkProgress;
+
+type
+  // Stops the transport after a delay, from its own thread.
+  TStopLater = class(TThread)
+  private
+    FTransport: TMCPHTTPServer;
+    FDelayMs: Integer;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(ATransport: TMCPHTTPServer; ADelayMs: Integer);
+  end;
+
+constructor TStopLater.Create(ATransport: TMCPHTTPServer; ADelayMs: Integer);
+begin
+  FTransport := ATransport;
+  FDelayMs := ADelayMs;
+  inherited Create(False);
+end;
+
+procedure TStopLater.Execute;
+begin
+  Sleep(FDelayMs);
+  FTransport.Stop;
+end;
+
+// Never ends by itself: asks again every 50 ms.
+function EndlessCheck(const AQuery: TMCPEventQuery;
+  const ACtx: TMCPRequestContext): TMCPEventPoll;
+begin
+  Inc(EndlessCalls);
+  Result := MCPEventPoll('0');
+  Result.NextPollMs := 50;
+end;
+
 procedure THTTPBinding.BeforeEach;
 var
   Attempt: Integer;
@@ -445,6 +572,16 @@ begin
     TJSONObject(GetJSON('{"type":"object","properties":{"region":' +
     '{"type":"string","x-mcp-header":"Region"}}}')), ObjectSchema.Build,
     TickCheck);
+  RegisterEvent(FServer, 'ending', 'Ends', ObjectSchema, ObjectSchema,
+    EndingCheck);
+  RegisterEvent(FServer, 'endless', 'Never ends', ObjectSchema,
+    ObjectSchema, EndlessCheck);
+  RegisterEvent(FServer, 'waiting', 'Waits in its check', ObjectSchema,
+    ObjectSchema, WaitingCheck);
+  FServer.RegisterMethod('test/parkprogress', ParkProgress.Handle);
+  WaitingSawStop := False;
+  EndingCalls := 0;
+  EndlessCalls := 0;
   FServer.RegisterRoute('example/route', 'target', FRouteFixture.Headers);
   FTransport := TMCPHTTPServer.Create(FServer);
   FTransport.Port := FindFreePort;
@@ -554,6 +691,59 @@ begin
     ABody := Copy(Response, HeaderEnd + 4, MaxInt)
   else
     ABody := '';
+end;
+
+// An events/stream POST for event AName, with Mcp-Name unless
+// AWithName is false.
+function StreamRequest(APort: Word; const AName: string;
+  AWithName: Boolean = True; const ACursor: string = ''): string;
+var
+  Payload: string;
+begin
+  Payload := '{"jsonrpc":"2.0","id":5,"method":"events/stream","params":{' +
+    '"name":"' + AName + '",';
+  if ACursor <> '' then
+    Payload := Payload + '"cursor":"' + ACursor + '",';
+  Payload := Payload + META_MODERN + '}}';
+  Result := 'POST /mcp HTTP/1.1'#13#10 +
+    'Host: 127.0.0.1:' + IntToStr(APort) + #13#10 +
+    'Content-Type: application/json'#13#10 +
+    'Accept: application/json, text/event-stream'#13#10 +
+    'MCP-Protocol-Version: ' + MCP_PROTOCOL_VERSION + #13#10 +
+    'Mcp-Method: events/stream'#13#10;
+  if AWithName then
+    Result := Result + 'Mcp-Name: ' + AName + #13#10;
+  Result := Result + 'Connection: close'#13#10 +
+    'Content-Length: ' + IntToStr(Length(Payload)) + #13#10#13#10 + Payload;
+end;
+
+// Sends ARequest and reads until the first SSE frame is complete, then
+// closes the connection: what the response held by then.
+function ReadFirstFrameThenClose(APort: Word;
+  const ARequest: string): string;
+var
+  Sock: TInetSocket;
+  Buf: array[0..4095] of Byte;
+  Got, HeaderEnd: Integer;
+begin
+  Result := '';
+  Sock := TInetSocket.Create('127.0.0.1', APort);
+  try
+    Sock.IOTimeout := 5000;
+    Sock.WriteBuffer(ARequest[1], Length(ARequest));
+    repeat
+      Got := Sock.Read(Buf[0], SizeOf(Buf));
+      if Got > 0 then
+      begin
+        SetLength(Result, Length(Result) + Got);
+        Move(Buf[0], Result[Length(Result) - Got + 1], Got);
+      end;
+      HeaderEnd := Pos(#13#10#13#10, Result);
+    until (Got <= 0) or ((HeaderEnd > 0) and
+      (Pos(#10#10, Copy(Result, HeaderEnd + 4, MaxInt)) > 0));
+  finally
+    Sock.Free;
+  end;
 end;
 
 function THTTPBinding.PostRoutedRaw(const AArguments,
@@ -1018,6 +1208,113 @@ begin
     'Connection: close'#13#10 +
     'Content-Length: ' + IntToStr(Length(Payload)) + #13#10#13#10 + Payload;
   Result := RawExchange(FTransport.Port, Request, ABody);
+end;
+
+// events/stream answers with an SSE stream at once (events.mdx,
+// Push-Based Delivery): active first, and when the server ends the
+// subscription, terminated and the final frame, then the close.
+procedure THTTPBinding.TestEventStream;
+var
+  Body: string;
+begin
+  Expect<Integer>(RawExchange(FTransport.Port, StreamRequest(
+    FTransport.Port, 'ending'), Body)).ToBe(200);
+  Expect<Integer>(Pos('data: { "jsonrpc" : "2.0", "method" : ' +
+    '"notifications/events/active"', Body)).ToBe(1);
+  Expect<Boolean>(Pos('data: { "jsonrpc" : "2.0", "method" : ' +
+    '"notifications/events/terminated", "params" : { "error" : { "code" : ' +
+    '-32024', Body) > 0).ToBe(True);
+  Expect<Boolean>(Pos('data: { "jsonrpc" : "2.0", "id" : 5, "result" : ' +
+    '{ "resultType" : "complete"', Body) > 0).ToBe(True);
+  Expect<Integer>(EndingCalls).ToBe(2);
+  // From a cursor, the non-ASCII occurrence, its UTF-8 bytes as sent.
+  EndingCalls := 0;
+  Expect<Integer>(RawExchange(FTransport.Port, StreamRequest(
+    FTransport.Port, 'ending', True, '0'), Body)).ToBe(200);
+  Expect<Boolean>(Pos('"text" : "Gr' + #$C3#$BC#$C3#$9F + 'e"', Body) > 0)
+    .ToBe(True);
+  // Mcp-Name is required on events/stream as on events/poll.
+  Expect<Integer>(RawExchange(FTransport.Port, StreamRequest(
+    FTransport.Port, 'ending', False), Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+end;
+
+// Stop reaches a check that waits: it returns, and the client, still
+// reading, gets the final frame (#126 review).
+procedure THTTPBinding.TestStopDuringACheck;
+var
+  Body: string;
+  Stopper: TStopLater;
+begin
+  Stopper := TStopLater.Create(FTransport, 300);
+  try
+    // From now: the stream's own second check is the one that waits.
+    Expect<Integer>(RawExchange(FTransport.Port, StreamRequest(
+      FTransport.Port, 'waiting'), Body)).ToBe(200);
+  finally
+    Stopper.WaitFor;
+    Stopper.Free;
+  end;
+  Expect<Boolean>(WaitingSawStop).ToBe(True);
+  Expect<Boolean>(Pos('data: { "jsonrpc" : "2.0", "id" : 5, "result" : ' +
+    '{ "resultType" : "complete"', Body) > 0).ToBe(True);
+end;
+
+// Stop reaches the opening check too, inside the request (#126
+// review).
+procedure THTTPBinding.TestStopDuringTheOpeningCheck;
+var
+  Body: string;
+  Stopper: TStopLater;
+begin
+  Stopper := TStopLater.Create(FTransport, 300);
+  try
+    Expect<Integer>(RawExchange(FTransport.Port, StreamRequest(
+      FTransport.Port, 'waiting', True, '0'), Body)).ToBe(200);
+  finally
+    Stopper.WaitFor;
+    Stopper.Free;
+  end;
+  Expect<Boolean>(WaitingSawStop).ToBe(True);
+end;
+
+// A handler whose progress opened the SSE response, and that then parks
+// a stream, gets the stream on that response, not its placeholder
+// result (#126 review).
+procedure THTTPBinding.TestProgressThenPark;
+var
+  Body, ContentType: string;
+begin
+  Expect<Integer>(Exchange('POST', '/mcp', '{"jsonrpc":"2.0","id":6,' +
+    '"method":"test/parkprogress","params":{"_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},"progressToken":"t"}}}',
+    [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+    HeaderPair('Mcp-Method', 'test/parkprogress')], Body, ContentType))
+    .ToBe(200);
+  Expect<Boolean>(Pos('notifications/progress', Body) > 0).ToBe(True);
+  Expect<Boolean>(Pos('{"frame":"stream"}', Body) > 0).ToBe(True);
+  Expect<Integer>(Pos('"result"', Body)).ToBe(0);
+end;
+
+// A client that closes the connection cancels its stream (events.mdx,
+// Lifecycle): the server stops calling the check.
+procedure THTTPBinding.TestEventStreamClientClose;
+var
+  Response: string;
+  Calls: Integer;
+begin
+  Response := ReadFirstFrameThenClose(FTransport.Port, StreamRequest(
+    FTransport.Port, 'endless'));
+  Expect<Boolean>(Pos('Content-Type: text/event-stream', Response) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Pos('notifications/events/active', Response) > 0)
+    .ToBe(True);
+  // The close is seen within 50 ms, a check runs every 50 ms.
+  Sleep(400);
+  Calls := EndlessCalls;
+  Sleep(400);
+  Expect<Integer>(EndlessCalls).ToBe(Calls);
 end;
 
 procedure THTTPBinding.TestParamHeaderMissing;
@@ -1641,6 +1938,15 @@ begin
     TestParamHeadersMatch);
   Test('Mcp-Param header missing → 400, -32020', TestParamHeaderMissing);
   Test('events/poll carries Mcp-Name and Mcp-Param-*', TestEventRouting);
+  Test('events/stream answers an SSE stream; the server can end it',
+    TestEventStream);
+  Test('a client that closes the connection ends its stream',
+    TestEventStreamClientClose);
+  Test('Stop reaches a waiting check, then the final frame',
+    TestStopDuringACheck);
+  Test('Stop reaches the opening check', TestStopDuringTheOpeningCheck);
+  Test('progress, then a parked stream, on one SSE response',
+    TestProgressThenPark);
   Test('Mcp-Param header mismatched → 400, -32020', TestParamHeaderMismatch);
   Test('Mcp-Param base64 with bad padding or characters → 400',
     TestParamHeaderBadBase64);
@@ -1694,10 +2000,12 @@ begin
 end;
 
 begin
+  ParkProgress := TParkProgress.Create;
   WaiterEntered := RTLEventCreate;
   WaiterDone := RTLEventCreate;
   TestRunnerProgram.AddSuite(THTTPBinding.Create('Transport.HTTP: binding'));
   TestRunnerProgram.Run;
   RTLEventDestroy(WaiterDone);
   RTLEventDestroy(WaiterEntered);
+  ParkProgress.Free;
 end.

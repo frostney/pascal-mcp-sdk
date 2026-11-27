@@ -186,7 +186,7 @@ prompts, argument completion, MRTR, progress/log notifications,
 caching hints, extension negotiation with
 [MCP Apps](docs/guides/mcp-apps.md) interactive UIs,
 [Skills](docs/guides/skills.md) and [Events](docs/guides/events.md)
-poll delivery, both
+poll and push delivery, both
 transports, and the classic `initialize` era. Deliberately out:
 `subscriptions/listen` and list-changed notifications — registries
 are static after startup. The authoritative surface-by-surface table,

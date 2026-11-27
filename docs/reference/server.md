@@ -454,12 +454,16 @@ function MCPSkillMarkdown(AFrontmatter: TJSONObject;
 | `RegisterSkillDirectory` | Every skill under `ARoot`: each directory holding a `SKILL.md`, at `skill://APrefix/<its path below ARoot>`, its `SKILL.md` and files served as the bytes on disk. Its frontmatter is read with `MCP.Frontmatter`'s YAML subset, and the checks of `RegisterSkill` apply. Directories are listed by directory reads even when empty. Names starting with `.` are left out, and so are files outside any skill. A symbolic link (`ARoot` included), anything but a directory or regular file, a directory that cannot be read, a skill over the limits (checked from the listed sizes before reading, nested skills' files and any registered skill the tree lies below counted), a `SKILL.md` in `ARoot` itself, or frontmatter outside the subset (named with its file and line) raises `EMCPServer`, and then none of the tree's skills is registered. The tree is trusted and must not change while it is read |
 | `MCPSkillMarkdown` | The `SKILL.md` text `RegisterSkill` writes: a YAML frontmatter block for `AFrontmatter` (borrowed), then `ABody`. Strings are double-quoted with escapes YAML 1.1 and 1.2 share; a fractional number, a key written longer than the 1024 characters YAML parsers read, or text that is not UTF-8 raises `EMCPServer` |
 
-From `MCP.Events`, the Events extension's poll delivery
+From `MCP.Events`, the Events extension's poll and push delivery
 ([Events](../guides/events.md)):
 
 ```pascal
 const MCP_EVENTS_EXTENSION = 'io.modelcontextprotocol/events';
 const MCP_EVENT_DEFAULT_POLL_MS = 30000;
+const MCP_EVENT_DEFAULT_HEARTBEAT_MS = 30000;   // push: the grant
+const MCP_EVENT_MIN_HEARTBEAT_MS = 1000;        // and its bounds
+const MCP_EVENT_MAX_HEARTBEAT_MS = 300000;
+const MCP_SUBSCRIPTION_ID_KEY = 'io.modelcontextprotocol/subscriptionId';
 
 type TMCPEventQuery = record
   Arguments: TJSONObject;   // borrowed; {} when absent
@@ -475,6 +479,7 @@ type TMCPEventPoll = record
   NoReplay: Boolean;        // cursor null
   HasMore, Truncated: Boolean;
   NextPollMs: Integer;      // 0: the registration's
+  GapCursor: string;        // push: the position before a gap's events
 end;
 
 TMCPEventCheck = function(const AQuery: TMCPEventQuery;
@@ -492,9 +497,9 @@ procedure RegisterEvent(AServer: TMCPServer; const AName,
 
 | Member | Meaning |
 | --- | --- |
-| `RegisterEvent` | Event type `AName`, delivered by poll, before the server starts. `AInputSchema` (owned) describes the arguments: root type object, `x-mcp-header` annotations as for tools, checked against arguments when inside the server-enforced subset. `APayloadSchema` (owned) describes each occurrence's data, checked when inside the subset. An input schema outside the subset is refused. The first call declares the extension with `{}` on `server/discover` only (`RestrictExtensionToModern`, `PinExtensionSettings`) and serves `events/list` and `events/poll` on 2026-07-28 (`-32601` for a classic client), routed on Streamable HTTP. A duplicate or empty name, a bad schema, a nil check or a call after the server started raises `EMCPServer` |
+| `RegisterEvent` | Event type `AName`, delivered by poll and push, before the server starts. `AInputSchema` (owned) describes the arguments: root type object, `x-mcp-header` annotations as for tools, checked against arguments when inside the server-enforced subset. `APayloadSchema` (owned) describes each occurrence's data, checked when inside the subset. An input schema outside the subset is refused. The first call declares the extension with `{}` on `server/discover` only (`RestrictExtensionToModern`, `PinExtensionSettings`) and serves `events/list`, `events/poll` and `events/stream` on 2026-07-28 (`-32601` for a classic client), routed on Streamable HTTP. A stream polls the check with `MaxEvents` 1, and answers `-32026` where the transport cannot stream. A duplicate or empty name, a bad schema, a nil check or a call after the server started raises `EMCPServer` |
 | `TMCPEventQuery` | One poll: the arguments, the cursor or `FromNow` for a null or absent one, and the client's `maxAgeMs` (at least 0) and `maxEvents` (at least 1), read as the schema reads integers |
-| `TMCPEventPoll` | A check's answer: at most `MaxEvents` occurrences, the cursor after them (null with `NoReplay`), `HasMore`, `Truncated` and `NextPollMs`. Events on a poll from now, more than `MaxEvents`, or an occurrence without object data, an RFC 3339 timestamp or a payload matching its schema answer `-32603` |
+| `TMCPEventPoll` | A check's answer: at most `MaxEvents` occurrences, the cursor after them (null with `NoReplay`), `HasMore`, `Truncated` and `NextPollMs`. Events on a poll from now, more than `MaxEvents`, an occurrence without object data, an RFC 3339 timestamp or a payload matching its schema, and on a poll `HasMore` with `NoReplay`, answer `-32603`. With `Truncated` and events, `GapCursor` is the position delivery resumed from, before them, which a push stream's gap notification carries; with `''` that notification carries the fresh cursor, after the events, which then belong to the gap `Truncated` signals |
 | `MCPEventOccurrence` | One occurrence: `AData` (owned) and `AMeta` (owned) as given. An empty `AEventId` is derived from the name, timestamp and data, so the same event keeps its id; the server adds the name |
 
 ### The request context
@@ -514,6 +519,7 @@ Every handler receives `TMCPRequestContext` (from `MCP.Protocol`):
 | `HasSubCapability(Name, Member)` | Whether `HasCapability(Name)` holds and the capability has member `Member`, such as `('elicitation', 'url')` or `('sampling', 'tools')`. An empty `elicitation` object declares `form`, as the specification reads it |
 | `HasExtension(Id)`, `ExtensionSettings(Id)` | Whether the client declared extension `Id` in `clientCapabilities.extensions`, and its settings object (borrowed; nil when absent) |
 | `IsCancelled` | Cooperative cancellation probe |
+| `RequestId`, `StreamHost` | On a 2026-07-28 request: its JSON-RPC id (borrowed for the call) and the session's stream host (a `TMCPStreamHost`; nil when the transport cannot stream), where a handler parks a long-lived stream (#126) |
 
 ### Introspection and the sans-I/O seam
 
@@ -572,6 +578,68 @@ handler's `IsCancelled` call. The poll stays on the session across its
 requests ([ADR-0001](../adr/0001-sans-io-core.md#amendment-2026-11-27-93)).
 The stdio loop's poll reads what is waiting on a plain file input, and
 the HTTP binding's reports a closed or reset connection.
+
+### Long-lived requests
+
+`MCP.Streams` holds a request that keeps writing after its handler
+returns, such as `events/stream` (#126):
+
+```pascal
+type TMCPStream = class
+  constructor Create(ARequestId: TJSONData);   // copied
+  function Step(ASink: TMCPLineSink;
+    ASinkData: Pointer): Int64; virtual; abstract;   // due, on its clock
+  procedure Cancel; virtual;
+  procedure Close(ASink: TMCPLineSink; ASinkData: Pointer); virtual; abstract;
+  property Id: TJSONData;
+  property Finished: Boolean;
+end;
+
+type TMCPStreamHost = class
+  procedure Park(AStream: TMCPStream);   // owned
+  function TakeParked: TMCPStream;       // the caller's, or nil
+end;
+
+function MCPTakeStream(AHost: TMCPStreamHost; AProduced: Boolean;
+  const AResponse: string): TMCPStream;   // the stream to drive, or nil
+property TMCPSession.StreamHost: TObject;   // borrowed; nil for none
+function MCPNowMs: Int64;                   // monotonic milliseconds
+property TMCPStream.Clock: TMCPClock;       // MCPStreamClock, else MCPNowMs
+var MCPStreamClock: TMCPClock;              // nil: MCPNowMs; tests set it
+function MCPStreamNow: Int64;               // MCPStreamClock's time
+property TMCPStreamHost.ShutdownProbe: TMCPCancellationProbe;
+function TMCPStreamHost.ShuttingDown: Boolean;
+property TMCPStream.CancelProbe: TMCPCancellationProbe;   // the transport's
+function TMCPStream.Cancelled: Boolean;
+```
+
+A transport that can drive streams sets `StreamHost` on its session.
+The core hands it to each 2026-07-28 handler as `ACtx.StreamHost`. A
+handler parks at most one stream and returns a placeholder result, which
+the transport drops. After `HandleMessage`, the transport asks
+`MCPTakeStream` for the stream to drive: only a request answered with a
+result hands one over. When the core answered an error, such as a
+handler that parked and then raised, or nothing, because the request was
+cancelled, the stream is cancelled and freed, and the transport sends
+the response as usual. The
+transport then calls `Step` until `Finished`, again by the time `Step`
+returns on the stream's clock. It sets `CancelProbe` to its live check
+for a client that went away, which `Cancelled` asks, between the
+stream's own steps and from the checks the stream runs. It calls
+`Cancel` when the client goes away. Streamable HTTP calls `Close`, for
+the final frame, when the transport stops, after a check that was
+running returns; the stdio loop ends every stream at the end of input,
+and a check that was running sees `IsCancelled`, while requests already
+queued are still served. A transport sets `TMCPStreamHost.ShutdownProbe`
+to its Stop or end of input, which a handler's own checks ask beside the
+request's cancellation (`ShuttingDown`). A sink that raises ends the
+stream.
+Streamable HTTP steps a stream in the request's thread; the stdio loop
+steps its streams between lines on its one thread.
+
+`MCPLogDiagnostic` writes one line to stderr, best effort, the way the
+core's own diagnostics do: a closed stderr is ignored, and on Unix
+cannot end the process with SIGPIPE.
 
 ### Schema builder and argument classes
 

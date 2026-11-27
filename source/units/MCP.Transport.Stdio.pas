@@ -38,6 +38,16 @@ unit MCP.Transport.Stdio;
 // through Text as before, without mid-request cancellation. No thread
 // is involved, so a stdio-only program needs no thread driver.
 //
+// Push streams (events/stream, #126) live in the same loop: a handler
+// parks one with the session's stream host, and the loop keeps it,
+// waiting for input no longer than the next stream is due and stepping
+// the due streams between lines, so other requests and streams carry
+// on. A notifications/cancelled for an open stream removes it and sends
+// nothing more; the end of input ends every stream at once, a waiting
+// check included, and queued requests are still served. A Text with its
+// own driver, or a Windows console, cannot be waited on with a time
+// limit, so that loop offers no stream host.
+//
 // The stdio binding says clients MUST send notifications/cancelled and
 // servers SHOULD stop work as soon as practical and MUST NOT send any
 // further messages for that request (verified 2026-07-21):
@@ -91,7 +101,8 @@ uses
   Windows,
   {$ENDIF}
   fpjson,
-  MCP.JSONRPC;
+  MCP.JSONRPC,
+  MCP.Streams;
 
 const
   READ_CHUNK = 65536;
@@ -130,6 +141,11 @@ type
     FQueue: array of TQueuedLine;
     FHead: Integer;
     FClassified: Integer; // entries before this index are classified
+    // The line NextLine returned last, and its cancellation target
+    // (owned; nil for none), classified once (LastCancelTarget).
+    FLastLine: string;
+    FLastOverflow, FLastClassified: Boolean;
+    FLastCancel: TJSONData;
     FCancelCount: Integer;
     FQueuedBytes: Int64;
     FPartial: string;
@@ -143,6 +159,7 @@ type
     function ReadChunk(ABlocking: Boolean): Boolean;
     function DataWaiting: Boolean;
     procedure ClassifyQueued;
+    function TakeQueuedCancellationOf(AId: TJSONData): Boolean;
     procedure RemoveAt(AIndex: Integer);
     procedure Compact;
   public
@@ -154,6 +171,25 @@ type
     // Reads at most one chunk that is already waiting, while fewer than
     // FQueueLimit bytes are queued; True when something was read.
     function ReadWaitingChunk: Boolean;
+    // Whether the loop can wait for input with a time limit (#126): a
+    // raw handle the platform can poll (on Windows a pipe or a disk
+    // file, not a console), so push streams can step between lines.
+    function CanWait: Boolean;
+    // True when a line is queued or the input ended, so NextLine returns
+    // at once; False when ATimeoutMs passed first. Input that keeps
+    // arriving without completing a line still returns at the deadline.
+    function WaitForLine(ATimeoutMs: Int64): Boolean;
+    // Takes a queued or waiting notifications/cancelled for AId (an open
+    // stream's request id, borrowed) out of the input: True when one
+    // was there (#126 review).
+    function TakeCancellationOf(AId: TJSONData): Boolean;
+    // The requestId of the line NextLine returned last when it is a
+    // notifications/cancelled the core accepts (borrowed until the next
+    // NextLine), else nil.
+    function LastCancelTarget: TJSONData;
+    // The raw input has ended (EOF or a failed read), whether or not
+    // lines before the end are still queued.
+    function InputEnded: Boolean;
     // Removes and returns the first queued notifications/cancelled line
     // the core would accept for the request ASession is running.
     function TakeActiveCancellation(ASession: TMCPSession;
@@ -226,6 +262,7 @@ var
 begin
   for I := FHead to High(FQueue) do
     FQueue[I].CancelId.Free;
+  FLastCancel.Free;
   inherited Destroy;
 end;
 
@@ -394,6 +431,62 @@ begin
     ReadChunk(False);
 end;
 
+function TStdioReader.CanWait: Boolean;
+begin
+  Result := FRaw;
+  {$IFDEF WINDOWS}
+  if Result then
+    Result := GetFileType(FHandle) in [FILE_TYPE_PIPE, FILE_TYPE_DISK];
+  {$ENDIF}
+end;
+
+// Waits at most ATimeoutMs for the handle to become readable.
+procedure WaitReadableFor(AHandle: THandle; ATimeoutMs: Int64);
+{$IFDEF UNIX}
+var
+  Fd: pollfd;
+begin
+  if ATimeoutMs > MaxInt then
+    ATimeoutMs := MaxInt;
+  Fd.fd := AHandle;
+  Fd.events := POLLIN;
+  Fd.revents := 0;
+  fpPoll(@Fd, 1, ATimeoutMs);
+end;
+{$ELSE}
+begin
+  // A pipe cannot be waited on: peek again after a short sleep.
+  if ATimeoutMs > 10 then
+    ATimeoutMs := 10;
+  Sleep(ATimeoutMs);
+end;
+{$ENDIF}
+
+function TStdioReader.WaitForLine(ATimeoutMs: Int64): Boolean;
+var
+  Deadline, Left: Int64;
+begin
+  Deadline := MCPNowMs + ATimeoutMs;
+  repeat
+    if (FHead < Length(FQueue)) or FEOF then
+      Exit(True);
+    // One read even when a stream is already due; then the deadline,
+    // so a feed that never completes a line cannot starve the streams
+    // (#126 review).
+    if DataWaiting then
+      ReadChunk(False)
+    else
+    begin
+      Left := Deadline - MCPNowMs;
+      if Left > 0 then
+        WaitReadableFor(FHandle, Left);
+    end;
+    if (FHead < Length(FQueue)) or FEOF then
+      Exit(True);
+  until MCPNowMs >= Deadline;
+  Result := False;
+end;
+
 // Read one LF-terminated line through Text, storing at most AMax bytes:
 // the path for a Text with its own I/O driver. True when a line
 // (possibly empty) was read; False on EOF with nothing read. AOverflow
@@ -459,9 +552,15 @@ begin
   // Released as it is taken: a long queue keeps no served lines.
   FQueue[FHead].Line := '';
   Dec(FQueuedBytes, Length(ALine) + QUEUE_ENTRY_COST);
+  // Its classification, if it has one, is kept for LastCancelTarget.
+  FreeAndNil(FLastCancel);
+  FLastLine := ALine;
+  FLastOverflow := AOverflow;
+  FLastClassified := FHead < FClassified;
   if FQueue[FHead].CancelId <> nil then
   begin
-    FreeAndNil(FQueue[FHead].CancelId);
+    FLastCancel := FQueue[FHead].CancelId;
+    FQueue[FHead].CancelId := nil;
     Dec(FCancelCount);
   end;
   Inc(FHead);
@@ -500,13 +599,20 @@ end;
 // (MCPCancellationTarget, the core's rule, method compared decoded, so
 // an escaped spelling counts). The cheap text check only skips lines
 // with neither the plain name nor any escape.
+// The one prefilter: only a line that names notifications/cancelled,
+// or escapes something, is parsed for a cancellation target.
+function MayBeCancellation(const ALine: string): Boolean;
+begin
+  Result := (Pos('notifications/cancelled', ALine) > 0) or
+    (Pos('\', ALine) > 0);
+end;
+
 procedure TStdioReader.ClassifyQueued;
 begin
   while FClassified < Length(FQueue) do
   begin
     with FQueue[FClassified] do
-      if not Overflow and ((Pos('notifications/cancelled', Line) > 0) or
-        (Pos('\', Line) > 0)) then
+      if not Overflow and MayBeCancellation(Line) then
       begin
         CancelId := MCPCancellationTarget(Line);
         if CancelId <> nil then
@@ -514,6 +620,26 @@ begin
       end;
     Inc(FClassified);
   end;
+end;
+
+function TStdioReader.LastCancelTarget: TJSONData;
+begin
+  // Classified once: by the cancellation poll while a handler ran, or
+  // here (#126 review).
+  if not FLastClassified then
+  begin
+    FLastClassified := True;
+    if not FLastOverflow and MayBeCancellation(FLastLine) then
+      FLastCancel := MCPCancellationTarget(FLastLine);
+  end;
+  Result := FLastCancel;
+end;
+
+function TStdioReader.InputEnded: Boolean;
+begin
+  // At once, queued lines or not: a check that waits returns, the
+  // streams end, and the queued requests are served (#126 review).
+  Result := FEOF;
 end;
 
 procedure TStdioReader.RemoveAt(AIndex: Integer);
@@ -555,6 +681,29 @@ begin
   Result := False;
 end;
 
+// A cancellation for AId among the queued lines, taken out.
+function TStdioReader.TakeQueuedCancellationOf(AId: TJSONData): Boolean;
+var
+  I: Integer;
+begin
+  ClassifyQueued;
+  if FCancelCount > 0 then
+    for I := FHead to High(FQueue) do
+      if (FQueue[I].CancelId <> nil) and
+        SameRequestId(FQueue[I].CancelId, AId) then
+      begin
+        RemoveAt(I);
+        Exit(True);
+      end;
+  Result := False;
+end;
+
+function TStdioReader.TakeCancellationOf(AId: TJSONData): Boolean;
+begin
+  Result := TakeQueuedCancellationOf(AId) or
+    (ReadWaitingChunk and TakeQueuedCancellationOf(AId));
+end;
+
 type
   TStdioPollState = record
     Reader: TStdioReader;
@@ -589,15 +738,188 @@ begin
   Flush(PText(AUserData)^);
 end;
 
+type
+  // The loop's open push streams (#126), each with the time it is next
+  // due, stepped between lines on the one thread.
+  // An open stream's live cancellation check: a notifications/cancelled
+  // for it that is queued or waiting on stdin while the stream steps.
+  TStdioStreamProbe = class
+  private
+    FReader: TStdioReader; // borrowed
+    FId: TJSONData;        // borrowed: the stream's
+  public
+    constructor Create(AReader: TStdioReader; AId: TJSONData);
+    function Cancelled: Boolean;
+  end;
+
+  TStdioStreams = class
+  private
+    FReader: TStdioReader; // borrowed
+    FStreams: array of TMCPStream; // owned
+    FProbes: array of TStdioStreamProbe; // owned
+    FDue: array of Int64;
+    procedure Drop(AIndex: Integer);
+  public
+    constructor Create(AReader: TStdioReader);
+    destructor Destroy; override;
+    function Count: Integer;
+    // Takes ownership of AStream and steps it at once (its first frame).
+    procedure Add(AStream: TMCPStream; var AOutput: Text);
+    procedure StepDue(var AOutput: Text);
+    // Milliseconds until the next stream is due (0 when one is).
+    function NextWait: Int64;
+    // A notifications/cancelled for an open stream ends it, and nothing
+    // more is sent (events.mdx, Lifecycle); ATarget is the line's
+    // requestId (Reader.LastCancelTarget, borrowed; nil for none). True
+    // when the line was one.
+    function Cancels(ATarget: TJSONData): Boolean;
+  end;
+
+constructor TStdioStreamProbe.Create(AReader: TStdioReader; AId: TJSONData);
+begin
+  inherited Create;
+  FReader := AReader;
+  FId := AId;
+end;
+
+// A cancellation for the stream, or the end of input, which ends every
+// stream (#126 review).
+function TStdioStreamProbe.Cancelled: Boolean;
+begin
+  Result := FReader.TakeCancellationOf(FId) or FReader.InputEnded;
+end;
+
+constructor TStdioStreams.Create(AReader: TStdioReader);
+begin
+  inherited Create;
+  FReader := AReader;
+end;
+
+destructor TStdioStreams.Destroy;
+var
+  I: Integer;
+begin
+  // The input ended: every stream ends with it.
+  for I := 0 to High(FStreams) do
+  begin
+    FStreams[I].Cancel;
+    FStreams[I].Free;
+    FProbes[I].Free;
+  end;
+  inherited Destroy;
+end;
+
+function TStdioStreams.Count: Integer;
+begin
+  Result := Length(FStreams);
+end;
+
+procedure TStdioStreams.Drop(AIndex: Integer);
+var
+  I: Integer;
+begin
+  FStreams[AIndex].Free;
+  FProbes[AIndex].Free;
+  for I := AIndex to High(FStreams) - 1 do
+  begin
+    FStreams[I] := FStreams[I + 1];
+    FProbes[I] := FProbes[I + 1];
+    FDue[I] := FDue[I + 1];
+  end;
+  SetLength(FStreams, Length(FStreams) - 1);
+  SetLength(FProbes, Length(FProbes) - 1);
+  SetLength(FDue, Length(FDue) - 1);
+end;
+
+procedure TStdioStreams.Add(AStream: TMCPStream; var AOutput: Text);
+begin
+  SetLength(FStreams, Length(FStreams) + 1);
+  SetLength(FProbes, Length(FProbes) + 1);
+  SetLength(FDue, Length(FDue) + 1);
+  FStreams[High(FStreams)] := AStream;
+  FProbes[High(FProbes)] := TStdioStreamProbe.Create(FReader, AStream.Id);
+  AStream.CancelProbe := FProbes[High(FProbes)].Cancelled;
+  FDue[High(FDue)] := MCPNowMs;
+  StepDue(AOutput);
+end;
+
+procedure TStdioStreams.StepDue(var AOutput: Text);
+var
+  I: Integer;
+begin
+  I := 0;
+  while I < Length(FStreams) do
+  begin
+    if FDue[I] <= MCPNowMs then
+    begin
+      try
+        FDue[I] := FStreams[I].Step(StdioNotificationSink, @AOutput);
+      except
+        // A failed stdout write is the whole loop's end; anything else
+        // ends only this stream.
+        on EInOutError do
+          raise;
+        on E: Exception do
+        begin
+          // Best effort: a closed stderr cannot end the loop (#126
+          // review).
+          MCPLogDiagnostic('events stream ended: ' + E.ClassName + ': ' +
+            E.Message);
+          FStreams[I].Cancel;
+        end;
+      end;
+      if FStreams[I].Finished then
+      begin
+        Drop(I);
+        Continue;
+      end;
+    end;
+    Inc(I);
+  end;
+end;
+
+function TStdioStreams.NextWait: Int64;
+var
+  I: Integer;
+  Now: Int64;
+begin
+  Result := High(Int64);
+  Now := MCPNowMs;
+  for I := 0 to High(FDue) do
+    if FDue[I] - Now < Result then
+      Result := FDue[I] - Now;
+  if Result < 0 then
+    Result := 0;
+end;
+
+function TStdioStreams.Cancels(ATarget: TJSONData): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  if ATarget = nil then
+    Exit;
+  for I := 0 to High(FStreams) do
+    if SameRequestId(FStreams[I].Id, ATarget) then
+    begin
+      FStreams[I].Cancel;
+      Drop(I);
+      Exit(True);
+    end;
+end;
+
 procedure RunMCPStdioLoop(var AInput, AOutput: Text; AServer: TMCPServer;
   AMaxLineLength: Integer);
 var
   Line, Response: string;
-  Overflow: Boolean;
+  Overflow, Produced: Boolean;
   Session: TMCPSession;
   Reader: TStdioReader;
   PollState: TStdioPollState;
   SavedCodePage: TSystemCodePage;
+  Host: TMCPStreamHost;
+  Streams: TStdioStreams;
+  Parked: TMCPStream;
 begin
   // The wire is UTF-8 whatever the locale: a Text file converts what
   // it writes to its own code page, which the RTL took from the locale
@@ -612,12 +934,32 @@ begin
   try
     Session := AServer.CreateSession;
     Reader := nil;
+    Host := nil;
+    Streams := nil;
     try
       Reader := TStdioReader.Create(AInput, AMaxLineLength);
       PollState.Reader := Reader;
       Session.SetCancellationPoll(StdioCancellationPoll, @PollState);
-      while Reader.NextLine(Line, Overflow) do
+      Streams := TStdioStreams.Create(Reader);
+      // Push streams need a loop that can wait with a time limit; a Text
+      // with its own driver, or a Windows console, cannot (#126).
+      if Reader.CanWait then
       begin
+        Host := TMCPStreamHost.Create;
+        // A handler's checks stop waiting at the end of input.
+        Host.ShutdownProbe := Reader.InputEnded;
+        Session.StreamHost := Host;
+      end;
+      repeat
+        if Streams.Count > 0 then
+        begin
+          Streams.StepDue(AOutput);
+          if (Streams.Count > 0) and not Reader.WaitForLine(Streams.NextWait)
+          then
+            Continue;
+        end;
+        if not Reader.NextLine(Line, Overflow) then
+          Break;
         if Overflow then
         begin
           Write(AOutput, AServer.OversizedLineResponse(AMaxLineLength), #10);
@@ -630,15 +972,25 @@ begin
           SetLength(Line, Length(Line) - 1);
         if Line = '' then
           Continue;
-        if AServer.HandleMessage(Session, Line, StdioNotificationSink,
-          @AOutput, Response) then
+        if (Streams.Count > 0) and Streams.Cancels(Reader.LastCancelTarget) then
+          Continue;
+        Produced := AServer.HandleMessage(Session, Line,
+          StdioNotificationSink, @AOutput, Response);
+        // A stream's handler answers with a placeholder: the stream
+        // writes its own frames from here on (MCPTakeStream's rule).
+        Parked := MCPTakeStream(Host, Produced, Response);
+        if Parked <> nil then
+          Streams.Add(Parked, AOutput)
+        else if Produced then
         begin
           Write(AOutput, Response, #10);
           Flush(AOutput);
         end;
-      end;
+      until False;
     finally
+      Streams.Free;
       Session.Free;
+      Host.Free;
       Reader.Free;
     end;
   finally
