@@ -146,12 +146,16 @@ begin
   State := INITIAL;
   // Message, a 0x80 byte, zeros up to 56 mod 64, then the 64-bit
   // big-endian bit length.
+  // Built by byte writes: string concatenation would let FPC
+  // transcode the bytes to the system code page (#89 review).
   BitLength := QWord(Length(AData)) * 8;
-  Padded := AData + #$80;
-  while Length(Padded) mod 64 <> 56 do
-    Padded := Padded + #0;
-  for I := 7 downto 0 do
-    Padded := Padded + AnsiChar(Byte(BitLength shr (I * 8)));
+  SetLength(Padded, ((Length(AData) + 8) div 64 + 1) * 64);
+  FillChar(Padded[1], Length(Padded), 0);
+  if Length(AData) > 0 then
+    Move(AData[1], Padded[1], Length(AData));
+  Padded[Length(AData) + 1] := AnsiChar($80);
+  for I := 0 to 7 do
+    Padded[Length(Padded) - I] := AnsiChar(Byte(BitLength shr (I * 8)));
   Offset := 1;
   while Offset <= Length(Padded) do
   begin
@@ -171,6 +175,16 @@ function DigestBytes(const ADigest: TSHA256Digest): RawByteString;
 begin
   SetLength(Result, SizeOf(ADigest));
   Move(ADigest[0], Result[1], SizeOf(ADigest));
+end;
+
+// A followed by B as bytes, without any code page conversion.
+function JoinBytes(const A, B: RawByteString): RawByteString;
+begin
+  SetLength(Result, Length(A) + Length(B));
+  if Length(A) > 0 then
+    Move(A[1], Result[1], Length(A));
+  if Length(B) > 0 then
+    Move(B[1], Result[Length(A) + 1], Length(B));
 end;
 
 function HMACSHA256(const AKey, AData: RawByteString): TSHA256Digest;
@@ -201,7 +215,8 @@ begin
       OuterPad[I] := AnsiChar($5C);
     end;
   end;
-  Result := SHA256(OuterPad + DigestBytes(SHA256(InnerPad + AData)));
+  Result := SHA256(JoinBytes(OuterPad,
+    DigestBytes(SHA256(JoinBytes(InnerPad, AData)))));
 end;
 
 function ConstantTimeEqual(const A, B: RawByteString): Boolean;

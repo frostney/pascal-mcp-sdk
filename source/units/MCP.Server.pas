@@ -490,8 +490,10 @@ type
     // writing their own plain state (ACtx.RequestState).
     //
     // Keys: the first seals, every key verifies. Rotate in three steps
-    // across all instances: [Old, New], then [New, Old], then [New]
-    // after one TTL. Each key must be at least 32 bytes. Without keys
+    // across all instances: [Old, New], then [New, Old], then [New] once
+    // the longest old-key TTL has passed since the last instance
+    // switched, plus a clock allowance (docs/guides/configuration.md,
+    // "requestState sealing", has the full procedure). Each key must be at least 32 bytes. Without keys
     // the server seals with a random key read from the OS at freeze,
     // which only this instance can verify: set a shared key when
     // several instances serve one endpoint or one replaces another.

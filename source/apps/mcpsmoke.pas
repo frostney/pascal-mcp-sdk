@@ -26,7 +26,8 @@ uses
 
   fpjson,
   jsonparser,
-  jsonscanner;
+  jsonscanner,
+  MCP.Crypto;
 
 const
   META_MODERN =
@@ -363,6 +364,28 @@ begin
   end;
 end;
 
+
+// The "a" field (argument digest) of a sealed requestState's envelope,
+// '' when the token does not decode.
+function EnvelopeArgumentsDigest(const AToken: string): string;
+var
+  Parts: TStringArray;
+  Envelope: RawByteString;
+  Data: TJSONData;
+begin
+  Result := '';
+  Parts := AToken.Split(['.']);
+  if (Length(Parts) <> 3) or not TryBase64UrlDecode(Parts[1], Envelope) then
+    Exit;
+  Data := GetJSON(Envelope);
+  try
+    if (Data.JSONType = jtObject) and (TJSONObject(Data).Find('a') <> nil) then
+      Result := TJSONObject(Data).Get('a', '');
+  finally
+    Data.Free;
+  end;
+end;
+
 var
   Demo: TProcess;
   Response: TJSONObject;
@@ -514,6 +537,12 @@ begin
     Check((Pos('v1.', SealedState) = 1) and
       (Pos('greet-round-1', SealedState) = 0),
       'MRTR round 1: requestState sealed');
+    // The envelope binds the arguments by the SHA-256 of their canonical
+    // form: {} here, whose digest is fixed. CI runs this battery under
+    // LC_ALL=C too, where a code page conversion once changed it.
+    Check(EnvelopeArgumentsDigest(SealedState) =
+      'RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o',
+      'MRTR round 1: argument digest is SHA-256 of {} on any locale');
     Response.Free;
     // A forged state is refused before the handler runs.
     Response := RoundTrip(Demo,

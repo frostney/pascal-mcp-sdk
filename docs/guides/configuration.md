@@ -110,6 +110,12 @@ Server.RequestStateTtlMs := 120000;                      // two minutes
   3. `[New]`, once the longest `RequestStateTtlMs` any old-key signer
      used has passed since the last instance switched, plus an
      allowance for clock differences between instances.
+- **Upgrading (breaking):** a server with sealing refuses the plain
+  state an earlier version handed out, so a client mid-round when you
+  upgrade gets `-32602` and must start that request again. Upgrade
+  every instance together, or drain in-flight rounds first (they last
+  at most as long as your clients take to answer); a mixed fleet would
+  also pass sealed tokens to old handlers as their state.
 - **Replay:** a token is bound to its method, tool or prompt, arguments
   and server, and expires after `RequestStateTtlMs`. Within that window
   the same retry can be sent again and verifies each time. If a retry

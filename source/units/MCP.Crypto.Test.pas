@@ -23,6 +23,7 @@ type
     procedure TestTwoBlockMessage;
     procedure TestMillionA;
     procedure TestPaddingBoundaries;
+    procedure TestIndependentOfCodePage;
   end;
 
   THMACVectors = class(TTestSuite)
@@ -99,6 +100,37 @@ begin
     'ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb');
 end;
 
+// Known answers (FIPS 180-4, RFC 4231) with UTF8String input while the
+// system code page is US-ASCII. The process-locale case (#89 review:
+// under LC_ALL=C the padding was transcoded) is not reproducible in
+// process; mcpsmoke checks a sealed digest, and CI runs it under
+// LC_ALL=C.
+procedure TSHA256Vectors.TestIndependentOfCodePage;
+var
+  Saved: TSystemCodePage;
+  Braces, Abc, HiThere: UTF8String;
+  EmptyObject, AbcDigest, HmacDigest: string;
+begin
+  Braces := '{}';
+  Abc := 'abc';
+  HiThere := 'Hi There';
+  Saved := DefaultSystemCodePage;
+  try
+    DefaultSystemCodePage := 20127; // US-ASCII, as under LC_ALL=C
+    EmptyObject := Hex(SHA256(Braces));
+    AbcDigest := Hex(SHA256(Abc));
+    HmacDigest := Hex(HMACSHA256(Repeated($0B, 20), HiThere));
+  finally
+    DefaultSystemCodePage := Saved;
+  end;
+  Expect<string>(EmptyObject).ToBe(
+    '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a');
+  Expect<string>(AbcDigest).ToBe(
+    'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+  Expect<string>(HmacDigest).ToBe(
+    'b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7');
+end;
+
 procedure TSHA256Vectors.SetupTests;
 begin
   Test('empty message', TestEmpty);
@@ -106,6 +138,8 @@ begin
   Test('448-bit two-block message', TestTwoBlockMessage);
   Test('one million "a"', TestMillionA);
   Test('padding boundaries at 55, 56 and 64 bytes', TestPaddingBoundaries);
+  Test('the same digests under a US-ASCII system code page',
+    TestIndependentOfCodePage);
 end;
 
 { HMAC-SHA-256, RFC 4231 section 4 }
