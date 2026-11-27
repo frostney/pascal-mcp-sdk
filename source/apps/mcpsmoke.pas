@@ -588,20 +588,29 @@ begin
       'completion/complete: unknown prompt → -32602');
     Response.Free;
 
-    // Cancellation reaches a running handler (#93): countdown polls
-    // IsCancelled, the cancellation follows at once, and the next
-    // request is answered long before the countdown would end.
+    // Cancellation reaches a running handler (#93; spec verified
+    // 2026-11-27: the receiver SHOULD stop and not respond,
+    // https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation).
+    // countdown's first progress event shows it is running before the
+    // cancellation is sent; the next request is then answered long
+    // before the countdown would end, with nothing for the cancelled one.
     StartedAt := GetTickCount64;
     SendLine(Demo, '{"jsonrpc":"2.0","id":40,"method":"tools/call",' +
       '"params":{"name":"countdown","arguments":{"seconds":5},' +
-      META_MODERN + '}}');
+      '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+      '"io.modelcontextprotocol/clientCapabilities":{},' +
+      '"progressToken":"cd"}}}');
+    Response := NextJson(Demo);
+    Check(PathString(Response, 'method') = 'notifications/progress',
+      'cancellation: countdown running (first progress event)');
+    Response.Free;
     SendLine(Demo, '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
       '"params":{"requestId":40,"reason":"smoke"}}');
     Response := RoundTrip(Demo,
       '{"jsonrpc":"2.0","id":41,"method":"tools/list","params":{' +
       META_MODERN + '}}');
     Check((PathInt(Response, 'id') = 41) and
-      (GetTickCount64 - StartedAt < 3000),
+      (GetTickCount64 - StartedAt < 3500),
       'cancellation: running countdown cancelled, its response withheld');
     Response.Free;
 

@@ -331,9 +331,13 @@ type
   // runs (#93): a closed HTTP connection, a notifications/cancelled
   // waiting on stdin. The request consults it whenever the handler asks
   // IsCancelled and before each in-request notification, on the
-  // handler's own thread. Return True to cancel the active request; a
-  // poll may instead hand a cancellation notification to
-  // HandleMessage, which cancels it the ordinary way.
+  // handler's own thread, and only while the request is not cancelled
+  // yet. Return True to cancel the active request. A poll may instead
+  // pass a notifications/cancelled line to HandleMessage for the same
+  // session, which cancels the request the ordinary way; that is the one
+  // re-entry allowed, as any other message would be handled in the
+  // middle of the running one. An exception from the poll propagates to
+  // the handler's IsCancelled call.
   TMCPCancellationPoll = function(ASession: TMCPSession;
     AUserData: Pointer): Boolean;
 
@@ -376,9 +380,16 @@ type
     // unknown, finished, malformed, and repeated signals are no-ops.
     procedure CancelRequest(ARequestId: TJSONData);
     // Installs the transport's cancellation poll for this session's
-    // requests (#93); nil removes it. AUserData is passed back as is.
+    // requests (#93); nil removes it. AUserData is borrowed and passed
+    // back as is: it must stay valid until the poll is removed or the
+    // session is freed.
     procedure SetCancellationPoll(APoll: TMCPCancellationPoll;
       AUserData: Pointer);
+    // Whether ARequestId (borrowed) names the request this session is
+    // running, matched as notifications/cancelled matches it: strings
+    // by decoded value, numbers by value. Lets a transport pick out the
+    // cancellation that concerns the running request (#93).
+    function IsActiveRequestId(ARequestId: TJSONData): Boolean;
   end;
 
   TMCPServer = class
@@ -1058,8 +1069,16 @@ procedure TMCPRequestDispatch.EmitNotification(const AMethod: string;
   AParams: TJSONObject);
 var
   Line: string;
+  Cancelled: Boolean;
 begin
-  if IsCancelled then
+  // The poll can raise; AParams is owned here on every path.
+  try
+    Cancelled := IsCancelled;
+  except
+    AParams.Free;
+    raise;
+  end;
+  if Cancelled then
   begin
     AParams.Free;
     Exit;
@@ -1772,6 +1791,12 @@ procedure TMCPSession.SetCancellationPoll(APoll: TMCPCancellationPoll;
 begin
   FCancellationPoll := APoll;
   FCancellationPollData := AUserData;
+end;
+
+function TMCPSession.IsActiveRequestId(ARequestId: TJSONData): Boolean;
+begin
+  Result := (FCurrentRequestToken <> nil) and
+    TMCPRequestCancellationToken(FCurrentRequestToken).Matches(ARequestId);
 end;
 
 procedure TMCPSession.CompleteLegacyInitialize;

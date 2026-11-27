@@ -62,6 +62,9 @@ var
   Seconds, Tick: Integer;
 begin
   Seconds := AArguments.Get('seconds', 3);
+  // A bound on the duration: stdio serves one request at a time.
+  if (Seconds < 1) or (Seconds > 60) then
+    Exit(MCPErrorResult('seconds must be between 1 and 60'));
   for Tick := 1 to Seconds * 10 do
   begin
     if ACtx.IsCancelled then
@@ -229,7 +232,7 @@ begin
 
     Server.RegisterTool('countdown',
       'Count down the given seconds; stops early when cancelled',
-      ObjectSchema.AddInteger('seconds', 'Seconds to count down'),
+      ObjectSchema.AddInteger('seconds', 'Seconds to count down, 1 to 60'),
       CountdownHandler);
 
     Server.RegisterTool('pixel',

@@ -77,9 +77,13 @@ unit MCP.Transport.HTTP;
 //     other requests get a single application/json object. (The spec
 //     lets the server choose per request; this is the policy.)
 //   - closing the connection is the cancellation signal: the
-//     session's cancellation poll (#93) reports a closed socket,
-//     checked at most every 50 ms, whenever the handler asks
-//     IsCancelled, so a handler that never writes stops too; and when
+//     session's cancellation poll (#93) reports a closed socket (an
+//     orderly close, a reset or another terminal error), checked at
+//     most every 50 ms, whenever the handler asks IsCancelled, so a
+//     handler that never writes stops too. Receive EOF cannot tell a
+//     client that closed only its sending side from one that closed
+//     both, so that client has cancelled too: its request ends and it
+//     gets no JSON-RPC message, only an empty 202. And when
 //     a stream write fails, the failure aborts the running handler,
 //     the core converts it into a response the transport can no
 //     longer deliver, and nothing further is sent for that request
@@ -1005,31 +1009,62 @@ const
   // How often a polling handler costs a system call.
   DISCONNECT_POLL_INTERVAL_MS = 50;
 
-// The client closed the connection: the socket is readable and a peek
-// finds nothing to read (an orderly close). The request body was read
-// in full before dispatch, so readable data would be the client's.
+// The client closed the connection: the socket reports a hang-up or an
+// error, or is readable while a peek finds the end of the stream (an
+// orderly close) or a terminal error such as a reset. The request body
+// was read in full before dispatch, so readable data would be the
+// client's and leaves the request running; so do errors that only say
+// to try again. Receive EOF cannot tell a client that closed only its
+// sending side from one that closed both, so either counts as having
+// cancelled: the request ends and nothing more about it is sent.
 function SocketClosedByPeer(ASocket: THandle): Boolean;
 var
   {$IFDEF WINDOWS}
   ReadSet: winsock2.TFDSet;
   Timeout: winsock2.TTimeVal;
+  Failure: Integer;
   {$ELSE}
-  ReadSet: TFDSet;
+  Fd: pollfd;
+  Failure: cint;
   {$ENDIF}
   Probe: Byte;
+  Got: Integer;
 begin
+  Result := False;
   {$IFDEF WINDOWS}
+  // A Windows fd_set lists sockets, so any socket value fits it.
   winsock2.FD_ZERO(ReadSet);
   winsock2.FD_SET(ASocket, ReadSet);
   Timeout.tv_sec := 0;
   Timeout.tv_usec := 0;
-  Result := (winsock2.select(0, @ReadSet, nil, nil, @Timeout) > 0) and
-    (winsock2.recv(ASocket, Probe, 1, winsock2.MSG_PEEK) = 0);
+  if winsock2.select(0, @ReadSet, nil, nil, @Timeout) <= 0 then
+    Exit;
+  Got := winsock2.recv(ASocket, Probe, 1, winsock2.MSG_PEEK);
+  if Got = 0 then
+    Exit(True);
+  if Got < 0 then
+  begin
+    Failure := winsock2.WSAGetLastError;
+    Result := (Failure <> WSAEWOULDBLOCK) and (Failure <> WSAEINTR) and
+      (Failure <> WSAEINPROGRESS);
+  end;
   {$ELSE}
-  fpFD_ZERO(ReadSet);
-  fpFD_SET(ASocket, ReadSet);
-  Result := (fpSelect(ASocket + 1, @ReadSet, nil, nil, 0) > 0) and
-    (fpRecv(ASocket, @Probe, 1, MSG_PEEK) = 0);
+  // poll, not select: a descriptor above 1023 fits no TFDSet.
+  Fd.fd := ASocket;
+  Fd.events := POLLIN;
+  Fd.revents := 0;
+  if fpPoll(@Fd, 1, 0) <= 0 then
+    Exit;
+  if Fd.revents and (POLLERR or POLLHUP or POLLNVAL) <> 0 then
+    Exit(True);
+  Got := fpRecv(ASocket, @Probe, 1, MSG_PEEK);
+  if Got = 0 then
+    Exit(True);
+  if Got < 0 then
+  begin
+    Failure := fpgeterrno;
+    Result := (Failure <> ESysEAGAIN) and (Failure <> ESysEINTR);
+  end;
   {$ENDIF}
 end;
 

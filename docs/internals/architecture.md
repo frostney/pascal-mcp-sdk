@@ -93,8 +93,10 @@ errors.
 
 The one addition to line-in/line-out is the **per-call notification
 sink**: the sink and its user data are arguments to the
-`HandleMessage` overload, so neither shared server state nor a session
-retains transport state.
+`HandleMessage` overload, so shared server state retains no transport
+state. A session keeps one transport hook: the cancellation poll and
+its borrowed user data (#93), installed for the connection and
+consulted only while one of its requests runs.
 
 ```mermaid
 sequenceDiagram
@@ -269,6 +271,9 @@ against the published final text
   [`_meta` + error codes](https://modelcontextprotocol.io/specification/2026-07-28/basic/index),
   [versioning](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning),
   [server/discover](https://modelcontextprotocol.io/specification/2026-07-28/server/discover),
+  [cancellation](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation),
+  [Streamable HTTP](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
+  (cancellation pages verified 2026-11-27),
   [tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools),
   [resources](https://modelcontextprotocol.io/specification/2026-07-28/server/resources).
 - The 2026-08-08 re-verification diffed the

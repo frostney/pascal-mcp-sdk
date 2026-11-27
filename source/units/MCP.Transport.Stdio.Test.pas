@@ -9,8 +9,15 @@ program MCP.Transport.Stdio.Test;
 {$I MCP.inc}
 
 uses
+  {$IFDEF UNIX}
+  BaseUnix,
+  {$ENDIF}
+  {$IFDEF WINDOWS}
+  Windows,
+  {$ENDIF}
   Classes,
   SysUtils,
+  streamio,
 
   fpjson,
   jsonparser,
@@ -52,6 +59,11 @@ type
     procedure TestOversizedLineRejected;
     procedure TestOversizedLineRecovery;
     procedure TestCancelReachesRunningHandler;
+    procedure TestCancelWrittenAfterHandlerStarts;
+    procedure TestCancelForQueuedRequestWaits;
+    procedure TestEscapedCancellationMethod;
+    procedure TestTextBufferTakenOver;
+    procedure TestStreamBackedInput;
     procedure TestCancelForOtherRequestIgnored;
     procedure TestLastLineWithoutNewline;
   end;
@@ -65,6 +77,10 @@ end;
 var
   // How the polling handler ended: 'cancelled' or 'finished'.
   WaiterOutcome: string;
+  // Every outcome in order, comma-separated.
+  WaiterOutcomes: string;
+  // The write end of the pipe TestCancelWrittenAfterHandlerStarts feeds.
+  PipeWriter: THandle;
 
 // Polls IsCancelled the way a long handler does; the cancellation, if
 // any, comes from the stdio loop's poll (#93).
@@ -75,6 +91,34 @@ var
 begin
   WaiterOutcome := 'finished';
   for I := 1 to 200 do
+  begin
+    if ACtx.IsCancelled then
+    begin
+      WaiterOutcome := 'cancelled';
+      WaiterOutcomes := WaiterOutcomes + 'cancelled,';
+      Exit(MCPTextResult('cancelled'));
+    end;
+    Sleep(1);
+  end;
+  WaiterOutcomes := WaiterOutcomes + 'finished,';
+  Result := MCPTextResult('finished');
+end;
+
+// Writes its own cancellation into the input pipe once it runs, then
+// closes the pipe and polls: only a poll that reads the handle can see
+// it, as the loop read the request before the cancellation existed.
+function SelfCancelHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+const
+  CANCEL = '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+    '"params":{"requestId":"p1"}}'#10;
+var
+  I: Integer;
+begin
+  FileWrite(PipeWriter, CANCEL[1], Length(CANCEL));
+  FileClose(PipeWriter);
+  WaiterOutcome := 'finished';
+  for I := 1 to 2000 do
   begin
     if ACtx.IsCancelled then
     begin
@@ -98,6 +142,9 @@ begin
   FServer.RegisterTool('ping', 'Ping', '{"type":"object"}', PingHandler);
   FServer.RegisterTool('echo', 'Echo', '{"type":"object"}', EchoHandler);
   FServer.RegisterTool('waiter', 'Waits', '{"type":"object"}', WaiterHandler);
+  FServer.RegisterTool('self_cancel', 'Cancels itself through the pipe',
+    '{"type":"object"}', SelfCancelHandler);
+  WaiterOutcomes := '';
   FDir := GetTempDir + 'pascal-mcp-sdk-stdio-test' + PathDelim;
   ForceDirectories(FDir);
 end;
@@ -374,6 +421,170 @@ begin
     .ToBe(True);
 end;
 
+// A pipe whose write end the handler keeps; the read end replaces the
+// handle of an ordinary Text opened on an empty file, so the loop sees a
+// plain file Text over a real pipe.
+procedure OpenPipe(out AReader, AWriter: THandle);
+{$IFDEF UNIX}
+var
+  Ends: TFilDes;
+begin
+  if fpPipe(Ends) <> 0 then
+    raise Exception.Create('pipe failed');
+  AReader := Ends[0];
+  AWriter := Ends[1];
+end;
+{$ELSE}
+begin
+  if not CreatePipe(AReader, AWriter, nil, 0) then
+    raise Exception.Create('CreatePipe failed');
+end;
+{$ENDIF}
+
+// Cancellation reaches a running handler on stdio (spec verified
+// 2026-11-27: the receiver SHOULD stop processing a cancelled request
+// and not respond,
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation;
+// on stdio servers SHOULD stop as soon as practical,
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio).
+// Here the cancellation is written only after the handler started, so
+// the poll must read it from the pipe.
+procedure TStdioLoop.TestCancelWrittenAfterHandlerStarts;
+const
+  REQUEST = '{"jsonrpc":"2.0","id":"p1","method":"tools/call",' +
+    '"params":{"name":"self_cancel",' + META_MODERN + '}}'#10;
+var
+  InFile, OutFile: Text;
+  PipeReader: THandle;
+  Output: string;
+  Bytes: TStringStream;
+begin
+  Bytes := TStringStream.Create('');
+  try
+    Bytes.SaveToFile(FDir + 'pipe-in.txt');
+  finally
+    Bytes.Free;
+  end;
+  OpenPipe(PipeReader, PipeWriter);
+  FileWrite(PipeWriter, REQUEST[1], Length(REQUEST));
+  Assign(InFile, FDir + 'pipe-in.txt');
+  Reset(InFile);
+  FileClose(TextRec(InFile).Handle);
+  TextRec(InFile).Handle := PipeReader;
+  Assign(OutFile, FDir + 'out.txt');
+  Rewrite(OutFile);
+  try
+    RunMCPStdioLoop(InFile, OutFile, FServer);
+  finally
+    Close(InFile);
+    Close(OutFile);
+  end;
+  Expect<string>(WaiterOutcome).ToBe('cancelled');
+  Bytes := TStringStream.Create('');
+  try
+    Bytes.LoadFromFile(FDir + 'out.txt');
+    Output := Bytes.DataString;
+  finally
+    Bytes.Free;
+  end;
+  // Nothing is sent for the cancelled request.
+  Expect<string>(Output).ToBe('');
+end;
+
+// A cancellation for a request still queued behind the running one is
+// left for that request, not spent on the running one (#93 review).
+procedure TStdioLoop.TestCancelForQueuedRequestWaits;
+begin
+  RunLoop(WaiterCall('1') + #10 + WaiterCall('2') + #10 +
+    '{"jsonrpc":"2.0","method":"notifications/cancelled","params":' +
+    '{"requestId":2}}' + #10);
+  Expect<string>(WaiterOutcomes).ToBe('finished,cancelled,');
+end;
+
+// The method is matched decoded, as the core matches it: an escaped
+// slash is still notifications/cancelled (#93 review).
+procedure TStdioLoop.TestEscapedCancellationMethod;
+begin
+  RunLoop(WaiterCall('3') + #10 +
+    '{"jsonrpc":"2.0","method":"notifications\/cancelled","params":' +
+    '{"requestId":3}}' + #10);
+  Expect<string>(WaiterOutcome).ToBe('cancelled');
+end;
+
+// Bytes the caller's Text had already buffered are served, not skipped
+// (#93 review).
+procedure TStdioLoop.TestTextBufferTakenOver;
+var
+  InFile, OutFile: Text;
+  Bytes: TStringStream;
+  Header, Output: string;
+begin
+  Bytes := TStringStream.Create('header'#10 + DiscoverLine(5) + #10);
+  try
+    Bytes.SaveToFile(FDir + 'in.txt');
+  finally
+    Bytes.Free;
+  end;
+  Assign(InFile, FDir + 'in.txt');
+  Reset(InFile);
+  ReadLn(InFile, Header);
+  Assign(OutFile, FDir + 'out.txt');
+  Rewrite(OutFile);
+  try
+    RunMCPStdioLoop(InFile, OutFile, FServer);
+  finally
+    Close(InFile);
+    Close(OutFile);
+  end;
+  Bytes := TStringStream.Create('');
+  try
+    Bytes.LoadFromFile(FDir + 'out.txt');
+    Output := Bytes.DataString;
+  finally
+    Bytes.Free;
+  end;
+  Expect<string>(Header).ToBe('header');
+  Expect<Boolean>(Pos('"id" : 5', Output) > 0).ToBe(True);
+end;
+
+// A Text with its own I/O driver (here a stream) is read through Text,
+// as before #93 (review).
+procedure TStdioLoop.TestStreamBackedInput;
+var
+  InFile, OutFile: Text;
+  Source: TStringStream;
+  Bytes: TStringStream;
+  Output: string;
+begin
+  Source := TStringStream.Create(DiscoverLine(6) + #10 + '{"jsonrpc":"2.0",' +
+    '"id":7,"method":"tools/call","params":{"name":"echo","arguments":' +
+    '{"message":"' + UTF8_PAYLOAD + '"},' + META_MODERN + '}}' + #10);
+  try
+    AssignStream(InFile, Source);
+    Reset(InFile);
+    Assign(OutFile, FDir + 'out.txt');
+    Rewrite(OutFile);
+    try
+      RunMCPStdioLoop(InFile, OutFile, FServer);
+    finally
+      Close(InFile);
+      Close(OutFile);
+    end;
+  finally
+    Source.Free;
+  end;
+  Bytes := TStringStream.Create('');
+  try
+    Bytes.LoadFromFile(FDir + 'out.txt');
+    Output := Bytes.DataString;
+  finally
+    Bytes.Free;
+  end;
+  Expect<Boolean>(Pos('"id" : 6', Output) > 0).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "' + UTF8_PAYLOAD + '"', Output) > 0)
+    .ToBe(True);
+end;
+
 procedure TStdioLoop.TestCancelForOtherRequestIgnored;
 var
   Output: string;
@@ -412,6 +623,16 @@ begin
     TestOversizedLineRecovery);
   Test('notifications/cancelled reaches a running handler; later lines served',
     TestCancelReachesRunningHandler);
+  Test('a cancellation written after the handler started reaches it',
+    TestCancelWrittenAfterHandlerStarts);
+  Test('a cancellation for a queued request waits for that request',
+    TestCancelForQueuedRequestWaits);
+  Test('an escaped notifications\/cancelled method still cancels',
+    TestEscapedCancellationMethod);
+  Test('bytes the caller''s Text already buffered are served',
+    TestTextBufferTakenOver);
+  Test('a stream-backed Text is read through Text, as before',
+    TestStreamBackedInput);
   Test('a cancellation for another id leaves the handler running',
     TestCancelForOtherRequestIgnored);
   Test('a last line without LF is served', TestLastLineWithoutNewline);

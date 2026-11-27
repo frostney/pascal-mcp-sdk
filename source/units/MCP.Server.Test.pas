@@ -229,6 +229,7 @@ type
     procedure TestModernUnknownAndMalformedIgnored;
     procedure TestLegacyFinishedAndRepeatedIgnored;
     procedure TestTransportPollCancels;
+    procedure TestActiveRequestIdMatches;
     procedure TestTransportPollOnlyDuringRequests;
   end;
 
@@ -3425,6 +3426,52 @@ begin
   Result := PollAnswer;
 end;
 
+var
+  // What IsActiveRequestId said, from inside the poll, for 9, "9", 9.0
+  // and 10.
+  ActiveAnswers: string;
+
+function RecordingPoll(ASession: TMCPSession; AUserData: Pointer): Boolean;
+
+  procedure Answer(AId: TJSONData);
+  begin
+    try
+      if ASession.IsActiveRequestId(AId) then
+        ActiveAnswers := ActiveAnswers + 'y'
+      else
+        ActiveAnswers := ActiveAnswers + 'n';
+    finally
+      AId.Free;
+    end;
+  end;
+
+begin
+  ActiveAnswers := '';
+  Answer(TJSONIntegerNumber.Create(9));
+  Answer(TJSONString.Create('9'));
+  Answer(TJSONFloatNumber.Create(9.0));
+  Answer(TJSONIntegerNumber.Create(10));
+  Result := False;
+end;
+
+// A transport picks out the cancellation for the running request as
+// notifications/cancelled matches it: numbers by value, strings apart
+// (#93 review).
+procedure TCancellationDispatch.TestActiveRequestIdMatches;
+var
+  Response: TJSONObject;
+begin
+  FSession.SetCancellationPoll(RecordingPoll, nil);
+  Response := Call('{"jsonrpc":"2.0","id":9,"method":"tools/call",' +
+    '"params":{"name":"cancellation-aware",' + META_MODERN + '}}');
+  Response.Free;
+  Expect<string>(ActiveAnswers).ToBe('ynyn');
+  Expect<Boolean>(FSession.IsActiveRequestId(TJSONData(nil))).ToBe(False);
+end;
+
+// Spec verified 2026-11-27: the receiver SHOULD stop processing a
+// cancelled request and not send a response,
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation.
 procedure TCancellationDispatch.TestTransportPollCancels;
 var
   ResponseLine: string;
@@ -3492,6 +3539,8 @@ begin
     TestLegacyFinishedAndRepeatedIgnored);
   Test('a transport poll that reports cancellation cancels the request',
     TestTransportPollCancels);
+  Test('IsActiveRequestId matches as notifications/cancelled does',
+    TestActiveRequestIdMatches);
   Test('the poll runs only when a handler asks, and nil removes it',
     TestTransportPollOnlyDuringRequests);
 end;
