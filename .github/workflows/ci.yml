@@ -14,7 +14,7 @@ name: CI
 # every leg runs the identical battery: unit suites + the mcpsmoke
 # subprocess E2E battery. mcpsmoke plus the spec-cited unit tests are
 # the net here. The official MCP conformance suite runs only in pr.yml,
-# as a non-blocking job against the conformance fixture
+# as a blocking job against the conformance fixture
 # (mcpconformance --http), judged against the baseline in
 # tools/conformance/baseline.json.
 #

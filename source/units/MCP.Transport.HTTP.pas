@@ -60,9 +60,10 @@ unit MCP.Transport.HTTP;
 //     2026-11-26); every other JSON-RPC response — results and in-band
 //     protocol errors alike, other -32602s included — is 200;
 //   - a request that opted into request-scoped notifications
-//     (_meta.progressToken or the logLevel key) on a handler-backed
-//     method (tools/call, resources/read, prompts/get) is answered as
-//     an SSE stream *once a notification actually flows*: the stream
+//     (_meta.progressToken or the logLevel key) is answered as an SSE
+//     stream *once a notification actually flows* (handlers of
+//     tools/call, resources/read, prompts/get and completion/complete
+//     can emit them): the stream
 //     headers (200, text/event-stream, Cache-Control: no-cache,
 //     X-Accel-Buffering: no) are deferred until the first event, the
 //     notifications follow as data: events, and the final response
@@ -446,16 +447,15 @@ begin
     (AMethod = 'resources/read');
 end;
 
-// Whether this request opted into request-scoped notifications and
-// targets a handler-backed method — the streaming policy documented
-// in the unit header.
+// Whether this request opted into request-scoped notifications — the
+// streaming policy documented in the unit header. Which methods emit
+// them is the core's business: a stream opens only once one flows, so
+// an opted-in request whose method notifies nothing gets JSON (#81).
 function WantsStream(const AMessage: TJSONRPCMessage): Boolean;
 var
   Meta: TJSONObject;
 begin
   Result := False;
-  if not NeedsName(AMessage.Method) then
-    Exit;
   Meta := MetaObject(AMessage.Params);
   if Meta = nil then
     Exit;

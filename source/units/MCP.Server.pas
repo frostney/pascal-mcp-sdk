@@ -26,11 +26,13 @@ unit MCP.Server;
 //     tools/list, tools/call
 //     resources/list, resources/read
 //     prompts/list, prompts/get
+//     completion/complete              (#81; capabilities follow the
+//                                      registrations)
 //   legacy era (dual-era mode, after initialize + initialized):
 //     initialize, ping
 //     tools/list, tools/call
 //     resources/list, resources/read
-//     prompts/list, prompts/get
+//     prompts/list, prompts/get, completion/complete
 //     — responses omit the modern-only stamps (resultType, serverInfo
 //       _meta, ttlMs/cacheScope) and resource-not-found is the legacy
 //       -32002, so each era sees its own wire dialect
@@ -102,9 +104,11 @@ uses
   fpjson,
   jsonparser,
   jsonscanner,
+  MCP.Completion,
   MCP.JSONRPC,
   MCP.Protocol,
-  MCP.Schema;
+  MCP.Schema,
+  MCP.UriTemplate;
 
 type
   TMCPLegacyState = (lsNew, lsAwaitingInitialized, lsReady);
@@ -233,6 +237,21 @@ type
     ResultMethod: TMCPPromptResultMethod;
   end;
 
+  // completion/complete (#81): the types live in MCP.Completion and are
+  // re-exported here, so a server needs only MCP.Server.
+  TMCPCompletion = MCP.Completion.TMCPCompletion;
+  TMCPCompletionHandler = MCP.Completion.TMCPCompletionHandler;
+  TMCPCompletionMethod = MCP.Completion.TMCPCompletionMethod;
+
+  TMCPCompletionRegistration = record
+    RefType: string;     // 'ref/prompt' or 'ref/resource'
+    RefName: string;     // prompt name or URI template
+    Argument: string;
+    Values: array of string; // static candidates when no callable
+    Handler: TMCPCompletionHandler;
+    Method: TMCPCompletionMethod;
+  end;
+
   TMCPServer = class;
 
   // Heap-allocated builder state shared by every record copy of
@@ -359,6 +378,7 @@ type
     FResources: array of TMCPResourceRegistration;
     FTemplates: array of TMCPTemplateRegistration;
     FPrompts: array of TMCPPromptRegistration;
+    FCompletions: array of TMCPCompletionRegistration;
 
     procedure EnsureMutable;
     procedure FreezeConfiguration;
@@ -404,6 +424,17 @@ type
       ADescription: string; AReader: TMCPTemplateReader;
       AMethod: TMCPTemplateMethod);
     function ServerCapabilities: TJSONObject;
+    // ACallable: the handler or method overload, so a nil one is a
+    // mistake, not an empty list.
+    procedure AddCompletion(const ARefType, ARefName, AArgument: string;
+      const AValues: array of string; ACallable: Boolean;
+      AHandler: TMCPCompletionHandler; AMethod: TMCPCompletionMethod);
+    function FindTemplate(const AUriTemplate: string): Integer;
+    // The completion registered for that argument of that target, or -1.
+    function FindCompletion(const ARefType, ARefName,
+      AArgument: string): Integer;
+    function HandleComplete(const AMessage: TJSONRPCMessage;
+      const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
     function HandleTemplatesList(const AMessage: TJSONRPCMessage;
       ALegacy: Boolean): string;
 
@@ -612,6 +643,26 @@ type
       constref AArguments: TMCPPromptArguments;
       AMethod: TMCPPromptResultMethod); overload;
 
+    // Argument completion (completion/complete, #81) for a registered
+    // prompt's declared argument or a registered resource template's
+    // variable. Register after the prompt or template. A static list
+    // completes by case-insensitive prefix (MCPCompleteFrom); a callable
+    // decides itself. Registering any completion declares the
+    // completions capability; an argument with none registered answers
+    // an empty list.
+    procedure RegisterPromptCompletion(const APrompt, AArgument: string;
+      const AValues: array of string); overload;
+    procedure RegisterPromptCompletion(const APrompt, AArgument: string;
+      AHandler: TMCPCompletionHandler); overload;
+    procedure RegisterPromptCompletion(const APrompt, AArgument: string;
+      AMethod: TMCPCompletionMethod); overload;
+    procedure RegisterTemplateCompletion(const AUriTemplate, AVariable: string;
+      const AValues: array of string); overload;
+    procedure RegisterTemplateCompletion(const AUriTemplate, AVariable: string;
+      AHandler: TMCPCompletionHandler); overload;
+    procedure RegisterTemplateCompletion(const AUriTemplate, AVariable: string;
+      AMethod: TMCPCompletionMethod); overload;
+
     // The core entry point: one inbound line in, at most one response
     // line out. The sink overload binds server-to-client notifications
     // to this call only. Returns True when AResponse must be written
@@ -796,6 +847,11 @@ function MCPAssistantMessage(const AText: string): TJSONObject;
 function MCPContentMessage(const ARole: string;
   AContent: TJSONObject): TJSONObject;
 function MCPMessages(const AMessages: array of TJSONObject): TJSONArray;
+
+// The candidates that start with AValue, compared case-insensitively,
+// in their given order: the completion a static list gives (#81).
+function MCPCompleteFrom(const AValue: string;
+  const ACandidates: array of string): TMCPCompletion;
 
 // In-request notifications, callable from any handler. Both are
 // silent no-ops when the precondition is missing, so handlers can
@@ -1146,183 +1202,10 @@ end;
 
 { ───────── URI templates ───────── }
 
-function IsUriTemplateVariableCharacter(ACharacter: Char): Boolean; inline;
-begin
-  Result := ACharacter in ['A'..'Z', 'a'..'z', '0'..'9', '_'];
-end;
-
-function TryValidateUriTemplate(const ATemplate: string;
-  out AError: string): Boolean;
-var
-  CloseBrace, Index, VariableIndex: Integer;
-  PreviousWasVariable: Boolean;
-begin
-  Result := False;
-  AError := '';
-  if ATemplate = '' then
-  begin
-    AError := 'Resource template registration requires a non-empty uriTemplate';
-    Exit;
-  end;
-  Index := 1;
-  PreviousWasVariable := False;
-  while Index <= Length(ATemplate) do
-  begin
-    if ATemplate[Index] = '}' then
-    begin
-      AError := Format('Invalid resource template "%s": stray "}" at ' +
-        'character %d', [ATemplate, Index]);
-      Exit;
-    end;
-    if ATemplate[Index] <> '{' then
-    begin
-      PreviousWasVariable := False;
-      Inc(Index);
-      Continue;
-    end;
-    if PreviousWasVariable then
-    begin
-      AError := Format('Invalid resource template "%s": adjacent variables ' +
-        'require separating literal text', [ATemplate]);
-      Exit;
-    end;
-    CloseBrace := Index + 1;
-    while (CloseBrace <= Length(ATemplate)) and
-      (ATemplate[CloseBrace] <> '}') do
-      Inc(CloseBrace);
-    if CloseBrace > Length(ATemplate) then
-    begin
-      AError := Format('Invalid resource template "%s": unclosed variable ' +
-        'at character %d', [ATemplate, Index]);
-      Exit;
-    end;
-    if CloseBrace = Index + 1 then
-    begin
-      AError := Format('Invalid resource template "%s": variable name must ' +
-        'not be empty', [ATemplate]);
-      Exit;
-    end;
-    for VariableIndex := Index + 1 to CloseBrace - 1 do
-      if not IsUriTemplateVariableCharacter(ATemplate[VariableIndex]) then
-      begin
-        AError := Format('Invalid resource template "%s": variable name ' +
-          'must contain only A-Z, a-z, 0-9, and _', [ATemplate]);
-        Exit;
-      end;
-    PreviousWasVariable := True;
-    Index := CloseBrace + 1;
-  end;
-  Result := True;
-end;
-
 function MatchUriTemplate(const ATemplate, AUri: string;
   out AVars: TJSONObject): Boolean;
-type
-  TVariableCapture = record
-    Name: string;
-    Value: string;
-  end;
-  TVariableCaptures = array of TVariableCapture;
-  TFailedStateRow = array of Boolean;
-  TFailedStateRows = array of TFailedStateRow;
-var
-  Captures: TVariableCaptures;
-  FailedStates: TFailedStateRows;
-  I: Integer;
-  ValidationError: string;
-
-  function IsFailedState(ATemplateIndex, AUriIndex: Integer): Boolean;
-  begin
-    Result := (Length(FailedStates[ATemplateIndex]) <> 0) and
-      FailedStates[ATemplateIndex][AUriIndex];
-  end;
-
-  procedure RememberFailedState(ATemplateIndex, AUriIndex: Integer);
-  begin
-    if Length(FailedStates[ATemplateIndex]) = 0 then
-      SetLength(FailedStates[ATemplateIndex], Length(AUri) + 2);
-    FailedStates[ATemplateIndex][AUriIndex] := True;
-  end;
-
-  procedure RememberFailedVariableStates(ATemplateIndex, AFirstUriIndex,
-    ALastUriIndex: Integer);
-  var
-    UriIndex: Integer;
-  begin
-    // With repeated-variable equality deliberately out of scope, a failed
-    // variable match also proves every later start in this path segment
-    // fails: each has a strict subset of the same possible endpoints.
-    for UriIndex := AFirstUriIndex to ALastUriIndex do
-      RememberFailedState(ATemplateIndex, UriIndex);
-  end;
-
-  function MatchFrom(ATemplateIndex, AUriIndex: Integer): Boolean;
-  var
-    CaptureIndex, CloseBrace, MaxValueEnd, ValueEnd: Integer;
-    StartTemplateIndex, StartUriIndex: Integer;
-  begin
-    StartTemplateIndex := ATemplateIndex;
-    StartUriIndex := AUriIndex;
-    if IsFailedState(StartTemplateIndex, StartUriIndex) then
-      Exit(False);
-    while ATemplateIndex <= Length(ATemplate) do
-    begin
-      if IsFailedState(ATemplateIndex, AUriIndex) then
-      begin
-        RememberFailedState(StartTemplateIndex, StartUriIndex);
-        Exit(False);
-      end;
-      if ATemplate[ATemplateIndex] = '{' then
-      begin
-        CloseBrace := ATemplateIndex + 1;
-        while ATemplate[CloseBrace] <> '}' do
-          Inc(CloseBrace);
-        MaxValueEnd := AUriIndex;
-        while (MaxValueEnd <= Length(AUri)) and
-          (AUri[MaxValueEnd] <> '/') do
-          Inc(MaxValueEnd);
-        for ValueEnd := AUriIndex + 1 to MaxValueEnd do
-        begin
-          CaptureIndex := Length(Captures);
-          SetLength(Captures, CaptureIndex + 1);
-          Captures[CaptureIndex].Name := Copy(ATemplate,
-            ATemplateIndex + 1, CloseBrace - ATemplateIndex - 1);
-          Captures[CaptureIndex].Value := Copy(AUri, AUriIndex,
-            ValueEnd - AUriIndex);
-          if MatchFrom(CloseBrace + 1, ValueEnd) then
-            Exit(True);
-          SetLength(Captures, CaptureIndex);
-        end;
-        RememberFailedVariableStates(ATemplateIndex, AUriIndex, MaxValueEnd);
-        RememberFailedState(StartTemplateIndex, StartUriIndex);
-        Exit(False);
-      end;
-      if (AUriIndex > Length(AUri)) or
-        (ATemplate[ATemplateIndex] <> AUri[AUriIndex]) then
-      begin
-        RememberFailedState(StartTemplateIndex, StartUriIndex);
-        Exit(False);
-      end;
-      Inc(ATemplateIndex);
-      Inc(AUriIndex);
-    end;
-    Result := AUriIndex > Length(AUri);
-    if not Result then
-      RememberFailedState(StartTemplateIndex, StartUriIndex);
-  end;
-
 begin
-  AVars := nil;
-  if not TryValidateUriTemplate(ATemplate, ValidationError) then
-    Exit(False);
-  SetLength(Captures, 0);
-  SetLength(FailedStates, Length(ATemplate) + 2);
-  Result := MatchFrom(1, 1);
-  if not Result then
-    Exit;
-  AVars := TJSONObject.Create;
-  for I := 0 to High(Captures) do
-    AVars.Add(Captures[I].Name, Captures[I].Value);
+  Result := MCP.UriTemplate.MatchUriTemplate(ATemplate, AUri, AVars);
 end;
 
 { ───────── in-request notifications ───────── }
@@ -2145,12 +2028,191 @@ end;
 // The capability objects stay empty: no listChanged / subscribe —
 // registries are fixed after startup, so there is nothing to notify.
 // Shared by server/discover (modern) and initialize (legacy).
+// Each capability is declared when the server offers something under
+// it ("Present if the server offers any tools to call", schema
+// ServerCapabilities, verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/schema#servercapabilities),
+// so a client does not list what is not there.
 function TMCPServer.ServerCapabilities: TJSONObject;
 begin
   Result := TJSONObject.Create;
-  Result.Add('tools', TJSONObject.Create);
-  Result.Add('resources', TJSONObject.Create);
-  Result.Add('prompts', TJSONObject.Create);
+  try
+    if Length(FTools) > 0 then
+      Result.Add('tools', TJSONObject.Create);
+    if (Length(FResources) > 0) or (Length(FTemplates) > 0) then
+      Result.Add('resources', TJSONObject.Create);
+    if Length(FPrompts) > 0 then
+      Result.Add('prompts', TJSONObject.Create);
+    if Length(FCompletions) > 0 then
+      Result.Add('completions', TJSONObject.Create);
+  except
+    Result.Free;
+    raise;
+  end;
+end;
+
+{ ───────── completion (#81) ───────── }
+
+function MCPCompleteFrom(const AValue: string;
+  const ACandidates: array of string): TMCPCompletion;
+begin
+  Result := MCP.Completion.MCPCompleteFrom(AValue, ACandidates);
+end;
+
+function TMCPServer.FindTemplate(const AUriTemplate: string): Integer;
+var
+  I: Integer;
+begin
+  for I := 0 to High(FTemplates) do
+    if FTemplates[I].UriTemplate = AUriTemplate then
+      Exit(I);
+  Result := -1;
+end;
+
+// '' when ARefType/ARefName name a registered prompt or template that
+// has AArgument, otherwise what is wrong (MCP.Completion decides).
+function CompletionTargetProblem(AServer: TMCPServer; const ARefType,
+  ARefName, AArgument: string): string;
+var
+  Index: Integer;
+  Definition: TJSONObject;
+begin
+  Definition := nil;
+  if ARefType = 'ref/prompt' then
+  begin
+    Index := AServer.FindPrompt(ARefName);
+    if Index >= 0 then
+      Definition := AServer.FPrompts[Index].Definition;
+  end;
+  Result := CompletionTargetFault(ARefType, ARefName, AArgument, Definition,
+    AServer.FindTemplate(ARefName) >= 0);
+end;
+
+function TMCPServer.FindCompletion(const ARefType, ARefName,
+  AArgument: string): Integer;
+begin
+  for Result := 0 to High(FCompletions) do
+    if (FCompletions[Result].RefType = ARefType) and
+      (FCompletions[Result].RefName = ARefName) and
+      (FCompletions[Result].Argument = AArgument) then
+      Exit;
+  Result := -1;
+end;
+
+procedure TMCPServer.AddCompletion(const ARefType, ARefName,
+  AArgument: string; const AValues: array of string; ACallable: Boolean;
+  AHandler: TMCPCompletionHandler; AMethod: TMCPCompletionMethod);
+var
+  Problem: string;
+  I, Slot: Integer;
+begin
+  EnsureMutable;
+  Problem := CompletionTargetProblem(Self, ARefType, ARefName, AArgument);
+  if Problem <> '' then
+    raise EMCPServer.Create('Cannot register a completion: ' + Problem);
+  if ACallable and not Assigned(AHandler) and not Assigned(AMethod) then
+    raise EMCPServer.CreateFmt('The completion for "%s" of "%s" needs a ' +
+      'non-nil callable', [AArgument, ARefName]);
+  if FindCompletion(ARefType, ARefName, AArgument) >= 0 then
+    raise EMCPServer.CreateFmt('A completion for "%s" of "%s" is ' +
+      'already registered', [AArgument, ARefName]);
+  Slot := Length(FCompletions);
+  SetLength(FCompletions, Slot + 1);
+  FCompletions[Slot].RefType := ARefType;
+  FCompletions[Slot].RefName := ARefName;
+  FCompletions[Slot].Argument := AArgument;
+  SetLength(FCompletions[Slot].Values, Length(AValues));
+  for I := 0 to High(AValues) do
+    FCompletions[Slot].Values[I] := AValues[I];
+  FCompletions[Slot].Handler := AHandler;
+  FCompletions[Slot].Method := AMethod;
+end;
+
+procedure TMCPServer.RegisterPromptCompletion(const APrompt, AArgument: string;
+  const AValues: array of string);
+begin
+  AddCompletion('ref/prompt', APrompt, AArgument, AValues, False, nil, nil);
+end;
+
+procedure TMCPServer.RegisterPromptCompletion(const APrompt, AArgument: string;
+  AHandler: TMCPCompletionHandler);
+begin
+  AddCompletion('ref/prompt', APrompt, AArgument, [], True, AHandler, nil);
+end;
+
+procedure TMCPServer.RegisterPromptCompletion(const APrompt, AArgument: string;
+  AMethod: TMCPCompletionMethod);
+begin
+  AddCompletion('ref/prompt', APrompt, AArgument, [], True, nil, AMethod);
+end;
+
+procedure TMCPServer.RegisterTemplateCompletion(const AUriTemplate,
+  AVariable: string; const AValues: array of string);
+begin
+  AddCompletion('ref/resource', AUriTemplate, AVariable, AValues, False, nil,
+    nil);
+end;
+
+procedure TMCPServer.RegisterTemplateCompletion(const AUriTemplate,
+  AVariable: string; AHandler: TMCPCompletionHandler);
+begin
+  AddCompletion('ref/resource', AUriTemplate, AVariable, [], True, AHandler,
+    nil);
+end;
+
+procedure TMCPServer.RegisterTemplateCompletion(const AUriTemplate,
+  AVariable: string; AMethod: TMCPCompletionMethod);
+begin
+  AddCompletion('ref/resource', AUriTemplate, AVariable, [], True, nil,
+    AMethod);
+end;
+
+// completion/complete: verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/completion
+// (unknown prompt or missing argument: -32602).
+function TMCPServer.HandleComplete(const AMessage: TJSONRPCMessage;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
+var
+  Request: TMCPCompleteRequest;
+  Problem: string;
+  Completion: TMCPCompletion;
+  I: Integer;
+  CompleteResult: TJSONObject;
+begin
+  // Without a registration the server declares no completions
+  // capability, so the method is not supported: -32601, as the
+  // completion page's error handling recommends (verified 2026-11-27,
+  // .../server/utilities/completion#error-handling).
+  if Length(FCompletions) = 0 then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
+      'Method not found: completion/complete (no completions registered)'));
+  Problem := ParseCompleteRequest(AMessage.Params, Request);
+  if Problem = '' then
+  begin
+    Problem := CompletionTargetProblem(Self, Request.RefType,
+      Request.RefName, Request.Argument);
+    if Problem <> '' then
+      Problem := 'Invalid params: ' + Problem;
+  end;
+  if Problem <> '' then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS, Problem));
+
+  // An argument with no completion registered answers an empty list.
+  I := FindCompletion(Request.RefType, Request.RefName, Request.Argument);
+  if I < 0 then
+    Completion := MCPCompleteFrom(Request.Value, [])
+  else if Assigned(FCompletions[I].Method) then
+    Completion := FCompletions[I].Method(Request.Argument, Request.Value,
+      Request.Context, ACtx)
+  else if Assigned(FCompletions[I].Handler) then
+    Completion := FCompletions[I].Handler(Request.Argument, Request.Value,
+      Request.Context, ACtx)
+  else
+    Completion := MCPCompleteFrom(Request.Value, FCompletions[I].Values);
+
+  CompleteResult := TJSONObject.Create;
+  CompleteResult.Add('completion', CompletionObject(Completion));
+  Result := ResultResponse(AMessage, CompleteResult, ALegacy);
 end;
 
 { ───────── TMCPServer: registration ───────── }
@@ -2868,7 +2930,6 @@ procedure TMCPServer.AddTemplate(const AUriTemplate, AName, AMimeType,
   ADescription: string; AReader: TMCPTemplateReader;
   AMethod: TMCPTemplateMethod);
 var
-  I: Integer;
   Definition: TJSONObject;
   ValidationError: string;
 begin
@@ -2883,10 +2944,9 @@ begin
       [AUriTemplate]);
   if not TryValidateUriTemplate(AUriTemplate, ValidationError) then
     raise EMCPServer.Create(ValidationError);
-  for I := 0 to High(FTemplates) do
-    if FTemplates[I].UriTemplate = AUriTemplate then
-      raise EMCPServer.CreateFmt(
-        'Resource template "%s" is already registered', [AUriTemplate]);
+  if FindTemplate(AUriTemplate) >= 0 then
+    raise EMCPServer.CreateFmt(
+      'Resource template "%s" is already registered', [AUriTemplate]);
   Definition := TJSONObject.Create;
   Definition.Add('uriTemplate', AUriTemplate);
   Definition.Add('name', AName);
@@ -3236,6 +3296,8 @@ begin
       Exit(HandlePromptsList(AMessage, False));
     if AMessage.Method = 'prompts/get' then
       Exit(HandlePromptsGet(AMessage, Ctx, False));
+    if AMessage.Method = 'completion/complete' then
+      Exit(HandleComplete(AMessage, Ctx, False));
 
     Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
       'Method not found: ' + AMessage.Method);
@@ -3294,6 +3356,8 @@ begin
       Exit(HandlePromptsList(AMessage, True));
     if AMessage.Method = 'prompts/get' then
       Exit(HandlePromptsGet(AMessage, Ctx, True));
+    if AMessage.Method = 'completion/complete' then
+      Exit(HandleComplete(AMessage, Ctx, True));
 
     Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
       'Method not found: ' + AMessage.Method);
