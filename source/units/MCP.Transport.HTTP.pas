@@ -117,6 +117,7 @@ uses
   fphttpserver,
   fpjson,
   httpdefs,
+  MCP.Extensions,
   MCP.JSONRPC,
   MCP.Protocol,
   MCP.Schema,
@@ -156,7 +157,8 @@ type
     procedure SetAddress(const AValue: string);
     function OriginAllowed(const AOrigin: string): Boolean;
     function ParamHeaderFailure(ARequest: TFPHTTPConnectionRequest;
-      const AMessage: TJSONRPCMessage; out AFailure: string): Boolean;
+      const AMessage: TJSONRPCMessage; AHeaders: TMCPHeaderLookup;
+      out AFailure: string): Boolean;
     function HeaderFailure(ARequest: TFPHTTPConnectionRequest;
       const AMessage: TJSONRPCMessage; out AFailure: string): Boolean;
     procedure HandleHTTPRequest(ASender: TObject;
@@ -808,7 +810,9 @@ function TMCPHTTPServer.HeaderFailure(ARequest: TFPHTTPConnectionRequest;
   const AMessage: TJSONRPCMessage; out AFailure: string): Boolean;
 var
   HeaderVersion, BodyVersion, HeaderMethod: string;
-  HeaderName, DecodedName, BodyName: string;
+  HeaderName, DecodedName, BodyName, NameParam: string;
+  Routed: Boolean;
+  Headers: TMCPHeaderLookup;
   Meta: TJSONObject;
 begin
   Result := True;
@@ -859,9 +863,18 @@ begin
   // resources/read (params.uri); sentinel-encoded values are decoded
   // before comparison. When the body itself omits the mirrored value
   // the request is malformed anyway — the core's diagnostic wins.
-  if NeedsName(AMessage.Method) then
+  // An extension's routed method (#118) mirrors its own name parameter.
+  Routed := FServer.MethodRoute(AMessage.Method, NameParam, Headers);
+  if NeedsName(AMessage.Method) or Routed then
   begin
-    BodyName := BodyNameFor(AMessage.Method, AMessage.Params);
+    if Routed then
+    begin
+      BodyName := '';
+      if AMessage.Params <> nil then
+        BodyName := AMessage.Params.Get(NameParam, '');
+    end
+    else
+      BodyName := BodyNameFor(AMessage.Method, AMessage.Params);
     HeaderName := ARequest.GetFieldByName('Mcp-Name');
     if HeaderName = '' then
     begin
@@ -889,8 +902,8 @@ begin
     end;
   end;
 
-  if (AMessage.Method = 'tools/call') and
-    ParamHeaderFailure(ARequest, AMessage, AFailure) then
+  if ((AMessage.Method = 'tools/call') or (Routed and Assigned(Headers))) and
+    ParamHeaderFailure(ARequest, AMessage, Headers, AFailure) then
     Exit;
 
   Result := False;
@@ -922,7 +935,7 @@ end;
 
 function TMCPHTTPServer.ParamHeaderFailure(
   ARequest: TFPHTTPConnectionRequest; const AMessage: TJSONRPCMessage;
-  out AFailure: string): Boolean;
+  AHeaders: TMCPHeaderLookup; out AFailure: string): Boolean;
 var
   Parameters: TMCPHeaderParameters;
   Arguments, Value: TJSONData;
@@ -930,7 +943,11 @@ var
   I, Occurrences: Integer;
 begin
   Result := True;
-  Parameters := FServer.ToolHeaderParameters(AMessage.Params.Get('name', ''));
+  // A routed method's own parameters, or the tool's.
+  if Assigned(AHeaders) then
+    Parameters := AHeaders(AMessage.Params.Get('name', ''))
+  else
+    Parameters := FServer.ToolHeaderParameters(AMessage.Params.Get('name', ''));
   Arguments := AMessage.Params.Find('arguments');
   for I := 0 to High(Parameters) do
   begin

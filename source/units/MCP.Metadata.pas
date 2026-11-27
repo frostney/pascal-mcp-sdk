@@ -68,6 +68,10 @@ function MetaPathString(ADefinition: TJSONObject; const APath: string;
 function ToolDefinitionProblem(ADefinition: TJSONObject;
   out AToolName: string): string;
 
+// Whether AText is a date-time with a time zone (RFC 3339 section 5.6),
+// as clients check lastModified and event timestamps.
+function ValidTimestamp(const AText: string): Boolean;
+
 // Sets the string member AName of ADefinition (borrowed), replacing an
 // earlier value.
 procedure SetStringMember(ADefinition: TJSONObject; const AName,

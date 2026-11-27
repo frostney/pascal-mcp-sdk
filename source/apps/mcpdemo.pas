@@ -26,10 +26,12 @@ uses
   cthreads,
   {$ENDIF}
   SysUtils,
+  DateUtils,
 
   fpjson,
 
   MCP.Apps,
+  MCP.Events,
   MCP.Protocol,
   MCP.Schema,
   MCP.Server,
@@ -230,6 +232,41 @@ begin
     ASize := 0;
 end;
 
+// The Events demo (#118): one occurrence per minute of UTC time, the
+// cursor the minute read last (minutes since 1970). Stateless: the
+// clock is the upstream. A cursor over an hour old is truncated to the
+// last hour.
+function ClockMinuteCheck(const AQuery: TMCPEventQuery;
+  const ACtx: TMCPRequestContext): TMCPEventPoll;
+var
+  Now, Minute, Last: Int64;
+begin
+  Now := DateTimeToUnix(LocalTimeToUniversal(SysUtils.Now)) div 60;
+  if AQuery.FromNow or not TryStrToInt64(AQuery.Cursor, Minute) then
+    Exit(MCPEventPoll(IntToStr(Now)));
+  Result := MCPEventPoll(IntToStr(Now), TJSONArray.Create);
+  if Minute < Now - 60 then
+  begin
+    Minute := Now - 60;
+    Result.Truncated := True;
+  end;
+  Last := Now;
+  if (AQuery.MaxEvents >= 0) and (Minute + AQuery.MaxEvents < Last) then
+  begin
+    Last := Minute + AQuery.MaxEvents;
+    Result.HasMore := True;
+  end;
+  while Minute < Last do
+  begin
+    Inc(Minute);
+    Result.Events.Add(MCPEventOccurrence('minute-' + IntToStr(Minute),
+      FormatDateTime('yyyy-mm-dd"T"hh:nn:ss"Z"', UnixToDateTime(Minute * 60)),
+      TJSONObject.Create(['minute', Minute])));
+  end;
+  Result.Cursor := IntToStr(Last);
+  Result.NextPollMs := 60000;
+end;
+
 // `--skills-dir <dir>` also serves the skills under <dir> (#117), at
 // skill://disk/...; mcpsmoke uses it to check skills loaded from disk.
 function SkillsDirFromArgs(out ADir: string): Boolean;
@@ -323,6 +360,11 @@ begin
       '[the example](examples/call.json).' + #10,
       [MCPSkillFile('examples/call.json',
       '{"name":"echo","arguments":{"message":"hi"}}' + #10)]);
+
+    // Events (#118): a minute clock a client polls with events/poll.
+    RegisterEvent(Server, 'clock.minute', 'Fires once a minute (UTC)',
+      ObjectSchema, ObjectSchema.AddInteger('minute', 'Minutes since 1970'),
+      ClockMinuteCheck, 60000);
 
     Server.RegisterResourceTemplate('mcp://pascal-mcp-sdk/shout/{text}',
       'shout', 'text/plain', ShoutReader, 'Uppercase echo of {text}');

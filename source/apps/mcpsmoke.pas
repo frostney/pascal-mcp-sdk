@@ -598,7 +598,7 @@ end;
 var
   Demo: TProcess;
   Response: TJSONObject;
-  ResponseLine, SealedState, SkillDigest, SkillText: string;
+  ResponseLine, SealedState, SkillDigest, SkillText, EventCursor: string;
   SkillSize: Integer;
   ServerInfo: TJSONData;
   StartedAt: QWord;
@@ -900,6 +900,31 @@ begin
     Check(PathString(Response, 'result.resources[1].mimeType') =
       'inode/directory', 'resources/directory/read: the skill root lists ' +
       'its examples directory');
+    Response.Free;
+
+    // Events (#118): a poll from now gives the current minute; three
+    // minutes back with maxEvents 2 gives the next two and hasMore,
+    // whether or not the minute turns in between (events.mdx,
+    // Poll-Based Delivery, verified 2026-11-27).
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":41,"method":"events/poll","params":{' +
+      '"name":"clock.minute","cursor":null,' + META_MODERN + '}}');
+    EventCursor := PathString(Response, 'result.cursor');
+    Check((EventCursor <> '') and (FindPath(Response, 'result.events') <> nil)
+      and (FindPath(Response, 'result.events').Count = 0),
+      'events/poll from now: a fresh cursor and no events');
+    Response.Free;
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":42,"method":"events/poll","params":{' +
+      '"name":"clock.minute","maxEvents":2,"cursor":"' +
+      IntToStr(StrToInt64Def(EventCursor, 0) - 3) + '",' + META_MODERN + '}}');
+    Check((PathString(Response, 'result.events[0].eventId') = 'minute-' +
+      IntToStr(StrToInt64Def(EventCursor, 0) - 2)) and
+      (PathString(Response, 'result.events[1].name') = 'clock.minute') and
+      (FindPath(Response, 'result.events[2]') = nil) and
+      (FindPath(Response, 'result.hasMore') <> nil) and
+      FindPath(Response, 'result.hasMore').AsBoolean,
+      'events/poll from a cursor: two occurrences, more waiting');
     Response.Free;
 
     // The MCP Apps card is an ordinary resources/read (#98).

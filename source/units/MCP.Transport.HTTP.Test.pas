@@ -28,6 +28,7 @@ uses
   fphttpclient,
   sockets,
   ssockets,
+  MCP.Events,
   MCP.Protocol,
   MCP.Schema,
   MCP.Server,
@@ -94,6 +95,10 @@ type
     // a field can repeat; returns the status.
     function PostRoutedRaw(const AArguments, AExtraHeaderLines: string;
       out ABody: string): Integer;
+    // An events/poll with params AParamsJson (each member followed by a
+    // comma), Mcp-Name AName ('' sends none) and AHeaders.
+    function PostPoll(const AName, AParamsJson: string;
+      const AHeaders: array of THeaderPair; out ABody: string): Integer;
     function PostWithUnsentBody(ADeclaredLength: Integer;
       out AResponseBody: string): Integer;
   protected
@@ -108,6 +113,7 @@ type
     procedure TestMissingProtocolVersion400;
     procedure TestMissingClientCapabilities400;
     procedure TestInBandInvalidParamsStays200;
+    procedure TestEventRouting;
     procedure TestStreamingOptInMissingCapabilities400;
     procedure TestNotificationAccepted;
     procedure TestMalformedNotificationAccepted;
@@ -354,6 +360,12 @@ begin
     AThread.WaitFor;
 end;
 
+function TickCheck(const AQuery: TMCPEventQuery;
+  const ACtx: TMCPRequestContext): TMCPEventPoll;
+begin
+  Result := MCPEventPoll('now');
+end;
+
 procedure THTTPBinding.BeforeEach;
 var
   Attempt: Integer;
@@ -386,6 +398,11 @@ begin
     '"dry":{"type":"boolean","x-mcp-header":"Dry"}}}}}',
     QuietHandler).ApplicationValidated;
   FServer.RegisterTool('waiter', 'Waits', '{"type":"object"}', WaiterHandler);
+  // An event type whose region is mirrored into Mcp-Param-Region (#118).
+  RegisterEvent(FServer, 'tick', 'Ticks',
+    TJSONObject(GetJSON('{"type":"object","properties":{"region":' +
+    '{"type":"string","x-mcp-header":"Region"}}}')), ObjectSchema.Build,
+    TickCheck);
   FTransport := TMCPHTTPServer.Create(FServer);
   FTransport.Port := FindFreePort;
   FBaseUrl := 'http://127.0.0.1:' + IntToStr(FTransport.Port);
@@ -864,6 +881,49 @@ begin
   Expect<Integer>(PostRouted('{"region":"Hello, ' + #$E4#$B8#$96#$E7#$95#$8C +
     '"}', [HeaderPair('mcp-param-region', '=?base64?SGVsbG8sIOS4lueVjA==?=')],
     Body)).ToBe(200);
+end;
+
+// events/poll carries Mcp-Name (params.name) and the Mcp-Param-*
+// headers of its input schema, checked as for tools/call; events/list
+// carries no name (events.mdx, Streamable HTTP: Routing Headers,
+// verified 2026-11-27).
+function THTTPBinding.PostPoll(const AName, AParamsJson: string;
+  const AHeaders: array of THeaderPair; out ABody: string): Integer;
+var
+  Headers: array of THeaderPair;
+  ContentType: string;
+  I: Integer;
+begin
+  Headers := [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+    HeaderPair('Mcp-Method', 'events/poll')];
+  if AName <> '' then
+    Headers := Concat(Headers, [HeaderPair('Mcp-Name', AName)]);
+  for I := 0 to High(AHeaders) do
+    Headers := Concat(Headers, [AHeaders[I]]);
+  Result := Exchange('POST', '/mcp', '{"jsonrpc":"2.0","id":5,' +
+    '"method":"events/poll","params":{' + AParamsJson + META_MODERN + '}}',
+    Headers, ABody, ContentType);
+end;
+
+procedure THTTPBinding.TestEventRouting;
+var
+  Body: string;
+begin
+  Expect<Integer>(PostPoll('tick', '"name":"tick","arguments":' +
+    '{"region":"eu"},', [HeaderPair('Mcp-Param-Region', 'eu')], Body))
+    .ToBe(200);
+  Expect<Boolean>(Pos('"cursor" : "now"', Body) > 0).ToBe(True);
+  Expect<Integer>(PostPoll('', '"name":"tick",', [], Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  Expect<Boolean>(Pos('required Mcp-Name header is missing', Body) > 0)
+    .ToBe(True);
+  Expect<Integer>(PostPoll('tock', '"name":"tick",', [], Body)).ToBe(400);
+  Expect<Integer>(PostPoll('tick', '"name":"tick","arguments":' +
+    '{"region":"eu"},', [], Body)).ToBe(400);
+  Expect<Boolean>(Pos('Mcp-Param-Region header is missing', Body) > 0)
+    .ToBe(True);
+  Expect<Integer>(Post('{"jsonrpc":"2.0","id":6,"method":"events/list",' +
+    '"params":{' + META_MODERN + '}}', 'events/list', '', Body)).ToBe(200);
 end;
 
 procedure THTTPBinding.TestParamHeaderMissing;
@@ -1486,6 +1546,7 @@ begin
   Test('Mcp-Param headers: plain, nested, typed and base64 values match',
     TestParamHeadersMatch);
   Test('Mcp-Param header missing → 400, -32020', TestParamHeaderMissing);
+  Test('events/poll carries Mcp-Name and Mcp-Param-*', TestEventRouting);
   Test('Mcp-Param header mismatched → 400, -32020', TestParamHeaderMismatch);
   Test('Mcp-Param base64 with bad padding or characters → 400',
     TestParamHeaderBadBase64);

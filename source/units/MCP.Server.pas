@@ -103,6 +103,7 @@ uses
   jsonparser,
   jsonscanner,
   MCP.Completion,
+  MCP.Errors,
   MCP.Extensions,
   MCP.JSONRPC,
   MCP.Metadata,
@@ -675,6 +676,17 @@ type
     // nil resolver or a prefix overlapping another raises EMCPServer.
     procedure RegisterResourceResolver(const AUriPrefix: string;
       AResolver: TMCPResourceResolver);
+    // On Streamable HTTP, a request for AMethod (registered with
+    // RegisterMethod) carries Mcp-Name mirroring params.ANameParam and,
+    // with AHeaders, Mcp-Param-* headers for the x-mcp-header parameters
+    // AHeaders gives for that name, checked as for tools/call (#118).
+    // An unregistered method, an empty name parameter or a second route
+    // raises EMCPServer.
+    procedure RegisterRoute(const AMethod, ANameParam: string;
+      AHeaders: TMCPHeaderLookup);
+    // The route of AMethod, for transports.
+    function MethodRoute(const AMethod: string; out ANameParam: string;
+      out AHeaders: TMCPHeaderLookup): Boolean;
     // Why RegisterMethod would refuse one of AMethods, or
     // RegisterResourceResolver AUriPrefix ('' for none), the server
     // having started included; '' when all would succeed. Nothing
@@ -894,50 +906,16 @@ type
     function PromptCount: Integer;
   end;
 
-  EMCPServer = class(Exception);
-
-  // A JSON-RPC error a handler answers with instead of a result (#88).
-  // Raised from a tools/call, prompts/get or resources/read handler
-  // (typed and template handlers included), it becomes the error
-  // response with exactly this code, message and data, in both eras;
-  // it is deliberate, so RedactErrorDetails leaves it alone: its message
-  // and data reach the client verbatim, so keep secrets out. Every
-  // other exception keeps its mapping (tools: in-band isError;
-  // prompts and resources: -32603).
-  //
-  // Allowed codes: the JSON-RPC ones (-32700, -32600 to -32603), the
-  // MCP-defined -32021 (MissingRequiredClientCapability; build it with
-  // MCPMissingCapabilityError), and application codes outside the
-  // reserved -32768..-32000 range. Any other code is reserved for a
-  // meaning the spec defines elsewhere or for legacy use, so the
-  // constructor raises EMCPServer for it (and frees AData). Error-code
-  // policy verified 2026-11-26 against
-  // https://modelcontextprotocol.io/specification/2026-07-28/basic/index#error-codes
-  EMCPProtocolError = class(Exception)
-  private
-    FCode: Integer;
-    FData: TJSONData;
-    // Hands the data to the dispatch wrapper, which puts it on the
-    // wire and then owns it (nil if none).
-    function TakeData: TJSONData;
-  public
-    // Takes ownership of AData (nil for none). Code -32021 needs data
-    // with a non-empty requiredCapabilities object.
-    constructor Create(ACode: Integer; const AMessage: string;
-      AData: TJSONData = nil);
-    destructor Destroy; override;
-    property Code: Integer read FCode;
-    // Borrowed: owned by the exception; do not free or change it (a
-    // -32021 whose data no longer validates is sent as -32603).
-    property Data: TJSONData read FData;
-  end;
+  // Declared in MCP.Errors (#118), under these names here too, so code
+  // that uses only MCP.Server keeps raising and catching them: see
+  // there for what each is for and the codes EMCPProtocolError allows.
+  EMCPServer = MCP.Errors.EMCPServer;
+  EMCPProtocolError = MCP.Errors.EMCPProtocolError;
 
 // The -32021 MissingRequiredClientCapability error for a request
 // that needs ACapability (for example 'sampling') which the client did
-// not declare, with the spec's data.requiredCapabilities. Raise it
-// from a handler: raise MCPMissingCapabilityError('sampling').
-// Verified 2026-11-26 against
-// https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta
+// not declare (MCP.Errors). Raise it from a handler:
+// raise MCPMissingCapabilityError('sampling').
 function MCPMissingCapabilityError(const ACapability: string): EMCPProtocolError;
 
 // Content builders for handler implementations.
@@ -1663,56 +1641,11 @@ end;
 
 
 
-{ ───────── handler-raised protocol errors (#88) ───────── }
-
-function IsAllowedHandlerErrorCode(ACode: Integer): Boolean;
-begin
-  case ACode of
-    JSONRPC_PARSE_ERROR, JSONRPC_INVALID_REQUEST, JSONRPC_METHOD_NOT_FOUND,
-    JSONRPC_INVALID_PARAMS, JSONRPC_INTERNAL_ERROR,
-    MCP_ERROR_MISSING_CLIENT_CAPABILITY:
-      Result := True;
-  else
-    Result := (ACode < -32768) or (ACode > -32000);
-  end;
-end;
-
-constructor EMCPProtocolError.Create(ACode: Integer; const AMessage: string;
-  AData: TJSONData);
-begin
-  // Own AData first, so every rejection below frees it: an exception in
-  // a constructor runs the destructor.
-  inherited Create(AMessage);
-  FCode := ACode;
-  FData := AData;
-  if not IsAllowedHandlerErrorCode(ACode) then
-    raise EMCPServer.CreateFmt('EMCPProtocolError code %d is reserved: ' +
-      'use a JSON-RPC code (-32700, -32600 to -32603), -32021, or an ' +
-      'application code outside -32768..-32000', [ACode]);
-  if (ACode = MCP_ERROR_MISSING_CLIENT_CAPABILITY) and
-    not IsMissingCapabilityData(AData) then
-    raise EMCPServer.Create('EMCPProtocolError -32021 needs data whose ' +
-      'requiredCapabilities names at least one capability, each shaped ' +
-      'as in ClientCapabilities; use MCPMissingCapabilityError');
-end;
-
-destructor EMCPProtocolError.Destroy;
-begin
-  FData.Free;
-  inherited Destroy;
-end;
-
-function EMCPProtocolError.TakeData: TJSONData;
-begin
-  Result := FData;
-  FData := nil;
-end;
+{ ───────── handler-raised protocol errors (#88; MCP.Errors) ───────── }
 
 function MCPMissingCapabilityError(const ACapability: string): EMCPProtocolError;
 begin
-  Result := EMCPProtocolError.Create(MCP_ERROR_MISSING_CLIENT_CAPABILITY,
-    'Missing required client capability: ' + ACapability,
-    BuildMissingCapabilityData(ACapability));
+  Result := MCP.Errors.MCPMissingCapabilityError(ACapability);
 end;
 
 function MCPTextResult(const AText: string): TMCPToolResult;
@@ -2543,26 +2476,15 @@ begin
   Result := ARedactedMessage + ' (ref ' + ErrorReference + ')';
 end;
 
-// The response for a handler's EMCPProtocolError (#88). Its data is
-// borrowed until here, so a -32021 whose data a handler changed after
-// construction is checked again and, if it no longer validates, sent
-// as -32603 rather than as a refusal clients would reject.
+// The response for a handler's EMCPProtocolError (#88; MCP.Errors).
 function TMCPServer.ProtocolErrorResponse(AMessage: TJSONRPCMessage;
   E: Exception): string;
 var
-  Err: EMCPProtocolError;
+  LogLine: string;
 begin
-  Err := E as EMCPProtocolError;
-  if (Err.Code = MCP_ERROR_MISSING_CLIENT_CAPABILITY) and
-    not IsMissingCapabilityData(Err.Data) then
-  begin
-    TryLogToStderr('dispatch/' + AMessage.Method + ': -32021 data no ' +
-      'longer names valid requiredCapabilities; sent as -32603');
-    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
-      'Internal error'));
-  end;
-  Result := BuildErrorResponse(AMessage.Id, Err.Code, Err.Message,
-    Err.TakeData);
+  Result := ProtocolErrorReply(AMessage, E as EMCPProtocolError, LogLine);
+  if LogLine <> '' then
+    TryLogToStderr(LogLine);
 end;
 
 destructor TMCPServer.Destroy;
@@ -2672,6 +2594,23 @@ begin
   Problem := FHooks.AddResolver(AUriPrefix, AResolver);
   if Problem <> '' then
     raise EMCPServer.Create(Problem);
+end;
+
+procedure TMCPServer.RegisterRoute(const AMethod, ANameParam: string;
+  AHeaders: TMCPHeaderLookup);
+var
+  Problem: string;
+begin
+  EnsureMutable;
+  Problem := FHooks.AddRoute(AMethod, ANameParam, AHeaders);
+  if Problem <> '' then
+    raise EMCPServer.Create(Problem);
+end;
+
+function TMCPServer.MethodRoute(const AMethod: string; out ANameParam: string;
+  out AHeaders: TMCPHeaderLookup): Boolean;
+begin
+  Result := FHooks.FindRoute(AMethod, ANameParam, AHeaders);
 end;
 
 procedure TMCPServer.Adopt(AObject: TObject);
