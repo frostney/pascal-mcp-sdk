@@ -61,7 +61,22 @@ params object.
 
 Each kind is gated on the per-request client capabilities: requesting
 a kind the client did not declare answers `-32021` instead of
-reaching the client.
+reaching the client. The gate also reads the member of the capability
+a request needs, as the specification forbids sending the request
+otherwise:
+
+- An elicitation request needs its mode: `elicitation.form` for
+  `MCPElicitFormRequest` or a request without `mode`, and
+  `elicitation.url` for `MCPElicitURLRequest`. An empty
+  `"elicitation": {}` declares form mode only.
+- A sampling request carrying `tools` or `toolChoice` needs
+  `sampling.tools`.
+
+The refusal names what is missing, as in
+`{"requiredCapabilities": {"elicitation": {"url": {}}}}`. A form
+request to a client without elicitation names just `elicitation`,
+since its empty object would do. To pick a mode before asking, a
+handler checks `ACtx.HasSubCapability('elicitation', 'url')`.
 
 ## Reading the responses on re-entry
 

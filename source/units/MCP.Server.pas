@@ -3927,13 +3927,13 @@ function TMCPServer.InputRequiredResponse(const AMessage: TJSONRPCMessage;
   AInputRequests: TJSONObject; const ARequestState: string;
   AMeta: TJSONObject): string;
 var
-  MissingCapability, UnknownKind: string;
+  MissingCapability, MissingMember, UnknownKind: string;
   InterimResult: TJSONObject;
 begin
   // Both trees are ours from here until the interim result takes them.
   try
     MissingCapability := MissingInputCapability(AInputRequests, ACtx,
-      UnknownKind);
+      UnknownKind, MissingMember);
   except
     AInputRequests.Free;
     AMeta.Free;
@@ -3951,6 +3951,9 @@ begin
   if MissingCapability <> '' then
   begin
     AInputRequests.Free;
+    if MissingMember <> '' then
+      Exit(MissingMemberResponse(AMessage, ASubjectKind, ASubjectName,
+        MissingCapability, MissingMember));
     Exit(MissingCapabilityResponse(AMessage, ASubjectKind, ASubjectName,
       [MissingCapability]));
   end;

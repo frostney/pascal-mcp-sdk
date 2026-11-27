@@ -353,6 +353,16 @@ begin
   BuildMissingCapabilityData(['sampling', 'roots', 'sampling']).Free;
 end;
 
+procedure MemberWithoutCapability;
+begin
+  BuildMissingCapabilityData('', 'url').Free;
+end;
+
+procedure CapabilityWithoutMember;
+begin
+  BuildMissingCapabilityData('elicitation', '').Free;
+end;
+
 function ArgumentRefused(AProc: TProcedure): Boolean;
 begin
   Result := False;
@@ -381,6 +391,17 @@ begin
   Expect<Boolean>(ArgumentRefused(EmptyCapabilityData)).ToBe(True);
   // A repeat is refused before anything is allocated.
   Expect<Boolean>(ArgumentRefused(RepeatedCapabilityData)).ToBe(True);
+  // One member of a capability (#108).
+  Data := BuildMissingCapabilityData('elicitation', 'url');
+  try
+    Expect<string>(Data.AsJSON).ToBe('{ "requiredCapabilities" : ' +
+      '{ "elicitation" : { "url" : {} } } }');
+    Expect<Boolean>(IsMissingCapabilityData(Data)).ToBe(True);
+  finally
+    Data.Free;
+  end;
+  Expect<Boolean>(ArgumentRefused(MemberWithoutCapability)).ToBe(True);
+  Expect<Boolean>(ArgumentRefused(CapabilityWithoutMember)).ToBe(True);
 end;
 
 procedure TMetaValidation.SetupTests;
@@ -399,7 +420,7 @@ begin
   Test('wrong-case logLevel → -32602', TestWrongCaseLogLevelRejected);
   Test('HasCapability: defined capabilities in shape, custom by presence',
     TestHasCapability);
-  Test('BuildMissingCapabilityData lists every name, refuses none or repeats',
+  Test('BuildMissingCapabilityData lists every name or one member, refuses none or repeats',
     TestMissingCapabilityData);
   Test('MissingRequiredMeta names the first missing field',
     TestMissingRequiredMetaNames);

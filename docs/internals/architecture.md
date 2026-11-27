@@ -239,7 +239,9 @@ server-initiated requests:
   both exposed on `TMCPRequestContext` — each round is one ordinary
   `HandleMessage` call, so the server stays stateless across rounds.
 - Kinds are gated on the per-request client capabilities (`-32021`
-  when undeclared), and the whole mechanism is modern-era only.
+  when undeclared), down to the member a request needs: its
+  elicitation mode, or `sampling.tools` for tool-enabled sampling. The
+  whole mechanism is modern-era only.
 - Sampling and roots are deprecated in the final spec (SEP-2577) but
   carried deliberately — each kind is one builder plus one accessor,
   so a later sunset is cheap.
