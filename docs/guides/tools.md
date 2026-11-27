@@ -337,10 +337,14 @@ every modern-era call, retries with `inputResponses` included. Leave it
 off when only some calls ask, and check `ACtx.HasCapability` in the
 handler before its first notification instead. It does not check a
 mode either: a client that declares only URL elicitation passes the
-check above, so a handler that sends a form checks that the client's
-`elicitation` object is empty or names `form` (an empty one means form
-mode only, per the
-[elicitation capabilities](https://modelcontextprotocol.io/specification/2026-07-28/client/elicitation#capabilities)).
+check above. The library still refuses the form request itself when
+the handler returns it, with `-32021` naming `elicitation.form`, so
+nothing reaches a client that cannot take it. A handler that streams
+progress first, or could ask in another mode, checks the mode before
+it starts with `ACtx.HasSubCapability('elicitation', 'form')`, which
+counts an empty `elicitation` object as form mode, as the
+[elicitation capabilities](https://modelcontextprotocol.io/specification/2026-07-28/client/elicitation#capabilities)
+say.
 
 ```pascal
 function GreetUserHandler(AArguments: TJSONObject;

@@ -142,6 +142,11 @@ type
     // its value. A classic-handshake client, whose capabilities follow
     // its own revision's schema, counts by presence alone.
     function HasCapability(const AName: string): Boolean;
+    // True when the client declared capability AName (HasCapability)
+    // with member AMember, such as elicitation's "url" or sampling's
+    // "tools" (#108). An empty elicitation object declares "form", as
+    // the specification reads it for backwards compatibility.
+    function HasSubCapability(const AName, AMember: string): Boolean;
     // The client declared extension AId in clientCapabilities.extensions
     // (#98; versioning#extension-negotiation, verified 2026-11-26).
     function HasExtension(const AId: string): Boolean;
@@ -215,6 +220,11 @@ function BuildMissingCapabilityData(const ACapability: string): TJSONObject;
 // allocated: -32021 data names each capability once, at least one.
 function BuildMissingCapabilityData(
   const ACapabilities: array of string): TJSONObject; overload;
+// The same naming one member of ACapability (both non-empty, else
+// EArgumentException): {"requiredCapabilities":{"elicitation":
+// {"url":{}}}} for a missing elicitation.url (#108).
+function BuildMissingCapabilityData(const ACapability,
+  AMember: string): TJSONObject; overload;
 
 // True when AData is valid -32021 data: an object whose
 // requiredCapabilities is a ClientCapabilities object naming at least
@@ -241,21 +251,31 @@ function IsExtensionId(const AId: string): Boolean;
 // capability an input request needs, the ones a request lacks, and the
 // automatic -32021 for them.
 
-// AInputRequests is borrowed.
-// '' when every inputRequests entry names a kind the client declared;
-// otherwise the first missing capability. AUnknownKind carries the
-// method of an entry that is not an MRTR kind at all, and stays
-// non-empty for a malformed entry too — one that is not an object, or
-// carries no string "method" — so callers can keep testing it with a
-// single `<> ''` guard and never emit such a map on the wire.
+// AInputRequests is borrowed. Entries are checked in order and the
+// first problem wins. '' when every entry names a kind the client
+// declared, with the member of that capability it needs (an
+// elicitation mode, sampling.tools for a request with tools or
+// toolChoice); otherwise the first missing capability, and in
+// AMissingMember the member it lacks, or '' when the capability alone
+// is missing and enough. AUnknownKind carries the method of an entry
+// that is not an MRTR kind at all, and stays non-empty for a malformed
+// entry too — one that is not an object, carries no string "method",
+// or asks for an elicitation mode other than form or url — so callers
+// can keep testing it with a single `<> ''` guard and never emit such
+// a map on the wire.
 function MissingInputCapability(AInputRequests: TJSONObject;
-  const ACtx: TMCPRequestContext; out AUnknownKind: string): string;
+  const ACtx: TMCPRequestContext; out AUnknownKind,
+  AMissingMember: string): string;
 
 // The automatic -32021 for a subject lacking ANames (not empty), both
 // for declared needs (#84) and for a run-time input request.
 function MissingCapabilityResponse(const AMessage: TJSONRPCMessage;
   const ASubjectKind, ASubjectName: string;
   const ANames: array of string): string;
+// The same for one member of ACapability (#108): the message names
+// "elicitation.url", the data {"elicitation":{"url":{}}}.
+function MissingMemberResponse(const AMessage: TJSONRPCMessage;
+  const ASubjectKind, ASubjectName, ACapability, AMember: string): string;
 
 // The declared capabilities ACtx lacks, in declaration order (#84).
 function MissingDeclaredCapabilities(const ARequired: array of string;
@@ -304,6 +324,29 @@ begin
   Position := MemberPosition(ClientCapabilities, AName);
   Result := (Position >= 0) and
     IsCapabilityEntry(AName, ClientCapabilities.Items[Position]);
+end;
+
+function TMCPRequestContext.HasSubCapability(const AName,
+  AMember: string): Boolean;
+var
+  Capability: TJSONData;
+begin
+  if not HasCapability(AName) then
+    Exit(False);
+  Capability := ClientCapabilities.Find(AName);
+  // A classic client's capability counts by presence, so it may be no
+  // object: then it declares no member.
+  if (Capability = nil) or (Capability.JSONType <> jtObject) then
+    Exit(False);
+  // "an empty capabilities object is equivalent to declaring support
+  // for form mode only" (client/elicitation#capabilities, 2026-07-28 and
+  // 2025-11-25, verified 2026-11-27); 2025-06-18 has only the empty
+  // object.
+  if (AName = 'elicitation') and (AMember = 'form') and
+    (Capability.Count = 0) then
+    Exit(True);
+  // HasCapability checked a 2026-07-28 request's typed members' shapes.
+  Result := MemberPosition(TJSONObject(Capability), AMember) >= 0;
 end;
 
 function TMCPRequestContext.ExtensionSettings(const AId: string): TJSONObject;
@@ -557,6 +600,25 @@ begin
   end;
 end;
 
+function BuildMissingCapabilityData(const ACapability,
+  AMember: string): TJSONObject;
+var
+  Capability: TJSONObject;
+begin
+  if (ACapability = '') or (AMember = '') then
+    raise EArgumentException.Create(
+      'BuildMissingCapabilityData needs a capability and a member');
+  Result := BuildMissingCapabilityData([ACapability]);
+  Capability := TJSONObject(TJSONObject(Result.Find('requiredCapabilities'))
+    .Find(ACapability));
+  try
+    Capability.Add(AMember, TJSONObject.Create);
+  except
+    Result.Free;
+    raise;
+  end;
+end;
+
 function IsJSONObjectValue(AData: TJSONData): Boolean;
 begin
   Result := (AData <> nil) and (AData.JSONType = jtObject);
@@ -567,7 +629,7 @@ end;
 function MembersAreObjects(AObject: TJSONObject;
   const AFields: array of string): Boolean;
 var
-  I: Integer;
+  I, Position: Integer;
 begin
   if Length(AFields) = 0 then
   begin
@@ -576,10 +638,14 @@ begin
         Exit(False);
     Exit(True);
   end;
+  // By key, so a typed member stored as nil (written as null) fails the
+  // shape, as a parsed null does (#108 review).
   for I := 0 to High(AFields) do
-    if (AObject.IndexOfName(AFields[I]) >= 0) and
-      not IsJSONObjectValue(AObject.Elements[AFields[I]]) then
+  begin
+    Position := MemberPosition(AObject, AFields[I]);
+    if (Position >= 0) and not IsJSONObjectValue(AObject.Items[Position]) then
       Exit(False);
+  end;
   Result := True;
 end;
 
@@ -693,21 +759,61 @@ begin
     Result := '';
 end;
 
-// '' when every inputRequests entry names a kind the client declared;
-// otherwise the first missing capability. AUnknownKind carries the
-// method of an entry that is not an MRTR kind at all, and stays
-// non-empty for a malformed entry too — one that is not an object, or
-// carries no string "method" — so callers can keep testing it with a
-// single `<> ''` guard and never emit such a map on the wire.
+// The member of its capability that input request AEntry (borrowed, an
+// object) needs, in AMember ('' for none): for elicitation/create its
+// mode, form when absent, and for sampling/createMessage "tools" when
+// it carries tools or toolChoice. False for a mode other than "form"
+// or "url". elicitation: "Servers MUST NOT send elicitation requests
+// with modes that are not supported by the client", "form mode
+// requests MAY omit mode"; sampling: "Servers MUST NOT send
+// tool-enabled sampling requests to Clients that have not declared
+// support for tool use via the sampling.tools capability"
+// (client/elicitation#capabilities, #elicitation-requests and
+// client/sampling#tools-in-sampling, 2026-07-28, verified 2026-11-27).
+// Members are found by key, so one a caller stored as nil counts.
+function InputRequestMember(const AMethod: string; AEntry: TJSONObject;
+  out AMember: string): Boolean;
+var
+  Params, Mode: TJSONData;
+  Position: Integer;
+begin
+  Result := True;
+  AMember := '';
+  Params := AEntry.Find('params');
+  if not IsJSONObjectValue(Params) then
+    Params := nil;
+  if AMethod = 'elicitation/create' then
+  begin
+    AMember := 'form';
+    if Params = nil then
+      Exit;
+    Position := MemberPosition(TJSONObject(Params), 'mode');
+    if Position < 0 then
+      Exit;
+    Mode := TJSONObject(Params).Items[Position];
+    if (Mode = nil) or (Mode.JSONType <> jtString) or
+      ((Mode.AsString <> 'form') and (Mode.AsString <> 'url')) then
+      Exit(False);
+    AMember := Mode.AsString;
+  end
+  else if (AMethod = 'sampling/createMessage') and (Params <> nil) and
+    ((MemberPosition(TJSONObject(Params), 'tools') >= 0) or
+    (MemberPosition(TJSONObject(Params), 'toolChoice') >= 0)) then
+    AMember := 'tools';
+end;
+
+// The contract is at the declaration.
 function MissingInputCapability(AInputRequests: TJSONObject;
-  const ACtx: TMCPRequestContext; out AUnknownKind: string): string;
+  const ACtx: TMCPRequestContext; out AUnknownKind,
+  AMissingMember: string): string;
 var
   I: Integer;
   Entry, MethodData: TJSONData;
-  Method, Capability: string;
+  Method, Capability, Member: string;
 begin
   Result := '';
   AUnknownKind := '';
+  AMissingMember := '';
   if AInputRequests = nil then
     Exit;
   for I := 0 to AInputRequests.Count - 1 do
@@ -732,8 +838,23 @@ begin
         AUnknownKind := Method;
       Exit;
     end;
+    if not InputRequestMember(Method, TJSONObject(Entry), Member) then
+    begin
+      AUnknownKind := Method + ' with an unknown mode';
+      Exit;
+    end;
     if not ACtx.HasCapability(Capability) then
+    begin
+      // An empty elicitation object would do for form mode.
+      if Member <> 'form' then
+        AMissingMember := Member;
       Exit(Capability);
+    end;
+    if (Member <> '') and not ACtx.HasSubCapability(Capability, Member) then
+    begin
+      AMissingMember := Member;
+      Exit(Capability);
+    end;
   end;
 end;
 
@@ -762,6 +883,15 @@ begin
   Result := BuildErrorResponse(AMessage.Id, MCP_ERROR_MISSING_CLIENT_CAPABILITY,
     ASubjectKind + ' "' + ASubjectName + '" requires the client ' +
     CapabilityList(ANames), BuildMissingCapabilityData(ANames));
+end;
+
+function MissingMemberResponse(const AMessage: TJSONRPCMessage;
+  const ASubjectKind, ASubjectName, ACapability, AMember: string): string;
+begin
+  Result := BuildErrorResponse(AMessage.Id, MCP_ERROR_MISSING_CLIENT_CAPABILITY,
+    ASubjectKind + ' "' + ASubjectName + '" requires the client ' +
+    'capability "' + ACapability + '.' + AMember + '"',
+    BuildMissingCapabilityData(ACapability, AMember));
 end;
 
 // The declared capabilities ACtx lacks, in declaration order (#84).

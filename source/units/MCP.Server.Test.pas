@@ -336,6 +336,33 @@ type
     procedure TestSamplingAndRootsBuilders;
   end;
 
+  // The input gate checks the member of a capability each request
+  // needs (#108): an elicitation mode, and sampling.tools for a
+  // tool-enabled sampling request. Verified 2026-11-27 against
+  // https://modelcontextprotocol.io/specification/2026-07-28/client/elicitation#capabilities
+  // ("Servers MUST NOT send elicitation requests with modes that are not
+  // supported by the client"; an empty object means form only) and
+  // https://modelcontextprotocol.io/specification/2026-07-28/client/sampling#tools-in-sampling
+  // ("Servers MUST NOT send tool-enabled sampling requests to Clients
+  // that have not declared support for tool use via the sampling.tools
+  // capability").
+  TInputMembers = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+    function Ask(const AKind, ACapabilities: string): string;
+    procedure ExpectSent(const AKind, ACapabilities, AMethod, APath,
+      AValue: string);
+    procedure ExpectRefused(const AKind, ACapabilities, AName,
+      AData: string);
+  public
+    procedure SetupTests; override;
+    procedure TestElicitationModes;
+    procedure TestElicitationUndeclared;
+    procedure TestToolEnabledSampling;
+    procedure TestUnknownModes;
+    procedure TestUtf8MemberRefusal;
+  end;
+
   // requestState sealing (#89): what reaches the client is a token,
   // the handler sees only its own state, and every token that is
   // altered, expired, or presented for another tool, other arguments
@@ -5007,6 +5034,202 @@ begin
   Test('sampling and roots entry builders', TestSamplingAndRootsBuilders);
 end;
 
+{ ───────── input request members (#108) ───────── }
+
+const
+  // "fråga", raw UTF-8 bytes.
+  ASK_UTF8 = 'fr' + #$C3#$A5 + 'ga';
+  ELICIT = 'elicitation/create';
+  SAMPLE = 'sampling/createMessage';
+
+// One input request per call, picked by the "kind" argument.
+function AskHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Kind: string;
+  Request: TJSONObject;
+begin
+  Kind := AArguments.Get('kind', '');
+  if Kind = 'url' then
+    Request := MCPElicitURLRequest('Sign in', 'https://example.com/sign-in')
+  else if Kind = 'bare' then
+    // A form request may omit its mode; the schema is a valid form one
+    // (the TypeScript client requires properties).
+    Request := TJSONObject(GetJSON('{"method":"elicitation/create",' +
+      '"params":{"message":"Name?","requestedSchema":{"type":"object",' +
+      '"properties":{}}}}'))
+  else if Kind = 'tools' then
+    Request := MCPSamplingRequest(TJSONObject(GetJSON('{"messages":[],' +
+      '"maxTokens":10,"tools":[{"name":"t","inputSchema":{"type":"object"}}]}')))
+  else if Kind = 'choice' then
+    Request := MCPSamplingRequest(TJSONObject(GetJSON('{"messages":[],' +
+      '"maxTokens":10,"toolChoice":{"mode":"none"}}')))
+  else if Kind = 'plain' then
+    Request := MCPSamplingTextRequest('Hi', 10)
+  else if Kind = 'niltools' then
+  begin
+    // A caller-built request whose tools member is stored as nil, which
+    // goes out as null and still asks for tools.
+    Request := TJSONObject(GetJSON('{"messages":[],"maxTokens":10}'));
+    Request.Add('tools', TJSONData(nil));
+    Request := MCPSamplingRequest(Request);
+  end
+  else if Kind = 'weirdmode' then
+    Request := TJSONObject(GetJSON('{"method":"elicitation/create",' +
+      '"params":{"mode":"weird","message":"Name?"}}'))
+  else if Kind = 'nullmode' then
+    Request := TJSONObject(GetJSON('{"method":"elicitation/create",' +
+      '"params":{"mode":null,"message":"Name?",' +
+      '"requestedSchema":{"type":"object","properties":{}}}}'))
+  else
+    Request := MCPElicitFormRequest('Name?', ObjectSchema.AddString('name'));
+  Result := MCPInputRequired(TJSONObject.Create(['q', Request]));
+end;
+
+procedure TInputMembers.BeforeEach;
+begin
+  inherited BeforeEach;
+  FServer.RegisterTool('ask', 'Asks one kind of input',
+    '{"type":"object","properties":{"kind":{"type":"string"}}}', AskHandler);
+  FServer.RegisterTool(ASK_UTF8, 'Asks, under a non-ASCII name',
+    '{"type":"object","properties":{"kind":{"type":"string"}}}', AskHandler);
+end;
+
+function TInputMembers.Ask(const AKind, ACapabilities: string): string;
+begin
+  Dispatch('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{' +
+    '"name":"ask","arguments":{"kind":"' + AKind + '"},"_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":' + ACapabilities + '}}}',
+    Result);
+end;
+
+// Sent as the handler built it: the interim result carries the entry,
+// with AMethod and AValue at APath under its params.
+procedure TInputMembers.ExpectSent(const AKind, ACapabilities, AMethod, APath,
+  AValue: string);
+var
+  Response: TJSONObject;
+begin
+  Response := TJSONObject(GetJSON(Ask(AKind, ACapabilities)));
+  try
+    Expect<string>(TJSONData(Response.FindPath('result.resultType')).AsString)
+      .ToBe('input_required');
+    Expect<string>(TJSONData(Response.FindPath('result.inputRequests.q.method'))
+      .AsString).ToBe(AMethod);
+    Expect<string>(TJSONData(Response.FindPath(
+      'result.inputRequests.q.params.' + APath)).AsString).ToBe(AValue);
+  finally
+    Response.Free;
+  end;
+end;
+
+// The exact -32021 error member: AName in the message, AData as the
+// requiredCapabilities object.
+procedure TInputMembers.ExpectRefused(const AKind, ACapabilities, AName,
+  AData: string);
+begin
+  Expect<string>(Ask(AKind, ACapabilities)).ToBe(
+    '{ "jsonrpc" : "2.0", "id" : 1, "error" : { "code" : -32021, ' +
+    '"message" : "Tool \"ask\" requires the client capability \"' + AName +
+    '\"", "data" : { "requiredCapabilities" : ' + AData + ' } } }');
+end;
+
+procedure TInputMembers.TestElicitationModes;
+const
+  FORM_ONLY = '{"elicitation":{"form":{}}}';
+  URL_ONLY = '{"elicitation":{"url":{}}}';
+  EMPTY = '{"elicitation":{}}';
+  BOTH = '{"elicitation":{"form":{},"url":{}}}';
+  NEEDS_URL = '{ "elicitation" : { "url" : {} } }';
+  NEEDS_FORM = '{ "elicitation" : { "form" : {} } }';
+begin
+  ExpectSent('form', FORM_ONLY, ELICIT, 'mode', 'form');
+  ExpectSent('bare', FORM_ONLY, ELICIT, 'message', 'Name?');
+  ExpectRefused('url', FORM_ONLY, 'elicitation.url', NEEDS_URL);
+  ExpectSent('url', URL_ONLY, ELICIT, 'url', 'https://example.com/sign-in');
+  ExpectRefused('form', URL_ONLY, 'elicitation.form', NEEDS_FORM);
+  ExpectRefused('bare', URL_ONLY, 'elicitation.form', NEEDS_FORM);
+  // The empty object declares form only.
+  ExpectSent('form', EMPTY, ELICIT, 'mode', 'form');
+  ExpectSent('bare', EMPTY, ELICIT, 'message', 'Name?');
+  ExpectRefused('url', EMPTY, 'elicitation.url', NEEDS_URL);
+  ExpectSent('form', BOTH, ELICIT, 'mode', 'form');
+  ExpectSent('url', BOTH, ELICIT, 'mode', 'url');
+end;
+
+// The member refusal keeps a non-ASCII subject name byte-exact.
+procedure TInputMembers.TestUtf8MemberRefusal;
+var
+  Line: string;
+begin
+  Dispatch('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{' +
+    '"name":"' + ASK_UTF8 + '","arguments":{"kind":"url"},"_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":' +
+    '{"elicitation":{"form":{}}}}}}', Line);
+  Expect<string>(Line).ToBe('{ "jsonrpc" : "2.0", "id" : 1, "error" : ' +
+    '{ "code" : -32021, "message" : "Tool \"' + ASK_UTF8 + '\" requires ' +
+    'the client capability \"elicitation.url\"", "data" : ' +
+    '{ "requiredCapabilities" : { "elicitation" : { "url" : {} } } } } }');
+end;
+
+// Without elicitation at all, a form request needs just the capability
+// (its empty object would do), a URL request its url member.
+procedure TInputMembers.TestElicitationUndeclared;
+begin
+  ExpectRefused('form', '{}', 'elicitation', '{ "elicitation" : {} }');
+  ExpectRefused('bare', '{}', 'elicitation', '{ "elicitation" : {} }');
+  ExpectRefused('url', '{}', 'elicitation.url',
+    '{ "elicitation" : { "url" : {} } }');
+end;
+
+procedure TInputMembers.TestToolEnabledSampling;
+const
+  NEEDS_TOOLS = '{ "sampling" : { "tools" : {} } }';
+begin
+  ExpectRefused('tools', '{"sampling":{}}', 'sampling.tools', NEEDS_TOOLS);
+  ExpectRefused('choice', '{"sampling":{"context":{}}}', 'sampling.tools',
+    NEEDS_TOOLS);
+  ExpectRefused('tools', '{}', 'sampling.tools', NEEDS_TOOLS);
+  ExpectSent('tools', '{"sampling":{"tools":{}}}', SAMPLE, 'tools[0].name', 't');
+  ExpectSent('choice', '{"sampling":{"tools":{}}}', SAMPLE, 'toolChoice.mode',
+    'none');
+  ExpectSent('plain', '{"sampling":{}}', SAMPLE, 'maxTokens', '10');
+  ExpectRefused('niltools', '{"sampling":{}}', 'sampling.tools', NEEDS_TOOLS);
+end;
+
+// A mode other than form or url is the handler's mistake, not a
+// capability the client could declare: -32603, nothing sent.
+procedure TInputMembers.TestUnknownModes;
+const
+  BOTH = '{"elicitation":{"form":{},"url":{}}}';
+var
+  Line: string;
+begin
+  Line := Ask('weirdmode', BOTH);
+  Expect<Boolean>(Pos('"code" : -32603', Line) > 0).ToBe(True);
+  Expect<Boolean>(Pos('unsupported input request kind ' +
+    '\"elicitation/create with an unknown mode\"', Line) > 0).ToBe(True);
+  Line := Ask('nullmode', BOTH);
+  Expect<Boolean>(Pos('"code" : -32603', Line) > 0).ToBe(True);
+  Expect<Boolean>(Pos('input_required', Line) = 0).ToBe(True);
+end;
+
+procedure TInputMembers.SetupTests;
+begin
+  Test('elicitation modes against form-only, URL-only, empty and both',
+    TestElicitationModes);
+  Test('no elicitation: form needs the capability, URL its member',
+    TestElicitationUndeclared);
+  Test('tool-enabled sampling needs sampling.tools',
+    TestToolEnabledSampling);
+  Test('an elicitation mode other than form or url → -32603',
+    TestUnknownModes);
+  Test('a member refusal keeps a non-ASCII tool name byte-exact',
+    TestUtf8MemberRefusal);
+end;
+
 { ───────── subset validation (#23) ───────── }
 
 // Mirrors the arguments the handler actually received, so tests can
@@ -8177,6 +8400,8 @@ begin
     TSubsetValidation.Create('Server: subset argument validation'));
   TestRunnerProgram.AddSuite(
     TMRTRDispatch.Create('Server: MRTR input_required'));
+  TestRunnerProgram.AddSuite(
+    TInputMembers.Create('Server: input request members'));
   TestRunnerProgram.AddSuite(
     TImageResults.Create('Server: image tool results'));
   TestRunnerProgram.AddSuite(TMetadataFields.Create('Server: metadata fields'));

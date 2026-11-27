@@ -36,6 +36,7 @@ type
     procedure TestUnknownLogLevelRejected;
     procedure TestWrongCaseLogLevelRejected;
     procedure TestHasCapability;
+    procedure TestHasSubCapability;
     procedure TestMissingCapabilityData;
     procedure TestMissingRequiredMetaNames;
     procedure TestMissingRequiredMetaComplete;
@@ -343,6 +344,60 @@ begin
   end;
 end;
 
+// The capability members a client declares (#108): an empty
+// elicitation object means form only (verified 2026-11-27,
+// https://modelcontextprotocol.io/specification/2026-07-28/client/elicitation#capabilities),
+// and a classic client's capability that is no object declares none.
+procedure TMetaValidation.TestHasSubCapability;
+var
+  Ctx: TMCPRequestContext;
+
+  function Members(const AVersion, ACapabilities: string): string;
+  begin
+    Ctx := Default(TMCPRequestContext);
+    Ctx.ProtocolVersion := AVersion;
+    Ctx.ClientCapabilities := ParseObj(ACapabilities);
+    try
+      Result := BoolToStr(Ctx.HasSubCapability('elicitation', 'form'),
+        'F', 'f') + BoolToStr(Ctx.HasSubCapability('elicitation', 'url'),
+        'U', 'u') + BoolToStr(Ctx.HasSubCapability('sampling', 'tools'),
+        'T', 't');
+    finally
+      Ctx.ClientCapabilities.Free;
+    end;
+  end;
+
+begin
+  Expect<string>(Members('2026-07-28', '{}')).ToBe('fut');
+  Expect<string>(Members('2026-07-28', '{"elicitation":{}}')).ToBe('Fut');
+  Expect<string>(Members('2026-07-28', '{"elicitation":{"url":{}}}'))
+    .ToBe('fUt');
+  Expect<string>(Members('2026-07-28', '{"elicitation":{"form":{},' +
+    '"url":{}},"sampling":{"tools":{}}}')).ToBe('FUT');
+  // The schema types sampling.tools as an object, so true declares
+  // neither it nor sampling.
+  Expect<string>(Members('2026-07-28', '{"sampling":{"tools":true}}'))
+    .ToBe('fut');
+  // A typed member stored as nil goes out as null, which the schema
+  // refuses, so it declares neither the member nor the capability.
+  Ctx := Default(TMCPRequestContext);
+  Ctx.ProtocolVersion := '2026-07-28';
+  Ctx.ClientCapabilities := ParseObj('{"sampling":{}}');
+  try
+    TJSONObject(Ctx.ClientCapabilities.Find('sampling')).Add('tools',
+      TJSONData(nil));
+    Expect<Boolean>(Ctx.HasSubCapability('sampling', 'tools')).ToBe(False);
+    Expect<Boolean>(Ctx.HasCapability('sampling')).ToBe(False);
+  finally
+    Ctx.ClientCapabilities.Free;
+  end;
+  // Classic clients count by presence, but false declares no mode.
+  Expect<string>(Members('2025-11-25', '{"elicitation":false}')).ToBe('fut');
+  Expect<string>(Members('2025-11-25', '{"elicitation":{}}')).ToBe('Fut');
+  Expect<string>(Members('2025-11-25', '{"sampling":{"tools":true}}'))
+    .ToBe('fuT');
+end;
+
 procedure EmptyCapabilityData;
 begin
   BuildMissingCapabilityData([]).Free;
@@ -351,6 +406,16 @@ end;
 procedure RepeatedCapabilityData;
 begin
   BuildMissingCapabilityData(['sampling', 'roots', 'sampling']).Free;
+end;
+
+procedure MemberWithoutCapability;
+begin
+  BuildMissingCapabilityData('', 'url').Free;
+end;
+
+procedure CapabilityWithoutMember;
+begin
+  BuildMissingCapabilityData('elicitation', '').Free;
 end;
 
 function ArgumentRefused(AProc: TProcedure): Boolean;
@@ -381,6 +446,19 @@ begin
   Expect<Boolean>(ArgumentRefused(EmptyCapabilityData)).ToBe(True);
   // A repeat is refused before anything is allocated.
   Expect<Boolean>(ArgumentRefused(RepeatedCapabilityData)).ToBe(True);
+  // One member of a capability (#108), shaped as -32021 requires
+  // (MissingRequiredClientCapabilityError, schema 2026-07-28, verified
+  // 2026-11-27: https://modelcontextprotocol.io/specification/2026-07-28/schema).
+  Data := BuildMissingCapabilityData('elicitation', 'url');
+  try
+    Expect<string>(Data.AsJSON).ToBe('{ "requiredCapabilities" : ' +
+      '{ "elicitation" : { "url" : {} } } }');
+    Expect<Boolean>(IsMissingCapabilityData(Data)).ToBe(True);
+  finally
+    Data.Free;
+  end;
+  Expect<Boolean>(ArgumentRefused(MemberWithoutCapability)).ToBe(True);
+  Expect<Boolean>(ArgumentRefused(CapabilityWithoutMember)).ToBe(True);
 end;
 
 procedure TMetaValidation.SetupTests;
@@ -399,7 +477,9 @@ begin
   Test('wrong-case logLevel → -32602', TestWrongCaseLogLevelRejected);
   Test('HasCapability: defined capabilities in shape, custom by presence',
     TestHasCapability);
-  Test('BuildMissingCapabilityData lists every name, refuses none or repeats',
+  Test('HasSubCapability: members, empty elicitation, classic values',
+    TestHasSubCapability);
+  Test('BuildMissingCapabilityData lists every name or one member, refuses none or repeats',
     TestMissingCapabilityData);
   Test('MissingRequiredMeta names the first missing field',
     TestMissingRequiredMetaNames);
