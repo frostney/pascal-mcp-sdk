@@ -760,9 +760,10 @@ begin
 end;
 
 // Sends ARequest and reads until the first SSE frame is complete, then
-// closes the connection: what the response held by then.
-function ReadFirstFrameThenClose(APort: Word;
-  const ARequest: string): string;
+// keeps the connection open for AHoldMs and closes it: what the
+// response held by then.
+function ReadFirstFrameThenClose(APort: Word; const ARequest: string;
+  AHoldMs: Integer = 0): string;
 var
   Sock: TInetSocket;
   Buf: array[0..4095] of Byte;
@@ -783,6 +784,7 @@ begin
       HeaderEnd := Pos(#13#10#13#10, Result);
     until (Got <= 0) or ((HeaderEnd > 0) and
       (Pos(#10#10, Copy(Result, HeaderEnd + 4, MaxInt)) > 0));
+    Sleep(AHoldMs);
   finally
     Sock.Free;
   end;
@@ -1362,7 +1364,9 @@ end;
 // A client that closes the connection ends a stream that is not due
 // for a minute within the disconnect poll's interval: the wait between
 // steps is capped by the poll, which runs on the streams' clock (#134
-// review).
+// review). The client holds the connection open for 200 ms after the
+// first frame, so the poll's first probe, right after that frame, finds
+// it open and the stream is waiting when the client closes.
 procedure THTTPBinding.TestQuietStreamClientClose;
 var
   Payload, Response: string;
@@ -1377,7 +1381,8 @@ begin
     'Accept: application/json, text/event-stream'#13#10 +
     'MCP-Protocol-Version: ' + MCP_PROTOCOL_VERSION + #13#10 +
     'Mcp-Method: test/parkquiet'#13#10 + 'Connection: close'#13#10 +
-    'Content-Length: ' + IntToStr(Length(Payload)) + #13#10#13#10 + Payload);
+    'Content-Length: ' + IntToStr(Length(Payload)) + #13#10#13#10 + Payload,
+    200);
   Expect<Boolean>(Pos('{"frame":"quiet"}', Response) > 0).ToBe(True);
   Waited := 0;
   while (QuietReleased = 0) and (Waited < 3000) do
