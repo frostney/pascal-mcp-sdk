@@ -5053,9 +5053,11 @@ begin
   if Kind = 'url' then
     Request := MCPElicitURLRequest('Sign in', 'https://example.com/sign-in')
   else if Kind = 'bare' then
-    // A form request may omit its mode.
+    // A form request may omit its mode; the schema is a valid form one
+    // (the TypeScript client requires properties).
     Request := TJSONObject(GetJSON('{"method":"elicitation/create",' +
-      '"params":{"message":"Name?","requestedSchema":{"type":"object"}}}'))
+      '"params":{"message":"Name?","requestedSchema":{"type":"object",' +
+      '"properties":{}}}}'))
   else if Kind = 'tools' then
     Request := MCPSamplingRequest(TJSONObject(GetJSON('{"messages":[],' +
       '"maxTokens":10,"tools":[{"name":"t","inputSchema":{"type":"object"}}]}')))
@@ -5078,7 +5080,7 @@ begin
   else if Kind = 'nullmode' then
     Request := TJSONObject(GetJSON('{"method":"elicitation/create",' +
       '"params":{"mode":null,"message":"Name?",' +
-      '"requestedSchema":{"type":"object"}}}'))
+      '"requestedSchema":{"type":"object","properties":{}}}}'))
   else
     Request := MCPElicitFormRequest('Name?', ObjectSchema.AddString('name'));
   Result := MCPInputRequired(TJSONObject.Create(['q', Request]));
