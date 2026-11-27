@@ -14,6 +14,7 @@ uses
   {$IFDEF UNIX}
   BaseUnix,
   {$ENDIF}
+  Classes,
   SysUtils,
 
   fpjson,
@@ -408,15 +409,41 @@ begin
   ExpectParsedValue('\ud83d\ude00', UTF8_GRINNING_FACE);
 end;
 
+// A high surrogate with no low one, then a pair: the library leaves
+// surrogate escapes to fpjson, so it does what the fpjson it was built
+// with does. FPC 3.2.2's drops the whole run; FPC 3.2.4's rejects it,
+// and the message is then a parse error (verified 2026-11-27 with
+// 3.2.2 and 3.2.4-rc2).
 procedure TUnicodeEscapeInput.TestHighHighLowMatchesFPJSON;
+const
+  RUN = '\ud83d\ud83d\ude00';
 var
   Baseline: TJSONObject;
+  Msg: TJSONRPCMessage;
 begin
-  Baseline := ParseObj('{"value":"\ud83d\ud83d\ude00"}');
   try
-    ExpectParsedValue('\ud83d\ud83d\ude00', Baseline.Get('value', ''));
-  finally
-    Baseline.Free;
+    Baseline := ParseObj('{"value":"' + RUN + '"}');
+  except
+    // 3.2.2 raises EJSONParser, 3.2.4 EScannerError: both EParserError.
+    on EParserError do
+      Baseline := nil;
+  end;
+  if Baseline <> nil then
+    try
+      ExpectParsedValue(RUN, Baseline.Get('value', ''));
+    finally
+      Baseline.Free;
+    end
+  else
+  begin
+    Msg := ParseJSONRPCMessage('{"jsonrpc":"2.0","id":1,"method":"x",' +
+      '"params":{"value":"' + RUN + '"}}');
+    try
+      Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkInvalid));
+      Expect<Integer>(Msg.ErrorCode).ToBe(JSONRPC_PARSE_ERROR);
+    finally
+      FreeJSONRPCMessage(Msg);
+    end;
   end;
 end;
 
@@ -464,7 +491,7 @@ begin
     TestAfterEscapedBackslash);
   Test('surrogate pair round-trips as four-byte UTF-8 via fpjson',
     TestSurrogatePair);
-  Test('high-high-low run keeps baseline fpjson behavior',
+  Test('high-high-low run follows the fpjson it is built with',
     TestHighHighLowMatchesFPJSON);
   Test('non-surrogate BMP before surrogate pair stays correct',
     TestBMPBeforeSurrogatePair);

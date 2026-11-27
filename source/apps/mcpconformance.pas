@@ -30,6 +30,7 @@ uses
   jsonparser,
 
   MCP.Content,
+  MCP.JSONRPC,
   MCP.Protocol,
   MCP.Server,
   MCP.Transport.HTTP,
@@ -153,9 +154,10 @@ function FixtureArrayOutput(AArguments: TJSONObject;
 var
   Values: TJSONArray;
 begin
-  Values := TJSONArray.Create;
-  Values.Add('Gr' + #$C3#$BC + #$C3#$9F + 'e');
-  Values.Add(#$F0#$9F#$98#$80);
+  // From escapes, not byte-constant literals: FPC 3.2.4 converts such a
+  // literal when it is passed as a UTF8String, as TJSONArray.Add takes
+  // it, and the text would go out encoded twice.
+  Values := TJSONArray(MCPParseJSON('["Gr\u00fc\u00dfe","\ud83d\ude00"]'));
   Result := MCPStructuredResult(Values);
 end;
 
