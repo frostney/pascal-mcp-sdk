@@ -508,6 +508,74 @@ begin
     Result := Result + LowerCase(IntToHex(ADigest[I], 2));
 end;
 
+// A skill written to a temporary directory and served by
+// `mcpdemo --skills-dir` (#117): its frontmatter read from the YAML, its
+// SKILL.md the bytes on disk, matching the listed digest.
+procedure SkillsDirBattery;
+const
+  SKILL_MD = '---' + #10 + 'name: from-disk' + #10 + 'description: >-' + #10 +
+    '  Loaded from a' + #10 + '  directory' + #10 + '---' + #10 + 'Hello.' +
+    #10;
+var
+  Dir, Text: string;
+  Stream: TFileStream;
+  Demo: TProcess;
+  Response: TJSONObject;
+  Digest: string;
+begin
+  Dir := IncludeTrailingPathDelimiter(GetTempDir(False)) + 'mcpsmoke-skills-' +
+    IntToStr(GetProcessID);
+  ForceDirectories(Dir + PathDelim + 'from-disk');
+  Stream := TFileStream.Create(Dir + PathDelim + 'from-disk' + PathDelim +
+    'SKILL.md', fmCreate);
+  try
+    Stream.WriteBuffer(SKILL_MD[1], Length(SKILL_MD));
+  finally
+    Stream.Free;
+  end;
+  Demo := TProcess.Create(nil);
+  try
+    Demo.Executable := DemoBinary;
+    Demo.Parameters.Add('--skills-dir');
+    Demo.Parameters.Add(Dir);
+    Demo.Options := [poUsePipes];
+    try
+      Demo.Execute;
+    except
+      on E: Exception do
+      begin
+        Check(False, 'skills from disk: launch ' + DemoBinary + ': ' +
+          E.Message);
+        Exit;
+      end;
+    end;
+    try
+      Response := RoundTrip(Demo, '{"jsonrpc":"2.0","id":1,' +
+        '"method":"skills/get","params":{' +
+        '"uri":"skill://disk/from-disk/SKILL.md",' + META_MODERN + '}}');
+      Digest := PathString(Response, 'result.skill.resources[0].digest');
+      Check(PathString(Response, 'result.skill.frontmatter.description') =
+        'Loaded from a directory', 'skills from disk: the folded ' +
+        'description read from the YAML');
+      Response.Free;
+      Response := RoundTrip(Demo, '{"jsonrpc":"2.0","id":2,' +
+        '"method":"resources/read","params":{' +
+        '"uri":"skill://disk/from-disk/SKILL.md",' + META_MODERN + '}}');
+      Text := PathString(Response, 'result.contents[0].text');
+      Check((Text = SKILL_MD) and (HexDigest(SHA256(Text)) = Digest),
+        'skills from disk: SKILL.md served as on disk, matching its digest');
+      Response.Free;
+    finally
+      Shutdown(Demo, 'skills from disk');
+    end;
+  finally
+    Demo.Free;
+    DeleteFile(Dir + PathDelim + 'from-disk' + PathDelim + 'SKILL.md');
+    RemoveDir(Dir + PathDelim + 'from-disk');
+    RemoveDir(Dir);
+  end;
+end;
+
 var
   Demo: TProcess;
   Response: TJSONObject;
@@ -1037,6 +1105,7 @@ begin
 
   FixtureContentBattery;
   PagedDemoBattery;
+  SkillsDirBattery;
 
   WriteLn;
   if Failures = 0 then

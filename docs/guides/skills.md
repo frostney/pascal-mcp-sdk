@@ -90,15 +90,47 @@ result fields.
 To point the model at a skill, name its URI in the server's
 instructions, for example `skill://git-workflow/SKILL.md`.
 
+## Load a skills directory
+
+Skills usually live on disk, one directory per skill.
+`RegisterSkillDirectory` serves a whole tree of them:
+
+```pascal
+RegisterSkillDirectory(Server, 'skills', 'acme');
+```
+
+Each directory below `skills` that holds a `SKILL.md` is a skill, at
+`skill://acme/<its path below skills>/SKILL.md`; without a prefix the
+path below the root is the whole skill path. Folders without a
+`SKILL.md`, such as `billing` in `skills/billing/refunds`, become part
+of the path. Every file in a skill's directory is served as its exact
+bytes on disk, except those of a skill nested in it, which is
+registered on its own, as above. Names starting with `.` are left out,
+as are files outside any skill. A symbolic link is refused, since it
+could lead outside the tree.
+
+The frontmatter is read with a YAML subset on which YAML 1.1 and 1.2
+parsers agree, since a host compares what it parses with the listing:
+
+- mappings and lists in block style;
+- quoted strings on one line;
+- `|` and `>` block scalars, with `-` or `+`;
+- plain strings, also over several lines;
+- `true`, `false`, `null` and whole numbers.
+
+A plain value the two YAML versions read differently, such as `yes`,
+`on`, `1.0`, `012` or a date, must be quoted: `version: "1.0"`. So must
+a value with a colon followed by a space, or a space followed by `#`, in it. Flow collections like `[a, b]`,
+anchors and tags are not read. Any of these, or a check `RegisterSkill`
+makes, raises `EMCPServer` naming the file and line, and then no skill
+of the tree is registered.
+
 ## Settings
 
 `RegisterSkill` keeps extension settings you declared first with
 `DeclareExtension(MCP_SKILLS_EXTENSION, Settings)`. The Skills
 extension has one setting, `directoryRead`, and the library serves
 directory reads either way.
-
-Loading skills from a directory on disk is not available yet: define
-them in code.
 
 ## Related pages
 
