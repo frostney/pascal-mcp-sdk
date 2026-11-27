@@ -212,6 +212,9 @@ begin
 
     Server.RegisterPrompt('greet', 'Compose a friendly greeting',
       PromptArguments.Add('name', 'Who to greet'), GreetPromptHandler);
+    // Suggestions while the user types the name (completion/complete).
+    Server.RegisterPromptCompletion('greet', 'name',
+      ['Ada', 'Alan', 'Grace', 'Niklaus']);
 
     Server.RegisterTextResource('mcp://pascal-mcp-sdk/greeting', 'greeting',
       'text/plain', 'Hello from pascal-mcp-sdk, a FreePascal MCP server.',

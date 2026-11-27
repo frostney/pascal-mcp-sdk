@@ -13,6 +13,10 @@ uses
   SysUtils,
 
   fpjson,
+  jsonparser,
+  // UTF-8 string conversion (cwstring), as every program using the
+  // library gets it through MCP.Server.
+  MCP.JSONRPC,
   MCP.Schema,
   TestingPascalLibrary;
 
@@ -96,6 +100,41 @@ type
   end;
 
   // MCPWireNumber: the number text the wire carries.
+  // #91: the enforced subset, recursive, and value validation against
+  // it. Messages asserted byte-exact, non-ASCII names included.
+  TSubsetSchemas = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestAcceptedSchemas;
+    procedure TestRejectedKeywords;
+    procedure TestObjectRootRequired;
+    procedure TestTypes;
+    procedure TestNestedPathsInMessages;
+    procedure TestArrayItems;
+    procedure TestEnumsOfAnyPrimitive;
+    procedure TestDefaultsSeededOnlyWhenAsked;
+    procedure TestRootValueMessages;
+    procedure TestIntegralFloats;
+    procedure TestExactNumericEnums;
+    procedure TestDeclaredDialect;
+    procedure TestBuiltValues;
+    procedure TestKeywordShapes;
+    procedure TestOnlyConformingDefaultsSeeded;
+    procedure TestUnconstrainedNonFiniteRefused;
+    procedure TestLargeIntegralFloatsInEnums;
+    procedure TestEnumEntriesOfOtherTypes;
+  end;
+
+  // #90: x-mcp-header annotations and their constraints.
+  THeaderAnnotations = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestValidAnnotations;
+    procedure TestNoAnnotations;
+    procedure TestRejected;
+    procedure TestDataIsNotAnnotation;
+  end;
+
   TWireNumber = class(TTestSuite)
   public
     procedure SetupTests; override;
@@ -647,10 +686,529 @@ begin
     TestAssignedFloatNodeStaysValid);
 end;
 
+{ ───────── the enforced subset (#91) ───────── }
+
+function ObjectOf(const AJson: string): TJSONObject;
+begin
+  Result := TJSONObject(GetJSON(AJson));
+end;
+
+function Violation(const ASchema: string; AObjectRoot: Boolean = False): string;
+var
+  Schema: TJSONObject;
+begin
+  Schema := ObjectOf(ASchema);
+  try
+    Result := MCPSchemaSubsetViolation(Schema, AObjectRoot);
+  finally
+    Schema.Free;
+  end;
+end;
+
+// '' when AValue conforms to ASchema, else the error.
+function Check(const ASchema, AValue: string; const AKind: string = 'argument';
+  ASeed: Boolean = False): string;
+var
+  Schema: TJSONObject;
+  Value: TJSONData;
+begin
+  Schema := ObjectOf(ASchema);
+  Value := GetJSON(AValue);
+  try
+    if MCPValidateAgainstSchema(Schema, Value, AKind, ASeed, Result) then
+      Result := '';
+  finally
+    Value.Free;
+    Schema.Free;
+  end;
+end;
+
+procedure TSubsetSchemas.TestAcceptedSchemas;
+begin
+  Expect<string>(Violation('{"$schema":"https://json-schema.org/draft/2020-12/schema",' +
+    '"type":"object","title":"t","description":"d","properties":{' +
+    '"a":{"type":"array","items":{"type":"object","properties":{' +
+    '"b":{"type":"integer","enum":[1,2],"default":1}},"required":["b"]}},' +
+    '"n":{"type":"null"}},"required":["a"]}')).ToBe('');
+  Expect<string>(Violation('{"type":"array","items":{"type":"string"}}')).ToBe('');
+  Expect<string>(Violation('{"type":"boolean"}')).ToBe('');
+end;
+
+procedure TSubsetSchemas.TestRejectedKeywords;
+begin
+  Expect<string>(Violation('{"type":"object","properties":{"a":{"type":"string",' +
+    '"format":"uri"}}}')).ToBe('property "a" uses unsupported keyword "format"');
+  Expect<string>(Violation('{"type":"object","properties":{"x":{"type":"array",' +
+    '"items":{"type":"object","properties":{"y":{"$ref":"#"}}}}}}'))
+    .ToBe('property "x[].y" needs a single "type"');
+  Expect<string>(Violation('{"type":["string","null"]}')).ToBe('needs a single "type"');
+  Expect<string>(Violation('{"type":"date"}')).ToBe('has unsupported type "date"');
+  Expect<string>(Violation('{"type":"object","properties":{"a":{"type":"string"}},' +
+    '"additionalProperties":false}')).ToBe('uses unsupported keyword "additionalProperties"');
+  // Keywords belong to their type: items on a string, enum on an object.
+  Expect<string>(Violation('{"type":"string","items":{"type":"string"}}'))
+    .ToBe('uses unsupported keyword "items"');
+  Expect<string>(Violation('{"type":"object","enum":[1]}'))
+    .ToBe('uses unsupported keyword "enum"');
+  Expect<string>(Violation('{"type":"object","properties":{"a":{"type":"string",' +
+    '"default":{}}}}')).ToBe('property "a" default must be a primitive');
+  Expect<string>(Violation('{"type":"object","properties":{"z":{"type":"string",' +
+    '"$schema":"x"}}}')).ToBe('property "z" uses unsupported keyword "$schema"');
+end;
+
+procedure TSubsetSchemas.TestObjectRootRequired;
+begin
+  Expect<string>(Violation('{"type":"array","items":{"type":"string"}}', True))
+    .ToBe('must have root type "object"');
+  Expect<string>(Violation('{"type":"object"}', True)).ToBe('');
+end;
+
+procedure TSubsetSchemas.TestTypes;
+begin
+  Expect<string>(Check('{"type":"integer"}', '2')).ToBe('');
+  Expect<string>(Check('{"type":"integer"}', '2.5')).ToBe('Argument must be an integer');
+  Expect<string>(Check('{"type":"number"}', '2')).ToBe('');
+  Expect<string>(Check('{"type":"string"}', '2')).ToBe('Argument must be a string');
+  Expect<string>(Check('{"type":"boolean"}', 'null')).ToBe('Argument must be a boolean');
+  Expect<string>(Check('{"type":"null"}', 'null')).ToBe('');
+  Expect<string>(Check('{"type":"object"}', '[]')).ToBe('Argument must be an object');
+  Expect<string>(Check('{"type":"array"}', '{}')).ToBe('Argument must be an array');
+end;
+
+procedure TSubsetSchemas.TestNestedPathsInMessages;
+const
+  NAME = 'gr' + #$C3#$B6 + #$C3#$9F + 'e';
+begin
+  Expect<string>(Check('{"type":"object","properties":{"' + NAME +
+    '":{"type":"object","properties":{"w":{"type":"number"}},"required":["w"]}}}',
+    '{"' + NAME + '":{}}')).ToBe('Missing required argument "' + NAME + '.w"');
+  Expect<string>(Check('{"type":"object","properties":{"' + NAME +
+    '":{"type":"object","properties":{"w":{"type":"number"}}}}}',
+    '{"' + NAME + '":{"w":"x"}}', 'structured output'))
+    .ToBe('Structured output "' + NAME + '.w" must be a number');
+end;
+
+procedure TSubsetSchemas.TestArrayItems;
+begin
+  Expect<string>(Check('{"type":"array","items":{"type":"object",' +
+    '"properties":{"id":{"type":"string"}},"required":["id"]}}',
+    '[{"id":"1"},{"id":2}]', 'structured output'))
+    .ToBe('Structured output "[1].id" must be a string');
+  Expect<string>(Check('{"type":"array","items":{"type":"integer"}}', '[1,2,3]'))
+    .ToBe('');
+end;
+
+procedure TSubsetSchemas.TestEnumsOfAnyPrimitive;
+begin
+  Expect<string>(Check('{"type":"string","enum":["a","b"]}', '"c"'))
+    .ToBe('Argument must be a string from the declared enum values');
+  Expect<string>(Check('{"type":"integer","enum":[1,3]}', '3')).ToBe('');
+  Expect<string>(Check('{"type":"integer","enum":[1,3]}', '2'))
+    .ToBe('Argument must be an integer from the declared enum values');
+  Expect<string>(Check('{"type":"boolean","enum":[true]}', 'false'))
+    .ToBe('Argument must be a boolean from the declared enum values');
+end;
+
+procedure TSubsetSchemas.TestDefaultsSeededOnlyWhenAsked;
+var
+  Schema, Value: TJSONObject;
+  Error: string;
+begin
+  Schema := ObjectOf('{"type":"object","properties":{"o":{"type":"object",' +
+    '"properties":{"n":{"type":"integer","default":7}}}}}');
+  Value := ObjectOf('{"o":{}}');
+  try
+    Expect<Boolean>(MCPValidateAgainstSchema(Schema, Value, 'argument', False,
+      Error)).ToBe(True);
+    Expect<Boolean>(Value.FindPath('o.n') = nil).ToBe(True);
+    Expect<Boolean>(MCPValidateAgainstSchema(Schema, Value, 'argument', True,
+      Error)).ToBe(True);
+    Expect<Integer>(TJSONData(Value.FindPath('o.n')).AsInteger).ToBe(7);
+  finally
+    Value.Free;
+    Schema.Free;
+  end;
+end;
+
+procedure TSubsetSchemas.TestRootValueMessages;
+begin
+  Expect<string>(Check('{"type":"array"}', '"x"', 'structured output'))
+    .ToBe('Structured output must be an array');
+  Expect<string>(Check('{"type":"object","required":["a"]}', '{}',
+    'structured output')).ToBe('Missing required structured output "a"');
+end;
+
+// JSON Schema 2020-12 validation §6.1.1 (verified 2026-11-27,
+// https://json-schema.org/draft/2020-12/json-schema-validation#name-type):
+// an integer is any number with a zero fractional part.
+procedure TSubsetSchemas.TestIntegralFloats;
+begin
+  Expect<string>(Check('{"type":"integer"}', '2.0')).ToBe('');
+  Expect<string>(Check('{"type":"integer"}', '2e0')).ToBe('');
+  Expect<string>(Check('{"type":"integer"}', '-0.0')).ToBe('');
+  Expect<string>(Check('{"type":"integer"}', '2.000001'))
+    .ToBe('Argument must be an integer');
+  // Past 2^53 a float cannot be known to be integral.
+  Expect<string>(Check('{"type":"integer"}', '1e300'))
+    .ToBe('Argument must be an integer');
+end;
+
+procedure TSubsetSchemas.TestExactNumericEnums;
+begin
+  // 2^53 and 2^53 + 1 are the same double but different integers.
+  Expect<Boolean>(Check('{"type":"integer","enum":[9007199254740992]}',
+    '9007199254740993') <> '').ToBe(True);
+  Expect<string>(Check('{"type":"integer","enum":[9007199254740993]}',
+    '9007199254740993')).ToBe('');
+  Expect<Boolean>(Check('{"type":"integer","enum":[18446744073709551615]}',
+    '-1') <> '').ToBe(True);
+  Expect<string>(Check('{"type":"integer","enum":[18446744073709551615]}',
+    '18446744073709551615')).ToBe('');
+  // An integral float equals the integer it spells.
+  Expect<string>(Check('{"type":"number","enum":[1]}', '1.0')).ToBe('');
+  Expect<string>(Check('{"type":"number","enum":[1.5]}', '1.5')).ToBe('');
+  Expect<Boolean>(Check('{"type":"number","enum":[1]}', '1.5') <> '')
+    .ToBe(True);
+end;
+
+// A schema declaring another dialect is not enforced by 2020-12 rules
+// (verified 2026-11-27 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic#json-schema-usage).
+procedure TSubsetSchemas.TestDeclaredDialect;
+begin
+  Expect<string>(Violation(
+    '{"$schema":"https://json-schema.org/draft/2020-12/schema#","type":"string"}'))
+    .ToBe('');
+  Expect<string>(Violation(
+    '{"$schema":"http://json-schema.org/draft-07/schema#","type":"string"}'))
+    .ToBe('declares $schema other than JSON Schema 2020-12');
+  Expect<string>(Violation('{"$schema":7,"type":"string"}'))
+    .ToBe('declares $schema other than JSON Schema 2020-12');
+end;
+
+// '' when the built AValue (consumed) conforms to ASchema, else the
+// error. Built values reach shapes parsing never produces: QWord nodes
+// for small values, nil members and items, non-finite floats.
+function CheckBuilt(const ASchema: string; AValue: TJSONData): string;
+var
+  Schema: TJSONObject;
+begin
+  Schema := ObjectOf(ASchema);
+  try
+    if MCPValidateAgainstSchema(Schema, AValue, 'structured output', False,
+      Result) then
+      Result := '';
+  finally
+    AValue.Free;
+    Schema.Free;
+  end;
+end;
+
+function WithNilMember(const AName: string): TJSONObject;
+begin
+  Result := TJSONObject.Create;
+  Result.Add(AName, TJSONData(nil));
+end;
+
+function NilItemArray: TJSONArray;
+begin
+  Result := TJSONArray.Create;
+  Result.Add(TJSONData(nil));
+end;
+
+procedure TSubsetSchemas.TestBuiltValues;
+begin
+  // A small value in a QWord node equals the integral float 2.0.
+  Expect<string>(CheckBuilt('{"type":"integer","enum":[2.0]}',
+    TJSONQWordNumber.Create(2))).ToBe('');
+  Expect<Boolean>(CheckBuilt('{"type":"integer","enum":[3.0]}',
+    TJSONQWordNumber.Create(2)) <> '').ToBe(True);
+  // A nil member is a present null, not an absent one.
+  Expect<string>(CheckBuilt('{"type":"object","properties":{"a":{"type":' +
+    '"null"}},"required":["a"]}', WithNilMember('a'))).ToBe('');
+  Expect<string>(CheckBuilt('{"type":"object","properties":{"a":{"type":' +
+    '"string"}}}', WithNilMember('a')))
+    .ToBe('Structured output "a" must be a string');
+  // A nil item is null: checked, not dereferenced.
+  Expect<string>(CheckBuilt('{"type":"array","items":{"type":"null"}}',
+    NilItemArray)).ToBe('');
+  Expect<string>(CheckBuilt('{"type":"array","items":{"type":"string"}}',
+    NilItemArray)).ToBe('Structured output "[0]" must be a string');
+  // NaN and infinities have no JSON form.
+  Expect<string>(CheckBuilt('{"type":"number"}',
+    TJSONFloatNumber.Create(NaN))).ToBe('Structured output must be a number');
+  Expect<string>(CheckBuilt('{"type":"number"}',
+    TJSONFloatNumber.Create(Infinity))).ToBe('Structured output must be a number');
+end;
+
+procedure TSubsetSchemas.TestKeywordShapes;
+begin
+  Expect<string>(Violation('{"type":"object","required":[7]}'))
+    .ToBe('required must list property names');
+  Expect<string>(Violation('{"type":"string","title":7}'))
+    .ToBe('title must be a string');
+  Expect<string>(Violation('{"type":"object","properties":{"a":{"type":' +
+    '"string","description":true}}}'))
+    .ToBe('property "a" description must be a string');
+end;
+
+// A default that breaks its own schema is not seeded: omitting the
+// property stays valid, and the handler never sees the bad value.
+procedure TSubsetSchemas.TestOnlyConformingDefaultsSeeded;
+var
+  Schema, Value: TJSONObject;
+  Error: string;
+begin
+  Schema := ObjectOf('{"type":"object","properties":{' +
+    '"a":{"type":"string","default":null},' +
+    '"b":{"type":"string","enum":["x"],"default":"y"},' +
+    '"c":{"type":"string","default":"ok"}}}');
+  Value := ObjectOf('{}');
+  try
+    Expect<Boolean>(MCPValidateAgainstSchema(Schema, Value, 'argument', True,
+      Error)).ToBe(True);
+    Expect<string>(Value.AsJSON).ToBe('{ "c" : "ok" }');
+  finally
+    Value.Free;
+    Schema.Free;
+  end;
+end;
+
+function NaNInArray: TJSONArray;
+begin
+  Result := TJSONArray.Create;
+  Result.Add(TJSONFloatNumber.Create(NaN));
+end;
+
+procedure TSubsetSchemas.TestUnconstrainedNonFiniteRefused;
+var
+  Obj: TJSONObject;
+begin
+  // No "items" and no named property constrain these, yet NaN has no
+  // JSON form.
+  Expect<string>(CheckBuilt('{"type":"array"}', NaNInArray))
+    .ToBe('Structured output contains a NaN or infinite number');
+  Obj := TJSONObject.Create;
+  Obj.Add('x', TJSONFloatNumber.Create(Infinity));
+  Expect<string>(CheckBuilt('{"type":"object"}', Obj))
+    .ToBe('Structured output contains a NaN or infinite number');
+end;
+
+// An integral double is an exact integer past 2^53 too.
+procedure TSubsetSchemas.TestLargeIntegralFloatsInEnums;
+begin
+  Expect<string>(CheckBuilt('{"type":"number","enum":[10000000000000000]}',
+    TJSONFloatNumber.Create(1e16))).ToBe('');
+  Expect<Boolean>(CheckBuilt(
+    '{"type":"number","enum":[10000000000000001]}',
+    TJSONFloatNumber.Create(1e16)) <> '').ToBe(True);
+  // 2^64 - 2048, the largest double below 2^64, against a QWord node.
+  Expect<string>(CheckBuilt(
+    '{"type":"number","enum":[18446744073709549568]}',
+    TJSONFloatNumber.Create(18446744073709549568.0))).ToBe('');
+  Expect<Boolean>(CheckBuilt(
+    '{"type":"number","enum":[18446744073709549569]}',
+    TJSONFloatNumber.Create(18446744073709549568.0)) <> '').ToBe(True);
+end;
+
+// Accepted before #91: entries of another type simply never match.
+procedure TSubsetSchemas.TestEnumEntriesOfOtherTypes;
+begin
+  Expect<string>(Violation('{"type":"string","enum":[{},"ok"]}')).ToBe('');
+  Expect<string>(Check('{"type":"string","enum":[{},"ok"]}', '"ok"')).ToBe('');
+  Expect<string>(Check('{"type":"string","enum":[{},"ok"]}', '{}'))
+    .ToBe('Argument must be a string');
+end;
+
+procedure TSubsetSchemas.SetupTests;
+begin
+  Test('nested objects, arrays, enums, defaults and null accepted',
+    TestAcceptedSchemas);
+  Test('keywords outside the subset named with their path',
+    TestRejectedKeywords);
+  Test('input schemas need an object root', TestObjectRootRequired);
+  Test('each type checked; integer means an integral number', TestTypes);
+  Test('nested paths in messages, non-ASCII byte-exact',
+    TestNestedPathsInMessages);
+  Test('array items checked with their index', TestArrayItems);
+  Test('enums of strings, integers and booleans', TestEnumsOfAnyPrimitive);
+  Test('defaults seeded into nested objects only when asked',
+    TestDefaultsSeededOnlyWhenAsked);
+  Test('root-level messages for output values', TestRootValueMessages);
+  Test('integral floats are integers; fractions and huge floats are not',
+    TestIntegralFloats);
+  Test('numeric enums compare exactly, integers without rounding',
+    TestExactNumericEnums);
+  Test('only a 2020-12 $schema is inside the subset', TestDeclaredDialect);
+  Test('built values: small QWords, nil members and items, non-finite',
+    TestBuiltValues);
+  Test('required names, title and description need their shapes',
+    TestKeywordShapes);
+  Test('only defaults that conform are seeded',
+    TestOnlyConformingDefaultsSeeded);
+  Test('NaN or infinity anywhere in a value is refused',
+    TestUnconstrainedNonFiniteRefused);
+  Test('integral floats past 2^53 match the integers they hold',
+    TestLargeIntegralFloatsInEnums);
+  Test('enum entries of another type are allowed and never match',
+    TestEnumEntriesOfOtherTypes);
+end;
+
+{ ───────── x-mcp-header annotations (#90) ───────── }
+
+// Constraints verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
+
+function HeaderViolation(const ASchema: string): string;
+var
+  Schema: TJSONObject;
+  Params: TMCPHeaderParameters;
+begin
+  Schema := TJSONObject(GetJSON(ASchema));
+  try
+    Result := MCPHeaderParameters(Schema, Params);
+  finally
+    Schema.Free;
+  end;
+end;
+
+procedure THeaderAnnotations.TestValidAnnotations;
+var
+  Schema: TJSONObject;
+  Params: TMCPHeaderParameters;
+begin
+  Schema := TJSONObject(GetJSON('{"type":"object","properties":{' +
+    '"region":{"type":"string","x-mcp-header":"Region"},' +
+    '"opts":{"type":"object","properties":{"dry":{"type":"boolean",' +
+    '"x-mcp-header":"Dry-Run"},"n":{"type":"integer","x-mcp-header":"N"}}}}}'));
+  try
+    Expect<string>(MCPHeaderParameters(Schema, Params)).ToBe('');
+    Expect<Integer>(Length(Params)).ToBe(3);
+    Expect<string>(Params[0].Header).ToBe('Region');
+    Expect<string>(Params[1].Header).ToBe('Dry-Run');
+    Expect<string>(Params[1].Path[0] + '.' + Params[1].Path[1]).ToBe('opts.dry');
+    Expect<string>(Params[2].ParamType).ToBe('integer');
+  finally
+    Schema.Free;
+  end;
+end;
+
+procedure THeaderAnnotations.TestNoAnnotations;
+begin
+  Expect<string>(HeaderViolation('{"type":"object","properties":' +
+    '{"a":{"type":"string"}}}')).ToBe('');
+end;
+
+procedure THeaderAnnotations.TestRejected;
+begin
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"a":' +
+    '{"type":"string","x-mcp-header":""}}}'))
+    .ToBe('x-mcp-header of "a" must be a non-empty HTTP token');
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"a":' +
+    '{"type":"string","x-mcp-header":"Re gion"}}}'))
+    .ToBe('x-mcp-header of "a" must be a non-empty HTTP token');
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"a":' +
+    '{"type":"number","x-mcp-header":"A"}}}'))
+    .ToBe('x-mcp-header of "a" needs type string, integer or boolean, not "number"');
+  Expect<string>(HeaderViolation('{"type":"object","properties":{' +
+    '"a":{"type":"string","x-mcp-header":"Key"},' +
+    '"b":{"type":"string","x-mcp-header":"KEY"}}}'))
+    .ToBe('x-mcp-header "KEY" is used twice, at "a" and "b" (headers compare ' +
+    'case-insensitively)');
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"list":' +
+    '{"type":"array","items":{"type":"string","x-mcp-header":"Item"}}}}'))
+    .ToBe('x-mcp-header at "list.items" is not on a property reachable ' +
+    'through "properties" from the root');
+  Expect<string>(HeaderViolation('{"type":"object","anyOf":[{"properties":' +
+    '{"a":{"type":"string","x-mcp-header":"A"}}}]}'))
+    .ToBe('x-mcp-header at "anyOf[0].properties.a" is not on a property ' +
+    'reachable through "properties" from the root');
+  Expect<string>(HeaderViolation('{"type":"object","x-mcp-header":"Root"}'))
+    .ToBe('x-mcp-header at "" is not on a property reachable through ' +
+    '"properties" from the root');
+end;
+
+// Only subschemas can carry an annotation: an instance in examples or a
+// $defs entry merely named x-mcp-header is data (#90 review). Verified
+// 2026-11-27 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
+procedure THeaderAnnotations.TestDataIsNotAnnotation;
+var
+  Schema, Prop: TJSONObject;
+  Params: TMCPHeaderParameters;
+begin
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"a":' +
+    '{"type":"object","examples":[{"x-mcp-header":"x"}]}},' +
+    '"examples":[{"x-mcp-header":7}]}')).ToBe('');
+  Expect<string>(HeaderViolation('{"type":"object","$defs":{' +
+    '"x-mcp-header":{"type":"string"}}}')).ToBe('');
+  // The subset admits the annotation in input schemas only; in an
+  // output schema it is an unsupported keyword, so output stays
+  // unchecked as before.
+  Expect<string>(Violation('{"type":"object","properties":{"a":' +
+    '{"type":"string","x-mcp-header":"A"}}}', True)).ToBe('');
+  Expect<string>(Violation('{"type":"object","properties":{"a":' +
+    '{"type":"string","x-mcp-header":"A"}}}', False))
+    .ToBe('property "a" uses unsupported keyword "x-mcp-header"');
+  // contentSchema (2020-12) and draft-07 dependencies hold subschemas:
+  // an annotation there is out of place. A dependencies entry that
+  // lists property names is data.
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"blob":' +
+    '{"type":"string","contentSchema":{"type":"object","properties":{' +
+    '"k":{"type":"string","x-mcp-header":"K"}}}}}}'))
+    .ToBe('x-mcp-header at "blob.contentSchema.properties.k" is not on a ' +
+    'property reachable through "properties" from the root');
+  Expect<string>(HeaderViolation('{"type":"object","dependencies":{"a":' +
+    '{"properties":{"b":{"type":"string","x-mcp-header":"B"}}}}}'))
+    .ToBe('x-mcp-header at "dependencies.a.properties.b" is not on a ' +
+    'property reachable through "properties" from the root');
+  Expect<string>(HeaderViolation('{"type":"object","dependencies":{"a":' +
+    '["b","x-mcp-header"]}}')).ToBe('');
+  // A literal key with a dot is quoted, so it differs from nesting.
+  Expect<string>(HeaderViolation('{"type":"object","properties":{' +
+    '"a.b":{"type":"string","x-mcp-header":"Key"},' +
+    '"a":{"type":"object","properties":{"b":{"type":"string",' +
+    '"x-mcp-header":"KEY"}}}}}'))
+    .ToBe('x-mcp-header "KEY" is used twice, at "["a.b"]" and "a.b" ' +
+    '(headers compare case-insensitively)');
+  // An annotation inside a $defs schema is still out of place.
+  Expect<string>(HeaderViolation('{"type":"object","$defs":{"d":' +
+    '{"type":"string","x-mcp-header":"D"}}}'))
+    .ToBe('x-mcp-header at "$defs.d" is not on a property reachable ' +
+    'through "properties" from the root');
+  // A nil child (programmatic schemas) is skipped, not dereferenced.
+  Prop := TJSONObject.Create;
+  Prop.Add('type', 'string');
+  Prop.Add('x-mcp-header', 'Region');
+  Schema := TJSONObject.Create;
+  try
+    Schema.Add('type', 'object');
+    Schema.Add('items', TJSONData(nil));
+    Schema.Add('properties', TJSONObject.Create(['region', Prop]));
+    Expect<string>(MCPHeaderParameters(Schema, Params)).ToBe('');
+    Expect<Integer>(Length(Params)).ToBe(1);
+  finally
+    Schema.Free;
+  end;
+end;
+
+procedure THeaderAnnotations.SetupTests;
+begin
+  Test('annotations along properties, nested, three types',
+    TestValidAnnotations);
+  Test('a schema without annotations has none', TestNoAnnotations);
+  Test('each constraint violation named', TestRejected);
+  Test('examples and $defs names are data, not annotations',
+    TestDataIsNotAnnotation);
+end;
+
 begin
   TestRunnerProgram.AddSuite(TSchemaBuilder.Create('Schema: fluent builder'));
   TestRunnerProgram.AddSuite(
     TSchemaFromClass.Create('Schema: derived from classes'));
   TestRunnerProgram.AddSuite(TWireNumber.Create('Schema: wire numbers'));
+  TestRunnerProgram.AddSuite(TSubsetSchemas.Create('Schema: enforced subset'));
+  TestRunnerProgram.AddSuite(
+    THeaderAnnotations.Create('Schema: x-mcp-header annotations'));
   TestRunnerProgram.Run;
 end.

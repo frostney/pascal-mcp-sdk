@@ -71,6 +71,16 @@ uses
 type
   EMCPSchema = class(Exception);
 
+  // A tool parameter mirrored into an HTTP header by x-mcp-header (#90):
+  // the header is Mcp-Param-<Header>, and Path is the chain of property
+  // names from the inputSchema root to the parameter.
+  TMCPHeaderParameter = record
+    Header: string;
+    Path: array of string;
+    ParamType: string; // 'string', 'integer' or 'boolean'
+  end;
+  TMCPHeaderParameters = array of TMCPHeaderParameter;
+
   // Base class for argument types. Published-property RTTI for every
   // descendant comes from MCP.inc's global {$M+} (no per-unit
   // override). Constructor kept virtual so the server can instantiate
@@ -164,6 +174,63 @@ function MCPSerialize(AObj: TMCPArgs): TJSONObject;
 // object or array, which then frees it). Used by MCPSerialize's float
 // properties and the server's progress notifications.
 function MCPWireNumber(AValue: Double): TJSONData;
+
+// ── The enforced schema subset (ADR-0004; #23, #91) ──
+//
+// The server validates arguments and structured output itself only for
+// schemas inside this JSON Schema 2020-12 subset; anything else is the
+// handler's job (.ApplicationValidated for input; an output schema
+// outside it is not checked). integer accepts integral floats within
+// +-2^53; number excludes NaN and the infinities. Every schema node carries a
+// "type" of object, array, string, number, integer, boolean or null,
+// and may use:
+//   object      properties (each a node), required (names)
+//   array       items (a node)
+//   primitives  enum (entries of another type never match), default
+//               (a primitive)
+//   any node    description, title; $schema at the root, naming
+//               2020-12 (the default dialect; a schema declaring
+//               another is outside the subset)
+//   input only  x-mcp-header on a property (checked by
+//               MCPHeaderParameters)
+// Nesting is unlimited. Verified 2026-11-26 against the structured
+// content and output schema rules of
+// https://modelcontextprotocol.io/specification/2026-07-28/server/tools
+// and (dialects) 2026-11-27 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic#json-schema-usage
+
+// '' when ASchema is inside the subset, otherwise the first violation
+// ('uses unsupported keyword "format"', 'property "a.b" has
+// unsupported type "x"', ...). AObjectRoot marks an input schema: it
+// requires the root type object and admits x-mcp-header annotations,
+// which an output schema cannot carry. ASchema is borrowed.
+function MCPSchemaSubsetViolation(ASchema: TJSONObject;
+  AObjectRoot: Boolean): string;
+
+// Checks AValue against a subset schema: types (integer means an
+// integral JSON number), required members, enum membership, nested
+// properties and array items. Members a schema does not name are
+// ignored. With ASeedDefaults, an absent optional property that
+// declares a default is added to its object, so a handler sees the
+// same view a typed handler gets. AKind names the value in errors:
+// 'argument' gives 'Missing required argument "a.b"' and
+// 'Argument "a.b" must be a string'. False with AError on the first
+// violation. ASchema must be inside the subset (MCPSchemaSubsetViolation
+// returned ''); both are borrowed, and AValue changes only by seeding.
+function MCPValidateAgainstSchema(ASchema: TJSONObject; AValue: TJSONData;
+  const AKind: string; ASeedDefaults: Boolean; out AError: string): Boolean;
+
+// The x-mcp-header annotations of a tool's inputSchema (#90), checked
+// against the constraints the specification puts on them: a non-empty
+// RFC 9110 token, case-insensitively unique, only on a string, integer
+// or boolean property, and only on properties reachable from the root
+// through "properties" keys alone (not through items, composition,
+// conditionals, $ref or $defs). Returns '' with the annotations in
+// AParameters, or the first violation. Verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
+// ASchema is borrowed.
+function MCPHeaderParameters(ASchema: TJSONObject;
+  out AParameters: TMCPHeaderParameters): string;
 
 implementation
 
@@ -667,8 +734,9 @@ begin
     raise EMCPSchema.Create('NaN and infinite numbers have no JSON form');
   // Every integer below 2^53 is an exact Double and fits an Int64;
   // integral values beyond it keep the float node, which writes them
-  // the way JavaScript does.
-  if (Frac(AValue) = 0) and (Abs(AValue) < 9007199254740992.0) then
+  // the way JavaScript does. The range test comes first: Frac past 2^63
+  // overflows on AArch64 (FPC 3.2.2).
+  if (Abs(AValue) < 9007199254740992.0) and (Frac(AValue) = 0) then
     Result := TJSONInt64Number.Create(Trunc(AValue))
   else
     Result := TMCPWireFloat.Create(AValue);
@@ -827,6 +895,749 @@ begin
   Core.FRoot := nil;
   Core.FProperties := nil;
   Core.FRequired := nil;
+end;
+
+
+{ ───────── the enforced schema subset (#91) ───────── }
+
+function IsSubsetType(const AType: string): Boolean;
+begin
+  Result := (AType = 'object') or (AType = 'array') or (AType = 'string') or
+    (AType = 'number') or (AType = 'integer') or (AType = 'boolean') or
+    (AType = 'null');
+end;
+
+function IsPrimitiveType(const AType: string): Boolean;
+begin
+  Result := (AType <> 'object') and (AType <> 'array');
+end;
+
+// 'property "a.b" ' for a nested node, '' for the root.
+function NodeLabel(const APath: string): string;
+begin
+  if APath = '' then
+    Result := ''
+  else
+    Result := 'property "' + APath + '" ';
+end;
+
+function JoinPath(const APath, AName: string): string;
+begin
+  if APath = '' then
+    Result := AName
+  else
+    Result := APath + '.' + AName;
+end;
+
+function NodeViolation(ANode: TJSONObject; const APath: string;
+  ARoot, AInput: Boolean): string; forward;
+
+// True for a $schema value naming JSON Schema 2020-12, the dialect the
+// subset's rules come from.
+function IsDefaultDialect(AValue: TJSONData): Boolean;
+var
+  Uri: string;
+begin
+  if AValue.JSONType <> jtString then
+    Exit(False);
+  Uri := AValue.AsString;
+  if (Uri <> '') and (Uri[Length(Uri)] = '#') then
+    SetLength(Uri, Length(Uri) - 1);
+  Result := (Uri = 'https://json-schema.org/draft/2020-12/schema') or
+    (Uri = 'http://json-schema.org/draft/2020-12/schema');
+end;
+
+// properties: an object of node schemas, each checked in turn.
+function PropertiesViolation(AValue: TJSONData; const APath: string;
+  AInput: Boolean): string;
+var
+  I: Integer;
+  Member: TJSONData;
+begin
+  if AValue.JSONType <> jtObject then
+    Exit(NodeLabel(APath) + 'properties must be an object');
+  for I := 0 to AValue.Count - 1 do
+  begin
+    Member := TJSONObject(AValue).Items[I];
+    if (Member = nil) or (Member.JSONType <> jtObject) then
+      Exit(Format('property "%s" must be an object schema',
+        [JoinPath(APath, TJSONObject(AValue).Names[I])]));
+    Result := NodeViolation(TJSONObject(Member),
+      JoinPath(APath, TJSONObject(AValue).Names[I]), False, AInput);
+    if Result <> '' then
+      Exit;
+  end;
+  Result := '';
+end;
+
+type
+  TJSONTypeSet = set of TJSONType;
+
+// True when every item of AValue (an array) is non-nil with a JSON
+// type in ATypes; AAllowNil lets a nil item (written as null) pass.
+function ItemsOfTypes(AValue: TJSONData; ATypes: TJSONTypeSet;
+  AAllowNil: Boolean): Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to AValue.Count - 1 do
+    if AValue.Items[I] = nil then
+    begin
+      if not AAllowNil then
+        Exit(False);
+    end
+    else if not (AValue.Items[I].JSONType in ATypes) then
+      Exit(False);
+  Result := True;
+end;
+
+// The annotation keywords any node may carry; False when Key is none.
+function AnnotationViolation(const AKey: string; AValue: TJSONData;
+  const APath: string; ARoot, AInput: Boolean;
+  out AViolation: string): Boolean;
+begin
+  AViolation := '';
+  Result := True;
+  if (AKey = 'description') or (AKey = 'title') then
+  begin
+    if AValue.JSONType <> jtString then
+      AViolation := NodeLabel(APath) + AKey + ' must be a string';
+  end
+  else if ARoot and (AKey = '$schema') then
+  begin
+    if not IsDefaultDialect(AValue) then
+      AViolation := 'declares $schema other than JSON Schema 2020-12';
+  end
+  else
+    // x-mcp-header names a routing header in an input schema; it does
+    // not constrain the value, and MCPHeaderParameters checks its own
+    // rules (#90). Anywhere else it stays outside the subset.
+    Result := (AKey = 'type') or (AInput and (AKey = 'x-mcp-header'));
+end;
+
+const
+  PRIMITIVE_JSON: TJSONTypeSet = [jtString, jtNumber, jtBoolean, jtNull];
+
+// The keyword ANode[AIndex] is allowed for a node of AType.
+function KeywordViolation(ANode: TJSONObject; AIndex: Integer;
+  const AType, APath: string; ARoot, AInput: Boolean): string;
+var
+  Key: string;
+  Value: TJSONData;
+begin
+  Result := '';
+  Key := ANode.Names[AIndex];
+  Value := ANode.Items[AIndex];
+  if Value = nil then
+    Exit(NodeLabel(APath) + Key + ' must not be nil');
+  if AnnotationViolation(Key, Value, APath, ARoot, AInput, Result) then
+    Exit;
+  if (Key = 'properties') and (AType = 'object') then
+    Result := PropertiesViolation(Value, APath, AInput)
+  else if (Key = 'required') and (AType = 'object') then
+  begin
+    if Value.JSONType <> jtArray then
+      Result := NodeLabel(APath) + 'required must be an array'
+    else if not ItemsOfTypes(Value, [jtString], False) then
+      Result := NodeLabel(APath) + 'required must list property names';
+  end
+  else if (Key = 'items') and (AType = 'array') then
+  begin
+    if Value.JSONType <> jtObject then
+      Exit(NodeLabel(APath) + 'items must be an object schema');
+    Result := NodeViolation(TJSONObject(Value), APath + '[]', False, AInput);
+  end
+  else if (Key = 'enum') and IsPrimitiveType(AType) then
+  begin
+    // Entries of another type are allowed, as before #91: they can
+    // never match a value of the declared type.
+    if Value.JSONType <> jtArray then
+      Result := NodeLabel(APath) + 'enum must be an array';
+  end
+  else if (Key = 'default') and IsPrimitiveType(AType) then
+  begin
+    if not (Value.JSONType in PRIMITIVE_JSON) then
+      Result := NodeLabel(APath) + 'default must be a primitive';
+  end
+  else
+    Result := NodeLabel(APath) + 'uses unsupported keyword "' + Key + '"';
+end;
+
+function NodeViolation(ANode: TJSONObject; const APath: string;
+  ARoot, AInput: Boolean): string;
+var
+  TypeData: TJSONData;
+  NodeType: string;
+  I: Integer;
+begin
+  TypeData := ANode.Find('type');
+  if (TypeData = nil) or (TypeData.JSONType <> jtString) or
+    not IsSubsetType(TypeData.AsString) then
+  begin
+    if (TypeData <> nil) and (TypeData.JSONType = jtString) then
+      Exit(NodeLabel(APath) + 'has unsupported type "' +
+        TypeData.AsString + '"');
+    Exit(NodeLabel(APath) + 'needs a single "type"');
+  end;
+  NodeType := TypeData.AsString;
+  for I := 0 to ANode.Count - 1 do
+  begin
+    Result := KeywordViolation(ANode, I, NodeType, APath, ARoot, AInput);
+    if Result <> '' then
+      Exit;
+  end;
+  Result := '';
+end;
+
+function MCPSchemaSubsetViolation(ASchema: TJSONObject;
+  AObjectRoot: Boolean): string;
+begin
+  if ASchema = nil then
+    Exit('is missing');
+  if AObjectRoot and (ASchema.Get('type', '') <> 'object') then
+    Exit('must have root type "object"');
+  Result := NodeViolation(ASchema, '', True, AObjectRoot);
+end;
+
+// 'a string', 'an integer', ... for messages.
+function TypePhrase(const AType: string): string;
+begin
+  if (AType = 'integer') or (AType = 'object') or (AType = 'array') then
+    Result := 'an ' + AType
+  else if AType = 'null' then
+    Result := 'null'
+  else
+    Result := 'a ' + AType;
+end;
+
+const
+  // 2^53: past it a double no longer holds every integer, so a float
+  // there cannot be told apart from its neighbours.
+  MAX_EXACT_FLOAT_INTEGER = 9007199254740992.0;
+
+// True for a finite double with no fractional part. Every double of
+// magnitude 2^52 or more is integral, and Frac is not called on those:
+// on AArch64 (FPC 3.2.2) it truncates through a 64-bit integer and
+// raises an arithmetic overflow past 2^63.
+function IsIntegralDouble(F: Double): Boolean;
+begin
+  if IsNan(F) or IsInfinite(F) then
+    Exit(False);
+  Result := (Abs(F) >= 4503599627370496.0) or (Frac(F) = 0);
+end;
+
+// JSON Schema's integer is a number with a zero fractional part
+// (json-schema-validation 2020-12 §6.1.1, verified 2026-11-27), so 2.0
+// and 2e0 count. Floats are accepted within +-2^53, where that is exact.
+function IsIntegralNumber(AValue: TJSONData): Boolean;
+var
+  F: Double;
+begin
+  if TJSONNumber(AValue).NumberType in [ntInteger, ntInt64, ntQWord] then
+    Exit(True);
+  F := AValue.AsFloat;
+  Result := (Abs(F) <= MAX_EXACT_FLOAT_INTEGER) and IsIntegralDouble(F);
+end;
+
+// True when the integer of magnitude AMagnitude (sign apart) is exact
+// as a double: at most 53 significant bits. Bit tests only, so no
+// float-to-integer conversion can trap (AArch64 raises on those).
+function IsExactAsDouble(AMagnitude: QWord): Boolean;
+var
+  Bits: Integer;
+  Probe: QWord;
+begin
+  Bits := 0;
+  Probe := AMagnitude;
+  while Probe <> 0 do
+  begin
+    Inc(Bits);
+    Probe := Probe shr 1;
+  end;
+  if Bits <= 53 then
+    Exit(True);
+  Result := AMagnitude and ((QWord(1) shl (Bits - 53)) - 1) = 0;
+end;
+
+// Exact equality of two JSON numbers: integers compare as integers
+// (no rounding through a double), floats as floats, and a float equals
+// an integer when it is integral and the same value: the integer is
+// exact as a double and converts to exactly that float.
+function SameNumber(A, B: TJSONData): Boolean;
+var
+  IntA, IntB, Negative: Boolean;
+  Integral, Other: TJSONData;
+  Magnitude: QWord;
+  Signed: Int64;
+  F, Exact: Double;
+begin
+  IntA := TJSONNumber(A).NumberType in [ntInteger, ntInt64, ntQWord];
+  IntB := TJSONNumber(B).NumberType in [ntInteger, ntInt64, ntQWord];
+  if not IntA and not IntB then
+    Exit(A.AsFloat = B.AsFloat);
+  if IntA and IntB then
+  begin
+    // A QWord above High(Int64) equals only the same QWord.
+    if (TJSONNumber(A).NumberType = ntQWord) or
+      (TJSONNumber(B).NumberType = ntQWord) then
+      Exit(A.AsJSON = B.AsJSON);
+    Exit(A.AsInt64 = B.AsInt64);
+  end;
+  if IntA then
+  begin
+    Integral := A;
+    Other := B;
+  end
+  else
+  begin
+    Integral := B;
+    Other := A;
+  end;
+  F := Other.AsFloat;
+  if not IsIntegralDouble(F) then
+    Exit(False);
+  // A QWord node holds small values too (CreateJSON(QWord(2))).
+  if TJSONNumber(Integral).NumberType = ntQWord then
+  begin
+    Negative := False;
+    Magnitude := Integral.AsQWord;
+  end
+  else
+  begin
+    Signed := Integral.AsInt64;
+    Negative := Signed < 0;
+    if Negative then
+      Magnitude := QWord(-(Signed + 1)) + 1
+    else
+      Magnitude := QWord(Signed);
+  end;
+  if (Negative <> (F < 0)) or not IsExactAsDouble(Magnitude) then
+    Exit((Magnitude = 0) and (F = 0));
+  // An assignment converts (a Double(...) cast would reinterpret bits).
+  Exact := Magnitude;
+  Result := Exact = Abs(F);
+end;
+
+// A float node can hold NaN or an infinity, which has no JSON form.
+function IsFiniteNumber(AValue: TJSONData): Boolean;
+begin
+  Result := (TJSONNumber(AValue).NumberType <> ntFloat) or
+    (not IsNan(AValue.AsFloat) and not IsInfinite(AValue.AsFloat));
+end;
+
+// AValue nil is a member or item stored as nil, which fpjson writes as
+// null: it is JSON null here too.
+function MatchesType(AValue: TJSONData; const AType: string): Boolean;
+begin
+  if AValue = nil then
+    Result := AType = 'null'
+  else if AType = 'string' then
+    Result := AValue.JSONType = jtString
+  else if AType = 'number' then
+    Result := (AValue.JSONType = jtNumber) and IsFiniteNumber(AValue)
+  else if AType = 'integer' then
+    Result := (AValue.JSONType = jtNumber) and IsIntegralNumber(AValue)
+  else if AType = 'boolean' then
+    Result := AValue.JSONType = jtBoolean
+  else if AType = 'null' then
+    Result := AValue.JSONType = jtNull
+  else if AType = 'object' then
+    Result := AValue.JSONType = jtObject
+  else
+    Result := AValue.JSONType = jtArray;
+end;
+
+// Equal primitive JSON values: same JSON type and the same text (for
+// numbers, the same numeric value).
+function SamePrimitive(A, B: TJSONData): Boolean;
+begin
+  if (A = nil) or (B = nil) then
+    Exit(((A = nil) or (A.JSONType = jtNull)) and
+      ((B = nil) or (B.JSONType = jtNull)));
+  if A.JSONType <> B.JSONType then
+    Exit(False);
+  case A.JSONType of
+    jtNumber:
+      Result := SameNumber(A, B);
+    jtNull:
+      Result := True;
+  else
+    Result := A.AsJSON = B.AsJSON;
+  end;
+end;
+
+// 'Argument "a.b"' or 'Argument' (root) for the value at APath.
+function Subject(const AKind, APath: string): string;
+begin
+  Result := UpperCase(Copy(AKind, 1, 1)) + Copy(AKind, 2, MaxInt);
+  if APath <> '' then
+    Result := Result + ' "' + APath + '"';
+end;
+
+function ValidateNode(ANode: TJSONObject; AValue: TJSONData;
+  const AKind, APath: string; ASeedDefaults: Boolean;
+  out AError: string): Boolean; forward;
+
+// The index of member AName, -1 when absent. fpjson's IndexOfName
+// misses a member stored as nil (FPC 3.2.2), which is a present null.
+function MemberIndex(AObject: TJSONObject; const AName: string): Integer;
+begin
+  Result := AObject.IndexOfName(AName);
+  if Result >= 0 then
+    Exit;
+  for Result := 0 to AObject.Count - 1 do
+    if AObject.Names[Result] = AName then
+      Exit;
+  Result := -1;
+end;
+
+function ValidateMembers(ANode, AValue: TJSONObject;
+  const AKind, APath: string; ASeedDefaults: Boolean;
+  out AError: string): Boolean;
+var
+  Data, Member, DefaultData: TJSONData;
+  Properties: TJSONObject;
+  I, Index: Integer;
+  Ignored: string;
+begin
+  Result := False;
+  Data := ANode.Find('required');
+  if (Data <> nil) and (Data.JSONType = jtArray) then
+    for I := 0 to Data.Count - 1 do
+      if (Data.Items[I].JSONType = jtString) and
+        (MemberIndex(AValue, Data.Items[I].AsString) < 0) then
+      begin
+        AError := Format('Missing required %s "%s"',
+          [AKind, JoinPath(APath, Data.Items[I].AsString)]);
+        Exit;
+      end;
+  Data := ANode.Find('properties');
+  if (Data <> nil) and (Data.JSONType = jtObject) then
+  begin
+    Properties := TJSONObject(Data);
+    for I := 0 to Properties.Count - 1 do
+    begin
+      // Present (a nil member is a present null) versus absent.
+      Index := MemberIndex(AValue, Properties.Names[I]);
+      if Index < 0 then
+      begin
+        // Only a default that conforms is seeded, so the handler sees
+        // a value its schema allows.
+        DefaultData := TJSONObject(Properties.Items[I]).Find('default');
+        if ASeedDefaults and (DefaultData <> nil) and
+          ValidateNode(TJSONObject(Properties.Items[I]), DefaultData, AKind,
+          '', False, Ignored) then
+          AValue.Add(Properties.Names[I], DefaultData.Clone);
+        Continue;
+      end;
+      Member := AValue.Items[Index];
+      if not ValidateNode(TJSONObject(Properties.Items[I]), Member, AKind,
+        JoinPath(APath, Properties.Names[I]), ASeedDefaults, AError) then
+        Exit;
+    end;
+  end;
+  Result := True;
+end;
+
+function ValidateNode(ANode: TJSONObject; AValue: TJSONData;
+  const AKind, APath: string; ASeedDefaults: Boolean;
+  out AError: string): Boolean;
+var
+  NodeType: string;
+  EnumData, ItemSchema: TJSONData;
+  I: Integer;
+  Matched: Boolean;
+begin
+  Result := False;
+  AError := '';
+  NodeType := ANode.Get('type', '');
+  if not MatchesType(AValue, NodeType) then
+  begin
+    AError := Subject(AKind, APath) + ' must be ' + TypePhrase(NodeType);
+    Exit;
+  end;
+  EnumData := ANode.Find('enum');
+  if (EnumData <> nil) and (EnumData.JSONType = jtArray) then
+  begin
+    Matched := False;
+    for I := 0 to EnumData.Count - 1 do
+      if SamePrimitive(EnumData.Items[I], AValue) then
+        Matched := True;
+    if not Matched then
+    begin
+      AError := Subject(AKind, APath) + ' must be ' + TypePhrase(NodeType) +
+        ' from the declared enum values';
+      Exit;
+    end;
+  end;
+  if NodeType = 'object' then
+    Exit(ValidateMembers(ANode, TJSONObject(AValue), AKind, APath,
+      ASeedDefaults, AError));
+  ItemSchema := ANode.Find('items');
+  if (NodeType = 'array') and (ItemSchema <> nil) and
+    (ItemSchema.JSONType = jtObject) then
+    for I := 0 to AValue.Count - 1 do
+      if not ValidateNode(TJSONObject(ItemSchema), AValue.Items[I], AKind,
+        Format('%s[%d]', [APath, I]), ASeedDefaults, AError) then
+        Exit;
+  Result := True;
+end;
+
+// True when AValue holds a NaN or infinite float anywhere, which no
+// JSON text can carry.
+function HasNonFiniteNumber(AValue: TJSONData): Boolean;
+var
+  I: Integer;
+begin
+  if AValue = nil then
+    Exit(False);
+  case AValue.JSONType of
+    jtNumber:
+      Exit(not IsFiniteNumber(AValue));
+    jtObject, jtArray:
+      for I := 0 to AValue.Count - 1 do
+        if HasNonFiniteNumber(AValue.Items[I]) then
+          Exit(True);
+  end;
+  Result := False;
+end;
+
+function MCPValidateAgainstSchema(ASchema: TJSONObject; AValue: TJSONData;
+  const AKind: string; ASeedDefaults: Boolean; out AError: string): Boolean;
+begin
+  Result := ValidateNode(ASchema, AValue, AKind, '', ASeedDefaults, AError);
+  // Parts no keyword constrains (items of an array without "items",
+  // members no property names) must still be writable JSON.
+  if Result and HasNonFiniteNumber(AValue) then
+  begin
+    AError := Subject(AKind, '') + ' contains a NaN or infinite number';
+    Result := False;
+  end;
+end;
+
+
+{ ───────── x-mcp-header annotations (#90) ───────── }
+
+const
+  HEADER_KEYWORD = 'x-mcp-header';
+
+function IsTokenChar(AChar: Char): Boolean;
+begin
+  Result := AChar in ['!', '#', '$', '%', '&', '''', '*', '+', '-', '.',
+    '^', '_', '`', '|', '~', '0'..'9', 'A'..'Z', 'a'..'z'];
+end;
+
+function IsHeaderToken(const AValue: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := AValue <> '';
+  for I := 1 to Length(AValue) do
+    if not IsTokenChar(AValue[I]) then
+      Exit(False);
+end;
+
+const
+  // Marks a path segment that is a subschema array index, not a name.
+  INDEX_MARK = #1;
+
+function IndexSegment(AIndex: Integer): string;
+begin
+  Result := INDEX_MARK + IntToStr(AIndex);
+end;
+
+// The path for messages: names joined by dots, a name holding a dot,
+// bracket, quote or nothing quoted as ["..."], and array branches as
+// [n], so a literal key "a.b" and the nesting a -> b differ.
+function PathText(const APath: array of string): string;
+var
+  I: Integer;
+  Segment: string;
+begin
+  Result := '';
+  for I := 0 to High(APath) do
+  begin
+    Segment := APath[I];
+    if (Segment <> '') and (Segment[1] = INDEX_MARK) then
+      Result := Result + '[' + Copy(Segment, 2, MaxInt) + ']'
+    else if (Segment = '') or (Pos('.', Segment) > 0) or
+      (Pos('[', Segment) > 0) or (Pos('"', Segment) > 0) then
+      Result := Result + '["' + StringReplace(Segment, '"', '\"',
+        [rfReplaceAll]) + '"]'
+    else
+    begin
+      if I > 0 then
+        Result := Result + '.';
+      Result := Result + Segment;
+    end;
+  end;
+end;
+
+function ExtendPath(const APath: array of string;
+  const AName: string): TStringArray;
+var
+  I: Integer;
+begin
+  SetLength(Result, Length(APath) + 1);
+  for I := 0 to High(APath) do
+    Result[I] := APath[I];
+  Result[High(Result)] := AName;
+end;
+
+// One annotation on the node at APath, which is a property reachable
+// through "properties" alone (AReachable) or not.
+function CheckAnnotation(ANode: TJSONObject; const APath: array of string;
+  AReachable: Boolean; var AParameters: TMCPHeaderParameters): string;
+var
+  Value: TJSONData;
+  ParamType: string;
+  I, Slot: Integer;
+begin
+  Result := '';
+  Value := ANode.Find(HEADER_KEYWORD);
+  if not AReachable or (Length(APath) = 0) then
+    Exit(Format('x-mcp-header at "%s" is not on a property reachable ' +
+      'through "properties" from the root', [PathText(APath)]));
+  if (Value.JSONType <> jtString) or not IsHeaderToken(Value.AsString) then
+    Exit(Format('x-mcp-header of "%s" must be a non-empty HTTP token',
+      [PathText(APath)]));
+  ParamType := ANode.Get('type', '');
+  if (ParamType <> 'string') and (ParamType <> 'integer') and
+    (ParamType <> 'boolean') then
+    Exit(Format('x-mcp-header of "%s" needs type string, integer or ' +
+      'boolean, not "%s"', [PathText(APath), ParamType]));
+  for I := 0 to High(AParameters) do
+    if SameText(AParameters[I].Header, Value.AsString) then
+      Exit(Format('x-mcp-header "%s" is used twice, at "%s" and "%s" ' +
+        '(headers compare case-insensitively)', [Value.AsString,
+        PathText(AParameters[I].Path), PathText(APath)]));
+  Slot := Length(AParameters);
+  SetLength(AParameters, Slot + 1);
+  AParameters[Slot].Header := Value.AsString;
+  AParameters[Slot].ParamType := ParamType;
+  SetLength(AParameters[Slot].Path, Length(APath));
+  for I := 0 to High(APath) do
+    AParameters[Slot].Path[I] := APath[I];
+end;
+
+type
+  TSchemaKeywordKind = (skNone, skSubschema, skSubschemaArray, skSubschemaMap);
+
+// How a JSON Schema 2020-12 keyword holds subschemas (plus the draft
+// names "definitions", "additionalItems" and "dependencies"). Other
+// keywords, such as examples, enum, const and default, hold data,
+// never annotations.
+function SchemaKeywordKind(const AKey: string): TSchemaKeywordKind;
+begin
+  if (AKey = 'items') or (AKey = 'additionalProperties') or (AKey = 'not') or
+    (AKey = 'if') or (AKey = 'then') or (AKey = 'else') or
+    (AKey = 'contains') or (AKey = 'propertyNames') or
+    (AKey = 'unevaluatedItems') or (AKey = 'unevaluatedProperties') or
+    (AKey = 'additionalItems') or (AKey = 'contentSchema') then
+    Result := skSubschema
+  else if (AKey = 'allOf') or (AKey = 'anyOf') or (AKey = 'oneOf') or
+    (AKey = 'prefixItems') then
+    Result := skSubschemaArray
+  else if (AKey = 'properties') or (AKey = 'patternProperties') or
+    (AKey = '$defs') or (AKey = 'definitions') or
+    (AKey = 'dependentSchemas') or (AKey = 'dependencies') then
+    // draft-07 "dependencies" maps to schemas or to name arrays; only an
+    // object entry is visited, an array of names is data.
+    Result := skSubschemaMap
+  else
+    Result := skNone;
+end;
+
+function CollectHeaders(AData: TJSONData; const APath: array of string;
+  AReachable: Boolean; var AParameters: TMCPHeaderParameters): string;
+  forward;
+
+// The subschemas AValue holds for a keyword of AKind, each under
+// APath.AKey; only "properties" keeps the reachable chain going.
+function CollectFromKeyword(const AKey: string; AValue: TJSONData;
+  AKind: TSchemaKeywordKind; const APath: array of string;
+  AReachable: Boolean; var AParameters: TMCPHeaderParameters): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  case AKind of
+    skSubschema:
+      if AValue.JSONType = jtArray then // items as an array (drafts)
+        Result := CollectFromKeyword(AKey, AValue, skSubschemaArray, APath,
+          False, AParameters)
+      else
+        Result := CollectHeaders(AValue, ExtendPath(APath, AKey), False,
+          AParameters);
+    skSubschemaArray:
+      if AValue.JSONType = jtArray then
+        for I := 0 to AValue.Count - 1 do
+        begin
+          Result := CollectHeaders(AValue.Items[I],
+            ExtendPath(ExtendPath(APath, AKey), IndexSegment(I)), False,
+            AParameters);
+          if Result <> '' then
+            Exit;
+        end;
+    skSubschemaMap:
+      if AValue.JSONType = jtObject then
+        for I := 0 to AValue.Count - 1 do
+        begin
+          // properties is the one chain along which annotations are
+          // allowed; $defs, patternProperties and the rest are not.
+          if (AKey = 'properties') and AReachable then
+            Result := CollectHeaders(AValue.Items[I],
+              ExtendPath(APath, TJSONObject(AValue).Names[I]), AReachable,
+              AParameters)
+          else
+            Result := CollectHeaders(AValue.Items[I],
+              ExtendPath(ExtendPath(APath, AKey),
+              TJSONObject(AValue).Names[I]), False, AParameters);
+          if Result <> '' then
+            Exit;
+        end;
+  end;
+end;
+
+function CollectHeaders(AData: TJSONData; const APath: array of string;
+  AReachable: Boolean; var AParameters: TMCPHeaderParameters): string;
+var
+  I: Integer;
+  Obj: TJSONObject;
+  Kind: TSchemaKeywordKind;
+begin
+  Result := '';
+  // A nil child (programmatic schemas) holds no schema.
+  if (AData = nil) or (AData.JSONType <> jtObject) then
+    Exit;
+  Obj := TJSONObject(AData);
+  if Obj.Find(HEADER_KEYWORD) <> nil then
+  begin
+    Result := CheckAnnotation(Obj, APath, AReachable, AParameters);
+    if Result <> '' then
+      Exit;
+  end;
+  for I := 0 to Obj.Count - 1 do
+  begin
+    Kind := SchemaKeywordKind(Obj.Names[I]);
+    if (Kind = skNone) or (Obj.Items[I] = nil) then
+      Continue;
+    Result := CollectFromKeyword(Obj.Names[I], Obj.Items[I], Kind, APath,
+      AReachable, AParameters);
+    if Result <> '' then
+      Exit;
+  end;
+end;
+
+function MCPHeaderParameters(ASchema: TJSONObject;
+  out AParameters: TMCPHeaderParameters): string;
+begin
+  AParameters := nil;
+  if ASchema = nil then
+    Exit('');
+  Result := CollectHeaders(ASchema, [], True, AParameters);
+  if Result <> '' then
+    AParameters := nil;
 end;
 
 end.

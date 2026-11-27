@@ -14,7 +14,7 @@ name: CI
 # every leg runs the identical battery: unit suites + the mcpsmoke
 # subprocess E2E battery. mcpsmoke plus the spec-cited unit tests are
 # the net here. The official MCP conformance suite runs only in pr.yml,
-# as a non-blocking job against the conformance fixture
+# as a blocking job against the conformance fixture
 # (mcpconformance --http), judged against the baseline in
 # tools/conformance/baseline.json.
 #
@@ -209,6 +209,17 @@ jobs:
 
       - name: mcpsmoke (E2E battery over real pipes, mcpdemo and mcpconformance)
         run: ./build/mcpsmoke${{ matrix.exe }}
+
+      # The wire is UTF-8 whatever the locale (#102): the unit suites
+      # and mcpsmoke again under LC_ALL=C, where the RTL's code page is
+      # US-ASCII.
+      - name: unit suites and mcpsmoke under LC_ALL=C
+        if: matrix.fpc-install == 'apt'
+        env:
+          LC_ALL: C
+        run: |
+          lwpt test
+          ./build/mcpsmoke
 
       # The zero-install path the README promises: a plain fpc build
       # from the committed lwpt.cfg, no lwpt binary involved.

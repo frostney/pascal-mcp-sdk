@@ -22,8 +22,10 @@ is created, and later mutation raises `EMCPServer`.
 | `Instructions` | `string` | `''` | Usage guidance surfaced via `server/discover` / classic `initialize` |
 | `CacheTtlMs` | `Integer` | `300000` | SEP-2549 `ttlMs` caching hint on discover/list/read results; must be ≥ 0 |
 | `CacheScope` | `string` | `'private'` | SEP-2549 `cacheScope`; `'private'` or `'public'` |
-| `RedactErrorDetails` | `Boolean` | `False` | `True` replaces exception detail with a correlation reference, logging the full error to stderr |
+| `RedactErrorDetails` | `Boolean` | `False` | `True` replaces escaped exception detail with a correlation reference, logging the full error to stderr; deliberate errors (`MCPErrorResult`, `EMCPProtocolError`) are sent as written |
 | `DualEra` | `Boolean` | `True` | Answer the classic `initialize` handshake alongside stateless 2026-07-28 requests |
+| `RequestStateTtlMs` | `Integer` | `600000` | Lifetime of a sealed `requestState` token; must be > 0 |
+| `SetRequestStateKeys(Keys)` | method | random per server instance | HMAC keys for `requestState` sealing, each ≥ 32 bytes; the first seals, all verify |
 | `Name`, `Version` | `string` | — | Read-only, from `Create` |
 
 Semantics and guidance: [Configuration](../guides/configuration.md).
@@ -169,6 +171,75 @@ function Add(const AName: string; const ADescription: string = '';
   ARequired: Boolean = True): TMCPPromptArguments;
 ```
 
+### Argument completion
+
+`completion/complete` suggests values while a user fills in a prompt
+argument or a resource-template variable
+([Completion](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/completion),
+verified 2026-11-26). Register a completion after the prompt or
+template it belongs to:
+
+```pascal
+procedure RegisterPromptCompletion(const APrompt, AArgument: string;
+  const AValues: array of string);              // static list
+procedure RegisterPromptCompletion(const APrompt, AArgument: string;
+  AHandler: TMCPCompletionHandler);             // + Method variant
+procedure RegisterTemplateCompletion(const AUriTemplate, AVariable: string;
+  const AValues: array of string);              // + Handler, Method
+
+TMCPCompletionHandler = function(const AArgument, AValue: string;
+  AContext: TJSONObject; const ACtx: TMCPRequestContext): TMCPCompletion;
+
+TMCPCompletion = record
+  Values: array of string;  // ranked; at most 100 are sent
+  Total: Integer;           // all matches, -1 when unknown
+  HasMore: Boolean;
+end;
+
+function MCPCompleteFrom(const AValue: string;
+  const ACandidates: array of string): TMCPCompletion;
+```
+
+A static list completes by prefix, in the order given (`MCPCompleteFrom`,
+which a handler can call too). Case is ignored by Unicode simple case
+folding for Basic Latin, Latin-1, Latin Extended-A, Greek and Coptic,
+and Cyrillic with its supplement (so `ſ` matches `s` and `ς` matches
+`σ`), independent of the locale; other scripts compare exactly. A
+handler gets the value typed so far and, in `AContext`, the arguments
+the client has already resolved (`nil` when none); a supplied `context`
+that is not an object, or whose `arguments` are not strings, is
+answered `-32602` before any handler runs. More than 100 values are cut
+to 100; `hasMore` is true then, when the handler sets `HasMore`, or when
+its known `Total` exceeds the values sent. An unknown prompt or
+template, an argument it does not declare, or a nil handler is refused
+with `EMCPServer` at registration, and the first two are answered
+`-32602` on the wire; an argument with no completion registered
+answers an empty list, and a server with no completions registered
+answers `completion/complete` with `-32601`, since it declares no
+`completions` capability. Registering any completion declares the
+`completions` capability. Over Streamable HTTP a request that opts
+into notifications streams them, as for the other handler-backed
+methods.
+
+### Capabilities
+
+`server/discover` and the classic `initialize` declare a capability
+for each kind of thing registered: `tools` when there is a tool,
+`resources` when there is a resource or template, `prompts` when there
+is a prompt, `completions` when there is a completion.
+
+### x-mcp-header parameters
+
+```pascal
+function ToolHeaderParameters(const AName: string): TMCPHeaderParameters;
+```
+
+The parameters tool `AName` mirrors into `Mcp-Param-*` headers (header
+name, property path, type), as `MCP.Schema.MCPHeaderParameters`
+reads them from its `inputSchema`. The Streamable HTTP binding uses it
+to validate the headers; a custom transport can too. See
+[Routing headers](../guides/tools.md#routing-headers-x-mcp-header).
+
 ### The request context
 
 Every handler receives `TMCPRequestContext` (from `MCP.Protocol`):
@@ -204,6 +275,23 @@ function OversizedLineResponse(AMaxLineLength: Integer): string;
 transports wrap — only custom transport authors call these directly
 (see [Architecture](../internals/architecture.md#the-sans-io-core)).
 
+### Schema checks
+
+`MCP.Schema` exposes the checks the server runs on arguments and
+structured output (see [the enforced subset](../guides/schemas.md#the-enforced-subset)):
+
+```pascal
+function MCPSchemaSubsetViolation(ASchema: TJSONObject;
+  AObjectRoot: Boolean): string;
+function MCPValidateAgainstSchema(ASchema: TJSONObject; AValue: TJSONData;
+  const AKind: string; ASeedDefaults: Boolean; out AError: string): Boolean;
+```
+
+| Function | Contract |
+| --- | --- |
+| `MCPSchemaSubsetViolation` | `''` when `ASchema` is inside the subset, otherwise the first violation with its path. `AObjectRoot` also requires an `object` root, as input schemas need. `ASchema` is borrowed |
+| `MCPValidateAgainstSchema` | `True` when `AValue` conforms; otherwise `False` with the first violation in `AError`, naming the value with `AKind` (`'argument'` gives `Missing required argument "a.b"`). `ASchema` must be inside the subset. Both are borrowed; with `ASeedDefaults`, absent optional properties that declare a default are added to `AValue` |
+
 ## Stdio transport
 
 From `MCP.Transport.Stdio`:
@@ -219,7 +307,15 @@ procedure MCPLogToStderr(const AMessage: string);
 `RunMCPStdioServer` serves stdin/stdout until EOF — the spec's
 graceful shutdown. `RunMCPStdioLoop` is the same loop over arbitrary
 `Text` files, for tests and custom stream transports reusing the
-newline framing.
+newline framing. It writes UTF-8 to `AOutput` whatever that file's code
+page, and puts the code page back exactly when it returns.
+
+`MCPLogToStderr` writes one line to stderr and flushes it, under the
+lock every library diagnostic shares, so lines from different threads
+never mix. The line is UTF-8 unless stderr is a Windows console, which
+keeps the code page the RTL chose for it; `ErrOutput`'s code page is
+restored afterwards, so your own writes are unaffected. I/O errors
+propagate (the server's internal diagnostics ignore them).
 
 ## Streamable HTTP transport
 
@@ -247,3 +343,57 @@ On Unix, `cthreads` must be first in the program's uses clause.
 `EMCPServer` is raised for API misuse: registration after freeze,
 malformed schemas, empty names, nil/foreign sessions. Wire-level
 problems never raise — they become JSON-RPC error responses.
+
+### Answering with a JSON-RPC error
+
+A handler that must refuse a request with a protocol error, rather than
+a result, raises `EMCPProtocolError`:
+
+```pascal
+EMCPProtocolError = class(Exception)
+  constructor Create(ACode: Integer; const AMessage: string;
+    AData: TJSONData = nil);   // takes ownership of AData
+  property Code: Integer;
+  property Data: TJSONData;
+end;
+
+function MCPMissingCapabilityError(const ACapability: string): EMCPProtocolError;
+```
+
+Raised from a `tools/call`, `prompts/get` or `resources/read` handler
+(typed and template handlers included), it becomes the error response
+with exactly that code, message and data, in both eras. It is
+deliberate, so [`RedactErrorDetails`](../guides/configuration.md#redacterrordetails)
+leaves it alone: its message and data reach the client verbatim, so
+keep secrets out of them. Every other exception keeps its mapping: an
+`isError` result from a tool, `-32603` from a prompt or a resource
+reader. `Data` is owned by the exception; do not free or change it.
+
+| Code | Use it for |
+| --- | --- |
+| `-32602` | Invalid params of a prompt or resource request that the handler rejects itself, or a `requestState` the handler cannot accept. A tool's argument errors stay in-band (`MCPErrorResult`), so the model can correct them |
+| `-32021` | A client capability the request needs and did not declare; it must carry `data.requiredCapabilities`, so build it with `MCPMissingCapabilityError('sampling')`. The constructor refuses `-32021` unless `requiredCapabilities` names at least one capability shaped as in `ClientCapabilities` (each one an object, and so are `sampling.tools`, `elicitation.form` and each `extensions` entry); data changed after that is sent as `-32603` |
+| `-32700`, `-32600`, `-32601`, `-32603` | The other JSON-RPC codes, with their JSON-RPC meanings |
+| outside `-32768..-32000` | Your application's own codes |
+
+Any other code is reserved, by the
+[specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/index#error-codes)
+or for legacy use, and the constructor raises `EMCPServer` for it.
+
+A URI that matches a resource template but names nothing that exists
+is not an error to raise either: return `nil` from the template reader,
+and the server answers with the code the client's protocol revision
+expects (`-32602`, or `-32002` for classic-handshake clients) and the
+URI as data. (An exact resource's reader must return contents.)
+
+On the Streamable HTTP binding the status follows the code, so a
+handler-raised `-32021` answers 400, as long as nothing has been
+streamed yet. A request that opted into progress becomes a `200` event
+stream with its first notification; an error raised after that can
+only be the stream's last event. Check capabilities before reporting
+progress.
+
+```pascal
+if not ACtx.HasCapability('sampling') then
+  raise MCPMissingCapabilityError('sampling');
+```

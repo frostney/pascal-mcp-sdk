@@ -26,11 +26,13 @@ unit MCP.Server;
 //     tools/list, tools/call
 //     resources/list, resources/read
 //     prompts/list, prompts/get
+//     completion/complete              (#81; capabilities follow the
+//                                      registrations)
 //   legacy era (dual-era mode, after initialize + initialized):
 //     initialize, ping
 //     tools/list, tools/call
 //     resources/list, resources/read
-//     prompts/list, prompts/get
+//     prompts/list, prompts/get, completion/complete
 //     — responses omit the modern-only stamps (resultType, serverInfo
 //       _meta, ttlMs/cacheScope) and resource-not-found is the legacy
 //       -32002, so each era sees its own wire dialect
@@ -55,8 +57,9 @@ unit MCP.Server;
 // MCPInputRequired(...) / MCPPromptInputRequired(...) — an
 // input_required result carrying inputRequests (elicitation form/url,
 // sampling/createMessage, roots/list entry builders below) and the
-// handler's opaque requestState. The client retries the ORIGINAL
-// request with inputResponses + the echoed requestState; the library
+// handler's opaque requestState, sealed by the server (#89, see
+// MCP.RequestState). The client retries the ORIGINAL request with
+// inputResponses + the echoed token; the library verifies it and
 // re-enters the same handler with both exposed on TMCPRequestContext.
 // Each round is one ordinary HandleMessage call — no threads, no
 // suspension. Modern era only: legacy calls get an in-band error
@@ -74,7 +77,8 @@ unit MCP.Server;
 // overloads are provided). A handler that raises becomes an isError
 // tool result carrying the exception message — execution errors belong
 // in-band where the model can read them; protocol errors stay JSON-RPC
-// errors. RedactErrorDetails preserves that verbose behavior by default;
+// errors. A handler that raises EMCPProtocolError answers with that
+// JSON-RPC error instead, from any handler kind (#88). RedactErrorDetails preserves that verbose behavior by default;
 // when enabled, escaped exceptions carry only a stable generic message
 // and correlation reference on the wire, while the full detail is logged
 // to stderr under the same reference. Deliberate MCPErrorResult values
@@ -100,9 +104,11 @@ uses
   fpjson,
   jsonparser,
   jsonscanner,
+  MCP.Completion,
   MCP.JSONRPC,
   MCP.Protocol,
-  MCP.Schema;
+  MCP.Schema,
+  MCP.UriTemplate;
 
 type
   TMCPLegacyState = (lsNew, lsAwaitingInitialized, lsReady);
@@ -153,15 +159,22 @@ type
     ArgsHandler: TMCPArgsHandler;
     ArgsMethod: TMCPArgsMethod;
     // Escape hatch (#23): the application owns argument validation
+    // Client capabilities the tool declared it needs (#84), checked
+    // before the handler runs.
+    RequiredCapabilities: array of string;
     // for this tool; its schema may use keywords outside the
     // enforceable subset and the server skips call-time checks.
     AppValidated: Boolean;
     // Set at freeze: the inputSchema is within the enforceable
     // subset, so arguments are validated against it per call.
     SubsetValidate: Boolean;
-    // Client capabilities the tool declared it needs (#84), checked
-    // before the handler runs.
-    RequiredCapabilities: array of string;
+    // Set at freeze: an outputSchema within the subset, so every
+    // structuredContent is checked against it before it is sent (#91).
+    OutputValidate: Boolean;
+    // Set at freeze: the inputSchema's x-mcp-header annotations, which
+    // registration already validated (#90), so a call does not walk
+    // the schema again.
+    HeaderParams: TMCPHeaderParameters;
   end;
 
   TMCPResourceRegistration = record
@@ -225,6 +238,21 @@ type
     Method: TMCPPromptMethod;
     ResultHandler: TMCPPromptResultHandler;
     ResultMethod: TMCPPromptResultMethod;
+  end;
+
+  // completion/complete (#81): the types live in MCP.Completion and are
+  // re-exported here, so a server needs only MCP.Server.
+  TMCPCompletion = MCP.Completion.TMCPCompletion;
+  TMCPCompletionHandler = MCP.Completion.TMCPCompletionHandler;
+  TMCPCompletionMethod = MCP.Completion.TMCPCompletionMethod;
+
+  TMCPCompletionRegistration = record
+    RefType: string;     // 'ref/prompt' or 'ref/resource'
+    RefName: string;     // prompt name or URI template
+    Argument: string;
+    Values: array of string; // static candidates when no callable
+    Handler: TMCPCompletionHandler;
+    Method: TMCPCompletionMethod;
   end;
 
   TMCPServer = class;
@@ -349,10 +377,17 @@ type
     FRedactErrorDetails: Boolean;
     FDualEra: Boolean;
     FFrozen: Boolean;
+    // requestState sealing (#89): the configured key ring (empty means
+    // a random key for this instance), the token lifetime, and the sealer
+    // built from them at freeze (a TMCPRequestStateSealer, owned).
+    FRequestStateKeys: array of RawByteString;
+    FRequestStateTtlMs: Integer;
+    FSealer: TObject;
     FTools: array of TMCPToolRegistration;
     FResources: array of TMCPResourceRegistration;
     FTemplates: array of TMCPTemplateRegistration;
     FPrompts: array of TMCPPromptRegistration;
+    FCompletions: array of TMCPCompletionRegistration;
 
     procedure EnsureMutable;
     procedure FreezeConfiguration;
@@ -361,8 +396,16 @@ type
     procedure SetCacheScope(const AValue: string);
     procedure SetRedactErrorDetails(AValue: Boolean);
     procedure SetDualEra(AValue: Boolean);
+    procedure SetRequestStateTtlMs(AValue: Integer);
+    // Replaces ACtx.RequestState with the handler's own state when the
+    // client's token verifies for this request; False when it does not.
+    function OpenRequestState(const AMessage: TJSONRPCMessage;
+      var ACtx: TMCPRequestContext): Boolean;
     function ExceptionClientMessage(const ASite, AVerbosePrefix,
       ARedactedMessage: string; E: Exception): string;
+    // E is an EMCPProtocolError, declared after this class.
+    function ProtocolErrorResponse(AMessage: TJSONRPCMessage;
+      E: Exception): string;
     function ParseSchema(const ASchemaJson, AToolName: string): TJSONObject;
     function BuildToolDefinition(const AName, ADescription,
       AInputSchemaJson: string): TJSONObject;
@@ -390,6 +433,17 @@ type
       ADescription: string; AReader: TMCPTemplateReader;
       AMethod: TMCPTemplateMethod);
     function ServerCapabilities: TJSONObject;
+    // ACallable: the handler or method overload, so a nil one is a
+    // mistake, not an empty list.
+    procedure AddCompletion(const ARefType, ARefName, AArgument: string;
+      const AValues: array of string; ACallable: Boolean;
+      AHandler: TMCPCompletionHandler; AMethod: TMCPCompletionMethod);
+    function FindTemplate(const AUriTemplate: string): Integer;
+    // The completion registered for that argument of that target, or -1.
+    function FindCompletion(const ARefType, ARefName,
+      AArgument: string): Integer;
+    function HandleComplete(const AMessage: TJSONRPCMessage;
+      const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
     function HandleTemplatesList(const AMessage: TJSONRPCMessage;
       ALegacy: Boolean): string;
 
@@ -409,9 +463,10 @@ type
     // FindPrompt; ANoun ('tool'/'prompt') names the registry in the
     // unknown-name message. Returns '' once the target resolved,
     // otherwise the error response the caller must Exit with.
-    // AArguments is never nil on success: a supplied arguments object
-    // is borrowed from AMessage and AOwnedEmpty stays nil, otherwise
-    // AOwnedEmpty is a fresh empty object the caller must free.
+    // AArguments is never nil on success: it is a copy of the supplied
+    // arguments (or an empty object), the same object as AOwnedEmpty,
+    // which the caller must free. AMessage keeps the client's original
+    // arguments for requestState sealing (#89).
     function ResolveCallTarget(const AMessage: TJSONRPCMessage;
       ALookup: TRegistryLookup; const ANoun: string;
       out AName: string; out AIndex: Integer;
@@ -453,7 +508,8 @@ type
 
     // False by default: escaped handler/dispatch exceptions retain the
     // v1 in-band detail used by trusted local clients. True replaces
-    // exception details with a correlation reference and logs the full
+    // exception details with a correlation reference (deliberate errors,
+    // MCPErrorResult and EMCPProtocolError, are sent as written) and logs the full
     // exception to stderr under that reference (best-effort: on UNIX
     // the first emission upgrades a default SIGPIPE disposition to
     // ignore so a closed stderr cannot kill the process; a host's own
@@ -468,6 +524,30 @@ type
     // initialize is rejected with a diagnostic naming the supported
     // versions.
     property DualEra: Boolean read FDualEra write SetDualEra;
+
+    // requestState integrity (#89). Every requestState a handler returns
+    // goes to the client sealed (HMAC-SHA-256 over the state, an expiry,
+    // the method, the tool or prompt name, a digest of the arguments
+    // and this server's name), and every one a client sends back is
+    // verified before the handler runs: a token that fails is answered
+    // -32602 and the handler never sees it. Handlers keep reading and
+    // writing their own plain state (ACtx.RequestState).
+    //
+    // Keys: the first seals, every key verifies. Rotate in three steps
+    // across all instances: [Old, New], then [New, Old], then [New] once
+    // the longest old-key TTL has passed since the last instance
+    // switched, plus a clock allowance (docs/guides/configuration.md,
+    // "requestState sealing", has the full procedure). Each key must be at least 32 bytes. Without keys
+    // the server seals with a random key read from the OS at freeze,
+    // which only this instance can verify: set a shared key when
+    // several instances serve one endpoint or one replaces another.
+    // A token verifies until it expires, so it can be replayed within
+    // its TTL. The client can read the state, so it must not carry
+    // secrets.
+    procedure SetRequestStateKeys(const AKeys: array of RawByteString);
+    // Token lifetime in milliseconds (default 600000, ten minutes).
+    property RequestStateTtlMs: Integer read FRequestStateTtlMs
+      write SetRequestStateTtlMs;
 
     // The response a transport sends for an inbound line it refused to
     // buffer (length cap). Kept here so the error shape remains a
@@ -572,6 +652,26 @@ type
       constref AArguments: TMCPPromptArguments;
       AMethod: TMCPPromptResultMethod); overload;
 
+    // Argument completion (completion/complete, #81) for a registered
+    // prompt's declared argument or a registered resource template's
+    // variable. Register after the prompt or template. A static list
+    // completes by case-insensitive prefix (MCPCompleteFrom); a callable
+    // decides itself. Registering any completion declares the
+    // completions capability; an argument with none registered answers
+    // an empty list.
+    procedure RegisterPromptCompletion(const APrompt, AArgument: string;
+      const AValues: array of string); overload;
+    procedure RegisterPromptCompletion(const APrompt, AArgument: string;
+      AHandler: TMCPCompletionHandler); overload;
+    procedure RegisterPromptCompletion(const APrompt, AArgument: string;
+      AMethod: TMCPCompletionMethod); overload;
+    procedure RegisterTemplateCompletion(const AUriTemplate, AVariable: string;
+      const AValues: array of string); overload;
+    procedure RegisterTemplateCompletion(const AUriTemplate, AVariable: string;
+      AHandler: TMCPCompletionHandler); overload;
+    procedure RegisterTemplateCompletion(const AUriTemplate, AVariable: string;
+      AMethod: TMCPCompletionMethod); overload;
+
     // The core entry point: one inbound line in, at most one response
     // line out. The sink overload binds server-to-client notifications
     // to this call only. Returns True when AResponse must be written
@@ -584,6 +684,12 @@ type
       ASink: TMCPLineSink; ASinkData: Pointer;
       out AResponse: string): Boolean; overload;
 
+    // The x-mcp-header parameters of tool AName (#90): the parameters a
+    // Streamable HTTP client mirrors into Mcp-Param-* headers, which
+    // the HTTP binding validates. Empty for an unknown tool or one
+    // without annotations.
+    function ToolHeaderParameters(const AName: string): TMCPHeaderParameters;
+
     function ToolCount: Integer;
     function ResourceCount: Integer;
     function PromptCount: Integer;
@@ -591,11 +697,60 @@ type
 
   EMCPServer = class(Exception);
 
+  // A JSON-RPC error a handler answers with instead of a result (#88).
+  // Raised from a tools/call, prompts/get or resources/read handler
+  // (typed and template handlers included), it becomes the error
+  // response with exactly this code, message and data, in both eras;
+  // it is deliberate, so RedactErrorDetails leaves it alone: its message
+  // and data reach the client verbatim, so keep secrets out. Every
+  // other exception keeps its mapping (tools: in-band isError;
+  // prompts and resources: -32603).
+  //
+  // Allowed codes: the JSON-RPC ones (-32700, -32600 to -32603), the
+  // MCP-defined -32021 (MissingRequiredClientCapability; build it with
+  // MCPMissingCapabilityError), and application codes outside the
+  // reserved -32768..-32000 range. Any other code is reserved for a
+  // meaning the spec defines elsewhere or for legacy use, so the
+  // constructor raises EMCPServer for it (and frees AData). Error-code
+  // policy verified 2026-11-26 against
+  // https://modelcontextprotocol.io/specification/2026-07-28/basic/index#error-codes
+  EMCPProtocolError = class(Exception)
+  private
+    FCode: Integer;
+    FData: TJSONData;
+    // Hands the data to the dispatch wrapper, which puts it on the
+    // wire and then owns it (nil if none).
+    function TakeData: TJSONData;
+  public
+    // Takes ownership of AData (nil for none). Code -32021 needs data
+    // with a non-empty requiredCapabilities object.
+    constructor Create(ACode: Integer; const AMessage: string;
+      AData: TJSONData = nil);
+    destructor Destroy; override;
+    property Code: Integer read FCode;
+    // Borrowed: owned by the exception; do not free or change it (a
+    // -32021 whose data no longer validates is sent as -32603).
+    property Data: TJSONData read FData;
+  end;
+
+// The -32021 MissingRequiredClientCapability error for a request
+// that needs ACapability (for example 'sampling') which the client did
+// not declare, with the spec's data.requiredCapabilities. Raise it
+// from a handler: raise MCPMissingCapabilityError('sampling').
+// Verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta
+function MCPMissingCapabilityError(const ACapability: string): EMCPProtocolError;
+
 // Content builders for handler implementations.
 function MCPTextResult(const AText: string): TMCPToolResult;
 function MCPErrorResult(const AText: string): TMCPToolResult;
 function MCPStructuredResult(const AText: string;
   AStructured: TJSONData): TMCPToolResult; overload;
+// Structured output of any JSON value (object, array, string, number,
+// boolean or null; SEP-2106), with its serialized JSON as the text
+// block, which the spec says such a result SHOULD also carry
+// (tools#structured-content, verified 2026-11-26). Takes ownership.
+function MCPStructuredResult(AStructured: TJSONData): TMCPToolResult; overload;
 // Typed structured output: serializes the instance's published
 // properties (MCPSerialize) and frees it.
 function MCPStructuredResult(const AText: string;
@@ -702,6 +857,11 @@ function MCPContentMessage(const ARole: string;
   AContent: TJSONObject): TJSONObject;
 function MCPMessages(const AMessages: array of TJSONObject): TJSONArray;
 
+// The candidates that start with AValue, compared case-insensitively,
+// in their given order: the completion a static list gives (#81).
+function MCPCompleteFrom(const AValue: string;
+  const ACandidates: array of string): TMCPCompletion;
+
 // In-request notifications, callable from any handler. Both are
 // silent no-ops when the precondition is missing, so handlers can
 // call them unconditionally:
@@ -722,7 +882,9 @@ implementation
 uses
   Math,
 
-  MCP.Content;
+  MCP.Content,
+  MCP.Crypto,
+  MCP.RequestState;
 
 var
   // Process-global diagnostic state intentionally remains outside
@@ -732,14 +894,12 @@ var
   // read-modify-write is guarded by ErrorSequenceLock (a plain
   // critical section, portable across 32- and 64-bit targets, rather
   // than a 64-bit atomic intrinsic that FPC 3.2.2 only declares for
-  // cpu64), and StderrLock serializes the write+flush pair so
-  // concurrent diagnostics cannot interleave within a line. The two
-  // locks are kept separate so error-ref allocation never waits on
-  // logging latency. All three are process-wide, matching the lifetime
-  // of the stderr handle itself.
+  // cpu64). Stderr writes are serialized by MCPWriteStderrLine's own
+  // lock (MCP.JSONRPC), kept separate so error-ref allocation never
+  // waits on logging latency. Both are process-wide, matching the
+  // lifetime of the stderr handle itself.
   ErrorSequence: Int64 = 0;
   ErrorSequenceLock: TRTLCriticalSection;
-  StderrLock: TRTLCriticalSection;
 
 type
   TMCPRequestCancellationToken = class
@@ -944,21 +1104,16 @@ begin
   {$IFDEF UNIX}
   EnsureSigPipeIgnored;
   {$ENDIF}
-  // Write and Flush are one indivisible diagnostic: without the lock,
-  // two connection threads can splice their text into a single line
-  // and make the redacted reference unreadable.
-  System.EnterCriticalSection(StderrLock);
+  // MCPWriteStderrLine writes and flushes under one lock (two
+  // connection threads cannot splice their text into one line and make
+  // the redacted reference unreadable) and as UTF-8 under any locale
+  // (#102). Logging is best effort: a closed stderr is ignored.
   try
-    try
-      Write(ErrOutput, AMessage, #10);
-      Flush(ErrOutput);
-    except
-      on EInOutError do
-      begin
-      end;
+    MCPWriteStderrLine(AMessage);
+  except
+    on EInOutError do
+    begin
     end;
-  finally
-    System.LeaveCriticalSection(StderrLock);
   end;
 end;
 
@@ -1056,183 +1211,10 @@ end;
 
 { ───────── URI templates ───────── }
 
-function IsUriTemplateVariableCharacter(ACharacter: Char): Boolean; inline;
-begin
-  Result := ACharacter in ['A'..'Z', 'a'..'z', '0'..'9', '_'];
-end;
-
-function TryValidateUriTemplate(const ATemplate: string;
-  out AError: string): Boolean;
-var
-  CloseBrace, Index, VariableIndex: Integer;
-  PreviousWasVariable: Boolean;
-begin
-  Result := False;
-  AError := '';
-  if ATemplate = '' then
-  begin
-    AError := 'Resource template registration requires a non-empty uriTemplate';
-    Exit;
-  end;
-  Index := 1;
-  PreviousWasVariable := False;
-  while Index <= Length(ATemplate) do
-  begin
-    if ATemplate[Index] = '}' then
-    begin
-      AError := Format('Invalid resource template "%s": stray "}" at ' +
-        'character %d', [ATemplate, Index]);
-      Exit;
-    end;
-    if ATemplate[Index] <> '{' then
-    begin
-      PreviousWasVariable := False;
-      Inc(Index);
-      Continue;
-    end;
-    if PreviousWasVariable then
-    begin
-      AError := Format('Invalid resource template "%s": adjacent variables ' +
-        'require separating literal text', [ATemplate]);
-      Exit;
-    end;
-    CloseBrace := Index + 1;
-    while (CloseBrace <= Length(ATemplate)) and
-      (ATemplate[CloseBrace] <> '}') do
-      Inc(CloseBrace);
-    if CloseBrace > Length(ATemplate) then
-    begin
-      AError := Format('Invalid resource template "%s": unclosed variable ' +
-        'at character %d', [ATemplate, Index]);
-      Exit;
-    end;
-    if CloseBrace = Index + 1 then
-    begin
-      AError := Format('Invalid resource template "%s": variable name must ' +
-        'not be empty', [ATemplate]);
-      Exit;
-    end;
-    for VariableIndex := Index + 1 to CloseBrace - 1 do
-      if not IsUriTemplateVariableCharacter(ATemplate[VariableIndex]) then
-      begin
-        AError := Format('Invalid resource template "%s": variable name ' +
-          'must contain only A-Z, a-z, 0-9, and _', [ATemplate]);
-        Exit;
-      end;
-    PreviousWasVariable := True;
-    Index := CloseBrace + 1;
-  end;
-  Result := True;
-end;
-
 function MatchUriTemplate(const ATemplate, AUri: string;
   out AVars: TJSONObject): Boolean;
-type
-  TVariableCapture = record
-    Name: string;
-    Value: string;
-  end;
-  TVariableCaptures = array of TVariableCapture;
-  TFailedStateRow = array of Boolean;
-  TFailedStateRows = array of TFailedStateRow;
-var
-  Captures: TVariableCaptures;
-  FailedStates: TFailedStateRows;
-  I: Integer;
-  ValidationError: string;
-
-  function IsFailedState(ATemplateIndex, AUriIndex: Integer): Boolean;
-  begin
-    Result := (Length(FailedStates[ATemplateIndex]) <> 0) and
-      FailedStates[ATemplateIndex][AUriIndex];
-  end;
-
-  procedure RememberFailedState(ATemplateIndex, AUriIndex: Integer);
-  begin
-    if Length(FailedStates[ATemplateIndex]) = 0 then
-      SetLength(FailedStates[ATemplateIndex], Length(AUri) + 2);
-    FailedStates[ATemplateIndex][AUriIndex] := True;
-  end;
-
-  procedure RememberFailedVariableStates(ATemplateIndex, AFirstUriIndex,
-    ALastUriIndex: Integer);
-  var
-    UriIndex: Integer;
-  begin
-    // With repeated-variable equality deliberately out of scope, a failed
-    // variable match also proves every later start in this path segment
-    // fails: each has a strict subset of the same possible endpoints.
-    for UriIndex := AFirstUriIndex to ALastUriIndex do
-      RememberFailedState(ATemplateIndex, UriIndex);
-  end;
-
-  function MatchFrom(ATemplateIndex, AUriIndex: Integer): Boolean;
-  var
-    CaptureIndex, CloseBrace, MaxValueEnd, ValueEnd: Integer;
-    StartTemplateIndex, StartUriIndex: Integer;
-  begin
-    StartTemplateIndex := ATemplateIndex;
-    StartUriIndex := AUriIndex;
-    if IsFailedState(StartTemplateIndex, StartUriIndex) then
-      Exit(False);
-    while ATemplateIndex <= Length(ATemplate) do
-    begin
-      if IsFailedState(ATemplateIndex, AUriIndex) then
-      begin
-        RememberFailedState(StartTemplateIndex, StartUriIndex);
-        Exit(False);
-      end;
-      if ATemplate[ATemplateIndex] = '{' then
-      begin
-        CloseBrace := ATemplateIndex + 1;
-        while ATemplate[CloseBrace] <> '}' do
-          Inc(CloseBrace);
-        MaxValueEnd := AUriIndex;
-        while (MaxValueEnd <= Length(AUri)) and
-          (AUri[MaxValueEnd] <> '/') do
-          Inc(MaxValueEnd);
-        for ValueEnd := AUriIndex + 1 to MaxValueEnd do
-        begin
-          CaptureIndex := Length(Captures);
-          SetLength(Captures, CaptureIndex + 1);
-          Captures[CaptureIndex].Name := Copy(ATemplate,
-            ATemplateIndex + 1, CloseBrace - ATemplateIndex - 1);
-          Captures[CaptureIndex].Value := Copy(AUri, AUriIndex,
-            ValueEnd - AUriIndex);
-          if MatchFrom(CloseBrace + 1, ValueEnd) then
-            Exit(True);
-          SetLength(Captures, CaptureIndex);
-        end;
-        RememberFailedVariableStates(ATemplateIndex, AUriIndex, MaxValueEnd);
-        RememberFailedState(StartTemplateIndex, StartUriIndex);
-        Exit(False);
-      end;
-      if (AUriIndex > Length(AUri)) or
-        (ATemplate[ATemplateIndex] <> AUri[AUriIndex]) then
-      begin
-        RememberFailedState(StartTemplateIndex, StartUriIndex);
-        Exit(False);
-      end;
-      Inc(ATemplateIndex);
-      Inc(AUriIndex);
-    end;
-    Result := AUriIndex > Length(AUri);
-    if not Result then
-      RememberFailedState(StartTemplateIndex, StartUriIndex);
-  end;
-
 begin
-  AVars := nil;
-  if not TryValidateUriTemplate(ATemplate, ValidationError) then
-    Exit(False);
-  SetLength(Captures, 0);
-  SetLength(FailedStates, Length(ATemplate) + 2);
-  Result := MatchFrom(1, 1);
-  if not Result then
-    Exit;
-  AVars := TJSONObject.Create;
-  for I := 0 to High(Captures) do
-    AVars.Add(Captures[I].Name, Captures[I].Value);
+  Result := MCP.UriTemplate.MatchUriTemplate(ATemplate, AUri, AVars);
 end;
 
 { ───────── in-request notifications ───────── }
@@ -1524,16 +1506,56 @@ begin
   end;
 end;
 
-// -32021 data payload: {requiredCapabilities: {<name>: {}}} (schema
-// anchor MissingRequiredClientCapabilityError, verified 2026-08-08).
-function CapabilityErrorData(const ACapability: string): TJSONObject;
-var
-  Capabilities: TJSONObject;
+{ ───────── handler-raised protocol errors (#88) ───────── }
+
+function IsAllowedHandlerErrorCode(ACode: Integer): Boolean;
 begin
-  Capabilities := TJSONObject.Create;
-  Capabilities.Add(ACapability, TJSONObject.Create);
-  Result := TJSONObject.Create;
-  Result.Add('requiredCapabilities', Capabilities);
+  case ACode of
+    JSONRPC_PARSE_ERROR, JSONRPC_INVALID_REQUEST, JSONRPC_METHOD_NOT_FOUND,
+    JSONRPC_INVALID_PARAMS, JSONRPC_INTERNAL_ERROR,
+    MCP_ERROR_MISSING_CLIENT_CAPABILITY:
+      Result := True;
+  else
+    Result := (ACode < -32768) or (ACode > -32000);
+  end;
+end;
+
+constructor EMCPProtocolError.Create(ACode: Integer; const AMessage: string;
+  AData: TJSONData);
+begin
+  // Own AData first, so every rejection below frees it: an exception in
+  // a constructor runs the destructor.
+  inherited Create(AMessage);
+  FCode := ACode;
+  FData := AData;
+  if not IsAllowedHandlerErrorCode(ACode) then
+    raise EMCPServer.CreateFmt('EMCPProtocolError code %d is reserved: ' +
+      'use a JSON-RPC code (-32700, -32600 to -32603), -32021, or an ' +
+      'application code outside -32768..-32000', [ACode]);
+  if (ACode = MCP_ERROR_MISSING_CLIENT_CAPABILITY) and
+    not IsMissingCapabilityData(AData) then
+    raise EMCPServer.Create('EMCPProtocolError -32021 needs data whose ' +
+      'requiredCapabilities names at least one capability, each shaped ' +
+      'as in ClientCapabilities; use MCPMissingCapabilityError');
+end;
+
+destructor EMCPProtocolError.Destroy;
+begin
+  FData.Free;
+  inherited Destroy;
+end;
+
+function EMCPProtocolError.TakeData: TJSONData;
+begin
+  Result := FData;
+  FData := nil;
+end;
+
+function MCPMissingCapabilityError(const ACapability: string): EMCPProtocolError;
+begin
+  Result := EMCPProtocolError.Create(MCP_ERROR_MISSING_CLIENT_CAPABILITY,
+    'Missing required client capability: ' + ACapability,
+    BuildMissingCapabilityData(ACapability));
 end;
 
 function MCPTextResult(const AText: string): TMCPToolResult;
@@ -1554,6 +1576,22 @@ function MCPStructuredResult(const AText: string;
 begin
   Result := MCPTextResult(AText);
   Result.StructuredContent := AStructured;
+end;
+
+function MCPStructuredResult(AStructured: TJSONData): TMCPToolResult;
+var
+  Text: string;
+begin
+  if AStructured = nil then
+    raise EMCPServer.Create('MCPStructuredResult: structured value is nil');
+  // Owned from here: freed if serializing it raises.
+  try
+    Text := SerializeCompact(AStructured);
+  except
+    AStructured.Free;
+    raise;
+  end;
+  Result := MCPStructuredResult(Text, AStructured);
 end;
 
 function MCPStructuredResult(const AText: string;
@@ -1770,6 +1808,7 @@ begin
   FRedactErrorDetails := False;
   FDualEra := True;
   FFrozen := False;
+  FRequestStateTtlMs := 600000;
 end;
 
 procedure TMCPServer.EnsureMutable;
@@ -1781,216 +1820,82 @@ end;
 
 { ───────── subset schema validation (#23) ───────── }
 
-// The server-enforced subset is exactly the dialect this SDK's
-// builders emit: a root object schema with properties / required /
-// enum / default plus annotation keywords. Returns '' when ASchema is
-// within the subset, otherwise a diagnostic naming the first
-// offending keyword. Decided 2026-07-20 (roadmap): no general
-// JSON-Schema engine — foreign dialects need the ApplicationValidated
-// escape hatch.
-function SchemaSubsetViolation(ASchema: TJSONObject): string;
-
-  function PropertyViolation(const AName: string;
-    ASpec: TJSONObject): string;
-  var
-    I: Integer;
-    Key, PropType: string;
-    EnumData, DefaultData: TJSONData;
-  begin
-    Result := '';
-    PropType := ASpec.Get('type', '');
-    if (PropType <> 'string') and (PropType <> 'number') and
-       (PropType <> 'integer') and (PropType <> 'boolean') then
-      Exit(Format('property "%s" has unsupported type "%s"',
-        [AName, PropType]));
-    for I := 0 to ASpec.Count - 1 do
-    begin
-      Key := ASpec.Names[I];
-      if (Key = 'type') or (Key = 'description') or (Key = 'title') then
-        Continue
-      else if Key = 'enum' then
-      begin
-        if PropType <> 'string' then
-          Exit(Format('property "%s" uses enum with type "%s" ' +
-            '(only string enums are enforceable)', [AName, PropType]));
-        EnumData := ASpec.Items[I];
-        if EnumData.JSONType <> jtArray then
-          Exit(Format('property "%s" enum must be an array', [AName]));
-      end
-      else if Key = 'default' then
-      begin
-        DefaultData := ASpec.Items[I];
-        if not (DefaultData.JSONType in
-          [jtString, jtNumber, jtBoolean]) then
-          Exit(Format('property "%s" default must be a primitive',
-            [AName]));
-      end
-      else
-        Exit(Format('property "%s" uses unsupported keyword "%s"',
-          [AName, Key]));
-    end;
-  end;
-
-var
-  I: Integer;
-  Key: string;
-  Data: TJSONData;
-  Properties: TJSONObject;
+// The sealer for AKeys, or for one random 32-byte key when none were
+// configured. A missing random source fails closed: the server does not
+// start rather than seal with a guessable key.
+function CreateSealer(const AName: string; const AKeys: array of RawByteString;
+  ATtlMs: Integer): TMCPRequestStateSealer;
 begin
-  Result := '';
-  for I := 0 to ASchema.Count - 1 do
-  begin
-    Key := ASchema.Names[I];
-    if (Key = 'type') or (Key = 'description') or (Key = 'title') or
-       (Key = '$schema') then
-      Continue
-    else if Key = 'properties' then
-    begin
-      if ASchema.Items[I].JSONType <> jtObject then
-        Exit('properties must be an object');
-    end
-    else if Key = 'required' then
-    begin
-      if ASchema.Items[I].JSONType <> jtArray then
-        Exit('required must be an array');
-    end
+  try
+    if Length(AKeys) > 0 then
+      Result := TMCPRequestStateSealer.Create(AName, AKeys, ATtlMs)
     else
-      Exit(Format('uses unsupported root keyword "%s"', [Key]));
-  end;
-  Data := ASchema.Find('properties');
-  if Data = nil then
-    Exit;
-  Properties := TJSONObject(Data);
-  for I := 0 to Properties.Count - 1 do
-  begin
-    if Properties.Items[I].JSONType <> jtObject then
-      Exit(Format('property "%s" must be an object schema',
-        [Properties.Names[I]]));
-    Result := PropertyViolation(Properties.Names[I],
-      TJSONObject(Properties.Items[I]));
-    if Result <> '' then
-      Exit;
+      Result := TMCPRequestStateSealer.Create(AName,
+        [SecureRandomBytes(32)], ATtlMs);
+  except
+    on E: EMCPCrypto do
+      raise EMCPServer.Create('Cannot set up requestState sealing: ' +
+        E.Message);
   end;
 end;
 
-// Call-time argument validation against a subset schema (raw-handler
-// tools only; the typed path validates through BindArguments). The
-// checks mirror BindProperty: required presence, JSON type per
-// property (integer means an integral JSON number), enum membership,
-// and default seeding into AArguments for absent optional
-// properties. Unknown argument properties are deliberately ignored —
-// the same tolerance the typed path applies to unknown keys.
-function ValidateSubsetArguments(ASchema, AArguments: TJSONObject;
-  out AError: string): Boolean;
+procedure TMCPServer.SetRequestStateKeys(const AKeys: array of RawByteString);
 var
   I: Integer;
-  Data, Value, EnumData, DefaultData: TJSONData;
-  Required: TJSONArray;
-  Properties, PropSpec: TJSONObject;
-  PropName, PropType: string;
-  EnumMatched: Boolean;
-  J: Integer;
 begin
-  Result := False;
-  AError := '';
+  EnsureMutable;
+  for I := 0 to High(AKeys) do
+    if Length(AKeys[I]) < 32 then
+      raise EMCPServer.CreateFmt('requestState key %d is %d bytes; ' +
+        'each key must be at least 32 bytes', [I, Length(AKeys[I])]);
+  SetLength(FRequestStateKeys, Length(AKeys));
+  for I := 0 to High(AKeys) do
+    FRequestStateKeys[I] := AKeys[I];
+end;
 
-  Data := ASchema.Find('required');
-  if (Data <> nil) and (Data.JSONType = jtArray) then
-  begin
-    Required := TJSONArray(Data);
-    for I := 0 to Required.Count - 1 do
-      if (Required[I].JSONType = jtString) and
-         (AArguments.Find(Required[I].AsString) = nil) then
-      begin
-        AError := Format('Missing required argument "%s"',
-          [Required[I].AsString]);
-        Exit;
-      end;
-  end;
+procedure TMCPServer.SetRequestStateTtlMs(AValue: Integer);
+begin
+  EnsureMutable;
+  if AValue <= 0 then
+    raise EMCPServer.Create('RequestStateTtlMs must be positive');
+  FRequestStateTtlMs := AValue;
+end;
 
-  Data := ASchema.Find('properties');
+// The request's arguments object, or nil.
+function RequestArguments(const AMessage: TJSONRPCMessage): TJSONObject;
+var
+  Data: TJSONData;
+begin
+  Result := nil;
+  if AMessage.Params = nil then
+    Exit;
+  Data := AMessage.Params.Find('arguments');
   if (Data <> nil) and (Data.JSONType = jtObject) then
-  begin
-    Properties := TJSONObject(Data);
-    for I := 0 to Properties.Count - 1 do
-    begin
-      PropName := Properties.Names[I];
-      PropSpec := TJSONObject(Properties.Items[I]);
-      Value := AArguments.Find(PropName);
-      if Value = nil then
-      begin
-        // Absent optional argument: seed the declared default so the
-        // handler sees the same view a typed handler would.
-        DefaultData := PropSpec.Find('default');
-        if DefaultData <> nil then
-          AArguments.Add(PropName, DefaultData.Clone);
-        Continue;
-      end;
-      PropType := PropSpec.Get('type', '');
-      if PropType = 'string' then
-      begin
-        if Value.JSONType <> jtString then
-        begin
-          AError := Format('Argument "%s" must be a string', [PropName]);
-          Exit;
-        end;
-        EnumData := PropSpec.Find('enum');
-        if (EnumData <> nil) and (EnumData.JSONType = jtArray) then
-        begin
-          EnumMatched := False;
-          for J := 0 to TJSONArray(EnumData).Count - 1 do
-            if (TJSONArray(EnumData)[J].JSONType = jtString) and
-               (TJSONArray(EnumData)[J].AsString = Value.AsString) then
-            begin
-              EnumMatched := True;
-              Break;
-            end;
-          if not EnumMatched then
-          begin
-            AError := Format(
-              'Argument "%s" must be a string from the declared enum values',
-              [PropName]);
-            Exit;
-          end;
-        end;
-      end
-      else if PropType = 'number' then
-      begin
-        if Value.JSONType <> jtNumber then
-        begin
-          AError := Format('Argument "%s" must be a number', [PropName]);
-          Exit;
-        end;
-      end
-      else if PropType = 'integer' then
-      begin
-        if (Value.JSONType <> jtNumber) or
-           not (TJSONNumber(Value).NumberType in
-             [ntInteger, ntInt64, ntQWord]) then
-        begin
-          AError := Format('Argument "%s" must be an integer', [PropName]);
-          Exit;
-        end;
-      end
-      else if PropType = 'boolean' then
-      begin
-        if Value.JSONType <> jtBoolean then
-        begin
-          AError := Format('Argument "%s" must be a boolean', [PropName]);
-          Exit;
-        end;
-      end;
-    end;
-  end;
+    Result := TJSONObject(Data);
+end;
 
-  Result := True;
+function TMCPServer.OpenRequestState(const AMessage: TJSONRPCMessage;
+  var ACtx: TMCPRequestContext): Boolean;
+var
+  State, Reason: string;
+begin
+  Result := TMCPRequestStateSealer(FSealer).Unseal(AMessage.Method,
+    AMessage.Params.Get('name', ''), RequestArguments(AMessage),
+    ACtx.RequestState, State, Reason);
+  if Result then
+    ACtx.RequestState := State
+  else
+    // The reason stays off the wire: it would tell an attacker which
+    // check to aim at next.
+    TryLogToStderr('MCP requestState rejected on ' + AMessage.Method + ': ' +
+      Reason);
 end;
 
 procedure TMCPServer.FreezeConfiguration;
 var
   I: Integer;
   Violation: string;
-  InputSchema: TJSONData;
+  InputSchema, OutputSchema: TJSONData;
 begin
   if FFrozen then
     Exit;
@@ -2003,16 +1908,27 @@ begin
     if FTools[I].ArgsClass = nil then
     begin
       InputSchema := FTools[I].Definition.Find('inputSchema');
-      Violation := SchemaSubsetViolation(TJSONObject(InputSchema));
+      Violation := MCPSchemaSubsetViolation(TJSONObject(InputSchema), True);
       if Violation = '' then
         FTools[I].SubsetValidate := not FTools[I].AppValidated
       else if not FTools[I].AppValidated then
         raise EMCPServer.CreateFmt(
           'Tool "%s" inputSchema %s — outside the server-validated ' +
-          'subset (type/properties/required/enum/default). Mark the ' +
-          'registration .ApplicationValidated to take over argument ' +
+          'subset (type/properties/required/items/enum/default). Mark ' +
+          'the registration .ApplicationValidated to take over argument ' +
           'validation', [FTools[I].Definition.Get('name', ''), Violation]);
     end;
+  FSealer := CreateSealer(FName, FRequestStateKeys, FRequestStateTtlMs);
+  // Structured output is checked whenever the output schema is inside
+  // the subset (#91); a richer one is the handler's to honour.
+  for I := 0 to High(FTools) do
+  begin
+    OutputSchema := FTools[I].Definition.Find('outputSchema');
+    FTools[I].OutputValidate := (OutputSchema <> nil) and
+      (MCPSchemaSubsetViolation(TJSONObject(OutputSchema), False) = '');
+    MCPHeaderParameters(TJSONObject(FTools[I].Definition.Find(
+      'inputSchema')), FTools[I].HeaderParams);
+  end;
   FFrozen := True;
 end;
 
@@ -2080,6 +1996,28 @@ begin
   Result := ARedactedMessage + ' (ref ' + ErrorReference + ')';
 end;
 
+// The response for a handler's EMCPProtocolError (#88). Its data is
+// borrowed until here, so a -32021 whose data a handler changed after
+// construction is checked again and, if it no longer validates, sent
+// as -32603 rather than as a refusal clients would reject.
+function TMCPServer.ProtocolErrorResponse(AMessage: TJSONRPCMessage;
+  E: Exception): string;
+var
+  Err: EMCPProtocolError;
+begin
+  Err := E as EMCPProtocolError;
+  if (Err.Code = MCP_ERROR_MISSING_CLIENT_CAPABILITY) and
+    not IsMissingCapabilityData(Err.Data) then
+  begin
+    TryLogToStderr('dispatch/' + AMessage.Method + ': -32021 data no ' +
+      'longer names valid requiredCapabilities; sent as -32603');
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
+      'Internal error'));
+  end;
+  Result := BuildErrorResponse(AMessage.Id, Err.Code, Err.Message,
+    Err.TakeData);
+end;
+
 destructor TMCPServer.Destroy;
 var
   I: Integer;
@@ -2092,18 +2030,198 @@ begin
     FTemplates[I].Definition.Free;
   for I := 0 to High(FPrompts) do
     FPrompts[I].Definition.Free;
+  FSealer.Free;
   inherited Destroy;
 end;
 
 // The capability objects stay empty: no listChanged / subscribe —
 // registries are fixed after startup, so there is nothing to notify.
 // Shared by server/discover (modern) and initialize (legacy).
+// Each capability is declared when the server offers something under
+// it ("Present if the server offers any tools to call", schema
+// ServerCapabilities, verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/schema#servercapabilities),
+// so a client does not list what is not there.
 function TMCPServer.ServerCapabilities: TJSONObject;
 begin
   Result := TJSONObject.Create;
-  Result.Add('tools', TJSONObject.Create);
-  Result.Add('resources', TJSONObject.Create);
-  Result.Add('prompts', TJSONObject.Create);
+  try
+    if Length(FTools) > 0 then
+      Result.Add('tools', TJSONObject.Create);
+    if (Length(FResources) > 0) or (Length(FTemplates) > 0) then
+      Result.Add('resources', TJSONObject.Create);
+    if Length(FPrompts) > 0 then
+      Result.Add('prompts', TJSONObject.Create);
+    if Length(FCompletions) > 0 then
+      Result.Add('completions', TJSONObject.Create);
+  except
+    Result.Free;
+    raise;
+  end;
+end;
+
+{ ───────── completion (#81) ───────── }
+
+function MCPCompleteFrom(const AValue: string;
+  const ACandidates: array of string): TMCPCompletion;
+begin
+  Result := MCP.Completion.MCPCompleteFrom(AValue, ACandidates);
+end;
+
+function TMCPServer.FindTemplate(const AUriTemplate: string): Integer;
+var
+  I: Integer;
+begin
+  for I := 0 to High(FTemplates) do
+    if FTemplates[I].UriTemplate = AUriTemplate then
+      Exit(I);
+  Result := -1;
+end;
+
+// '' when ARefType/ARefName name a registered prompt or template that
+// has AArgument, otherwise what is wrong (MCP.Completion decides).
+function CompletionTargetProblem(AServer: TMCPServer; const ARefType,
+  ARefName, AArgument: string): string;
+var
+  Index: Integer;
+  Definition: TJSONObject;
+begin
+  Definition := nil;
+  if ARefType = 'ref/prompt' then
+  begin
+    Index := AServer.FindPrompt(ARefName);
+    if Index >= 0 then
+      Definition := AServer.FPrompts[Index].Definition;
+  end;
+  Result := CompletionTargetFault(ARefType, ARefName, AArgument, Definition,
+    AServer.FindTemplate(ARefName) >= 0);
+end;
+
+function TMCPServer.FindCompletion(const ARefType, ARefName,
+  AArgument: string): Integer;
+begin
+  for Result := 0 to High(FCompletions) do
+    if (FCompletions[Result].RefType = ARefType) and
+      (FCompletions[Result].RefName = ARefName) and
+      (FCompletions[Result].Argument = AArgument) then
+      Exit;
+  Result := -1;
+end;
+
+procedure TMCPServer.AddCompletion(const ARefType, ARefName,
+  AArgument: string; const AValues: array of string; ACallable: Boolean;
+  AHandler: TMCPCompletionHandler; AMethod: TMCPCompletionMethod);
+var
+  Problem: string;
+  I, Slot: Integer;
+begin
+  EnsureMutable;
+  Problem := CompletionTargetProblem(Self, ARefType, ARefName, AArgument);
+  if Problem <> '' then
+    raise EMCPServer.Create('Cannot register a completion: ' + Problem);
+  if ACallable and not Assigned(AHandler) and not Assigned(AMethod) then
+    raise EMCPServer.CreateFmt('The completion for "%s" of "%s" needs a ' +
+      'non-nil callable', [AArgument, ARefName]);
+  if FindCompletion(ARefType, ARefName, AArgument) >= 0 then
+    raise EMCPServer.CreateFmt('A completion for "%s" of "%s" is ' +
+      'already registered', [AArgument, ARefName]);
+  Slot := Length(FCompletions);
+  SetLength(FCompletions, Slot + 1);
+  FCompletions[Slot].RefType := ARefType;
+  FCompletions[Slot].RefName := ARefName;
+  FCompletions[Slot].Argument := AArgument;
+  SetLength(FCompletions[Slot].Values, Length(AValues));
+  for I := 0 to High(AValues) do
+    FCompletions[Slot].Values[I] := AValues[I];
+  FCompletions[Slot].Handler := AHandler;
+  FCompletions[Slot].Method := AMethod;
+end;
+
+procedure TMCPServer.RegisterPromptCompletion(const APrompt, AArgument: string;
+  const AValues: array of string);
+begin
+  AddCompletion('ref/prompt', APrompt, AArgument, AValues, False, nil, nil);
+end;
+
+procedure TMCPServer.RegisterPromptCompletion(const APrompt, AArgument: string;
+  AHandler: TMCPCompletionHandler);
+begin
+  AddCompletion('ref/prompt', APrompt, AArgument, [], True, AHandler, nil);
+end;
+
+procedure TMCPServer.RegisterPromptCompletion(const APrompt, AArgument: string;
+  AMethod: TMCPCompletionMethod);
+begin
+  AddCompletion('ref/prompt', APrompt, AArgument, [], True, nil, AMethod);
+end;
+
+procedure TMCPServer.RegisterTemplateCompletion(const AUriTemplate,
+  AVariable: string; const AValues: array of string);
+begin
+  AddCompletion('ref/resource', AUriTemplate, AVariable, AValues, False, nil,
+    nil);
+end;
+
+procedure TMCPServer.RegisterTemplateCompletion(const AUriTemplate,
+  AVariable: string; AHandler: TMCPCompletionHandler);
+begin
+  AddCompletion('ref/resource', AUriTemplate, AVariable, [], True, AHandler,
+    nil);
+end;
+
+procedure TMCPServer.RegisterTemplateCompletion(const AUriTemplate,
+  AVariable: string; AMethod: TMCPCompletionMethod);
+begin
+  AddCompletion('ref/resource', AUriTemplate, AVariable, [], True, nil,
+    AMethod);
+end;
+
+// completion/complete: verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/completion
+// (unknown prompt or missing argument: -32602).
+function TMCPServer.HandleComplete(const AMessage: TJSONRPCMessage;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
+var
+  Request: TMCPCompleteRequest;
+  Problem: string;
+  Completion: TMCPCompletion;
+  I: Integer;
+  CompleteResult: TJSONObject;
+begin
+  // Without a registration the server declares no completions
+  // capability, so the method is not supported: -32601, as the
+  // completion page's error handling recommends (verified 2026-11-27,
+  // .../server/utilities/completion#error-handling).
+  if Length(FCompletions) = 0 then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
+      'Method not found: completion/complete (no completions registered)'));
+  Problem := ParseCompleteRequest(AMessage.Params, Request);
+  if Problem = '' then
+  begin
+    Problem := CompletionTargetProblem(Self, Request.RefType,
+      Request.RefName, Request.Argument);
+    if Problem <> '' then
+      Problem := 'Invalid params: ' + Problem;
+  end;
+  if Problem <> '' then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS, Problem));
+
+  // An argument with no completion registered answers an empty list.
+  I := FindCompletion(Request.RefType, Request.RefName, Request.Argument);
+  if I < 0 then
+    Completion := MCPCompleteFrom(Request.Value, [])
+  else if Assigned(FCompletions[I].Method) then
+    Completion := FCompletions[I].Method(Request.Argument, Request.Value,
+      Request.Context, ACtx)
+  else if Assigned(FCompletions[I].Handler) then
+    Completion := FCompletions[I].Handler(Request.Argument, Request.Value,
+      Request.Context, ACtx)
+  else
+    Completion := MCPCompleteFrom(Request.Value, FCompletions[I].Values);
+
+  CompleteResult := TJSONObject.Create;
+  CompleteResult.Add('completion', CompletionObject(Completion));
+  Result := ResultResponse(AMessage, CompleteResult, ALegacy);
 end;
 
 { ───────── TMCPServer: registration ───────── }
@@ -2185,6 +2303,8 @@ procedure TMCPServer.ValidateToolDefinition(ADefinition: TJSONObject;
   out AToolName: string);
 var
   InputSchema, OutputSchema, SchemaType: TJSONData;
+  HeaderParams: TMCPHeaderParameters;
+  Violation: string;
 begin
   if ADefinition = nil then
     raise EMCPServer.Create('Tool definition must not be nil');
@@ -2208,19 +2328,38 @@ begin
   OutputSchema := ADefinition.Find('outputSchema');
   if OutputSchema <> nil then
   begin
+    // Any root type since SEP-2106 (tools#structured-content, verified
+    // 2026-11-26); the schema itself is still a JSON object.
     if OutputSchema.JSONType <> jtObject then
       raise EMCPServer.CreateFmt(
         'Tool "%s" definition must carry an object-valued outputSchema',
         [AToolName]);
-    SchemaType := TJSONObject(OutputSchema).Find('type');
-    if (SchemaType = nil) or (SchemaType.JSONType <> jtString) or
-      (SchemaType.AsString <> 'object') then
-      raise EMCPServer.CreateFmt(
-        'Tool "%s" outputSchema must have root type "object"', [AToolName]);
   end;
+  // x-mcp-header annotations a client would reject make it drop the
+  // whole tool, so they fail here instead (#90).
+  Violation := MCPHeaderParameters(TJSONObject(InputSchema), HeaderParams);
+  if Violation <> '' then
+    raise EMCPServer.CreateFmt('Tool "%s" inputSchema: %s',
+      [AToolName, Violation]);
   if FindTool(AToolName) >= 0 then
     raise EMCPServer.CreateFmt(
       'Tool "%s" is already registered', [AToolName]);
+end;
+
+// Replaces every child stored as nil (which fpjson writes as null but
+// cannot clone, FPC 3.2.2) with a JSON null, so a definition can be
+// cloned for every tools/list.
+procedure NilChildrenToNull(AData: TJSONData);
+var
+  I: Integer;
+begin
+  if (AData = nil) or not (AData.JSONType in [jtObject, jtArray]) then
+    Exit;
+  for I := 0 to AData.Count - 1 do
+    if AData.Items[I] = nil then
+      AData.Items[I] := TJSONNull.Create
+    else
+      NilChildrenToNull(AData.Items[I]);
 end;
 
 function TMCPServer.AddTool(ADefinition: TJSONObject;
@@ -2230,6 +2369,7 @@ var
 begin
   try
     EnsureMutable;
+    NilChildrenToNull(ADefinition);
     ValidateToolDefinition(ADefinition, ToolName);
     if Assigned(AHandler) = Assigned(AMethod) then
       raise EMCPServer.CreateFmt(
@@ -2768,6 +2908,28 @@ begin
   AddResource(AUri, AName, AMimeType, ADescription, nil, AMethod, '', False);
 end;
 
+function TMCPServer.ToolHeaderParameters(
+  const AName: string): TMCPHeaderParameters;
+var
+  Index, I: Integer;
+begin
+  Result := nil;
+  Index := FindTool(AName);
+  if Index < 0 then
+    Exit;
+  if not FFrozen then
+  begin
+    MCPHeaderParameters(TJSONObject(FTools[Index].Definition.Find(
+      'inputSchema')), Result);
+    Exit;
+  end;
+  // An independent copy: dynamic arrays are shared, not copied, by
+  // assignment, and the cached paths must stay as frozen.
+  Result := Copy(FTools[Index].HeaderParams);
+  for I := 0 to High(Result) do
+    Result[I].Path := Copy(FTools[Index].HeaderParams[I].Path);
+end;
+
 function TMCPServer.FindTool(const AName: string): Integer;
 var
   I: Integer;
@@ -2792,7 +2954,6 @@ procedure TMCPServer.AddTemplate(const AUriTemplate, AName, AMimeType,
   ADescription: string; AReader: TMCPTemplateReader;
   AMethod: TMCPTemplateMethod);
 var
-  I: Integer;
   Definition: TJSONObject;
   ValidationError: string;
 begin
@@ -2807,10 +2968,9 @@ begin
       [AUriTemplate]);
   if not TryValidateUriTemplate(AUriTemplate, ValidationError) then
     raise EMCPServer.Create(ValidationError);
-  for I := 0 to High(FTemplates) do
-    if FTemplates[I].UriTemplate = AUriTemplate then
-      raise EMCPServer.CreateFmt(
-        'Resource template "%s" is already registered', [AUriTemplate]);
+  if FindTemplate(AUriTemplate) >= 0 then
+    raise EMCPServer.CreateFmt(
+      'Resource template "%s" is already registered', [AUriTemplate]);
   Definition := TJSONObject.Create;
   Definition.Add('uriTemplate', AUriTemplate);
   Definition.Add('name', AName);
@@ -3048,6 +3208,9 @@ begin
             try
               AResponse := DispatchRequest(ASession, ASink, ASinkData, Msg);
             except
+              // A handler's deliberate JSON-RPC error (#88).
+              on E: EMCPProtocolError do
+                AResponse := ProtocolErrorResponse(Msg, E);
               on E: Exception do
                 AResponse := BuildErrorResponse(Msg.Id,
                   JSONRPC_INTERNAL_ERROR,
@@ -3124,6 +3287,23 @@ begin
       Ctx.Notifier := Dispatch.EmitNotification;
     Ctx.CancellationProbe := Dispatch.IsCancelled;
 
+    // requestState is verified before any handler sees it (#89). Only
+    // tools/call and prompts/get mint state here, so on any other
+    // method a client-sent value cannot be ours and is dropped. A
+    // supplied field counts even when empty: '' is no token we issued,
+    // and must not reach the handler as a fresh call.
+    if (AMessage.Params <> nil) and
+      (AMessage.Params.Find('requestState') <> nil) then
+      if (AMessage.Method = 'tools/call') or
+        (AMessage.Method = 'prompts/get') then
+      begin
+        if not OpenRequestState(AMessage, Ctx) then
+          Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+            'Invalid or expired requestState'));
+      end
+      else
+        Ctx.RequestState := '';
+
     if AMessage.Method = 'server/discover' then
       Exit(HandleDiscover(AMessage));
     if AMessage.Method = 'tools/list' then
@@ -3140,6 +3320,8 @@ begin
       Exit(HandlePromptsList(AMessage, False));
     if AMessage.Method = 'prompts/get' then
       Exit(HandlePromptsGet(AMessage, Ctx, False));
+    if AMessage.Method = 'completion/complete' then
+      Exit(HandleComplete(AMessage, Ctx, False));
 
     Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
       'Method not found: ' + AMessage.Method);
@@ -3198,6 +3380,8 @@ begin
       Exit(HandlePromptsList(AMessage, True));
     if AMessage.Method = 'prompts/get' then
       Exit(HandlePromptsGet(AMessage, Ctx, True));
+    if AMessage.Method = 'completion/complete' then
+      Exit(HandleComplete(AMessage, Ctx, True));
 
     Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
       'Method not found: ' + AMessage.Method);
@@ -3355,15 +3539,33 @@ end;
 function TMCPServer.HandleToolsList(const AMessage: TJSONRPCMessage;
   ALegacy: Boolean): string;
 var
-  ListResult: TJSONObject;
+  ListResult, Definition: TJSONObject;
+  OutputSchema: TJSONData;
   Tools: TJSONArray;
   I: Integer;
 begin
   // Whole list, registration order: deterministic ordering is what the
   // spec asks for, and without pagination there is no cursor to honor.
   Tools := TJSONArray.Create;
+  try
   for I := 0 to High(FTools) do
-    Tools.Add(FTools[I].Definition.Clone);
+  begin
+    Definition := TJSONObject(FTools[I].Definition.Clone);
+    // The classic dialect's outputSchema has an object root (2025-11-25
+    // schema, Tool.outputSchema, verified 2026-11-27 against
+    // https://modelcontextprotocol.io/specification/2025-11-25/schema#tool).
+    // A tool with any other root stays listed, so classic clients can
+    // still call it, but without the schema they could not accept (#91).
+    OutputSchema := Definition.Find('outputSchema');
+    if ALegacy and (OutputSchema <> nil) and
+      (TJSONObject(OutputSchema).Get('type', '') <> 'object') then
+      Definition.Delete('outputSchema');
+    Tools.Add(Definition);
+  end;
+  except
+    Tools.Free;
+    raise;
+  end;
   ListResult := TJSONObject.Create;
   ListResult.Add('tools', Tools);
   if not ALegacy then
@@ -3412,14 +3614,28 @@ begin
       MCP_ERROR_MISSING_CLIENT_CAPABILITY,
       ASubjectKind + ' "' + ASubjectName + '" requires the client ' +
       'capability "' + MissingCapability + '"',
-      CapabilityErrorData(MissingCapability)));
+      BuildMissingCapabilityData(MissingCapability)));
   end;
   InterimResult := TJSONObject.Create;
-  InterimResult.Add('resultType', RESULT_TYPE_INPUT_REQUIRED);
-  if AInputRequests <> nil then
-    InterimResult.Add('inputRequests', AInputRequests);
-  if ARequestState <> '' then
-    InterimResult.Add('requestState', ARequestState);
+  try
+    InterimResult.Add('resultType', RESULT_TYPE_INPUT_REQUIRED);
+    if AInputRequests <> nil then
+      InterimResult.Add('inputRequests', AInputRequests);
+    AInputRequests := nil; // owned by InterimResult from here
+    // Sealed for the client (#89); the retry is verified in
+    // DispatchRequest before the handler runs again.
+    if ARequestState <> '' then
+      InterimResult.Add('requestState',
+        TMCPRequestStateSealer(FSealer).Seal(AMessage.Method, ASubjectName,
+        RequestArguments(AMessage), ARequestState));
+  except
+    // Sealing can raise (an argument tree it cannot serialize): the
+    // tree, the input requests included, is ours until the response
+    // builder takes it.
+    InterimResult.Free;
+    AInputRequests.Free;
+    raise;
+  end;
   Result := ResultResponse(AMessage, InterimResult, False);
 end;
 
@@ -3454,16 +3670,68 @@ begin
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
       'Invalid params: arguments must be an object'));
 
-  // Handlers always see a non-nil arguments object. A supplied one is
-  // borrowed from AMessage; the substitute is owned by the caller.
+  // Handlers always see a non-nil arguments object, and always a copy
+  // the caller owns: seeding defaults or a handler changing it must not
+  // touch AMessage, whose original arguments a sealed requestState is
+  // bound to (#89).
   if ArgsData <> nil then
-    AArguments := TJSONObject(ArgsData)
+    AOwnedEmpty := TJSONObject(ArgsData.Clone)
   else
-  begin
     AOwnedEmpty := TJSONObject.Create;
-    AArguments := AOwnedEmpty;
-  end;
+  AArguments := AOwnedEmpty;
   Result := '';
+end;
+
+// A tool with a subset outputSchema must send conforming structured
+// output: the spec makes that a server MUST (tools#output-schema,
+// verified 2026-11-26). A handler that breaks it gets an isError result
+// naming the first violation instead of sending the bad value. An
+// isError result may omit structured output; one it carries is checked
+// too, and dropped (keeping the handler's error text) if it fails.
+// For a classic client: replaces non-object structured output with a
+// text block of its JSON, unless the content already carries that text.
+procedure MoveStructuredToText(var AResult: TMCPToolResult);
+var
+  Text: string;
+  I: Integer;
+  Block: TJSONData;
+begin
+  Text := SerializeCompact(AResult.StructuredContent);
+  // Freed only once serialized: if that raises, the caller frees it.
+  FreeAndNil(AResult.StructuredContent);
+  for I := 0 to AResult.Content.Count - 1 do
+  begin
+    Block := AResult.Content.Items[I];
+    if (Block.JSONType = jtObject) and
+      (TJSONObject(Block).Get('type', '') = 'text') and
+      (TJSONObject(Block).Get('text', '') = Text) then
+      Exit;
+  end;
+  AResult.Content.Add(MCPTextContent(Text));
+end;
+
+procedure CheckStructuredOutput(const AToolName: string;
+  AOutputSchema: TJSONObject; var AResult: TMCPToolResult);
+var
+  Violation: string;
+begin
+  if AResult.IsError then
+  begin
+    if (AResult.StructuredContent <> nil) and
+      not MCPValidateAgainstSchema(AOutputSchema, AResult.StructuredContent,
+      'structured output', False, Violation) then
+      FreeAndNil(AResult.StructuredContent);
+    Exit;
+  end;
+  if AResult.StructuredContent = nil then
+    Violation := 'no structuredContent was returned'
+  else if MCPValidateAgainstSchema(AOutputSchema, AResult.StructuredContent,
+    'structured output', False, Violation) then
+    Exit;
+  AResult.Content.Free;
+  AResult.StructuredContent.Free;
+  AResult := MCPErrorResult('Tool "' + AToolName + '" produced output that ' +
+    'does not match its outputSchema: ' + Violation);
 end;
 
 function TMCPServer.HandleToolsCall(const AMessage: TJSONRPCMessage;
@@ -3491,7 +3759,7 @@ begin
           MCP_ERROR_MISSING_CLIENT_CAPABILITY, 'Tool "' + ToolName +
           '" requires the client capability "' +
           FTools[Index].RequiredCapabilities[I] + '"',
-          CapabilityErrorData(FTools[Index].RequiredCapabilities[I])));
+          BuildMissingCapabilityData(FTools[Index].RequiredCapabilities[I])));
       end;
 
   try
@@ -3515,9 +3783,9 @@ begin
           ToolResult := MCPErrorResult(BindError);
       end
       else if FTools[Index].SubsetValidate and
-        not ValidateSubsetArguments(
+        not MCPValidateAgainstSchema(
           TJSONObject(FTools[Index].Definition.Find('inputSchema')),
-          Arguments, BindError) then
+          Arguments, 'argument', True, BindError) then
         // Raw path (#23): the registered schema's enforceable subset
         // is checked before the handler runs; violations travel
         // in-band exactly like typed binding failures.
@@ -3528,8 +3796,11 @@ begin
         ToolResult := FTools[Index].Handler(Arguments, ACtx);
     except
       // Execution errors travel in-band (isError: true) so the model
-      // can read them and self-correct; only dispatch-level faults are
-      // JSON-RPC errors.
+      // can read them and self-correct; only dispatch-level faults and
+      // a handler's deliberate EMCPProtocolError (answered by the
+      // dispatch wrapper, #88) are JSON-RPC errors.
+      on E: EMCPProtocolError do
+        raise;
       on E: Exception do
         ToolResult := MCPErrorResult(ExceptionClientMessage(
           'tools/call handler', 'Tool execution failed: ',
@@ -3559,6 +3830,24 @@ begin
 
   if ToolResult.Content = nil then
     ToolResult.Content := TJSONArray.Create;
+  // The result trees stay ours until CallResult takes them: free them
+  // if checking or converting raises (serializing a non-finite number).
+  try
+    if FTools[Index].OutputValidate then
+      CheckStructuredOutput(ToolName,
+        TJSONObject(FTools[Index].Definition.Find('outputSchema')), ToolResult);
+    // The classic dialect's structuredContent is an object (2025-11-25
+    // schema, CallToolResult, verified 2026-11-27 against
+    // https://modelcontextprotocol.io/specification/2025-11-25/schema#calltoolresult);
+    // any other value travels as a text block of its JSON (#91).
+    if (ToolResult.StructuredContent <> nil) and ALegacy and
+      (ToolResult.StructuredContent.JSONType <> jtObject) then
+      MoveStructuredToText(ToolResult);
+  except
+    ToolResult.Content.Free;
+    ToolResult.StructuredContent.Free;
+    raise;
+  end;
 
   CallResult := TJSONObject.Create;
   CallResult.Add('content', ToolResult.Content);
@@ -3755,6 +4044,9 @@ begin
           Messages := FPrompts[Index].Handler(Arguments, ACtx);
       end;
     except
+      // The dispatch wrapper answers a deliberate error (#88).
+      on E: EMCPProtocolError do
+        raise;
       on E: Exception do
         Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INTERNAL_ERROR,
           ExceptionClientMessage('prompts/get handler',
@@ -3792,14 +4084,12 @@ end;
 
 initialization
   // RTL-only mutual exclusion for the process-wide diagnostic state;
-  // both outlive every session, so unit lifetime is the right scope.
+  // it outlives every session, so unit lifetime is the right scope.
   // ErrorSequenceLock guards the error-reference counter (portable in
-  // place of a 64-bit atomic); StderrLock serializes stderr writes.
+  // place of a 64-bit atomic).
   InitCriticalSection(ErrorSequenceLock);
-  InitCriticalSection(StderrLock);
 
 finalization
-  DoneCriticalSection(StderrLock);
   DoneCriticalSection(ErrorSequenceLock);
 
 end.

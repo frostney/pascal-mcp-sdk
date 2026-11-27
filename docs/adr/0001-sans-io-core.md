@@ -20,3 +20,14 @@ same tested core unchanged.
   explicit argument, never as retained transport state.
 - If a change seems to need protocol knowledge inside a transport,
   the change is wrong, not the boundary.
+
+## Amendment (2026-11-27, #89)
+
+One read happens in the core: with no `requestState` keys set, the
+first `CreateSession` reads 32 bytes of operating-system entropy for
+the instance's sealing key. It happens once, at the freeze boundary,
+never while a request is handled, and a server configured with
+`SetRequestStateKeys` performs none. Making the key lazily on the
+first seal was rejected: the frozen server is shared across the HTTP
+binding's threads, so lazy creation would need a lock in the
+dispatch path.
