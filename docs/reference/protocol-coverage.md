@@ -12,7 +12,7 @@ the README links here.
 | `resources/list`, `resources/read` | ✅ static + dynamic, text + blob builders |
 | `resources/templates/list` + template matching | ✅ RFC 6570 level-1 (`{var}`), exact resources win, vars passed to readers |
 | `prompts/list`, `prompts/get` | ✅ fluent argument declaration, message builders for every content type, spec error codes |
-| MRTR `input_required` (SEP-2322) | ✅ on `tools/call` + `prompts/get`: elicitation (form + url), sampling, roots entry builders; capability-gated; stateless re-entry |
+| MRTR `input_required` (SEP-2322) | ✅ on `tools/call` + `prompts/get`: elicitation (form + url), sampling, roots entry builders; capability-gated; stateless re-entry; `requestState` sealed by the server (HMAC-SHA-256, expiry, bound to the method, target, arguments and server) and verified before the handler runs |
 | `notifications/progress`, `notifications/message` | ✅ `MCPReportProgress` / `MCPLogMessage` from any handler; strictly opt-in per request (`progressToken` / `logLevel`), severity-filtered, emitted before the response |
 | `_meta` validation, version negotiation | ✅ `-32602` / `-32021` / `-32022` per spec |
 | `ttlMs` / `cacheScope` caching hints (SEP-2549) | ✅ on discover/list/read, tunable via `CacheTtlMs`/`CacheScope` |

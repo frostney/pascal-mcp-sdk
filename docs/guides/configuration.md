@@ -2,9 +2,10 @@
 
 ## Executive Summary
 
-`TMCPServer` has five request-visible configuration properties —
-`Instructions`, `CacheTtlMs`, `CacheScope`, `RedactErrorDetails`, and
-`DualEra` — all set between `Create` and serving. Configuration
+`TMCPServer` has six request-visible configuration properties —
+`Instructions`, `CacheTtlMs`, `CacheScope`, `RedactErrorDetails`,
+`DualEra` and `RequestStateTtlMs` — plus the `requestState` keys
+(`SetRequestStateKeys`), all set between `Create` and serving. Configuration
 freezes together with the registries when the first session is
 created; a later write raises `EMCPServer`.
 
@@ -71,14 +72,70 @@ is rejected with a diagnostic naming the supported versions. The
 Streamable HTTP binding forces this mode — HTTP clients speak
 `2026-07-28`.
 
+## requestState sealing
+
+A handler that asks for more input (MRTR) can return a `requestState`
+for the next round. The specification makes the client's echo of it
+attacker-controlled input: a server must protect its integrity and
+reject state that fails verification, and should bind it to an expiry
+and to the request
+([MRTR](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr),
+verified 2026-11-26). The server does this for every handler. It sends
+the state as a token signed with HMAC-SHA-256 that also carries an
+expiry, the method, the tool or prompt name, a SHA-256 digest of the
+arguments and the server's name, and it verifies the token before the
+handler runs again. A token that fails any of these checks is answered
+`-32602` ("Invalid or expired requestState"); the reason is logged to
+stderr only.
+
+```pascal
+Server.SetRequestStateKeys([LoadKey('MCP_STATE_KEY')]);  // >= 32 bytes
+Server.RequestStateTtlMs := 120000;                      // two minutes
+```
+
+- **No keys set:** each `TMCPServer` makes a random 32-byte key when
+  its first session starts (reading the operating system's random
+  source then; with keys set, nothing is read). The key lives as long
+  as that instance: a token from an instance you replace, or from
+  another process serving the same endpoint behind a load balancer,
+  is refused. Give every instance the same key, and the same server
+  `Name` (the token names its server), to keep continuations working
+  across them. Make the key from a cryptographically secure random
+  source, 32 bytes or more, and keep it with your other secrets.
+- **Rotation:** the first key seals and every key verifies. Change keys
+  in three steps, each on every instance before the next:
+  1. `[Old, New]`: every instance can verify the new key, still
+     sealing with the old one.
+  2. `[New, Old]`: seal with the new key.
+  3. `[New]`, once the longest `RequestStateTtlMs` any old-key signer
+     used has passed since the last instance switched, plus an
+     allowance for clock differences between instances.
+- **Upgrading (breaking):** a server with sealing refuses the plain
+  state an earlier version handed out, so a client mid-round when you
+  upgrade gets `-32602` and must start that request again. Upgrade
+  every instance together, or drain in-flight rounds first (they last
+  at most as long as your clients take to answer); a mixed fleet would
+  also pass sealed tokens to old handlers as their state.
+- **Replay:** a token is bound to its method, tool or prompt, arguments
+  and server, and expires after `RequestStateTtlMs`. Within that window
+  the same retry can be sent again and verifies each time. If a retry
+  has a side effect that must happen once, make the handler
+  idempotent, or record the use yourself (an id in the state, checked
+  against your own store).
+- **What it does not do:** the client can read the state, so keep
+  secrets out of it. The token is not bound to a user, because the
+  library has no authenticated identity to bind it to; if your state
+  grants something per user, put the user in the state and check it in
+  the handler.
+
 ## Freeze semantics
 
-All five properties, like the registries, are mutable only until the
+All six properties and the keys, like the registries, are mutable only until the
 first session exists (`RunMCPStdioServer` and `TMCPHTTPServer` create
 sessions internally). Configure fully, then serve:
 
 ```text
-Create → Instructions/Cache*/Redact/DualEra → Register* → serve
+Create → Instructions/Cache*/Redact/DualEra/RequestState* → Register* → serve
 ```
 
 A write after freeze raises

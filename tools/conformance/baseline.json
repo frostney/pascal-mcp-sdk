@@ -57,11 +57,7 @@
       "expected": "pass"
     },
     "input-required-result-tampered-state": {
-      "expected": "fail",
-      "issue": 89,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "input-required-result-unsupported-methods": {
       "expected": "pass"
