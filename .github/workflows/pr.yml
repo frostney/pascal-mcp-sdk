@@ -8,7 +8,7 @@ name: PR
 #            mcpsmoke E2E battery on Linux, macOS, and win64 (the stdio
 #            transport is pure RTL, so unlike duetto there are no
 #            platform-specific transport legs to stage — all three OSes
-#            run the full battery pre-merge). The Linux leg alone adds
+#            run the full battery pre-merge). The linux-x64 leg alone adds
 #            format --check, agents --check, the reference-docs check,
 #            health and duplication.
 #   ci.yml — push to main and manual dispatch: the wider per-arch

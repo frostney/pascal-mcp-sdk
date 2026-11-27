@@ -420,6 +420,7 @@ const
 var
   Baseline: TJSONObject;
   Msg: TJSONRPCMessage;
+  Value: TJSONData;
 begin
   try
     Baseline := ParseObj('{"value":"' + RUN + '"}');
@@ -430,22 +431,27 @@ begin
     on EParserError do
       Baseline := nil;
   end;
-  if Baseline <> nil then
-    try
-      ExpectParsedValue(RUN, Baseline.Get('value', ''));
-    finally
-      Baseline.Free;
+  Msg := ParseJSONRPCMessage('{"jsonrpc":"2.0","id":1,"method":"x",' +
+    '"params":{"value":"' + RUN + '"}}');
+  try
+    if Baseline <> nil then
+    begin
+      // A string member, so a parser that dropped it or nulled it
+      // would not pass for fpjson's empty string.
+      Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkRequest));
+      Value := Msg.Params.Find('value', jtString);
+      Expect<Boolean>(Value <> nil).ToBe(True);
+      if Value <> nil then
+        Expect<string>(Value.AsString).ToBe(Baseline.Get('value', ''));
     end
-  else
-  begin
-    Msg := ParseJSONRPCMessage('{"jsonrpc":"2.0","id":1,"method":"x",' +
-      '"params":{"value":"' + RUN + '"}}');
-    try
+    else
+    begin
       Expect<Integer>(Ord(Msg.Kind)).ToBe(Ord(jrkInvalid));
       Expect<Integer>(Msg.ErrorCode).ToBe(JSONRPC_PARSE_ERROR);
-    finally
-      FreeJSONRPCMessage(Msg);
     end;
+  finally
+    FreeJSONRPCMessage(Msg);
+    Baseline.Free;
   end;
 end;
 

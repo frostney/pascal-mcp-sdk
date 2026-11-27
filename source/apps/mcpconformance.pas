@@ -151,14 +151,12 @@ end;
 // of UTF-8 strings, sent with its JSON as the text block.
 function FixtureArrayOutput(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
-var
-  Values: TJSONArray;
 begin
   // From escapes, not byte-constant literals: FPC 3.2.4 converts such a
   // literal when it is passed as a UTF8String, as TJSONArray.Add takes
   // it, and the text would go out encoded twice.
-  Values := TJSONArray(MCPParseJSON('["Gr\u00fc\u00dfe","\ud83d\ude00"]'));
-  Result := MCPStructuredResult(Values);
+  Result := MCPStructuredResult(MCPParseJSON(
+    '["Gr\u00fc\u00dfe","\ud83d\ude00"]'));
 end;
 
 // Output that breaks its integer outputSchema (#91): the server answers
