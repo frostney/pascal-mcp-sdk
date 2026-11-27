@@ -222,7 +222,10 @@ begin
 
     Server.RegisterTool('greet_user',
       'Greet a person; asks who to greet via elicitation (MRTR)',
-      '{"type":"object"}', GreetUserHandler);
+      '{"type":"object"}', GreetUserHandler)
+      // Refused up front for a client without elicitation, instead of
+      // after the handler ran.
+      .RequiresClientCapability('elicitation');
 
     Server.RegisterTool('countdown',
       'Count down the given seconds; stops early when cancelled',
@@ -235,6 +238,9 @@ begin
 
     Server.RegisterPrompt('greet', 'Compose a friendly greeting',
       PromptArguments.Add('name', 'Who to greet'), GreetPromptHandler);
+    // Suggestions while the user types the name (completion/complete).
+    Server.RegisterPromptCompletion('greet', 'name',
+      ['Ada', 'Alan', 'Grace', 'Niklaus']);
 
     Server.RegisterTextResource('mcp://pascal-mcp-sdk/greeting', 'greeting',
       'text/plain', 'Hello from pascal-mcp-sdk, a FreePascal MCP server.',

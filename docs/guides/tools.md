@@ -7,7 +7,8 @@ name, a description the model reads, a JSON Schema for its arguments,
 and a Pascal handler. Register tools on a `TMCPServer` before serving;
 the library validates every call against the schema before your
 handler runs, turns handler exceptions into in-band errors the model
-can correct against, and stamps the protocol envelope — your handler
+can correct against (an `EMCPProtocolError` answers with its JSON-RPC
+error instead), and stamps the protocol envelope — your handler
 contains domain logic and nothing else.
 
 ## The registration model
@@ -24,8 +25,8 @@ Server.RegisterTool('greet', 'Greet someone by name',
 The schema can be declared four ways — pick per tool, they coexist on
 one server:
 
-- **Fluent builder** — `ObjectSchema.AddString(...).AddNumber(...)`
-  for the flat object schemas most tools need. See
+- **Fluent builder** — `ObjectSchema.AddString(...).AddNumber(...)`,
+  with enums, defaults, arrays and nested objects. See
   [Schemas](schemas.md).
 - **Typed argument class** — a `TMCPArgs` descendant whose published
   properties *are* the schema; the handler receives a populated,
@@ -79,25 +80,38 @@ Results are built with the helpers in
 
 - `MCPTextResult('...')` — plain text content.
 - `MCPStructuredResult(Text, StructuredData)` — text plus
-  `structuredContent` matching your output schema.
+  `structuredContent` matching your output schema, which the server
+  checks before sending when the schema is inside
+  [the enforced subset](schemas.md#the-enforced-subset).
+  `MCPStructuredResult(StructuredData)` uses the serialized JSON as the
+  text. The value can be any JSON value: an array of records, a number.
 - `MCPImageResult(Bytes, 'image/png')` — one image content block;
   takes raw bytes (base64-encoded for you) or already-base64 data.
 - `MCPErrorResult('...')` — an explicit in-band error
   (`isError: true`).
 
+An exception a handler raises also becomes an in-band `isError`
+result: that is the channel a model reads and corrects against. When
+the request itself must be refused with a JSON-RPC error instead, for
+example a client capability it needs and did not declare, raise
+`EMCPProtocolError` (see
+[Answering with a JSON-RPC error](../reference/server.md#answering-with-a-json-rpc-error)).
+
 ## Validation before your handler runs
 
-Every call is checked against the registered schema's enforceable
-subset — `type`, `properties`, `required`, `enum`, `default` —
-before the handler runs. Violations become in-band `isError` results
+Every call is checked before the handler runs. A raw schema's
+arguments are checked against the enforced subset — `type`,
+`properties`, `required`, `items`, `enum`, `default`, nested to any
+depth; a typed tool's are checked as they bind to its argument class.
+Violations become in-band `isError` results
 in the same shape for raw and typed tools, so the model sees what it
 got wrong and retries. Absent optional arguments are seeded with their
 schema `default`; unknown argument properties are ignored.
 
 A raw schema that uses keywords *outside* the enforced subset fails at
 startup, naming the offending keyword, unless the registration is
-marked `.ApplicationValidated` — the documented escape hatch that
-hands argument validation to your handler (see
+marked `.ApplicationValidated` — the documented escape hatch, for input
+schemas only, that hands argument validation to your handler (see
 [Schemas](schemas.md#the-enforced-subset)).
 
 Deeper, semantic validation stays your handler's job — report
@@ -105,7 +119,58 @@ violations with `MCPErrorResult`, not exceptions, when you want the
 model to read and correct them. Exceptions work too: an escaped
 handler exception becomes an `isError: true` result automatically
 (with the message redactable — see
-[Configuration](configuration.md#redacterrordetails)).
+[Configuration](configuration.md#redacterrordetails)); an
+`EMCPProtocolError` is the exception to that, and is never redacted.
+
+## Routing headers (x-mcp-header)
+
+A parameter can be mirrored into an HTTP header so that load balancers
+and gateways can route on it without reading the body. Mark it with
+`x-mcp-header` in a raw schema:
+
+```pascal
+Server.RegisterTool('execute_sql', 'Run SQL in a region',
+  '{"type":"object","properties":{' +
+  '"region":{"type":"string","x-mcp-header":"Region"},' +
+  '"query":{"type":"string"}},"required":["region","query"]}',
+  SqlHandler);
+```
+
+`x-mcp-header` is part of the enforced subset, so the server still
+validates the arguments.
+
+Over Streamable HTTP the client then sends `Mcp-Param-Region:
+us-west1` with the call, and the server checks that the header matches
+the body. For each header the called tool designates: an argument with
+a non-null value needs its header exactly once, and an absent or
+`null` argument needs none. The call is refused with HTTP 400 and
+`-32020` when a needed header is missing, sent more than once or
+different from the body, or when a header comes for an absent or
+`null` argument. `Mcp-Param-*` headers the tool does not designate are
+ignored, as the spec asks. Header names match in any ASCII case. An empty header is the empty string's,
+and integers compare as numbers within the JavaScript safe range, so a
+body `42.0` matches a header `42`. The comparison goes by the declared
+type: a body value of another type, or an array or object, never
+matches. The HTTP server strips a header value's leading and trailing
+whitespace and control bytes before the check sees it, so a plain value
+with such edges (which a client must base64-encode) is not caught; the
+decoded comparison still holds. At registration the server checks the annotations
+the way a client would: a non-empty header token, unique (ignoring
+case), only on a `string`, `integer` or `boolean` property, and only on
+properties reached through `properties` from the root. A violation
+raises `EMCPServer`, because a client would drop the whole tool from
+its list
+([x-mcp-header](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header),
+verified 2026-11-26). Header values are visible to every intermediary,
+so do not mark secrets or personal data.
+
+> [!NOTE]
+> Upgrading (breaking): `=?base64?...?=` values in `Mcp-Name`, sent for
+> every tool, prompt and resource whether annotated or not, now decode
+> strictly too. A custom client that left the base64 padding off gets
+> 400; send standard base64 with its `=` padding, as the spec's Value
+> Encoding asks. The official TypeScript client (2.0.0) already does
+> (verified 2026-11-27: it encodes with `btoa`, which pads).
 
 ## Annotations
 
@@ -257,7 +322,24 @@ A handler that needs more input mid-call — a missing value, a user
 confirmation, a model completion — returns `MCPInputRequired(...)`
 instead of a final result. The client gathers the responses and
 retries the same call; your handler re-enters with the responses
-available on `ACtx`:
+available on `ACtx`. When every call needs a kind of request, declare
+its capability on the registration, so a client without it is refused
+before the handler runs rather than after it has streamed progress:
+
+```pascal
+Server.RegisterTool('greet_user', 'Greet a person', '{"type":"object"}',
+  GreetUserHandler).RequiresClientCapability('elicitation');
+```
+
+A declaration is unconditional: it checks the top-level capability on
+every modern-era call, retries with `inputResponses` included. Leave it
+off when only some calls ask, and check `ACtx.HasCapability` in the
+handler before its first notification instead. It does not check a
+mode either: a client that declares only URL elicitation passes the
+check above, so a handler that sends a form checks that the client's
+`elicitation` object is empty or names `form` (an empty one means form
+mode only, per the
+[elicitation capabilities](https://modelcontextprotocol.io/specification/2026-07-28/client/elicitation#capabilities)).
 
 ```pascal
 function GreetUserHandler(AArguments: TJSONObject;
@@ -275,8 +357,13 @@ begin
 end;
 ```
 
-The server stays stateless across rounds — your `requestState` string
-is echoed back by the client (treat it as untrusted input). Request
+The server stays stateless across rounds: your `requestState` string
+travels through the client, sealed by the server so that a tampered or
+expired copy, or one presented for another tool, other arguments or
+another server, is refused before your handler runs. A valid token can
+be presented again until it expires, so a side effect that must happen
+once needs its own guard (see
+[requestState sealing](configuration.md#requeststate-sealing)). Request
 kinds are capability-gated per request. The entry builders and
 accessors are documented in
 [Client requests](../reference/client-requests.md).

@@ -33,6 +33,8 @@ type
     // Feed AInput through the loop; returns the raw bytes written out.
     function RunLoop(const AInput: string;
       AMaxLineLength: Integer = MCP_STDIO_DEFAULT_MAX_LINE): string;
+    function RunWithCodePage(const AInput: string;
+      ACodePage: TSystemCodePage; out AAfter: TSystemCodePage): string;
   protected
     procedure BeforeEach; override;
     procedure AfterEach; override;
@@ -43,6 +45,8 @@ type
     procedure TestCrLfInputTolerated;
     procedure TestBlankLinesSkipped;
     procedure TestNotificationNoOutput;
+    procedure TestCallerCodePageRestored;
+    procedure TestStderrCodePageRestored;
     procedure TestMultipleRequests;
     procedure TestUtf8RoundTrip;
     procedure TestOversizedLineRejected;
@@ -268,6 +272,81 @@ begin
   Expect<Boolean>(Pos('"supportedVersions"', Output) > 0).ToBe(True);
 end;
 
+// The output file is the caller's: the loop writes UTF-8 to it and puts
+// its code page back on return (#102 review).
+// Runs AInput through the loop with the output file's raw code page
+// set to ACodePage; returns the bytes written and, in AAfter, the raw
+// code page the file has once the loop returns.
+function TStdioLoop.RunWithCodePage(const AInput: string;
+  ACodePage: TSystemCodePage; out AAfter: TSystemCodePage): string;
+var
+  InFile, OutFile: Text;
+  Bytes: TStringStream;
+begin
+  Bytes := TStringStream.Create(AInput);
+  try
+    Bytes.SaveToFile(FDir + 'in.txt');
+  finally
+    Bytes.Free;
+  end;
+  Assign(InFile, FDir + 'in.txt');
+  Reset(InFile);
+  Assign(OutFile, FDir + 'out.txt');
+  Rewrite(OutFile);
+  TextRec(OutFile).CodePage := ACodePage;
+  try
+    RunMCPStdioLoop(InFile, OutFile, FServer, MCP_STDIO_DEFAULT_MAX_LINE);
+    AAfter := TextRec(OutFile).CodePage;
+  finally
+    Close(InFile);
+    Close(OutFile);
+  end;
+  Bytes := TStringStream.Create('');
+  try
+    Bytes.LoadFromFile(FDir + 'out.txt');
+    Result := Bytes.DataString;
+  finally
+    Bytes.Free;
+  end;
+end;
+
+// The output file is the caller's: the loop writes UTF-8 to it whatever
+// its code page, and puts the exact value back on return, 0 included
+// (#102 review).
+procedure TStdioLoop.TestCallerCodePageRestored;
+const
+  REQUEST = '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{' +
+    '"name":"echo","arguments":{"message":"' + UTF8_PAYLOAD + '"},';
+var
+  After: TSystemCodePage;
+  Output: string;
+begin
+  Output := RunWithCodePage(REQUEST + META_MODERN + '}}'#10, 1252, After);
+  Expect<Integer>(After).ToBe(1252);
+  Expect<Boolean>(Pos('"text" : "' + UTF8_PAYLOAD + '"', Output) > 0)
+    .ToBe(True);
+  RunWithCodePage('', 0, After);
+  Expect<Integer>(After).ToBe(0);
+end;
+
+// MCPLogToStderr leaves ErrOutput's code page as the host had it.
+procedure TStdioLoop.TestStderrCodePageRestored;
+var
+  Saved: TSystemCodePage;
+begin
+  Saved := TextRec(ErrOutput).CodePage;
+  try
+    TextRec(ErrOutput).CodePage := 1252;
+    MCPLogToStderr('mcp-stderr-probe (expected in test output)');
+    Expect<Integer>(TextRec(ErrOutput).CodePage).ToBe(1252);
+    TextRec(ErrOutput).CodePage := 0;
+    MCPLogToStderr('mcp-stderr-probe (expected in test output)');
+    Expect<Integer>(TextRec(ErrOutput).CodePage).ToBe(0);
+  finally
+    TextRec(ErrOutput).CodePage := Saved;
+  end;
+end;
+
 function WaiterCall(const AId: string): string;
 begin
   Result := '{"jsonrpc":"2.0","id":' + AId + ',"method":"tools/call",' +
@@ -317,6 +396,10 @@ end;
 
 procedure TStdioLoop.SetupTests;
 begin
+  Test('the caller''s output code page is restored exactly; output UTF-8',
+    TestCallerCodePageRestored);
+  Test('MCPLogToStderr restores the stderr code page exactly',
+    TestStderrCodePageRestored);
   Test('one request line → one response line', TestOneLineInOneLineOut);
   Test('LF-only line terminators', TestLfOnlyTerminators);
   Test('CRLF input tolerated', TestCrLfInputTolerated);
