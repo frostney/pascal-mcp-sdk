@@ -98,8 +98,8 @@ Six workflows (see [.github/workflows/](../../.github/workflows/)):
   `.github/scripts/check-reference-docs.sh` (every
   `MCP*`/`Register*` function or procedure in the interface of
   `MCP.Server` and `MCP.Content` must appear in `docs/reference/`). Plus
-  a blocking markdownlint job, the required `interop` job, and the
-  blocking `conformance` job (both below).
+  a blocking markdownlint job, and the required `interop` and
+  `conformance` jobs (both below).
 - **ci.yml** — push to main: the wider native matrix (Linux x64 and
   arm64, macOS arm64 and x64, Win64 and Win32) as the post-merge
   confirmation signal; it does not run the conformance job.
@@ -149,7 +149,8 @@ every scenario with `initialize`, which the binding rejects, so 1 of
 its 31 checks passes. The runner runs the suite's requirement set for
 2026-07-28 (`--requirements 2026-07-28`): the scenarios that revision
 requires, at its stateless wire, plus the extension and pending
-scenarios the suite runs without scoring. Run it locally with
+scenarios the suite runs without scoring. It runs in CI as the
+**required** `conformance` job on every PR. Run it locally with
 `lwpt build && lwpt run conformance` (Node 22 or later; npx fetches the
 suite from the npm registry). Each run writes its per-scenario
 `checks.json` files into a new directory of its own under

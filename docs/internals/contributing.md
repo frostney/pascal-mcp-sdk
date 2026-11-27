@@ -183,7 +183,7 @@ registry.
 | Linux / macOS / Windows legs | checksum-verified lwpt install, `install --frozen`, build, unit suites, mcpsmoke on every platform |
 | `fpc @lwpt.cfg` leg | the zero-install path still works |
 | `interop` (required) | the official TypeScript clients still talk to `mcpdemo` — a red interop job is a real cross-implementation regression |
-| `conformance` | the official conformance suite's 2026-07-28 requirement set, run against `mcpconformance`, still matches `tools/conformance/baseline.json` |
+| `conformance` (required) | the official conformance suite's 2026-07-28 requirement set, run against `mcpconformance`, still matches `tools/conformance/baseline.json` |
 | format / agents `--check` | formatter and AGENTS.md command block have not drifted |
 | `check-reference-docs.sh` | every `MCP*`/`Register*` routine in the interface of `MCP.Server` and `MCP.Content` is documented in `docs/reference/` |
 | health / duplication | complexity and token-clone ceilings in `lwpt.toml` hold — ratchets set just above the adoption-day baseline, so they shrink but never grow unnoticed |
