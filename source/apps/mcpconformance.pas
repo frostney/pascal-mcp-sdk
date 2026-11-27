@@ -136,6 +136,48 @@ begin
       'text/plain', 'Caf' + #$C3#$A9 + ' ' + #$F0#$9F#$98#$80)]);
 end;
 
+// Not in the reference fixture: a deliberate JSON-RPC error raised by
+// a handler (EMCPProtocolError), with an application code and data.
+function FixtureProtocolError(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := Default(TMCPToolResult);
+  raise EMCPProtocolError.Create(4290, 'Quota exhausted: ' + #$E2#$82#$AC + '0 left',
+    JSONObjectOf('{"retryAfterSeconds":60}'));
+end;
+
+// Non-object structured output (#91, not a suite scenario): an array
+// of UTF-8 strings, sent with its JSON as the text block.
+function FixtureArrayOutput(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Values: TJSONArray;
+begin
+  Values := TJSONArray.Create;
+  Values.Add('Gr' + #$C3#$BC + #$C3#$9F + 'e');
+  Values.Add(#$F0#$9F#$98#$80);
+  Result := MCPStructuredResult(Values);
+end;
+
+// Output that breaks its integer outputSchema (#91): the server answers
+// isError instead of sending it.
+function FixtureBadOutput(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult(TJSONString.Create('not a number'));
+end;
+
+// A tool definition with an outputSchema, for the #91 fixture tools.
+function OutputTool(const AName, ADescription,
+  AOutputSchema: string): TJSONObject;
+begin
+  Result := TJSONObject.Create;
+  Result.Add('name', AName);
+  Result.Add('description', ADescription);
+  Result.Add('inputSchema', GetJSON(NO_ARGUMENTS));
+  Result.Add('outputSchema', GetJSON(AOutputSchema));
+end;
+
 function MultipleContentTypes(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
@@ -348,8 +390,8 @@ begin
   Result := MCPInputRequired(Requests, 'multiple-inputs');
 end;
 
-// The state only names the round: the library passes the client's echo
-// through unverified until #89, so nothing from it reaches the result.
+// The state names the round; the library verifies it before this
+// handler sees it again (#89).
 function IRMultiRound(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
@@ -368,21 +410,17 @@ begin
 end;
 
 // The suite sends this state back modified and expects a JSON-RPC
-// error. The handler compares the echo with what it minted; a mismatch
-// can only raise, which tools/call reports as an isError result, so the
-// scenario fails until the library verifies requestState itself (#89).
+// error. The handler does no checking of its own: the library seals
+// every requestState and answers a tampered one -32602 before any
+// handler runs (#89).
 function IRTamperedState(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 const
   MINTED = 'tamper-test';
 begin
-  if ACtx.RequestState <> '' then
-  begin
-    if ACtx.RequestState <> MINTED then
-      raise Exception.Create('requestState integrity check failed');
-    if MCPInputResponse(ACtx, 'confirm') <> nil then
-      Exit(MCPTextResult('integrity-ok: state verified'));
-  end;
+  if (ACtx.RequestState = MINTED) and
+    (MCPInputResponse(ACtx, 'confirm') <> nil) then
+    Exit(MCPTextResult('integrity-ok: state verified'));
   Result := MCPInputRequired(OneRequest('confirm',
     MCPElicitFormRequest('Please confirm', JSONObjectOf(CONFIRM_SCHEMA))),
     MINTED);
@@ -523,7 +561,7 @@ type
 
 const
   // Every tool without arguments, under the reference fixture's names.
-  ARGUMENTLESS_TOOLS: array[0..19] of TArgumentlessTool = (
+  ARGUMENTLESS_TOOLS: array[0..20] of TArgumentlessTool = (
     (Name: 'test_simple_text';
      Description: 'Tests simple text content response'; Handler: SimpleText),
     (Name: 'test_image_content';
@@ -536,6 +574,9 @@ const
     (Name: 'fixture_resource_link';
      Description: 'Returns text and a resource link (not a suite scenario)';
      Handler: FixtureResourceLink),
+    (Name: 'fixture_protocol_error';
+     Description: 'Refuses with a JSON-RPC error of its own (not a suite scenario)';
+     Handler: FixtureProtocolError),
     (Name: 'test_multiple_content_types';
      Description: 'Tests response with multiple content types (text, image, resource)';
      Handler: MultipleContentTypes),
@@ -589,6 +630,13 @@ begin
   AServer.RegisterTool('json_schema_2020_12_tool',
     'Tool with JSON Schema 2020-12 features', JSON_SCHEMA_2020_12,
     JsonSchemaTool).ApplicationValidated;
+  AServer.RegisterTool(OutputTool('fixture_array_output',
+    'Returns an array of UTF-8 strings as structured output (not a suite ' +
+    'scenario)', '{"type":"array","items":{"type":"string"}}'),
+    FixtureArrayOutput);
+  AServer.RegisterTool(OutputTool('fixture_bad_output',
+    'Returns output that breaks its schema (not a suite scenario)',
+    '{"type":"integer"}'), FixtureBadOutput);
   AServer.RegisterTool('test_custom_headers',
     'Tool whose region argument is mirrored into an Mcp-Param header',
     CUSTOM_HEADER_SCHEMA, CustomHeaders).ApplicationValidated;

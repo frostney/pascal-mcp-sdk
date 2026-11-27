@@ -114,11 +114,10 @@ type
     // MRTR retry payload (modern era only; spec pattern verified
     // 2026-08-08, see RESULT_TYPE_INPUT_REQUIRED): inputResponses is
     // borrowed from the request tree (nil when this is not a retry);
-    // RequestState is the handler's own opaque state echoed verbatim
-    // by the client ('' when absent). The spec requires servers to
-    // treat requestState as attacker-controlled input — integrity
-    // protection is the handler's contract when the state influences
-    // authorization or business logic.
+    // RequestState is the client's echo as received ('' when absent);
+    // MCP.Server verifies that sealed token and replaces it with the
+    // handler's own state before any handler runs (#89), because the
+    // spec makes requestState attacker-controlled input.
     InputResponses: TJSONObject;
     RequestState: string;
     // Set by the dispatching server, not by ExtractRequestContext.
@@ -183,6 +182,17 @@ function BuildUnsupportedVersionData(
 // True when AVersion is one of the legacy revisions this library can
 // answer through the initialize handshake.
 function IsLegacyProtocolVersion(const AVersion: string): Boolean;
+
+// -32021 MissingRequiredClientCapability data payload:
+// {requiredCapabilities: {<ACapability>: {}}}. Fresh, owned by the
+// caller.
+function BuildMissingCapabilityData(const ACapability: string): TJSONObject;
+
+// True when AData is valid -32021 data: an object whose
+// requiredCapabilities is a ClientCapabilities object naming at least
+// one capability, each shaped as the schema types it. AData is
+// borrowed and may be nil.
+function IsMissingCapabilityData(AData: TJSONData): Boolean;
 
 implementation
 
@@ -396,6 +406,82 @@ begin
   if Meta.Find(META_KEY_SERVER_INFO) = nil then
     Meta.Add(META_KEY_SERVER_INFO,
       BuildServerInfo(AServerName, AServerVersion));
+end;
+
+// -32021 data payload: {requiredCapabilities: {<name>: {}}} (schema
+// anchor MissingRequiredClientCapabilityError, verified 2026-08-08).
+function BuildMissingCapabilityData(const ACapability: string): TJSONObject;
+var
+  Capabilities: TJSONObject;
+begin
+  Capabilities := TJSONObject.Create;
+  Capabilities.Add(ACapability, TJSONObject.Create);
+  Result := TJSONObject.Create;
+  Result.Add('requiredCapabilities', Capabilities);
+end;
+
+function IsJSONObjectValue(AData: TJSONData): Boolean;
+begin
+  Result := (AData <> nil) and (AData.JSONType = jtObject);
+end;
+
+// True when every member of AObject that AFields names (all members
+// when AFields is empty) is a JSON object.
+function MembersAreObjects(AObject: TJSONObject;
+  const AFields: array of string): Boolean;
+var
+  I: Integer;
+begin
+  if Length(AFields) = 0 then
+  begin
+    for I := 0 to AObject.Count - 1 do
+      if not IsJSONObjectValue(AObject.Items[I]) then
+        Exit(False);
+    Exit(True);
+  end;
+  for I := 0 to High(AFields) do
+    if (AObject.IndexOfName(AFields[I]) >= 0) and
+      not IsJSONObjectValue(AObject.Elements[AFields[I]]) then
+      Exit(False);
+  Result := True;
+end;
+
+// One entry of requiredCapabilities against the ClientCapabilities
+// schema: every capability is an object, and the members the schema
+// types are objects too (sampling.context/tools, elicitation.form/url,
+// each experimental and extensions entry).
+function IsCapabilityEntry(const AName: string; AValue: TJSONData): Boolean;
+begin
+  Result := IsJSONObjectValue(AValue);
+  if not Result then
+    Exit;
+  if AName = 'sampling' then
+    Result := MembersAreObjects(TJSONObject(AValue), ['context', 'tools'])
+  else if AName = 'elicitation' then
+    Result := MembersAreObjects(TJSONObject(AValue), ['form', 'url'])
+  else if (AName = 'experimental') or (AName = 'extensions') then
+    Result := MembersAreObjects(TJSONObject(AValue), []);
+end;
+
+// -32021's data MUST carry requiredCapabilities, a ClientCapabilities
+// object (schema MissingRequiredClientCapabilityError, verified
+// 2026-11-27 against schema/2026-07-28/schema.json); this one also
+// needs it to name at least one capability.
+function IsMissingCapabilityData(AData: TJSONData): Boolean;
+var
+  Required: TJSONData;
+  I: Integer;
+begin
+  if not IsJSONObjectValue(AData) then
+    Exit(False);
+  Required := TJSONObject(AData).Find('requiredCapabilities');
+  if not IsJSONObjectValue(Required) or (Required.Count = 0) then
+    Exit(False);
+  for I := 0 to Required.Count - 1 do
+    if not IsCapabilityEntry(TJSONObject(Required).Names[I],
+      Required.Items[I]) then
+      Exit(False);
+  Result := True;
 end;
 
 end.

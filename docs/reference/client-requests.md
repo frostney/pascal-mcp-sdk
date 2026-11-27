@@ -20,10 +20,16 @@ function MCPPromptInputRequired(AInputRequests: TJSONObject;
 
 `AInputRequests` maps your keys to request entries (built below);
 the client fulfils them and retries the original call with the
-responses. `ARequestState` is your opaque round-trip state, echoed
-verbatim by the client — **treat it as attacker-controlled input**
-on re-entry; integrity protection is your handler's job when the
-state influences authorization or business logic.
+responses. `ARequestState` is your round-trip state. The server seals
+it before it leaves (HMAC-SHA-256 over the state, an expiry, the method,
+the tool or prompt name, a digest of the arguments and the server's
+name) and verifies the client's echo before your handler runs again:
+a token that was altered, has expired, or comes back on another tool,
+prompt or argument set is answered `-32602`, and the handler never
+sees it. On re-entry `ACtx.RequestState` is your own string again.
+The client can still read the state, so keep secrets out of it; key
+and lifetime settings are in
+[Configuration](../guides/configuration.md#requeststate-sealing).
 
 ## Request entry builders
 

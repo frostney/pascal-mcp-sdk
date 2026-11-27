@@ -26,7 +26,8 @@ uses
 
   fpjson,
   jsonparser,
-  jsonscanner;
+  jsonscanner,
+  MCP.Crypto;
 
 const
   META_MODERN =
@@ -281,6 +282,26 @@ begin
       'content: resource link (MCPResourceLink), UTF-8 byte-exact');
     Response.Free;
 
+    // Non-object structured output and its JSON text block (#91).
+    Response := RoundTripWithLine(Fixture,
+      '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{' +
+      '"name":"fixture_array_output",' + META_MODERN + '}}', ResponseLine);
+    Check(Pos('"content" : [{ "type" : "text", "text" : "[\"Gr' +
+      #$C3#$BC + #$C3#$9F + 'e\", \"' + #$F0#$9F#$98#$80 + '\"]" }], ' +
+      '"isError" : false, "structuredContent" : ["Gr' + #$C3#$BC + #$C3#$9F +
+      'e", "' + #$F0#$9F#$98#$80 + '"]', ResponseLine) > 0,
+      'output: array structuredContent and its JSON text, UTF-8 byte-exact');
+    Response.Free;
+
+    Response := RoundTripWithLine(Fixture,
+      '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{' +
+      '"name":"fixture_bad_output",' + META_MODERN + '}}', ResponseLine);
+    Check(Pos('"text" : "Tool \"fixture_bad_output\" produced output that ' +
+      'does not match its outputSchema: Structured output must be an ' +
+      'integer" }], "isError" : true', ResponseLine) > 0,
+      'output: output breaking its schema becomes isError');
+    Response.Free;
+
     Response := RoundTripWithLine(Fixture,
       '{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{' +
       '"name":"test_prompt_with_embedded_resource","arguments":{' +
@@ -292,6 +313,18 @@ begin
       (PathString(Response, 'result.messages[0].content.resource.mimeType') =
       'text/plain'),
       'content: prompt message with an embedded resource and its MIME type');
+    Response.Free;
+
+    // A handler's deliberate JSON-RPC error (#88) reaches stdout with its
+    // code, message and data.
+    Response := RoundTripWithLine(Fixture,
+      '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{' +
+      '"name":"fixture_protocol_error",' + META_MODERN + '}}', ResponseLine);
+    Check((PathInt(Response, 'error.code') = 4290) and
+      (Pos('"message" : "Quota exhausted: ' + #$E2#$82#$AC + '0 left"',
+      ResponseLine) > 0) and
+      (PathInt(Response, 'error.data.retryAfterSeconds') = 60),
+      'content: handler-raised protocol error, code, message and data');
     Response.Free;
 
     // The fixture's ApplicationValidated tools check their own arguments.
@@ -331,10 +364,32 @@ begin
   end;
 end;
 
+
+// The "a" field (argument digest) of a sealed requestState's envelope,
+// '' when the token does not decode.
+function EnvelopeArgumentsDigest(const AToken: string): string;
+var
+  Parts: TStringArray;
+  Envelope: RawByteString;
+  Data: TJSONData;
+begin
+  Result := '';
+  Parts := AToken.Split(['.']);
+  if (Length(Parts) <> 3) or not TryBase64UrlDecode(Parts[1], Envelope) then
+    Exit;
+  Data := GetJSON(Envelope);
+  try
+    if (Data.JSONType = jtObject) and (TJSONObject(Data).Find('a') <> nil) then
+      Result := TJSONObject(Data).Get('a', '');
+  finally
+    Data.Free;
+  end;
+end;
+
 var
   Demo: TProcess;
   Response: TJSONObject;
-  ResponseLine: string;
+  ResponseLine, SealedState: string;
   ServerInfo: TJSONData;
 
 begin
@@ -474,13 +529,34 @@ begin
       'MRTR round 1: resultType input_required');
     Check(PathString(Response, 'result.inputRequests.who.method') =
       'elicitation/create', 'MRTR round 1: elicitation request present');
-    Check(PathString(Response, 'result.requestState') = 'greet-round-1',
-      'MRTR round 1: requestState carried');
+    // The handler's state leaves sealed (#89), never as plain text: the
+    // MRTR page makes requestState attacker-controlled input whose
+    // integrity a server MUST protect (verified 2026-11-26,
+    // https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr).
+    SealedState := PathString(Response, 'result.requestState');
+    Check((Pos('v1.', SealedState) = 1) and
+      (Pos('greet-round-1', SealedState) = 0),
+      'MRTR round 1: requestState sealed');
+    // The envelope binds the arguments by the SHA-256 of their canonical
+    // form: {} here, whose digest is fixed. CI runs this battery under
+    // LC_ALL=C too, where a code page conversion once changed it.
+    Check(EnvelopeArgumentsDigest(SealedState) =
+      'RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o',
+      'MRTR round 1: argument digest is SHA-256 of {} on any locale');
+    Response.Free;
+    // A forged state is refused before the handler runs.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{' +
+      '"name":"greet_user","inputResponses":{"who":{"action":"accept",' +
+      '"content":{"name":"Ada"}}},"requestState":"greet-round-1",' +
+      META_MRTR + '}}');
+    Check(PathInt(Response, 'error.code') = -32602,
+      'MRTR retry: forged requestState → -32602');
     Response.Free;
     Response := RoundTrip(Demo,
       '{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{' +
       '"name":"greet_user","inputResponses":{"who":{"action":"accept",' +
-      '"content":{"name":"Ada"}}},"requestState":"greet-round-1",' +
+      '"content":{"name":"Ada"}}},"requestState":"' + SealedState + '",' +
       META_MRTR + '}}');
     Check(PathString(Response, 'result.resultType') = 'complete',
       'MRTR retry: resultType complete');
