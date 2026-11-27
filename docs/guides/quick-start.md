@@ -146,11 +146,13 @@ Transport.Run;            // blocks; Transport.Stop unblocks it
 
 Try it: `./build/mcpdemo --http 3000`.
 
-Every HTTP request still carries `_meta` in its body, and the mirrored
-`Mcp-*` headers are derived from it. The transport does not reject a
-request that omits the header with a header error, but the core still
-requires `_meta` and answers `-32602` when it is missing — the header
-tolerance is not a way to skip `_meta`.
+Every HTTP request carries `_meta` in its body, and the mirrored
+`Mcp-*` headers are derived from it. A request whose body has
+`params._meta["io.modelcontextprotocol/protocolVersion"]` must send the
+matching headers too: a missing or different one is answered `400`
+with `-32020` before dispatch. Once the headers match, or when the body
+has no protocol version, the core checks the envelope and answers a
+missing required `_meta` field with `400` and `-32602` naming it.
 
 ## Talk to a stdio server by hand
 
