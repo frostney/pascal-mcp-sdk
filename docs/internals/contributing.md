@@ -198,8 +198,10 @@ registry.
   `docs/` or `website/`, and fails on broken internal doc links, so
   fix a red build there before merging. `build-and-test
   (linux-x64-fpc-3.2.4)` builds and runs the unit suites and mcpsmoke
-  with FPC 3.2.4-rc2; a failure there is a change in the next release
-  to look at, not a merge blocker.
+  with FPC 3.2.4-rc2. The `main` ruleset does not require it, so a red
+  run does not block a merge, but look at the step that failed: it may
+  be a change in the next FPC release, the toolchain install, or a
+  regression of the change itself.
 
 - Reverting via GitHub's Revert button produces a `Revert "..."`
   title git-cliff cannot parse — retitle it

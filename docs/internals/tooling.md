@@ -120,11 +120,14 @@ The checks a PR needs to merge are listed in
 
 - **pr.yml** — every PR: Linux + macOS + Windows legs, each doing
   checksum-verified lwpt release install, `lwpt install --frozen`,
-  then `build`, `test`, and the `mcpsmoke` E2E battery, on FPC 3.2.2;
-  a further Linux leg does the same on FPC 3.2.4-rc2, installed with
+  then `build`, `test`, and the `mcpsmoke` E2E battery. The Windows
+  leg installs FPC 3.2.2 itself; the Linux and macOS legs take the FPC
+  that apt and Homebrew offer, which the library supports as 3.2.2. A
+  further Linux leg does the same on FPC 3.2.4-rc2, installed with
   [frostney/fpc-toolchain](https://github.com/frostney/fpc-toolchain)
   pinned by commit, and is not a required check. The Linux legs
-  run `test` and `mcpsmoke` a second time under `LC_ALL=C`, where the
+  run `test` and `mcpsmoke` a second time under `LC_ALL=C` (the build
+  is not repeated there), where the
   locale's code page is US-ASCII (#102); reproduce it with
   `LC_ALL=C lwpt test && LC_ALL=C ./build/mcpsmoke`.
   One leg additionally runs the platform-independent gates:

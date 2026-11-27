@@ -424,7 +424,9 @@ begin
   try
     Baseline := ParseObj('{"value":"' + RUN + '"}');
   except
-    // 3.2.2 raises EJSONParser, 3.2.4 EScannerError: both EParserError.
+    // 3.2.4 rejects this run with EScannerError; EParserError is also
+    // the base of 3.2.2's EJSONParser, which it raises for invalid
+    // JSON, though it accepts this run.
     on EParserError do
       Baseline := nil;
   end;
