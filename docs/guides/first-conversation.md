@@ -50,7 +50,8 @@ its identity and capabilities in `_meta`:
 
 The server answers with the stateless revision it serves, its
 capabilities and extensions, its identity and the `Instructions` you
-set — the text the model reads to learn when to use your server:
+set, guidance a client can pass to its model about when to use your
+server:
 
 ```json
 {"jsonrpc":"2.0","id":"server-discover-probe-1","result":{
@@ -154,7 +155,8 @@ surface this way.
   supplied the instructions, the tool declarations and the result text;
   the library checked the requests and built the responses around them.
 - Model-facing text matters: the tool `description` and the server
-  `Instructions` are what the model reads when it chooses a tool.
+  `Instructions` are the guidance a client can hand its model when it
+  chooses a tool.
 - Clients move between protocol revisions at their own pace — the
   dual-era default on stdio absorbs that, so you never have to ask
   which client your users run.

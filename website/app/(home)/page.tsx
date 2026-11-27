@@ -205,8 +205,9 @@ export default async function HomePage() {
           </p>
         </div>
         <p className="mt-3 text-sm text-fd-muted-foreground text-center">
-          The 2026-07-28 core server operations are implemented and
-          interop-tested against both official MCP TypeScript clients;
+          Tools, resources and prompts are interop-tested against both
+          official MCP TypeScript clients, each in its own protocol
+          revision;
           see{' '}
           <Link href="/docs/reference/protocol-coverage" className="underline">
             protocol coverage
