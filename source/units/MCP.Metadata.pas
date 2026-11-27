@@ -62,7 +62,8 @@ procedure SetStringMember(ADefinition: TJSONObject; const AName,
 
 // A resource "annotations" object, or nil with AProblem set. AAudience
 // lists 'user' and/or 'assistant'; APriority is 0..1 (< 0 leaves it
-// out); ALastModified is an ISO 8601 timestamp ('' leaves it out). The
+// out); ALastModified is a date-time with a time zone
+// (2026-11-26T00:00:00Z, or a +HH:MM offset; '' leaves it out). The
 // result is the caller's.
 function BuildAnnotations(const AAudience: array of string;
   APriority: Double; const ALastModified: string;
@@ -73,10 +74,100 @@ implementation
 uses
   MCP.Schema;
 
-// Whether ASrc, an https: URI, has a usable authority: a host of
-// letters, digits, '.', '-', '_' and '~' (or a bracketed IPv6
-// address), after any user info, and a port of digits when one is
-// given (RFC 3986 section 3.2).
+// Whether AText is an IPv6 address (RFC 4291 section 2.2): eight
+// groups of one to four hex digits, at most one "::" standing for one
+// or more zero groups, and optionally a dotted IPv4 address in place of
+// the last two groups.
+function ValidIPv6(const AText: string): Boolean;
+var
+  Parts: TStringArray;
+  Text: string;
+  Groups, I, J, Value, Octets: Integer;
+  Compressed: Boolean;
+  Part, Octet: string;
+begin
+  Result := False;
+  Text := AText;
+  Compressed := Pos('::', Text) > 0;
+  if Compressed and (Pos('::', Copy(Text, Pos('::', Text) + 1, MaxInt)) > 0) then
+    Exit;
+  if Compressed then
+    Text := StringReplace(Text, '::', ':*:', []);
+  Parts := Text.Split([':']);
+  Groups := 0;
+  for I := 0 to High(Parts) do
+  begin
+    Part := Parts[I];
+    if Part = '*' then
+      Continue;
+    if Part = '' then
+    begin
+      // Only the empty ends a leading or trailing "::" leaves.
+      if not Compressed or ((I <> 0) and (I <> High(Parts))) then
+        Exit;
+      Continue;
+    end;
+    if (I = High(Parts)) and (Pos('.', Part) > 0) then
+    begin
+      // A trailing IPv4 address: four decimal octets.
+      Octets := 0;
+      for Octet in Part.Split(['.']) do
+      begin
+        if (Octet = '') or (Length(Octet) > 3) or
+          not TryStrToInt(Octet, Value) or (Value > 255) then
+          Exit;
+        for J := 1 to Length(Octet) do
+          if not (Octet[J] in ['0'..'9']) then
+            Exit;
+        Inc(Octets);
+      end;
+      if Octets <> 4 then
+        Exit;
+      Inc(Groups, 2);
+      Continue;
+    end;
+    if Length(Part) > 4 then
+      Exit;
+    for J := 1 to Length(Part) do
+      if not (Part[J] in ['0'..'9', 'a'..'f', 'A'..'F']) then
+        Exit;
+    Inc(Groups);
+  end;
+  if Compressed then
+    Result := Groups < 8
+  else
+    Result := Groups = 8;
+end;
+
+// Whether AHost is a registered name: unreserved characters and %XX
+// escapes (RFC 3986 section 3.2.2), at least one character.
+function ValidRegName(const AHost: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := AHost <> '';
+  I := 1;
+  while Result and (I <= Length(AHost)) do
+  begin
+    if AHost[I] = '%' then
+    begin
+      Result := (I + 2 <= Length(AHost)) and
+        (AHost[I + 1] in ['0'..'9', 'a'..'f', 'A'..'F']) and
+        (AHost[I + 2] in ['0'..'9', 'a'..'f', 'A'..'F']);
+      Inc(I, 3);
+    end
+    else
+    begin
+      Result := AHost[I] in ['A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_', '~'];
+      Inc(I);
+    end;
+  end;
+end;
+
+// Whether ASrc, an https: URI, has a usable authority: after any user
+// info, a registered name (unreserved characters and %XX escapes) or a
+// bracketed IPv6 address, and a port of digits when one is given
+// (RFC 3986 section 3.2).
 function ValidHttpsAuthority(const ASrc: string): Boolean;
 var
   Authority, Host, Port: string;
@@ -95,10 +186,8 @@ begin
     Stop := Pos(']', Authority);
     if Stop < 3 then
       Exit(False);
-    Host := Copy(Authority, 2, Stop - 2);
-    for I := 1 to Length(Host) do
-      if not (Host[I] in ['0'..'9', 'a'..'f', 'A'..'F', ':', '.']) then
-        Exit(False);
+    if not ValidIPv6(Copy(Authority, 2, Stop - 2)) then
+      Exit(False);
     Delete(Authority, 1, Stop);
     if Authority <> '' then
     begin
@@ -121,11 +210,8 @@ begin
     end
     else
       Host := Authority;
-    if Host = '' then
+    if not ValidRegName(Host) then
       Exit(False);
-    for I := 1 to Length(Host) do
-      if not (Host[I] in ['A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_', '~']) then
-        Exit(False);
   end;
   for I := 1 to Length(Port) do
     if not (Port[I] in ['0'..'9']) then
@@ -284,6 +370,54 @@ begin
   ADefinition.Add(AName, AValue);
 end;
 
+// Whether AText is a date-time with a time zone, as clients check
+// lastModified (the TypeScript SDK's zod iso.datetime with offsets):
+// YYYY-MM-DDTHH:MM:SS, an optional fraction, then Z or +HH:MM / -HH:MM
+// (RFC 3339 section 5.6).
+function ValidTimestamp(const AText: string): Boolean;
+
+  function Digits(AFrom, ACount: Integer; AMax: Integer): Boolean;
+  var
+    I, Value: Integer;
+  begin
+    Value := 0;
+    for I := AFrom to AFrom + ACount - 1 do
+    begin
+      if (I > Length(AText)) or not (AText[I] in ['0'..'9']) then
+        Exit(False);
+      Value := Value * 10 + Ord(AText[I]) - Ord('0');
+    end;
+    Result := Value <= AMax;
+  end;
+
+var
+  At: Integer;
+begin
+  Result := (Length(AText) >= 20) and Digits(1, 4, 9999) and
+    (AText[5] = '-') and Digits(6, 2, 12) and (AText[8] = '-') and
+    Digits(9, 2, 31) and (AText[11] = 'T') and Digits(12, 2, 23) and
+    (AText[14] = ':') and Digits(15, 2, 59) and (AText[17] = ':') and
+    Digits(18, 2, 59) and (Copy(AText, 6, 2) <> '00') and
+    (Copy(AText, 9, 2) <> '00');
+  if not Result then
+    Exit;
+  At := 20;
+  if AText[At] = '.' then
+  begin
+    Inc(At);
+    if (At > Length(AText)) or not (AText[At] in ['0'..'9']) then
+      Exit(False);
+    while (At <= Length(AText)) and (AText[At] in ['0'..'9']) do
+      Inc(At);
+  end;
+  if At > Length(AText) then
+    Exit(False);
+  if AText[At] = 'Z' then
+    Exit(At = Length(AText));
+  Result := (AText[At] in ['+', '-']) and (Length(AText) = At + 5) and
+    Digits(At + 1, 2, 23) and (AText[At + 3] = ':') and Digits(At + 4, 2, 59);
+end;
+
 // '' when every audience entry is one the schema names.
 function AudienceProblem(const AAudience: array of string): string;
 var
@@ -306,6 +440,11 @@ begin
   AProblem := AudienceProblem(AAudience);
   if (AProblem = '') and (APriority > 1) then
     AProblem := 'Annotation priority must be between 0 and 1';
+  // Clients reject the whole list over one bad timestamp (#96 review).
+  if (AProblem = '') and (ALastModified <> '') and
+    not ValidTimestamp(ALastModified) then
+    AProblem := Format('lastModified "%s" must be a date-time with a time ' +
+      'zone, such as 2026-11-26T00:00:00Z', [ALastModified]);
   if AProblem <> '' then
     Exit;
   Result := TJSONObject.Create;

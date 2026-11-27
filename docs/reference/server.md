@@ -174,12 +174,17 @@ Server.RegisterResource('mcp://app/report', 'report', 'text/csv', ReportReader)
   .CacheTtlMs(60000);
 ```
 
-An icon's `ASrc` must be an `https:` or `data:` URI, `ASizes` is
-space-separated (`'48x48 96x96'`) and `ATheme` is `light` or `dark`;
+An icon's `ASrc` must be a well-formed `https:` URI (a valid host,
+IPv6 in brackets, and a numeric port if any) or `data:` URI (base64
+data when it says `;base64`), `ASizes` is space-separated
+(`'48x48 96x96'`) and `ATheme` is `light` or `dark`. An annotation's
+`ALastModified` is a date-time with a time zone
+(`2026-11-01T00:00:00Z` or a `+HH:MM` offset), as clients check it;
 anything else raises `EMCPServer`. `Meta` takes ownership of its value
 and puts it under the definition's `_meta`. `CacheTtlMs` sets the
 `ttlMs` of reads served by the resource's reader (by default `0`,
-revalidate every time); static text uses the server's `CacheTtlMs`.
+revalidate every time); static text uses the server's `CacheTtlMs`,
+and `CacheTtlMs` on it raises.
 `TMCPToolOptions` has the same `Icon` and `Meta`. Fields from the
 [schema](https://modelcontextprotocol.io/specification/2026-07-28/schema)
 (verified 2026-11-26).

@@ -7718,7 +7718,58 @@ procedure GoodIcons;
 begin
   GuardServer.AddIcon('https://user@example.com:8443/i.png');
   GuardServer.AddIcon('https://[::1]/i.png');
+  GuardServer.AddIcon('https://[2001:db8::7]:443/i.png');
+  GuardServer.AddIcon('https://[::ffff:192.0.2.1]/i.png');
+  GuardServer.AddIcon('https://%65xample.com/i.png');
   GuardServer.AddIcon('data:image/svg+xml,%3Csvg%3E');
+end;
+
+procedure IconNotIPv6;
+begin
+  GuardServer.AddIcon('https://[abcd]/i.png');
+end;
+
+procedure IconTwoCompressions;
+begin
+  GuardServer.AddIcon('https://[1::2::3]/i.png');
+end;
+
+procedure IconNineGroups;
+begin
+  GuardServer.AddIcon('https://[1:2:3:4:5:6:7:8:9]/i.png');
+end;
+
+procedure IconBadEscape;
+begin
+  GuardServer.AddIcon('https://%zzample.com/i.png');
+end;
+
+procedure LastModifiedWords;
+begin
+  GuardServer.RegisterTextResource('mem://lm1', 'l', 'text/plain', 'l')
+    .Annotations([], -1, 'yesterday');
+end;
+
+procedure LastModifiedNoZone;
+begin
+  GuardServer.RegisterTextResource('mem://lm2', 'l', 'text/plain', 'l')
+    .Annotations([], -1, '2026-11-26T00:00:00');
+end;
+
+procedure LastModifiedBadMonth;
+begin
+  GuardServer.RegisterTextResource('mem://lm3', 'l', 'text/plain', 'l')
+    .Annotations([], -1, '2026-13-01T00:00:00Z');
+end;
+
+procedure LastModifiedGood;
+begin
+  GuardServer.RegisterTextResource('mem://lm4', 'l', 'text/plain', 'l')
+    .Annotations([], -1, '2026-11-26T00:00:00Z');
+  GuardServer.RegisterTextResource('mem://lm5', 'l', 'text/plain', 'l')
+    .Annotations([], -1, '2026-11-26T08:30:00.25+01:00');
+  GuardServer.RegisterTextResource('mem://lm6', 'l', 'text/plain', 'l')
+    .Annotations([], -1, '2026-11-26T08:30:00-05:00');
 end;
 
 procedure StaticTtl;
@@ -7749,6 +7800,17 @@ begin
   Expect<Boolean>(RefusedBy(IconBadBase64)).ToBe(True);
   Expect<Boolean>(RefusedBy(IconShortBase64)).ToBe(True);
   Expect<Boolean>(RefusedBy(GoodIcons)).ToBe(False);
+  // IPv6 syntax and %XX escapes in hosts (#96 review).
+  Expect<Boolean>(RefusedBy(IconNotIPv6)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconTwoCompressions)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconNineGroups)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconBadEscape)).ToBe(True);
+  // lastModified is a date-time with a time zone, as clients check it
+  // (#96 review).
+  Expect<Boolean>(RefusedBy(LastModifiedWords)).ToBe(True);
+  Expect<Boolean>(RefusedBy(LastModifiedNoZone)).ToBe(True);
+  Expect<Boolean>(RefusedBy(LastModifiedBadMonth)).ToBe(True);
+  Expect<Boolean>(RefusedBy(LastModifiedGood)).ToBe(False);
   // A raw definition's icons or _meta of the wrong type is refused, not
   // cast (#96 review).
   Expect<Boolean>(RefusedBy(IconOnNullIcons)).ToBe(True);

@@ -315,7 +315,8 @@ type
     // AKey under the definition's _meta; takes ownership of AValue.
     function Meta(const AKey: string; AValue: TJSONData): TMCPDefinitionOptions;
     // AAudience: 'user' and/or 'assistant'; APriority 0..1 (< 0 =
-    // unset); ALastModified an ISO 8601 timestamp ('' = unset).
+    // unset); ALastModified a date-time with a time zone, such as
+    // 2026-11-26T00:00:00Z or a +HH:MM offset ('' = unset).
     function Annotations(const AAudience: array of string;
       APriority: Double = -1; const ALastModified: string = ''): TMCPDefinitionOptions;
     function Size(ABytes: Int64): TMCPDefinitionOptions;
