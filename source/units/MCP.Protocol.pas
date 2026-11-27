@@ -114,11 +114,10 @@ type
     // MRTR retry payload (modern era only; spec pattern verified
     // 2026-08-08, see RESULT_TYPE_INPUT_REQUIRED): inputResponses is
     // borrowed from the request tree (nil when this is not a retry);
-    // RequestState is the handler's own opaque state echoed verbatim
-    // by the client ('' when absent). The spec requires servers to
-    // treat requestState as attacker-controlled input — integrity
-    // protection is the handler's contract when the state influences
-    // authorization or business logic.
+    // RequestState is the client's echo as received ('' when absent);
+    // MCP.Server verifies that sealed token and replaces it with the
+    // handler's own state before any handler runs (#89), because the
+    // spec makes requestState attacker-controlled input.
     InputResponses: TJSONObject;
     RequestState: string;
     // Set by the dispatching server, not by ExtractRequestContext.
