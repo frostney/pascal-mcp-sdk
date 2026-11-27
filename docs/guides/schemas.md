@@ -32,11 +32,15 @@ Server.RegisterTool('search', 'Search the product catalog',
   ObjectSchema.AddNumber('x').AddNumber('y'))` — an array of objects.
 - `AddObject('opts', ObjectSchema.AddBoolean('dry'))` — a nested
   object, built from another builder.
-- `.WithDefault(...)` after a property gives it a default (string,
-  integer, float or boolean) and makes it optional; the server seeds
-  the default into arguments that leave it out.
-- Properties are **required by default**; pass `False` as the third
-  argument to make one optional.
+- `.WithDefault(...)` after a primitive property gives it a default
+  (string, integer, float or boolean) and makes it optional; the server
+  seeds the default into arguments that leave it out. A default that
+  does not fit its property (another type, a value outside the enum, a
+  second default, or an array or object property) raises `EMCPSchema`.
+- Properties are **required by default**; pass `False` as the
+  `ARequired` argument to make one optional: the third argument of
+  `AddString`, `AddNumber`, `AddInteger` and `AddBoolean`, the fourth of
+  `AddEnum`, `AddArray` and `AddObject`, after their description.
 
 ```pascal
 ObjectSchema
@@ -120,8 +124,13 @@ type
   end;
 ```
 
-The instance owns its nested objects and frees them; an optional one
-the client left out is `nil`. Binding errors name the path, such as
+The instance owns its nested objects and frees them; binding replaces
+one your constructor made, freeing it, and an optional one the client
+left out is `nil` (an explicit `null` is refused, as the schema says
+`object`). Array properties must read and write a field (`read FTags
+write FTags`), not a method. Integer properties and elements accept a
+number with no fractional part (`2.0`), as the schema subset does.
+Classes nest at most 16 levels. Binding errors name the path, such as
 `Argument "page.size" must be an integer`.
 
 **Optionality** uses the standard property directives:
@@ -166,9 +175,9 @@ Server.RegisterTool('add', 'Add two numbers', TAddArgs, TSumResult,
 ## Raw schemas
 
 For schemas beyond what the builder or RTTI can express — `$ref`,
-nested objects, titles and annotations, per-property descriptions —
-register the JSON directly, as a string or a `TJSONObject`
-definition:
+composition (`anyOf`, `oneOf`), formats, patterns, titles and other
+annotations — register the JSON directly, as a string or a
+`TJSONObject` definition:
 
 ```pascal
 Server.RegisterTool('greet_user',

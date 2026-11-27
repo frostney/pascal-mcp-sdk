@@ -96,7 +96,6 @@ interface
 
 uses
   SysUtils,
-  typinfo,
   {$IFDEF UNIX}
   BaseUnix,
   {$ENDIF}

@@ -6554,14 +6554,15 @@ end;
 
 procedure TTypedNested.TestNestedArgumentsReachHandler;
 var
-  Response: TJSONObject;
+  Line: string;
 begin
-  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{' +
-    '"name":"batch","arguments":{"item":{"label_":"x","weights":' +
-    '["\u00e9","b"]}},' + META_MODERN + '}}');
-  Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
-    .AsString).ToBe('x:2:' + #$C3#$A9);
-  Response.Free;
+  // The handler's text carries the nested array's UTF-8 element; the
+  // wire line is asserted as bytes.
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"batch","arguments":{"item":{"label_":"x",' +
+    '"weights":["\u00e9","b"]}},' + META_MODERN + '}}', Line)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "x:2:' + #$C3#$A9 + '"', Line) > 0)
+    .ToBe(True);
 end;
 
 procedure TTypedNested.TestNestedErrorIsInBand;
