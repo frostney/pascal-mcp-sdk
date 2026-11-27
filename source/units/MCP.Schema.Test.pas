@@ -125,6 +125,16 @@ type
     procedure TestEnumEntriesOfOtherTypes;
   end;
 
+  // #90: x-mcp-header annotations and their constraints.
+  THeaderAnnotations = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestValidAnnotations;
+    procedure TestNoAnnotations;
+    procedure TestRejected;
+    procedure TestDataIsNotAnnotation;
+  end;
+
   TWireNumber = class(TTestSuite)
   public
     procedure SetupTests; override;
@@ -1044,11 +1054,161 @@ begin
     TestEnumEntriesOfOtherTypes);
 end;
 
+{ ───────── x-mcp-header annotations (#90) ───────── }
+
+// Constraints verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
+
+function HeaderViolation(const ASchema: string): string;
+var
+  Schema: TJSONObject;
+  Params: TMCPHeaderParameters;
+begin
+  Schema := TJSONObject(GetJSON(ASchema));
+  try
+    Result := MCPHeaderParameters(Schema, Params);
+  finally
+    Schema.Free;
+  end;
+end;
+
+procedure THeaderAnnotations.TestValidAnnotations;
+var
+  Schema: TJSONObject;
+  Params: TMCPHeaderParameters;
+begin
+  Schema := TJSONObject(GetJSON('{"type":"object","properties":{' +
+    '"region":{"type":"string","x-mcp-header":"Region"},' +
+    '"opts":{"type":"object","properties":{"dry":{"type":"boolean",' +
+    '"x-mcp-header":"Dry-Run"},"n":{"type":"integer","x-mcp-header":"N"}}}}}'));
+  try
+    Expect<string>(MCPHeaderParameters(Schema, Params)).ToBe('');
+    Expect<Integer>(Length(Params)).ToBe(3);
+    Expect<string>(Params[0].Header).ToBe('Region');
+    Expect<string>(Params[1].Header).ToBe('Dry-Run');
+    Expect<string>(Params[1].Path[0] + '.' + Params[1].Path[1]).ToBe('opts.dry');
+    Expect<string>(Params[2].ParamType).ToBe('integer');
+  finally
+    Schema.Free;
+  end;
+end;
+
+procedure THeaderAnnotations.TestNoAnnotations;
+begin
+  Expect<string>(HeaderViolation('{"type":"object","properties":' +
+    '{"a":{"type":"string"}}}')).ToBe('');
+end;
+
+procedure THeaderAnnotations.TestRejected;
+begin
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"a":' +
+    '{"type":"string","x-mcp-header":""}}}'))
+    .ToBe('x-mcp-header of "a" must be a non-empty HTTP token');
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"a":' +
+    '{"type":"string","x-mcp-header":"Re gion"}}}'))
+    .ToBe('x-mcp-header of "a" must be a non-empty HTTP token');
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"a":' +
+    '{"type":"number","x-mcp-header":"A"}}}'))
+    .ToBe('x-mcp-header of "a" needs type string, integer or boolean, not "number"');
+  Expect<string>(HeaderViolation('{"type":"object","properties":{' +
+    '"a":{"type":"string","x-mcp-header":"Key"},' +
+    '"b":{"type":"string","x-mcp-header":"KEY"}}}'))
+    .ToBe('x-mcp-header "KEY" is used twice, at "a" and "b" (headers compare ' +
+    'case-insensitively)');
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"list":' +
+    '{"type":"array","items":{"type":"string","x-mcp-header":"Item"}}}}'))
+    .ToBe('x-mcp-header at "list.items" is not on a property reachable ' +
+    'through "properties" from the root');
+  Expect<string>(HeaderViolation('{"type":"object","anyOf":[{"properties":' +
+    '{"a":{"type":"string","x-mcp-header":"A"}}}]}'))
+    .ToBe('x-mcp-header at "anyOf[0].properties.a" is not on a property ' +
+    'reachable through "properties" from the root');
+  Expect<string>(HeaderViolation('{"type":"object","x-mcp-header":"Root"}'))
+    .ToBe('x-mcp-header at "" is not on a property reachable through ' +
+    '"properties" from the root');
+end;
+
+// Only subschemas can carry an annotation: an instance in examples or a
+// $defs entry merely named x-mcp-header is data (#90 review). Verified
+// 2026-11-27 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
+procedure THeaderAnnotations.TestDataIsNotAnnotation;
+var
+  Schema, Prop: TJSONObject;
+  Params: TMCPHeaderParameters;
+begin
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"a":' +
+    '{"type":"object","examples":[{"x-mcp-header":"x"}]}},' +
+    '"examples":[{"x-mcp-header":7}]}')).ToBe('');
+  Expect<string>(HeaderViolation('{"type":"object","$defs":{' +
+    '"x-mcp-header":{"type":"string"}}}')).ToBe('');
+  // The subset admits the annotation in input schemas only; in an
+  // output schema it is an unsupported keyword, so output stays
+  // unchecked as before.
+  Expect<string>(Violation('{"type":"object","properties":{"a":' +
+    '{"type":"string","x-mcp-header":"A"}}}', True)).ToBe('');
+  Expect<string>(Violation('{"type":"object","properties":{"a":' +
+    '{"type":"string","x-mcp-header":"A"}}}', False))
+    .ToBe('property "a" uses unsupported keyword "x-mcp-header"');
+  // contentSchema (2020-12) and draft-07 dependencies hold subschemas:
+  // an annotation there is out of place. A dependencies entry that
+  // lists property names is data.
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"blob":' +
+    '{"type":"string","contentSchema":{"type":"object","properties":{' +
+    '"k":{"type":"string","x-mcp-header":"K"}}}}}}'))
+    .ToBe('x-mcp-header at "blob.contentSchema.properties.k" is not on a ' +
+    'property reachable through "properties" from the root');
+  Expect<string>(HeaderViolation('{"type":"object","dependencies":{"a":' +
+    '{"properties":{"b":{"type":"string","x-mcp-header":"B"}}}}}'))
+    .ToBe('x-mcp-header at "dependencies.a.properties.b" is not on a ' +
+    'property reachable through "properties" from the root');
+  Expect<string>(HeaderViolation('{"type":"object","dependencies":{"a":' +
+    '["b","x-mcp-header"]}}')).ToBe('');
+  // A literal key with a dot is quoted, so it differs from nesting.
+  Expect<string>(HeaderViolation('{"type":"object","properties":{' +
+    '"a.b":{"type":"string","x-mcp-header":"Key"},' +
+    '"a":{"type":"object","properties":{"b":{"type":"string",' +
+    '"x-mcp-header":"KEY"}}}}}'))
+    .ToBe('x-mcp-header "KEY" is used twice, at "["a.b"]" and "a.b" ' +
+    '(headers compare case-insensitively)');
+  // An annotation inside a $defs schema is still out of place.
+  Expect<string>(HeaderViolation('{"type":"object","$defs":{"d":' +
+    '{"type":"string","x-mcp-header":"D"}}}'))
+    .ToBe('x-mcp-header at "$defs.d" is not on a property reachable ' +
+    'through "properties" from the root');
+  // A nil child (programmatic schemas) is skipped, not dereferenced.
+  Prop := TJSONObject.Create;
+  Prop.Add('type', 'string');
+  Prop.Add('x-mcp-header', 'Region');
+  Schema := TJSONObject.Create;
+  try
+    Schema.Add('type', 'object');
+    Schema.Add('items', TJSONData(nil));
+    Schema.Add('properties', TJSONObject.Create(['region', Prop]));
+    Expect<string>(MCPHeaderParameters(Schema, Params)).ToBe('');
+    Expect<Integer>(Length(Params)).ToBe(1);
+  finally
+    Schema.Free;
+  end;
+end;
+
+procedure THeaderAnnotations.SetupTests;
+begin
+  Test('annotations along properties, nested, three types',
+    TestValidAnnotations);
+  Test('a schema without annotations has none', TestNoAnnotations);
+  Test('each constraint violation named', TestRejected);
+  Test('examples and $defs names are data, not annotations',
+    TestDataIsNotAnnotation);
+end;
+
 begin
   TestRunnerProgram.AddSuite(TSchemaBuilder.Create('Schema: fluent builder'));
   TestRunnerProgram.AddSuite(
     TSchemaFromClass.Create('Schema: derived from classes'));
   TestRunnerProgram.AddSuite(TWireNumber.Create('Schema: wire numbers'));
   TestRunnerProgram.AddSuite(TSubsetSchemas.Create('Schema: enforced subset'));
+  TestRunnerProgram.AddSuite(
+    THeaderAnnotations.Create('Schema: x-mcp-header annotations'));
   TestRunnerProgram.Run;
 end.

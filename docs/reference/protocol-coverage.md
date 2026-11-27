@@ -17,7 +17,7 @@ the README links here.
 | `_meta` validation, version negotiation | ✅ `-32602` / `-32021` / `-32022` per spec |
 | `ttlMs` / `cacheScope` caching hints (SEP-2549) | ✅ on discover/list/read, tunable via `CacheTtlMs`/`CacheScope` |
 | stdio transport | ✅ newline-delimited, EOF shutdown contract |
-| Streamable HTTP transport | ✅ `MCP.Transport.HTTP`: single POST endpoint, SSE response streams, mirrored-header validation, Origin allowlist |
+| Streamable HTTP transport | ✅ `MCP.Transport.HTTP`: single POST endpoint, SSE response streams, mirrored-header validation (`Mcp-Name`, and `Mcp-Param-*` for `x-mcp-header` parameters), Origin allowlist |
 | Classic handshake era (`initialize`: 2024-11-05, 2025-06-18, 2025-11-25) | ✅ dual-era default: era-faithful dialect (unstamped results, `-32002`, `ping`); `DualEra := False` for strict modern-only |
 | `subscriptions/listen`, list-changed | ⏳ not implemented (registries are static after startup) |
 

@@ -146,6 +146,10 @@ schema node has one `type` (`object`, `array`, `string`, `number`,
 | primitives | `enum` (entries of another type never match), `default` (a primitive) |
 | any | `description`, `title`; `$schema` at the root, naming JSON Schema 2020-12 |
 
+Input schemas may also carry `x-mcp-header` on a property (see
+[Routing headers](tools.md#routing-headers-x-mcp-header)); it names an
+HTTP header and does not constrain the value.
+
 Objects and arrays nest to any depth. `integer` means a number with no
 fractional part, so `2.0` counts, for floats up to 2^53 in magnitude
 (past that a double cannot tell neighbouring integers apart). Numeric

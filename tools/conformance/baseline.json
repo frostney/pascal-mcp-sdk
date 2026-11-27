@@ -18,12 +18,7 @@
       "expected": "pass"
     },
     "http-custom-header-server-validation": {
-      "expected": "fail",
-      "issue": 90,
-      "passingChecks": [
-        "sep-2243-server-decode-base64",
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "http-header-validation": {
       "expected": "pass"

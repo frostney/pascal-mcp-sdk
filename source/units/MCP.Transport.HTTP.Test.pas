@@ -70,6 +70,9 @@ type
     function Exchange(const AMethod, APath, ABody: string;
       const AHeaders: array of THeaderPair; out AResponseBody: string;
       out AContentType: string): Integer;
+    // A tools/call of 'routed' (#90) with AArguments and extra headers.
+    function PostRouted(const AArguments: string;
+      const AHeaders: array of THeaderPair; out ABody: string): Integer;
     // POST to the endpoint with the standard modern headers for
     // AMcpMethod/AMcpName; '' skips a header entirely.
     function Post(const ABody, AMcpMethod, AMcpName: string;
@@ -86,6 +89,11 @@ type
     // the reset lands first). With nothing unsent the close is a
     // clean FIN, so the response is always readable — and reaching
     // EOF is itself the connection-close assertion.
+    // A tools/call of 'routed' with AArguments and AExtraHeaderLines
+    // (raw "Name: value" lines, CRLF-joined), sent over a raw socket so
+    // a field can repeat; returns the status.
+    function PostRoutedRaw(const AArguments, AExtraHeaderLines: string;
+      out ABody: string): Integer;
     function PostWithUnsentBody(ADeclaredLength: Integer;
       out AResponseBody: string): Integer;
   protected
@@ -111,6 +119,15 @@ type
     procedure TestUnsupportedVersion;
     procedure TestMissingMcpName;
     procedure TestSentinelEncodedMcpName;
+    procedure TestParamHeadersMatch;
+    procedure TestParamHeaderMissing;
+    procedure TestParamHeaderMismatch;
+    procedure TestParamHeaderBadBase64;
+    procedure TestParamHeaderUnencodedNonASCII;
+    procedure TestParamHeaderWithoutValue;
+    procedure TestParamHeaderEmptyAndRepeated;
+    procedure TestParamHeaderIntegers;
+    procedure TestMcpNameStrictBase64;
     procedure TestUnknownMethod404;
     procedure TestInitializeRejected404;
     procedure TestLegacyGetRefused;
@@ -243,6 +260,15 @@ begin
     NeedsSamplingHandler);
   FServer.RegisterTool('late_refusal', 'Refuses late', '{"type":"object"}',
     ProgressThenRefuseHandler);
+  // Mirrors region (string), opts.limit (integer) and opts.dry
+  // (boolean) into Mcp-Param-* headers (#90).
+  FServer.RegisterTool('routed', 'Routed',
+    '{"type":"object","properties":{' +
+    '"region":{"type":"string","x-mcp-header":"Region"},' +
+    '"opts":{"type":"object","properties":{' +
+    '"limit":{"type":"integer","x-mcp-header":"Limit"},' +
+    '"dry":{"type":"boolean","x-mcp-header":"Dry"}}}}}',
+    QuietHandler).ApplicationValidated;
   FTransport := TMCPHTTPServer.Create(FServer);
   FTransport.Port := FindFreePort;
   FBaseUrl := 'http://127.0.0.1:' + IntToStr(FTransport.Port);
@@ -317,24 +343,21 @@ begin
   end;
 end;
 
-function THTTPBinding.PostWithUnsentBody(ADeclaredLength: Integer;
-  out AResponseBody: string): Integer;
+// Sends ARequest as raw bytes to the loopback port and reads to EOF;
+// the status code, and the body in ABody. A 5 s socket timeout fails a
+// test instead of hanging it.
+function RawExchange(APort: Word; const ARequest: string;
+  out ABody: string): Integer;
 var
   Sock: TInetSocket;
-  Request, Response: string;
+  Response: string;
   Buf: array[0..4095] of Byte;
   Got, HeaderEnd: Integer;
 begin
-  Request := 'POST /mcp HTTP/1.1'#13#10 +
-    'Host: 127.0.0.1:' + IntToStr(FTransport.Port) + #13#10 +
-    'Content-Type: application/json'#13#10 +
-    'Content-Length: ' + IntToStr(ADeclaredLength) + #13#10#13#10;
-  Sock := TInetSocket.Create('127.0.0.1', FTransport.Port);
+  Sock := TInetSocket.Create('127.0.0.1', APort);
   try
-    // A hang here would be a close-contract regression; fail the test
-    // via the timeout instead of wedging the suite.
     Sock.IOTimeout := 5000;
-    Sock.WriteBuffer(Request[1], Length(Request));
+    Sock.WriteBuffer(ARequest[1], Length(ARequest));
     Response := '';
     repeat
       Got := Sock.Read(Buf[0], SizeOf(Buf));
@@ -351,9 +374,40 @@ begin
   Result := StrToIntDef(Copy(Response, 10, 3), -1);
   HeaderEnd := Pos(#13#10#13#10, Response);
   if HeaderEnd > 0 then
-    AResponseBody := Copy(Response, HeaderEnd + 4, MaxInt)
+    ABody := Copy(Response, HeaderEnd + 4, MaxInt)
   else
-    AResponseBody := '';
+    ABody := '';
+end;
+
+function THTTPBinding.PostRoutedRaw(const AArguments,
+  AExtraHeaderLines: string; out ABody: string): Integer;
+var
+  Payload, Request: string;
+begin
+  Payload := '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{' +
+    '"name":"routed","arguments":' + AArguments + ',' + META_MODERN + '}}';
+  Request := 'POST /mcp HTTP/1.1'#13#10 +
+    'Host: 127.0.0.1:' + IntToStr(FTransport.Port) + #13#10 +
+    'Content-Type: application/json'#13#10 +
+    'Accept: application/json, text/event-stream'#13#10 +
+    'MCP-Protocol-Version: ' + MCP_PROTOCOL_VERSION + #13#10 +
+    'Mcp-Method: tools/call'#13#10 + 'Mcp-Name: routed'#13#10 +
+    AExtraHeaderLines + #13#10 +
+    'Connection: close'#13#10 +
+    'Content-Length: ' + IntToStr(Length(Payload)) + #13#10#13#10 + Payload;
+  Result := RawExchange(FTransport.Port, Request, ABody);
+end;
+
+function THTTPBinding.PostWithUnsentBody(ADeclaredLength: Integer;
+  out AResponseBody: string): Integer;
+begin
+  // A hang here would be a close-contract regression; RawExchange's
+  // socket timeout fails the test instead of wedging the suite.
+  Result := RawExchange(FTransport.Port, 'POST /mcp HTTP/1.1'#13#10 +
+    'Host: 127.0.0.1:' + IntToStr(FTransport.Port) + #13#10 +
+    'Content-Type: application/json'#13#10 +
+    'Content-Length: ' + IntToStr(ADeclaredLength) + #13#10#13#10,
+    AResponseBody);
 end;
 
 function HeaderPair(const AName, AValue: string): THeaderPair;
@@ -662,6 +716,180 @@ begin
     '=?base64?cGluZw==?=', Body);
   Expect<Integer>(Status).ToBe(200);
   Expect<Boolean>(Pos('pong', Body) > 0).ToBe(True);
+end;
+
+// A tools/call of 'routed' with AArguments and the extra headers. The
+// Mcp-Param tests below follow "Custom Headers from Tool Parameters"
+// and "Server Validation", verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#custom-headers-from-tool-parameters
+function THTTPBinding.PostRouted(const AArguments: string;
+  const AHeaders: array of THeaderPair; out ABody: string): Integer;
+var
+  Headers: array of THeaderPair;
+  ContentType: string;
+  I: Integer;
+begin
+  Headers := [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+    HeaderPair('Mcp-Method', 'tools/call'), HeaderPair('Mcp-Name', 'routed')];
+  for I := 0 to High(AHeaders) do
+    Headers := Concat(Headers, [AHeaders[I]]);
+  Result := Exchange('POST', '/mcp', '{"jsonrpc":"2.0","id":4,' +
+    '"method":"tools/call","params":{"name":"routed","arguments":' +
+    AArguments + ',' + META_MODERN + '}}', Headers, ABody, ContentType);
+end;
+
+procedure THTTPBinding.TestParamHeadersMatch;
+var
+  Body: string;
+begin
+  // Plain values, nested properties, all three types.
+  Expect<Integer>(PostRouted('{"region":"us-west1","opts":{"limit":42,' +
+    '"dry":true}}', [HeaderPair('Mcp-Param-Region', 'us-west1'),
+    HeaderPair('Mcp-Param-Limit', '42'), HeaderPair('Mcp-Param-Dry', 'true')],
+    Body)).ToBe(200);
+  Expect<Boolean>(Pos('quiet', Body) > 0).ToBe(True);
+  // Header names compare case-insensitively; a non-ASCII value travels
+  // base64-encoded ('Hello, 世界', the spec's own example).
+  Expect<Integer>(PostRouted('{"region":"Hello, ' + #$E4#$B8#$96#$E7#$95#$8C +
+    '"}', [HeaderPair('mcp-param-region', '=?base64?SGVsbG8sIOS4lueVjA==?=')],
+    Body)).ToBe(200);
+end;
+
+procedure THTTPBinding.TestParamHeaderMissing;
+var
+  Body: string;
+begin
+  Expect<Integer>(PostRouted('{"region":"eu"}', [], Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  Expect<Boolean>(Pos('Mcp-Param-Region header is missing', Body) > 0)
+    .ToBe(True);
+end;
+
+procedure THTTPBinding.TestParamHeaderMismatch;
+var
+  Body: string;
+begin
+  Expect<Integer>(PostRouted('{"region":"eu"}',
+    [HeaderPair('Mcp-Param-Region', 'us')], Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  Expect<Integer>(PostRouted('{"opts":{"dry":false}}',
+    [HeaderPair('Mcp-Param-Dry', 'False')], Body)).ToBe(400);
+  // A base64 value that decodes to something else.
+  Expect<Integer>(PostRouted('{"region":"eu"}',
+    [HeaderPair('Mcp-Param-Region', '=?base64?dXM=?=')], Body)).ToBe(400);
+end;
+
+procedure THTTPBinding.TestParamHeaderBadBase64;
+var
+  Body: string;
+begin
+  // Missing padding and a character outside the alphabet: both
+  // rejected (SEP-2243 test table), not decoded leniently.
+  Expect<Integer>(PostRouted('{"region":"Hello"}',
+    [HeaderPair('Mcp-Param-Region', '=?base64?SGVsbG8?=')], Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  // A foreign character in a payload of whole 4-character groups, which
+  // a lenient decoder would skip to "Hello": only the alphabet check
+  // refuses it.
+  Expect<Integer>(PostRouted('{"region":"Hello"}',
+    [HeaderPair('Mcp-Param-Region', '=?base64?SGVsbG8!?=')], Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  Expect<Boolean>(Pos('is not valid base64', Body) > 0).ToBe(True);
+  // Without the full sentinel the value is literal.
+  Expect<Integer>(PostRouted('{"region":"SGVsbG8="}',
+    [HeaderPair('Mcp-Param-Region', 'SGVsbG8=')], Body)).ToBe(200);
+end;
+
+procedure THTTPBinding.TestParamHeaderUnencodedNonASCII;
+var
+  Body: string;
+begin
+  Expect<Integer>(PostRouted('{"region":"' + #$C3#$A9 + '"}',
+    [HeaderPair('Mcp-Param-Region', #$C3#$A9)], Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+end;
+
+// Presence, not value (#90 review): an empty field is the empty
+// string's header, the empty base64 payload decodes to it, an empty
+// field for an absent argument is a mismatch, and a repeated field is
+// refused. Verified 2026-11-27 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-validation
+procedure THTTPBinding.TestParamHeaderEmptyAndRepeated;
+var
+  Body: string;
+begin
+  Expect<Integer>(PostRouted('{"region":""}',
+    [HeaderPair('Mcp-Param-Region', '')], Body)).ToBe(200);
+  Expect<Integer>(PostRouted('{"region":""}',
+    [HeaderPair('Mcp-Param-Region', '=?base64??=')], Body)).ToBe(200);
+  Expect<Integer>(PostRouted('{}', [HeaderPair('Mcp-Param-Region', '')],
+    Body)).ToBe(400);
+  Expect<Integer>(PostRoutedRaw('{"region":"eu"}',
+    'Mcp-Param-Region: us'#13#10'Mcp-Param-Region: eu', Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  Expect<Boolean>(Pos('sent more than once', Body) > 0).ToBe(True);
+  Expect<Integer>(PostRoutedRaw('{"region":"eu"}', 'Mcp-Param-Region: eu',
+    Body)).ToBe(200);
+  // Names match in ASCII case for presence and value alike (an I/i pair
+  // compares by the locale in fcl-web's own lookup, e.g. under tr_TR).
+  Expect<Integer>(PostRoutedRaw('{"opts":{"limit":3}}',
+    'MCP-PARAM-LIMIT: 3', Body)).ToBe(200);
+  Expect<Integer>(PostRoutedRaw('{"opts":{"limit":3}}',
+    'mcp-param-limit: 3'#13#10'MCP-PARAM-LIMIT: 3', Body)).ToBe(400);
+end;
+
+// Integers compare numerically within the JavaScript safe range;
+// composites and values of another type have no header form.
+procedure THTTPBinding.TestParamHeaderIntegers;
+var
+  Body: string;
+begin
+  Expect<Integer>(PostRouted('{"opts":{"limit":42.0}}',
+    [HeaderPair('Mcp-Param-Limit', '42')], Body)).ToBe(200);
+  Expect<Integer>(PostRouted('{"opts":{"limit":42}}',
+    [HeaderPair('Mcp-Param-Limit', '42.0')], Body)).ToBe(200);
+  Expect<Integer>(PostRouted('{"opts":{"limit":-7}}',
+    [HeaderPair('Mcp-Param-Limit', '-7')], Body)).ToBe(200);
+  Expect<Integer>(PostRouted('{"opts":{"limit":42}}',
+    [HeaderPair('Mcp-Param-Limit', '+42')], Body)).ToBe(400);
+  Expect<Integer>(PostRouted('{"opts":{"limit":9007199254740992}}',
+    [HeaderPair('Mcp-Param-Limit', '9007199254740992')], Body)).ToBe(400);
+  Expect<Integer>(PostRouted('{"opts":{"limit":"42"}}',
+    [HeaderPair('Mcp-Param-Limit', '42')], Body)).ToBe(400);
+  Expect<Integer>(PostRouted('{"region":["eu"]}',
+    [HeaderPair('Mcp-Param-Region', '["eu"]')], Body)).ToBe(400);
+end;
+
+// Mcp-Name decodes strictly too since #90: an unpadded payload, which
+// the lenient decoder used to take, is refused.
+procedure THTTPBinding.TestMcpNameStrictBase64;
+var
+  Body, ContentType: string;
+  Line: string;
+begin
+  Line := '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{' +
+    '"name":"quiet",' + META_MODERN + '}}';
+  Expect<Integer>(Exchange('POST', '/mcp', Line,
+    [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+    HeaderPair('Mcp-Method', 'tools/call'),
+    HeaderPair('Mcp-Name', '=?base64?cXVpZXQ=?=')], Body, ContentType))
+    .ToBe(200);
+  Expect<Integer>(Exchange('POST', '/mcp', Line,
+    [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+    HeaderPair('Mcp-Method', 'tools/call'),
+    HeaderPair('Mcp-Name', '=?base64?cXVpZXQ?=')], Body, ContentType))
+    .ToBe(400);
+end;
+
+procedure THTTPBinding.TestParamHeaderWithoutValue;
+var
+  Body: string;
+begin
+  // Absent or null in the body: no header expected...
+  Expect<Integer>(PostRouted('{"region":null}', [], Body)).ToBe(200);
+  // ...and one that is sent anyway does not match.
+  Expect<Integer>(PostRouted('{}', [HeaderPair('Mcp-Param-Region', 'eu')],
+    Body)).ToBe(400);
 end;
 
 procedure THTTPBinding.TestUnknownMethod404;
@@ -999,6 +1227,19 @@ begin
     TestMissingMcpName);
   Test('sentinel-encoded Mcp-Name decoded and matched',
     TestSentinelEncodedMcpName);
+  Test('Mcp-Param headers: plain, nested, typed and base64 values match',
+    TestParamHeadersMatch);
+  Test('Mcp-Param header missing → 400, -32020', TestParamHeaderMissing);
+  Test('Mcp-Param header mismatched → 400, -32020', TestParamHeaderMismatch);
+  Test('Mcp-Param base64 with bad padding or characters → 400',
+    TestParamHeaderBadBase64);
+  Test('Mcp-Param unencoded non-ASCII → 400', TestParamHeaderUnencodedNonASCII);
+  Test('Mcp-Param empty and repeated fields', TestParamHeaderEmptyAndRepeated);
+  Test('Mcp-Param integers compare numerically in the safe range',
+    TestParamHeaderIntegers);
+  Test('Mcp-Name base64 decodes strictly', TestMcpNameStrictBase64);
+  Test('Mcp-Param for an absent value: none expected, one sent → 400',
+    TestParamHeaderWithoutValue);
   Test('unknown method → 404, -32601', TestUnknownMethod404);
   Test('legacy initialize → 404, versions named',
     TestInitializeRejected404);

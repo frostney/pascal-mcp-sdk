@@ -122,6 +122,56 @@ handler exception becomes an `isError: true` result automatically
 [Configuration](configuration.md#redacterrordetails)); an
 `EMCPProtocolError` is the exception to that, and is never redacted.
 
+## Routing headers (x-mcp-header)
+
+A parameter can be mirrored into an HTTP header so that load balancers
+and gateways can route on it without reading the body. Mark it with
+`x-mcp-header` in a raw schema:
+
+```pascal
+Server.RegisterTool('execute_sql', 'Run SQL in a region',
+  '{"type":"object","properties":{' +
+  '"region":{"type":"string","x-mcp-header":"Region"},' +
+  '"query":{"type":"string"}},"required":["region","query"]}',
+  SqlHandler);
+```
+
+`x-mcp-header` is part of the enforced subset, so the server still
+validates the arguments.
+
+Over Streamable HTTP the client then sends `Mcp-Param-Region:
+us-west1` with the call, and the server checks that the header matches
+the body. For each header the called tool designates: an argument with
+a non-null value needs its header exactly once, and an absent or
+`null` argument needs none. The call is refused with HTTP 400 and
+`-32020` when a needed header is missing, sent more than once or
+different from the body, or when a header comes for an absent or
+`null` argument. `Mcp-Param-*` headers the tool does not designate are
+ignored, as the spec asks. Header names match in any ASCII case. An empty header is the empty string's,
+and integers compare as numbers within the JavaScript safe range, so a
+body `42.0` matches a header `42`. The comparison goes by the declared
+type: a body value of another type, or an array or object, never
+matches. The HTTP server strips a header value's leading and trailing
+whitespace and control bytes before the check sees it, so a plain value
+with such edges (which a client must base64-encode) is not caught; the
+decoded comparison still holds. At registration the server checks the annotations
+the way a client would: a non-empty header token, unique (ignoring
+case), only on a `string`, `integer` or `boolean` property, and only on
+properties reached through `properties` from the root. A violation
+raises `EMCPServer`, because a client would drop the whole tool from
+its list
+([x-mcp-header](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header),
+verified 2026-11-26). Header values are visible to every intermediary,
+so do not mark secrets or personal data.
+
+> [!NOTE]
+> Upgrading (breaking): `=?base64?...?=` values in `Mcp-Name`, sent for
+> every tool, prompt and resource whether annotated or not, now decode
+> strictly too. A custom client that left the base64 padding off gets
+> 400; send standard base64 with its `=` padding, as the spec's Value
+> Encoding asks. The official TypeScript client (2.0.0) already does
+> (verified 2026-11-27: it encodes with `btoa`, which pads).
+
 ## Annotations
 
 `RegisterTool` returns a `TMCPToolOptions` for fluent annotation
