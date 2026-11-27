@@ -7,13 +7,15 @@
 
 ## Executive Summary
 
-pascal-mcp-sdk is seven units layered strictly bottom-up. Four form the
+pascal-mcp-sdk is eight units layered strictly bottom-up. Four form the
 request chain — `MCP.JSONRPC` (the JSON-RPC 2.0 profile MCP mandates),
 `MCP.Protocol` (the stateless per-request `_meta` model of spec
 revision 2026-07-28), `MCP.Server` (the sans-I/O dispatch core), and a
 transport shell (`MCP.Transport.Stdio` or `MCP.Transport.HTTP`) — and
 `MCP.Schema` and `MCP.Content` sit beside the chain as the schema and
-content-block helpers `MCP.Server` consumes. The core performs no I/O: `CreateSession` binds connection
+content-block helpers `MCP.Server` consumes, and `MCP.Testing` sits
+above the core as the in-process test client for server authors. The
+core performs no I/O: `CreateSession` binds connection
 state and `HandleMessage` maps one inbound line to at most one
 response line, so both transports wrap the same tested core without
 touching it. The runtime dependency set is packages that ship inside
@@ -57,6 +59,7 @@ Rules live in the layer that owns them and nowhere else:
 | `MCP.Server` | Method dispatch (`server/discover`, `tools/*`, `resources/*`, `prompts/*`), frozen registries and request-visible configuration, per-connection legacy state, cooperative cancellation, in-band vs. protocol error policy (handler exceptions → `isError: true` results; dispatch faults → JSON-RPC errors), the legacy-`initialize` rejection that names supported versions | Bytes and streams |
 | `MCP.Schema` | The fluent builder (`ObjectSchema.AddString(...)`) and the RTTI-derived `TMCPArgs` argument classes, both emitting the JSON Schema 2020-12 subset the server enforces | Dispatch, bytes, streams |
 | `MCP.Content` | The five content block shapes tool results and prompt messages carry (text, image, audio, resource link, embedded resource) and the base64 encoding of raw-bytes payloads | Dispatch, registries, bytes and streams |
+| `MCP.Testing` | The in-process test client (`TMCPTestClient`): request envelopes, notification capture, canned input answers, over `HandleMessage` with no transport | Bytes and streams |
 | `MCP.Transport.Stdio` | LF-terminated writes on every platform, CR tolerance on reads, blank-line skipping, stderr-only logging, EOF as the graceful-shutdown signal | Protocol decisions — it contains not a single one |
 
 ## The sans-I/O core

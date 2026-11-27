@@ -12,6 +12,7 @@
     "resources",
     "configuration",
     "progress-and-logging",
+    "testing",
     "shipping",
     "deployment",
     "troubleshooting",
