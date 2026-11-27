@@ -199,12 +199,15 @@ three interop batteries and by `mcpsmoke`.
 
 Since the HTTP era inverted the trust boundary (#23), **every
 raw-handler tool call is validated against its registered schema's
-enforceable subset before the handler runs** — `type`, `description`,
-`title`, `properties`, `required`, `enum`, `default`, exactly the
-dialect the builders emit (the fluent builder stamps non-empty
-`description`s, which the server accepts without
-`.ApplicationValidated`) — with violations returned as in-band
-`isError` results, the same shape the typed path produces.
+enforceable subset before the handler runs** — the recursive JSON
+Schema 2020-12 subset `MCP.Schema` defines (`type`, `properties`,
+`required`, `items`, `enum`, `default`, `description`, `title`; see
+[the enforced subset](../guides/schemas.md#the-enforced-subset)), which
+covers everything the builders emit — with violations returned as
+in-band `isError` results, the same shape the typed path produces.
+Since #91 the same subset also checks **structured output** against a
+tool's `outputSchema` before the result is sent (any root type), and a
+mismatch becomes an `isError` result.
 
 - Absent optional arguments are seeded with their schema `default`.
 - Unknown argument properties are ignored (the same tolerance the

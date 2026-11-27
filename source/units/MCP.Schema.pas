@@ -175,15 +175,19 @@ function MCPWireNumber(AValue: Double): TJSONData;
 //   object      properties (each a node), required (names)
 //   array       items (a node)
 //   primitives  enum (primitive values), default (a primitive)
-//   any node    description, title; $schema at the root
+//   any node    description, title; $schema at the root, naming
+//               2020-12 (the default dialect; a schema declaring
+//               another is outside the subset)
 // Nesting is unlimited. Verified 2026-11-26 against the structured
 // content and output schema rules of
 // https://modelcontextprotocol.io/specification/2026-07-28/server/tools
+// and (dialects) 2026-11-27 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic#json-schema-usage
 
 // '' when ASchema is inside the subset, otherwise the first violation
 // ('uses unsupported keyword "format"', 'property "a.b" has
 // unsupported type "x"', ...). AObjectRoot additionally requires the
-// root type to be object (input schemas).
+// root type to be object (input schemas). ASchema is borrowed.
 function MCPSchemaSubsetViolation(ASchema: TJSONObject;
   AObjectRoot: Boolean): string;
 
@@ -195,7 +199,8 @@ function MCPSchemaSubsetViolation(ASchema: TJSONObject;
 // same view a typed handler gets. AKind names the value in errors:
 // 'argument' gives 'Missing required argument "a.b"' and
 // 'Argument "a.b" must be a string'. False with AError on the first
-// violation.
+// violation. ASchema must be inside the subset (MCPSchemaSubsetViolation
+// returned ''); both are borrowed, and AValue changes only by seeding.
 function MCPValidateAgainstSchema(ASchema: TJSONObject; AValue: TJSONData;
   const AKind: string; ASeedDefaults: Boolean; out AError: string): Boolean;
 
@@ -898,6 +903,21 @@ end;
 function NodeViolation(ANode: TJSONObject; const APath: string;
   ARoot: Boolean): string; forward;
 
+// True for a $schema value naming JSON Schema 2020-12, the dialect the
+// subset's rules come from.
+function IsDefaultDialect(AValue: TJSONData): Boolean;
+var
+  Uri: string;
+begin
+  if AValue.JSONType <> jtString then
+    Exit(False);
+  Uri := AValue.AsString;
+  if (Uri <> '') and (Uri[Length(Uri)] = '#') then
+    SetLength(Uri, Length(Uri) - 1);
+  Result := (Uri = 'https://json-schema.org/draft/2020-12/schema') or
+    (Uri = 'http://json-schema.org/draft/2020-12/schema');
+end;
+
 // The keyword ANode[AIndex] is allowed for a node of AType.
 function KeywordViolation(ANode: TJSONObject; AIndex: Integer;
   const AType, APath: string; ARoot: Boolean): string;
@@ -909,9 +929,14 @@ begin
   Result := '';
   Key := ANode.Names[AIndex];
   Value := ANode.Items[AIndex];
-  if (Key = 'type') or (Key = 'description') or (Key = 'title') or
-    (ARoot and (Key = '$schema')) then
+  if (Key = 'type') or (Key = 'description') or (Key = 'title') then
     Exit;
+  if ARoot and (Key = '$schema') then
+  begin
+    if not IsDefaultDialect(Value) then
+      Result := 'declares $schema other than JSON Schema 2020-12';
+    Exit;
+  end;
   if (Key = 'properties') and (AType = 'object') then
   begin
     if Value.JSONType <> jtObject then
@@ -1003,6 +1028,61 @@ begin
     Result := 'a ' + AType;
 end;
 
+const
+  // 2^53: past it a double no longer holds every integer, so a float
+  // there cannot be told apart from its neighbours.
+  MAX_EXACT_FLOAT_INTEGER = 9007199254740992.0;
+
+// JSON Schema's integer is a number with a zero fractional part
+// (json-schema-validation 2020-12 §6.1.1, verified 2026-11-27), so 2.0
+// and 2e0 count. Floats are accepted within +-2^53, where that is exact.
+function IsIntegralNumber(AValue: TJSONData): Boolean;
+var
+  F: Double;
+begin
+  if TJSONNumber(AValue).NumberType in [ntInteger, ntInt64, ntQWord] then
+    Exit(True);
+  F := AValue.AsFloat;
+  Result := not IsNan(F) and not IsInfinite(F) and
+    (Abs(F) <= MAX_EXACT_FLOAT_INTEGER) and (Frac(F) = 0);
+end;
+
+// Exact equality of two JSON numbers: integers compare as integers
+// (no rounding through a double), floats as floats, and a float equals
+// an integer only when it is integral within +-2^53 and the same value.
+function SameNumber(A, B: TJSONData): Boolean;
+var
+  IntA, IntB: Boolean;
+  Integral, Other: TJSONData;
+begin
+  IntA := TJSONNumber(A).NumberType in [ntInteger, ntInt64, ntQWord];
+  IntB := TJSONNumber(B).NumberType in [ntInteger, ntInt64, ntQWord];
+  if not IntA and not IntB then
+    Exit(A.AsFloat = B.AsFloat);
+  if IntA and IntB then
+  begin
+    // A QWord above High(Int64) equals only the same QWord.
+    if (TJSONNumber(A).NumberType = ntQWord) or
+      (TJSONNumber(B).NumberType = ntQWord) then
+      Exit(A.AsJSON = B.AsJSON);
+    Exit(A.AsInt64 = B.AsInt64);
+  end;
+  if IntA then
+  begin
+    Integral := A;
+    Other := B;
+  end
+  else
+  begin
+    Integral := B;
+    Other := A;
+  end;
+  if not IsIntegralNumber(Other) or
+    (TJSONNumber(Integral).NumberType = ntQWord) then
+    Exit(False);
+  Result := Integral.AsInt64 = Trunc(Other.AsFloat);
+end;
+
 function MatchesType(AValue: TJSONData; const AType: string): Boolean;
 begin
   if AType = 'string' then
@@ -1010,8 +1090,7 @@ begin
   else if AType = 'number' then
     Result := AValue.JSONType = jtNumber
   else if AType = 'integer' then
-    Result := (AValue.JSONType = jtNumber) and
-      (TJSONNumber(AValue).NumberType in [ntInteger, ntInt64, ntQWord])
+    Result := (AValue.JSONType = jtNumber) and IsIntegralNumber(AValue)
   else if AType = 'boolean' then
     Result := AValue.JSONType = jtBoolean
   else if AType = 'null' then
@@ -1030,7 +1109,7 @@ begin
     Exit(False);
   case A.JSONType of
     jtNumber:
-      Result := A.AsFloat = B.AsFloat;
+      Result := SameNumber(A, B);
     jtNull:
       Result := True;
   else

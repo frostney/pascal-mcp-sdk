@@ -1556,10 +1556,19 @@ begin
 end;
 
 function MCPStructuredResult(AStructured: TJSONData): TMCPToolResult;
+var
+  Text: string;
 begin
   if AStructured = nil then
     raise EMCPServer.Create('MCPStructuredResult: structured value is nil');
-  Result := MCPStructuredResult(SerializeCompact(AStructured), AStructured);
+  // Owned from here: freed if serializing it raises.
+  try
+    Text := SerializeCompact(AStructured);
+  except
+    AStructured.Free;
+    raise;
+  end;
+  Result := MCPStructuredResult(Text, AStructured);
 end;
 
 function MCPStructuredResult(const AText: string;
@@ -3158,7 +3167,10 @@ begin
   begin
     Definition := TJSONObject(FTools[I].Definition.Clone);
     // The classic dialect's outputSchema has an object root (2025-11-25
-    // schema); a tool with any other is listed without one there (#91).
+    // schema, Tool.outputSchema, verified 2026-11-27 against
+    // https://modelcontextprotocol.io/specification/2025-11-25/schema#tool).
+    // A tool with any other root stays listed, so classic clients can
+    // still call it, but without the schema they could not accept (#91).
     OutputSchema := Definition.Find('outputSchema');
     if ALegacy and (OutputSchema <> nil) and
       (TJSONObject(OutputSchema).Get('type', '') <> 'object') then
@@ -3261,12 +3273,43 @@ end;
 // A tool with a subset outputSchema must send conforming structured
 // output: the spec makes that a server MUST (tools#output-schema,
 // verified 2026-11-26). A handler that breaks it gets an isError result
-// naming the first violation instead of sending the bad value.
+// naming the first violation instead of sending the bad value. An
+// isError result may omit structured output; one it carries is checked
+// too, and dropped (keeping the handler's error text) if it fails.
+// For a classic client: replaces non-object structured output with a
+// text block of its JSON, unless the content already carries that text.
+procedure MoveStructuredToText(var AResult: TMCPToolResult);
+var
+  Text: string;
+  I: Integer;
+  Block: TJSONData;
+begin
+  Text := SerializeCompact(AResult.StructuredContent);
+  FreeAndNil(AResult.StructuredContent);
+  for I := 0 to AResult.Content.Count - 1 do
+  begin
+    Block := AResult.Content.Items[I];
+    if (Block.JSONType = jtObject) and
+      (TJSONObject(Block).Get('type', '') = 'text') and
+      (TJSONObject(Block).Get('text', '') = Text) then
+      Exit;
+  end;
+  AResult.Content.Add(MCPTextContent(Text));
+end;
+
 procedure CheckStructuredOutput(const AToolName: string;
   AOutputSchema: TJSONObject; var AResult: TMCPToolResult);
 var
   Violation: string;
 begin
+  if AResult.IsError then
+  begin
+    if (AResult.StructuredContent <> nil) and
+      not MCPValidateAgainstSchema(AOutputSchema, AResult.StructuredContent,
+      'structured output', False, Violation) then
+      FreeAndNil(AResult.StructuredContent);
+    Exit;
+  end;
   if AResult.StructuredContent = nil then
     Violation := 'no structuredContent was returned'
   else if MCPValidateAgainstSchema(AOutputSchema, AResult.StructuredContent,
@@ -3357,7 +3400,7 @@ begin
 
   if ToolResult.Content = nil then
     ToolResult.Content := TJSONArray.Create;
-  if FTools[Index].OutputValidate and not ToolResult.IsError then
+  if FTools[Index].OutputValidate then
     CheckStructuredOutput(ToolName,
       TJSONObject(FTools[Index].Definition.Find('outputSchema')), ToolResult);
 
@@ -3365,10 +3408,12 @@ begin
   CallResult.Add('content', ToolResult.Content);
   CallResult.Add('isError', ToolResult.IsError);
   // The classic dialect's structuredContent is an object (2025-11-25
-  // schema); any other value stays in the text block only (#91).
+  // schema, CallToolResult, verified 2026-11-27 against
+  // https://modelcontextprotocol.io/specification/2025-11-25/schema#calltoolresult);
+  // any other value travels as a text block of its JSON (#91).
   if (ToolResult.StructuredContent <> nil) and ALegacy and
     (ToolResult.StructuredContent.JSONType <> jtObject) then
-    FreeAndNil(ToolResult.StructuredContent);
+    MoveStructuredToText(ToolResult);
   if ToolResult.StructuredContent <> nil then
     CallResult.Add('structuredContent', ToolResult.StructuredContent);
 

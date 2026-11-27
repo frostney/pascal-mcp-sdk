@@ -376,6 +376,10 @@ type
     procedure TestHandlerIsErrorNotChecked;
     procedure TestOutOfSubsetOutputNotChecked;
     procedure TestLegacyDialect;
+    procedure TestLegacyKeepsCustomText;
+    procedure TestErrorWithBadStructuredDropsIt;
+    procedure TestErrorWithGoodStructuredKeepsIt;
+    procedure TestRicherSchemaPublishedUnchanged;
   end;
 
   // MCPImageResult: the spec's image content block, the raw-bytes
@@ -1862,12 +1866,13 @@ begin
   Server := TMCPServer.Create('t', '1');
   try
     Definition := TJSONObject.Create;
-    // Any root type is fine since SEP-2106 (#91); the schema itself
-    // must still be a JSON object.
-    Definition.Add('name', 'string-valued-output');
+    // Any root type is fine since SEP-2106 (#91), verified 2026-11-26
+    // against https://modelcontextprotocol.io/specification/2026-07-28/server/tools#output-schema.
+    Definition.Add('name', 'array-output');
     Definition.Add('inputSchema', GetJSON('{"type":"object"}'));
-    Definition.Add('outputSchema', '{"type":"array"}');
-    ExpectToolDefinitionRejected(Server, Definition);
+    Definition.Add('outputSchema', GetJSON('{"type":"array"}'));
+    Server.RegisterTool(Definition, EchoHandler);
+    Expect<Integer>(Server.ToolCount).ToBe(1);
   finally
     Server.Free;
   end;
@@ -2479,7 +2484,7 @@ begin
   Test('inputSchema without root type rejected', TestMissingInputSchemaRoot);
   Test('inputSchema array root rejected', TestWrongInputSchemaRoot);
   Test('non-object outputSchema rejected', TestNonObjectOutputSchema);
-  Test('outputSchema that is not a JSON object rejected',
+  Test('outputSchema with an array root accepted',
     TestWrongOutputSchemaRoot);
   Test('object inputSchema and outputSchema accepted',
     TestValidInputAndOutputSchemaRoots);
@@ -4779,6 +4784,28 @@ begin
   Result := MCPStructuredResult(TJSONIntegerNumber.Create(42));
 end;
 
+// Custom text beside non-object output: classic clients get both.
+function LabelledUsersHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult('Found ' + #$C3#$BC + 'sers',
+    GetJSON('[{"id":"1","name":"Ada"}]'));
+end;
+
+function ErrorWithBadStructuredHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult('quota exceeded', GetJSON('"not users"'));
+  Result.IsError := True;
+end;
+
+function ErrorWithGoodStructuredHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult('partial', GetJSON('[{"id":"1"}]'));
+  Result.IsError := True;
+end;
+
 procedure TStructuredOutput.BeforeEach;
 begin
   inherited BeforeEach;
@@ -4792,6 +4819,12 @@ begin
   // "format" is outside the subset: the output is the handler's to honour.
   FServer.RegisterTool(OutputTool('formatted',
     '{"type":"string","format":"uri"}'), CountHandler);
+  FServer.RegisterTool(OutputTool('labelled', USERS_SCHEMA),
+    LabelledUsersHandler);
+  FServer.RegisterTool(OutputTool('error_bad', USERS_SCHEMA),
+    ErrorWithBadStructuredHandler);
+  FServer.RegisterTool(OutputTool('error_good', USERS_SCHEMA),
+    ErrorWithGoodStructuredHandler);
 end;
 
 function OutputCall(const ATool: string): string;
@@ -4874,6 +4907,7 @@ var
   Response: TJSONObject;
   Tools: TJSONArray;
   I: Integer;
+  Found: Boolean;
 begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
     '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
@@ -4881,13 +4915,19 @@ begin
   Response.Free;
   SendNotification(
     '{"jsonrpc":"2.0","method":"notifications/initialized"}');
-  // A non-object outputSchema is left out of the classic listing.
+  // The tool stays in the classic listing, without its non-object
+  // outputSchema (2025-11-25 schema, Tool.outputSchema).
+  Found := False;
   Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}');
   Tools := TJSONArray(Response.FindPath('result.tools'));
   for I := 0 to Tools.Count - 1 do
     if TJSONObject(Tools[I]).Get('name', '') = 'users' then
+    begin
+      Found := True;
       Expect<Boolean>(TJSONObject(Tools[I]).Find('outputSchema') = nil)
         .ToBe(True);
+    end;
+  Expect<Boolean>(Found).ToBe(True);
   Response.Free;
   // ...and its array output travels in the text block only.
   Response := Call('{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
@@ -4896,6 +4936,66 @@ begin
     .ToBe(True);
   Expect<Boolean>(Pos('Ada', TJSONData(Response.FindPath(
     'result.content[0].text')).AsString) > 0).ToBe(True);
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestLegacyKeepsCustomText;
+var
+  Response: TJSONObject;
+  Line: string;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+    '"params":{"name":"labelled","arguments":{}}}', Line)).ToBe(True);
+  Expect<Boolean>(Pos('"content" : [{ "type" : "text", "text" : "Found ' +
+    #$C3#$BC + 'sers" }, { "type" : "text", "text" : "[{ \"id\" : \"1\", ' +
+    '\"name\" : \"Ada\" }]" }], "isError" : false }', Line) > 0).ToBe(True);
+end;
+
+procedure TStructuredOutput.TestErrorWithBadStructuredDropsIt;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(OutputCall('error_bad'), Response)).ToBe(True);
+  Expect<Boolean>(Pos('"content" : [{ "type" : "text", "text" : ' +
+    '"quota exceeded" }], "isError" : true', Response) > 0).ToBe(True);
+  Expect<Boolean>(Pos('structuredContent', Response) = 0).ToBe(True);
+end;
+
+procedure TStructuredOutput.TestErrorWithGoodStructuredKeepsIt;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(OutputCall('error_good'));
+  Expect<string>(TJSONData(Response.FindPath('result.structuredContent[0].id'))
+    .AsString).ToBe('1');
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestRicherSchemaPublishedUnchanged;
+var
+  Response: TJSONObject;
+  Tools: TJSONArray;
+  I: Integer;
+  Found: Boolean;
+begin
+  Found := False;
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{' +
+    META_MODERN + '}}');
+  Tools := TJSONArray(Response.FindPath('result.tools'));
+  for I := 0 to Tools.Count - 1 do
+    if TJSONObject(Tools[I]).Get('name', '') = 'formatted' then
+    begin
+      Found := True;
+      Expect<string>(TJSONObject(Tools[I]).Find('outputSchema').AsJSON)
+        .ToBe('{ "type" : "string", "format" : "uri" }');
+    end;
+  Expect<Boolean>(Found).ToBe(True);
   Response.Free;
 end;
 
@@ -4908,11 +5008,20 @@ begin
     TestMismatchBecomesIsError);
   Test('missing structuredContent becomes isError',
     TestMissingStructuredContent);
-  Test('a handler''s own isError is not checked', TestHandlerIsErrorNotChecked);
+  Test('a handler''s own isError may omit structured output',
+    TestHandlerIsErrorNotChecked);
   Test('an output schema outside the subset is not checked',
     TestOutOfSubsetOutputNotChecked);
   Test('classic dialect: no non-object outputSchema or structuredContent',
     TestLegacyDialect);
+  Test('classic dialect: custom text kept, output JSON added as text',
+    TestLegacyKeepsCustomText);
+  Test('isError with non-conforming structured output drops it',
+    TestErrorWithBadStructuredDropsIt);
+  Test('isError with conforming structured output keeps it',
+    TestErrorWithGoodStructuredKeepsIt);
+  Test('an out-of-subset output schema is listed unchanged',
+    TestRicherSchemaPublishedUnchanged);
 end;
 
 { ───────── image results ───────── }

@@ -114,6 +114,9 @@ type
     procedure TestEnumsOfAnyPrimitive;
     procedure TestDefaultsSeededOnlyWhenAsked;
     procedure TestRootValueMessages;
+    procedure TestIntegralFloats;
+    procedure TestExactNumericEnums;
+    procedure TestDeclaredDialect;
   end;
 
   TWireNumber = class(TTestSuite)
@@ -819,6 +822,54 @@ begin
     'structured output')).ToBe('Missing required structured output "a"');
 end;
 
+// JSON Schema 2020-12 validation §6.1.1 (verified 2026-11-27,
+// https://json-schema.org/draft/2020-12/json-schema-validation#name-type):
+// an integer is any number with a zero fractional part.
+procedure TSubsetSchemas.TestIntegralFloats;
+begin
+  Expect<string>(Check('{"type":"integer"}', '2.0')).ToBe('');
+  Expect<string>(Check('{"type":"integer"}', '2e0')).ToBe('');
+  Expect<string>(Check('{"type":"integer"}', '-0.0')).ToBe('');
+  Expect<string>(Check('{"type":"integer"}', '2.000001'))
+    .ToBe('Argument must be an integer');
+  // Past 2^53 a float cannot be known to be integral.
+  Expect<string>(Check('{"type":"integer"}', '1e300'))
+    .ToBe('Argument must be an integer');
+end;
+
+procedure TSubsetSchemas.TestExactNumericEnums;
+begin
+  // 2^53 and 2^53 + 1 are the same double but different integers.
+  Expect<Boolean>(Check('{"type":"integer","enum":[9007199254740992]}',
+    '9007199254740993') <> '').ToBe(True);
+  Expect<string>(Check('{"type":"integer","enum":[9007199254740993]}',
+    '9007199254740993')).ToBe('');
+  Expect<Boolean>(Check('{"type":"integer","enum":[18446744073709551615]}',
+    '-1') <> '').ToBe(True);
+  Expect<string>(Check('{"type":"integer","enum":[18446744073709551615]}',
+    '18446744073709551615')).ToBe('');
+  // An integral float equals the integer it spells.
+  Expect<string>(Check('{"type":"number","enum":[1]}', '1.0')).ToBe('');
+  Expect<string>(Check('{"type":"number","enum":[1.5]}', '1.5')).ToBe('');
+  Expect<Boolean>(Check('{"type":"number","enum":[1]}', '1.5') <> '')
+    .ToBe(True);
+end;
+
+// A schema declaring another dialect is not enforced by 2020-12 rules
+// (verified 2026-11-27 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic#json-schema-usage).
+procedure TSubsetSchemas.TestDeclaredDialect;
+begin
+  Expect<string>(Violation(
+    '{"$schema":"https://json-schema.org/draft/2020-12/schema#","type":"string"}'))
+    .ToBe('');
+  Expect<string>(Violation(
+    '{"$schema":"http://json-schema.org/draft-07/schema#","type":"string"}'))
+    .ToBe('declares $schema other than JSON Schema 2020-12');
+  Expect<string>(Violation('{"$schema":7,"type":"string"}'))
+    .ToBe('declares $schema other than JSON Schema 2020-12');
+end;
+
 procedure TSubsetSchemas.SetupTests;
 begin
   Test('nested objects, arrays, enums, defaults and null accepted',
@@ -834,6 +885,11 @@ begin
   Test('defaults seeded into nested objects only when asked',
     TestDefaultsSeededOnlyWhenAsked);
   Test('root-level messages for output values', TestRootValueMessages);
+  Test('integral floats are integers; fractions and huge floats are not',
+    TestIntegralFloats);
+  Test('numeric enums compare exactly, integers without rounding',
+    TestExactNumericEnums);
+  Test('only a 2020-12 $schema is inside the subset', TestDeclaredDialect);
 end;
 
 begin

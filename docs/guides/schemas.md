@@ -144,9 +144,15 @@ schema node has one `type` (`object`, `array`, `string`, `number`,
 | `object` | `properties` (each a node), `required` |
 | `array` | `items` (a node) |
 | primitives | `enum` (primitive values), `default` (a primitive) |
-| any | `description`, `title`; `$schema` at the root |
+| any | `description`, `title`; `$schema` at the root, naming JSON Schema 2020-12 |
 
-Objects and arrays nest to any depth. Input schemas have an `object`
+Objects and arrays nest to any depth. `integer` means a number with no
+fractional part, so `2.0` counts, and numeric `enum` values compare
+exactly. A schema whose `$schema` names another dialect is outside the
+subset, since the server could only check it by 2020-12 rules
+([JSON Schema usage](https://modelcontextprotocol.io/specification/2026-07-28/basic#json-schema-usage),
+verified 2026-11-27).
+ Input schemas have an `object`
 root, as the specification requires; output schemas can have any root.
 Every raw input schema is checked against the subset at startup: a
 schema using a keyword outside it **fails at registration, naming the
@@ -160,9 +166,21 @@ server duty
 ([Output Schema](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#output-schema),
 verified 2026-11-26), so a handler that returns the wrong shape, or no
 structured content at all, gets an `isError` result naming the first
-mismatch instead of sending it. A handler's own `isError` result is not
-checked. An output schema outside the subset is published unchanged and
-not checked: honouring it is the handler's job.
+mismatch instead of sending it. A handler's own `isError` result may
+leave structured content out; if it carries some, that is checked too,
+and dropped (keeping your error text) when it does not conform. An
+output schema outside the subset is published unchanged and not
+checked: honouring it is the handler's job.
+
+> [!NOTE]
+> Upgrading: a tool that declares an output schema inside the subset
+> but returns only text now gets an `isError` result. Return conforming
+> structured content, or drop the schema the tool does not use.
+
+Clients on a classic-handshake revision (2025-11-25 and earlier) accept
+only an `object` output schema. A tool with another root stays in their
+`tools/list`, so they can still call it, but without the schema, and its
+non-object output reaches them as a text block of its JSON.
 
 The escape hatch is `.ApplicationValidated`:
 
@@ -178,17 +196,7 @@ itself.
 
 The checks the server runs are public in `MCP.Schema`, so a handler can
 reuse them, for example on a part of its arguments that does fit the
-subset:
-
-```pascal
-function MCPSchemaSubsetViolation(ASchema: TJSONObject;
-  AObjectRoot: Boolean): string;
-function MCPValidateAgainstSchema(ASchema: TJSONObject; AValue: TJSONData;
-  const AKind: string; ASeedDefaults: Boolean; out AError: string): Boolean;
-```
-
-`MCPSchemaSubsetViolation` returns `''` for a schema inside the subset,
-otherwise the first violation with its path. `MCPValidateAgainstSchema`
-checks a value, naming it with `AKind` in the error (`'argument'` gives
-`Missing required argument "a.b"`), and with `ASeedDefaults` adds the
-declared defaults of absent optional properties.
+subset: `MCPSchemaSubsetViolation` classifies a schema and
+`MCPValidateAgainstSchema` checks a value against one inside the
+subset. Their signatures and contracts are in the
+[server reference](../reference/server.md#schema-checks).

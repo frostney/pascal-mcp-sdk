@@ -47,7 +47,8 @@ function MCPContentResult(const ABlocks: array of TJSONObject): TMCPToolResult;
   server checks the value before sending it and turns a mismatch into
   an `isError` result. To a client on a classic-handshake revision
   (2025-11-25 and earlier), which allows only object structured
-  content, a non-object value is sent in the text block only.
+  content, a non-object value is sent as a text block of its JSON,
+  after your own text unless a block already carries exactly that.
 - `MCPImageResult` — one image content block (`type`, `data`,
   `mimeType`). The string overload takes data that is **already**
   base64 (the same contract as `MCPBlobContents`); the `TBytes`
