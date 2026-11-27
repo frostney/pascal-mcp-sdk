@@ -102,7 +102,9 @@ capability the schema defines counts as declared only in its shape, so
 `"sampling": null` or `false` is missing; a capability of the client's
 own counts when present. The check is unconditional and top-level: it
 runs on every modern-era call, retries included, and does not look at
-modes such as `elicitation.form`, which a handler checks itself. On
+members such as `elicitation.url`. The input gate checks those for each
+request the handler returns
+([Client requests](client-requests.md)). On
 Streamable HTTP that matters: an error decided after the handler has
 streamed progress can only end the stream, while one decided first is
 answered `400`, as the specification requires. Not checked for
@@ -369,6 +371,7 @@ Every handler receives `TMCPRequestContext` (from `MCP.Protocol`):
 | `HasProgressToken`, `ProgressToken` | Progress opt-in state |
 | `InputResponses`, `RequestState` | MRTR retry payload — see [Client requests](client-requests.md) |
 | `Meta` | The request's whole `params._meta`, borrowed for the call and read-only (nil when absent, as a classic-era request may leave it), for keys the library does not interpret, such as `traceparent`; clone what you keep or change, as the server reads parts of it after the handler returns |
+| `HasSubCapability(Name, Member)` | Whether `HasCapability(Name)` holds and the capability has member `Member`, such as `('elicitation', 'url')` or `('sampling', 'tools')`. An empty `elicitation` object declares `form`, as the specification reads it |
 | `HasExtension(Id)`, `ExtensionSettings(Id)` | Whether the client declared extension `Id` in `clientCapabilities.extensions`, and its settings object (borrowed; nil when absent) |
 | `IsCancelled` | Cooperative cancellation probe |
 
@@ -563,7 +566,7 @@ reader. `Data` is owned by the exception; do not free or change it.
 | Code | Use it for |
 | --- | --- |
 | `-32602` | Invalid params of a prompt or resource request that the handler rejects itself, or a `requestState` the handler cannot accept. A tool's argument errors stay in-band (`MCPErrorResult`), so the model can correct them |
-| `-32021` | A client capability the request needs and did not declare; it must carry `data.requiredCapabilities`, so build it with `MCPMissingCapabilityError('sampling')`, or for several, `EMCPProtocolError.Create(-32021, …, BuildMissingCapabilityData(['sampling', 'roots']))` from `MCP.Protocol`, which returns a fresh object the exception then owns and raises `EArgumentException` for an empty list or a repeated name. The constructor refuses `-32021` unless `requiredCapabilities` names at least one capability shaped as in `ClientCapabilities`: each capability that schema defines is an object, and so are `sampling.tools`, `elicitation.form` and each `extensions` entry, while a capability of the client's own may have any value. Data changed after that is sent as `-32603` |
+| `-32021` | A client capability the request needs and did not declare; it must carry `data.requiredCapabilities`, so build it with `MCPMissingCapabilityError('sampling')`, or for several, `EMCPProtocolError.Create(-32021, …, BuildMissingCapabilityData(['sampling', 'roots']))` from `MCP.Protocol`, or for one member, `EMCPProtocolError.Create(-32021, …, BuildMissingCapabilityData('elicitation', 'url'))`. Each builder returns a fresh object that the exception then owns; the list form raises `EArgumentException` for an empty list or a repeated name, the member form for an empty capability or member. The constructor refuses `-32021` unless `requiredCapabilities` names at least one capability shaped as in `ClientCapabilities`: each capability that schema defines is an object, and so are `sampling.tools`, `elicitation.form` and each `extensions` entry, while a capability of the client's own may have any value. Data changed after that is sent as `-32603` |
 | `-32700`, `-32600`, `-32601`, `-32603` | The other JSON-RPC codes, with their JSON-RPC meanings |
 | outside `-32768..-32000` | Your application's own codes |
 

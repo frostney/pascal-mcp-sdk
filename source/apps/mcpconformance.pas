@@ -434,7 +434,9 @@ begin
   if (ACtx.InputResponses <> nil) and (ACtx.InputResponses.Count > 0) then
     Exit(MCPTextResult('capabilities-ok: received'));
   Requests := TJSONObject.Create;
-  if ACtx.HasCapability('elicitation') then
+  // Only a client that takes forms gets one (#108): the server refuses
+  // the whole round otherwise, losing the sampling request too.
+  if ACtx.HasSubCapability('elicitation', 'form') then
     Requests.Add('elicit_input', MCPElicitFormRequest('Elicitation input',
       FieldSchema('value')));
   if ACtx.HasCapability('sampling') then
