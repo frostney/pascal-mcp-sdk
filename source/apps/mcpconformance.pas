@@ -299,8 +299,8 @@ begin
     AArguments.AsJSON);
 end;
 
-// Needs sampling: an input request for it is answered -32021 by the
-// library when the client did not declare the capability.
+// Needs sampling; the registration declares it, so the library answers
+// -32021 before this runs for a client that did not declare it.
 function MissingCapability(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
@@ -561,7 +561,7 @@ type
 
 const
   // Every tool without arguments, under the reference fixture's names.
-  ARGUMENTLESS_TOOLS: array[0..20] of TArgumentlessTool = (
+  ARGUMENTLESS_TOOLS: array[0..19] of TArgumentlessTool = (
     (Name: 'test_simple_text';
      Description: 'Tests simple text content response'; Handler: SimpleText),
     (Name: 'test_image_content';
@@ -588,8 +588,6 @@ const
      Handler: WithProgress),
     (Name: 'test_error_handling';
      Description: 'Tests error response handling'; Handler: ErrorHandling),
-    (Name: 'test_missing_capability';
-     Description: 'Test tool requiring sampling'; Handler: MissingCapability),
     (Name: 'test_input_required_result_elicitation';
      Description: 'MRTR: returns InputRequiredResult with elicitation request';
      Handler: IRElicitation),
@@ -627,6 +625,11 @@ begin
     AServer.RegisterTool(ARGUMENTLESS_TOOLS[I].Name,
       ARGUMENTLESS_TOOLS[I].Description, NO_ARGUMENTS,
       ARGUMENTLESS_TOOLS[I].Handler);
+  // Declares its need, so a client without sampling is refused before
+  // the handler runs (#84).
+  AServer.RegisterTool('test_missing_capability',
+    'Test tool requiring sampling', NO_ARGUMENTS, MissingCapability)
+    .RequiresClientCapability('sampling');
   AServer.RegisterTool('json_schema_2020_12_tool',
     'Tool with JSON Schema 2020-12 features', JSON_SCHEMA_2020_12,
     JsonSchemaTool).ApplicationValidated;

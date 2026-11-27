@@ -142,6 +142,8 @@ type
     procedure TestNonWebSchemeOriginRejected;
     procedure TestSessionHeaderIgnored;
     procedure TestOversizedBody;
+    procedure TestDeclaredCapabilityRefusedBeforeStreaming;
+    procedure TestUndeclaredCapabilityStillEndsTheStream;
     procedure TestSSEStream;
     procedure TestCompletionStreams;
     procedure TestStreamingProtocolErrorIsJSON;
@@ -179,6 +181,55 @@ function HintPrompt(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TJSONArray;
 begin
   Result := MCPMessages([MCPUserMessage('hint')]);
+end;
+
+// Reports progress, then asks for sampling (#84).
+function ProgressThenSamplingHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Requests: TJSONObject;
+begin
+  MCPReportProgress(ACtx, 0.5, 1.0, 'halfway');
+  Requests := TJSONObject.Create;
+  try
+    Requests.Add('s', MCPSamplingTextRequest('Say hi', 10));
+  except
+    Requests.Free;
+    raise;
+  end;
+  Result := MCPInputRequired(Requests);
+end;
+
+// Splits an SSE body into its events' data. False unless every event
+// is one "data: " line ended by a blank line, with nothing left over.
+function SplitSSEEvents(ABody: string; out AEvents: TStringArray): Boolean;
+var
+  Cut: Integer;
+begin
+  AEvents := nil;
+  while ABody <> '' do
+  begin
+    Cut := Pos(#10#10, ABody);
+    if (Cut = 0) or (Copy(ABody, 1, 6) <> 'data: ') or
+      (Pos(#10, Copy(ABody, 1, Cut - 1)) > 0) then
+      Exit(False);
+    AEvents := Concat(AEvents, [Copy(ABody, 7, Cut - 7)]);
+    Delete(ABody, 1, Cut + 1);
+  end;
+  Result := True;
+end;
+
+// An SSE body of well-formed events: progress first, and the -32021
+// error alone as the last event.
+function ProgressThenFinalRefusal(const ABody: string): Boolean;
+var
+  Events: TStringArray;
+begin
+  Result := SplitSSEEvents(ABody, Events) and (Length(Events) >= 2) and
+    (Pos('notifications/progress', Events[0]) > 0) and
+    (Pos('-32021', Events[0]) = 0) and
+    (Pos('"code" : -32021', Events[High(Events)]) > 0) and
+    (Pos('notifications/progress', Events[High(Events)]) = 0);
 end;
 
 // Emits nothing while it runs: a streaming-opted call to this tool
@@ -279,6 +330,11 @@ begin
     NeedsSamplingHandler);
   FServer.RegisterTool('late_refusal', 'Refuses late', '{"type":"object"}',
     ProgressThenRefuseHandler);
+  // The same handler, with and without its need declared (#84).
+  FServer.RegisterTool('sampler', 'Samples', '{"type":"object"}',
+    ProgressThenSamplingHandler).RequiresClientCapability('sampling');
+  FServer.RegisterTool('sampler_undeclared', 'Samples', '{"type":"object"}',
+    ProgressThenSamplingHandler);
   // Mirrors region (string), opts.limit (integer) and opts.dry
   // (boolean) into Mcp-Param-* headers (#90).
   FServer.RegisterTool('routed', 'Routed',
@@ -520,13 +576,7 @@ begin
   Expect<string>(ContentType).ToBe('text/event-stream');
   // Ordered frames: the progress event, then the error as the final,
   // terminated event.
-  Expect<Boolean>(Pos('notifications/progress', Body) > 0).ToBe(True);
-  Expect<Boolean>(Pos('notifications/progress', Body) <
-    Pos('"code" : -32021', Body)).ToBe(True);
-  Expect<string>(Copy(Body, Length(Body) - 1, 2)).ToBe(#10#10);
-  Expect<Boolean>(Pos('"code" : -32021', Copy(Body,
-    LastDelimiter(#10, Copy(Body, 1, Length(Body) - 2)) + 1, MaxInt)) > 0)
-    .ToBe(True);
+  Expect<Boolean>(ProgressThenFinalRefusal(Body)).ToBe(True);
 end;
 
 procedure THTTPBinding.TestBareDiscoverProbe;
@@ -1079,8 +1129,8 @@ end;
 procedure THTTPBinding.TestSSEStream;
 var
   Body, ContentType, LastEvent: string;
-  Status, EventCount, Cut: Integer;
-  Events: array of string;
+  Status, EventCount: Integer;
+  Events: TStringArray;
 begin
   Status := Exchange('POST', '/mcp',
     CallLine(3, 'echo', META_MODERN_STREAMING),
@@ -1091,16 +1141,7 @@ begin
   Expect<string>(ContentType).ToBe('text/event-stream');
 
   // Split the stream into data: events.
-  Events := [];
-  while Body <> '' do
-  begin
-    Cut := Pos(#10#10, Body);
-    if Cut = 0 then
-      Break;
-    Expect<string>(Copy(Body, 1, 6)).ToBe('data: ');
-    Events := Concat(Events, [Copy(Body, 7, Cut - 7)]);
-    Delete(Body, 1, Cut + 1);
-  end;
+  Expect<Boolean>(SplitSSEEvents(Body, Events)).ToBe(True);
   EventCount := Length(Events);
   // progress(0.5) + log message + final response, in stream order.
   Expect<Integer>(EventCount).ToBe(3);
@@ -1234,6 +1275,45 @@ begin
   end;
 end;
 
+procedure THTTPBinding.TestDeclaredCapabilityRefusedBeforeStreaming;
+var
+  Body, ContentType: string;
+  Status: Integer;
+begin
+  // Progress opted in, sampling not declared: the declared need is
+  // checked before the handler runs, so the answer is a plain 400
+  // (spec verified 2026-11-26:
+  // https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta).
+  Status := Exchange('POST', '/mcp',
+    CallLine(3, 'sampler', META_MODERN_STREAMING),
+    [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+     HeaderPair('Mcp-Method', 'tools/call'),
+     HeaderPair('Mcp-Name', 'sampler')], Body, ContentType);
+  Expect<Integer>(Status).ToBe(400);
+  Expect<string>(ContentType).ToBe('application/json');
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32021);
+  Expect<Boolean>(Pos('"requiredCapabilities" : { "sampling" : {} }', Body) > 0)
+    .ToBe(True);
+end;
+
+procedure THTTPBinding.TestUndeclaredCapabilityStillEndsTheStream;
+var
+  Body, ContentType: string;
+  Status: Integer;
+begin
+  // Without the declaration the need shows only after progress went
+  // out: the error can only be the stream's last event. This is the
+  // case the declaration exists for.
+  Status := Exchange('POST', '/mcp',
+    CallLine(3, 'sampler_undeclared', META_MODERN_STREAMING),
+    [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+     HeaderPair('Mcp-Method', 'tools/call'),
+     HeaderPair('Mcp-Name', 'sampler_undeclared')], Body, ContentType);
+  Expect<Integer>(Status).ToBe(200);
+  Expect<string>(ContentType).ToBe('text/event-stream');
+  Expect<Boolean>(ProgressThenFinalRefusal(Body)).ToBe(True);
+end;
+
 procedure THTTPBinding.SetupTests;
 begin
   Test('completion/complete streams when its callback notifies',
@@ -1301,6 +1381,10 @@ begin
   Test('legacy session/resume headers ignored',
     TestSessionHeaderIgnored);
   Test('oversized body → 413', TestOversizedBody);
+  Test('declared capability missing → 400 before any notification',
+    TestDeclaredCapabilityRefusedBeforeStreaming);
+  Test('undeclared capability after progress → error ends the stream',
+    TestUndeclaredCapabilityStillEndsTheStream);
   Test('notification-opted request → SSE stream, response last',
     TestSSEStream);
   Test('notification-opted protocol error → 400 JSON, -32022',

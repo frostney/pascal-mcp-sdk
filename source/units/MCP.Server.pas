@@ -161,6 +161,9 @@ type
     // for this tool; its schema may use keywords outside the
     // enforceable subset and the server skips call-time checks.
     AppValidated: Boolean;
+    // Client capabilities the tool declared it needs (#84), checked
+    // before the handler runs.
+    RequiredCapabilities: array of string;
     // Set at freeze: the inputSchema is within the enforceable
     // subset, so arguments are validated against it per call.
     SubsetValidate: Boolean;
@@ -308,6 +311,13 @@ type
     // keywords outside the server-enforced subset (type/properties/
     // required/enum/default); such tools skip call-time validation.
     function ApplicationValidated: TMCPToolOptions;
+    // Declares a client capability the tool needs ('sampling',
+    // 'elicitation', 'roots', ...). A request whose clientCapabilities
+    // lack it is answered -32021 before the handler runs, so nothing has
+    // been streamed yet and Streamable HTTP can answer 400 as the spec
+    // requires (#84). Call once per capability; a second call with the
+    // same name raises EMCPServer.
+    function RequiresClientCapability(const AName: string): TMCPToolOptions;
   end;
 
   // Where the server writes server-to-client notification lines
@@ -2438,6 +2448,26 @@ begin
   Result := Self;
 end;
 
+function TMCPToolOptions.RequiresClientCapability(
+  const AName: string): TMCPToolOptions;
+var
+  Index, Slot: Integer;
+  Existing: string;
+begin
+  FServer.EnsureMutable;
+  if AName = '' then
+    raise EMCPServer.Create('RequiresClientCapability needs a capability name');
+  Index := FServer.FindTool(FDefinition.Get('name', ''));
+  for Existing in FServer.FTools[Index].RequiredCapabilities do
+    if Existing = AName then
+      raise EMCPServer.CreateFmt('Tool "%s" already requires the client ' +
+        'capability "%s"', [FDefinition.Get('name', ''), AName]);
+  Slot := Length(FServer.FTools[Index].RequiredCapabilities);
+  SetLength(FServer.FTools[Index].RequiredCapabilities, Slot + 1);
+  FServer.FTools[Index].RequiredCapabilities[Slot] := AName;
+  Result := Self;
+end;
+
 function TMCPToolOptions.OpenWorldHint(AValue: Boolean): TMCPToolOptions;
 begin
   Result := SetAnnotation('openWorldHint', AValue);
@@ -3370,6 +3400,33 @@ begin
   Result := ResultResponse(AMessage, ListResult, ALegacy);
 end;
 
+// 'capability "a"' or 'capabilities "a", "b"' for a -32021 message.
+function CapabilityList(const ANames: array of string): string;
+var
+  I: Integer;
+begin
+  if Length(ANames) = 1 then
+    Exit('capability "' + ANames[0] + '"');
+  Result := 'capabilities';
+  for I := 0 to High(ANames) do
+  begin
+    if I > 0 then
+      Result := Result + ',';
+    Result := Result + ' "' + ANames[I] + '"';
+  end;
+end;
+
+// The automatic -32021 for a subject lacking ANames (not empty), both
+// for declared needs (#84) and for a run-time input request.
+function MissingCapabilityResponse(const AMessage: TJSONRPCMessage;
+  const ASubjectKind, ASubjectName: string;
+  const ANames: array of string): string;
+begin
+  Result := BuildErrorResponse(AMessage.Id, MCP_ERROR_MISSING_CLIENT_CAPABILITY,
+    ASubjectKind + ' "' + ASubjectName + '" requires the client ' +
+    CapabilityList(ANames), BuildMissingCapabilityData(ANames));
+end;
+
 // The input_required tail shared by tools/call and prompts/get (#4).
 // Gate first, assemble second: an entry naming a kind the library
 // never emits is a server bug (-32603), a kind the client did not
@@ -3398,11 +3455,8 @@ begin
   if MissingCapability <> '' then
   begin
     AInputRequests.Free;
-    Exit(BuildErrorResponse(AMessage.Id,
-      MCP_ERROR_MISSING_CLIENT_CAPABILITY,
-      ASubjectKind + ' "' + ASubjectName + '" requires the client ' +
-      'capability "' + MissingCapability + '"',
-      BuildMissingCapabilityData(MissingCapability)));
+    Exit(MissingCapabilityResponse(AMessage, ASubjectKind, ASubjectName,
+      [MissingCapability]));
   end;
   InterimResult := TJSONObject.Create;
   try
@@ -3522,11 +3576,27 @@ begin
     'does not match its outputSchema: ' + Violation);
 end;
 
+// The declared capabilities ACtx lacks, in declaration order (#84).
+function MissingDeclaredCapabilities(const ARequired: array of string;
+  const ACtx: TMCPRequestContext): TStringArray;
+var
+  Name: string;
+begin
+  Result := nil;
+  for Name in ARequired do
+    if not ACtx.HasCapability(Name) then
+    begin
+      SetLength(Result, Length(Result) + 1);
+      Result[High(Result)] := Name;
+    end;
+end;
+
 function TMCPServer.HandleToolsCall(const AMessage: TJSONRPCMessage;
   const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
 var
   ToolName, BindError, TargetError: string;
   Index: Integer;
+  Missing: TStringArray;
   Arguments, OwnedEmpty, CallResult: TJSONObject;
   ToolResult: TMCPToolResult;
   ArgsInstance: TMCPArgs;
@@ -3535,8 +3605,22 @@ begin
     Index, Arguments, OwnedEmpty);
   if TargetError <> '' then
     Exit(TargetError);
-
+  // Declared needs first (#84): refused before the handler can emit
+  // anything, so the status stays the transport's to choose. A request
+  // lacking a required client capability gets -32021 naming them in
+  // data.requiredCapabilities, which Streamable HTTP answers with 400
+  // (spec verified 2026-11-27:
+  // https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta).
+  // Modern era only, like the MRTR requests these capabilities serve.
+  // Inside the argument cleanup, so an exception here frees them too.
   try
+    if not ALegacy then
+    begin
+      Missing := MissingDeclaredCapabilities(
+        FTools[Index].RequiredCapabilities, ACtx);
+      if Length(Missing) > 0 then
+        Exit(MissingCapabilityResponse(AMessage, 'Tool', ToolName, Missing));
+    end;
     try
       if FTools[Index].ArgsClass <> nil then
       begin

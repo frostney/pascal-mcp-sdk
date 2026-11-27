@@ -472,6 +472,27 @@ type
     procedure TestNestedErrorIsInBand;
   end;
 
+  // .RequiresClientCapability (#84): a declared need is checked before
+  // the handler runs. A request lacking a required client capability
+  // is answered -32021 with data.requiredCapabilities (spec verified
+  // 2026-11-27:
+  // https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta).
+  TDeclaredCapabilities = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestMissingRefusedBeforeHandler;
+    procedure TestEveryMissingCapabilityNamed;
+    procedure TestMalformedDeclarationIsMissing;
+    procedure TestNonASCIIToolName;
+    procedure TestCustomCapabilityByPresence;
+    procedure TestClassicLookupByPresence;
+    procedure TestPresentRuns;
+    procedure TestLegacyEraNotChecked;
+    procedure TestGuards;
+  end;
+
   // MCPImageResult: the spec's image content block, the raw-bytes
   // overload's base64 encoding (asserted against literal fixtures, not
   // against a decode of what we just encoded), mimeType passthrough,
@@ -5254,6 +5275,13 @@ begin
   WithNil := TJSONObject.Create;
   WithNil.Add('requiredCapabilities', Capabilities);
   Expect<Boolean>(CapabilityDataRefused(WithNil)).ToBe(True);
+  // A capability of the client's own is valid with any value, a member
+  // stored as nil included: its key is present (#84 review).
+  Capabilities := TJSONObject.Create;
+  Capabilities.Add('com.example/feature', TJSONData(nil));
+  WithNil := TJSONObject.Create;
+  WithNil.Add('requiredCapabilities', Capabilities);
+  Expect<Boolean>(CapabilityDataRefused(WithNil)).ToBe(False);
   EMCPProtocolError.Create(-32021, 'missing', GetJSON(
     '{"requiredCapabilities":{"sampling":{"tools":{}},' +
     '"extensions":{"io.modelcontextprotocol/ui":{}}}}')).Free;
@@ -6587,6 +6615,273 @@ begin
     TestNestedErrorIsInBand);
 end;
 
+{ ───────── declared client capabilities (#84) ───────── }
+
+var
+  NeedyRuns: Integer;
+
+function NeedyHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Inc(NeedyRuns);
+  Result := MCPTextResult('ran');
+end;
+
+var
+  SawSampling: Boolean;
+
+// Records what HasCapability says about sampling.
+function SamplingProbeHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  SawSampling := ACtx.HasCapability('sampling');
+  Result := MCPTextResult('probed');
+end;
+
+// Undeclared: asks for sampling at run time.
+function AskerHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Requests: TJSONObject;
+begin
+  Inc(NeedyRuns);
+  Requests := TJSONObject.Create;
+  try
+    Requests.Add('s', MCPSamplingTextRequest('Say hi', 10));
+  except
+    Requests.Free;
+    raise;
+  end;
+  Result := MCPInputRequired(Requests);
+end;
+
+procedure TDeclaredCapabilities.BeforeEach;
+begin
+  inherited BeforeEach;
+  NeedyRuns := 0;
+  FServer.RegisterTool('needy', 'Needs two', '{"type":"object"}', NeedyHandler)
+    .RequiresClientCapability('elicitation')
+    .RequiresClientCapability('sampling');
+  FServer.RegisterTool('asker', 'Asks at run time', '{"type":"object"}',
+    AskerHandler);
+  FServer.RegisterTool('sampling_probe', 'Reports HasCapability',
+    '{"type":"object"}', SamplingProbeHandler);
+  FServer.RegisterTool('custom', 'Needs a client capability of its own',
+    '{"type":"object"}', NeedyHandler)
+    .RequiresClientCapability('com.example/feature');
+  FServer.RegisterTool('pr' + #$C3#$BC + 'f' + #$F0#$9F#$98#$80, 'Needs one',
+    '{"type":"object"}', NeedyHandler).RequiresClientCapability('sampling');
+end;
+
+function ToolCall(const ATool, ACapabilities: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{' +
+    '"name":"' + ATool + '","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":' + ACapabilities + '}}}';
+end;
+
+function NeedyCall(const ACapabilities: string): string;
+begin
+  Result := ToolCall('needy', ACapabilities);
+end;
+
+// The exact -32021 line for the needy tool lacking ANames ('"a"' or
+// '"a", "b"') with AData the requiredCapabilities members.
+function NeedyRefusal(const AWord, ANames, AData: string): string;
+begin
+  Result := '{ "jsonrpc" : "2.0", "id" : 4, "error" : ' +
+    '{ "code" : -32021, "message" : "Tool \"needy\" requires the client ' +
+    AWord + ' ' + ANames + '", "data" : { "requiredCapabilities" : ' +
+    '{ ' + AData + ' } } } }';
+end;
+
+procedure TDeclaredCapabilities.TestMissingRefusedBeforeHandler;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(NeedyCall('{"elicitation":{}}'), Response))
+    .ToBe(True);
+  Expect<string>(Response).ToBe(NeedyRefusal('capability', '\"sampling\"',
+    '"sampling" : {}'));
+  // Only the first declared one missing.
+  Expect<Boolean>(Dispatch(NeedyCall('{"sampling":{}}'), Response))
+    .ToBe(True);
+  Expect<string>(Response).ToBe(NeedyRefusal('capability',
+    '\"elicitation\"', '"elicitation" : {}'));
+  Expect<Integer>(NeedyRuns).ToBe(0);
+end;
+
+// Every missing one in one refusal, so the client needs no second try
+// to learn the rest (#84 review).
+procedure TDeclaredCapabilities.TestEveryMissingCapabilityNamed;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(NeedyCall('{}'), Response)).ToBe(True);
+  Expect<string>(Response).ToBe(NeedyRefusal('capabilities',
+    '\"elicitation\", \"sampling\"', '"elicitation" : {}, "sampling" : {}'));
+  Expect<Integer>(NeedyRuns).ToBe(0);
+end;
+
+// null, false, or an entry whose typed members are not objects declares
+// nothing: refused before the handler, and a run-time request for it is
+// refused too (#84 review).
+procedure TDeclaredCapabilities.TestMalformedDeclarationIsMissing;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(NeedyCall('{"elicitation":null,"sampling":false}'),
+    Response)).ToBe(True);
+  Expect<string>(Response).ToBe(NeedyRefusal('capabilities',
+    '\"elicitation\", \"sampling\"', '"elicitation" : {}, "sampling" : {}'));
+  Expect<Boolean>(Dispatch(NeedyCall(
+    '{"elicitation":{},"sampling":{"tools":5}}'), Response)).ToBe(True);
+  Expect<string>(Response).ToBe(NeedyRefusal('capability', '\"sampling\"',
+    '"sampling" : {}'));
+  Expect<Integer>(NeedyRuns).ToBe(0);
+  Expect<Boolean>(Dispatch(ToolCall('asker', '{"sampling":null}'), Response))
+    .ToBe(True);
+  Expect<Boolean>(Pos('"code" : -32021', Response) > 0).ToBe(True);
+  Expect<Integer>(NeedyRuns).ToBe(1);
+end;
+
+// A capability the schema does not define is the client's own, with any
+// value: declared by presence (#84 review).
+procedure TDeclaredCapabilities.TestCustomCapabilityByPresence;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(ToolCall('custom', '{"com.example/feature":true}'),
+    Response)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "ran"', Response) > 0).ToBe(True);
+  Expect<Integer>(NeedyRuns).ToBe(1);
+  Expect<Boolean>(Dispatch(ToolCall('custom', '{}'), Response)).ToBe(True);
+  Expect<Boolean>(Pos('"code" : -32021', Response) > 0).ToBe(True);
+  Expect<Integer>(NeedyRuns).ToBe(1);
+end;
+
+// A classic client's capabilities follow its own revision's schema
+// (2025-06-18 has "sampling": {"tools": true}), so the 2026-07-28 shape
+// check does not apply: presence counts, as before #84 (review).
+procedure TDeclaredCapabilities.TestClassicLookupByPresence;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-06-18","capabilities":' +
+    '{"sampling":{"tools":true}},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification('{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  SawSampling := False;
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"sampling_probe","arguments":{}}}');
+  try
+    Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+      .AsString).ToBe('probed');
+  finally
+    Response.Free;
+  end;
+  Expect<Boolean>(SawSampling).ToBe(True);
+  // The same declaration on a 2026-07-28 request is malformed there.
+  SawSampling := True;
+  Response := Call(ToolCall('sampling_probe', '{"sampling":{"tools":true}}'));
+  Response.Free;
+  Expect<Boolean>(SawSampling).ToBe(False);
+end;
+
+// The tool name goes out byte-exact: two-byte and astral characters.
+procedure TDeclaredCapabilities.TestNonASCIIToolName;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(ToolCall('pr' + #$C3#$BC + 'f' + #$F0#$9F#$98#$80,
+    '{}'), Response)).ToBe(True);
+  Expect<string>(Response).ToBe('{ "jsonrpc" : "2.0", "id" : 4, "error" : ' +
+    '{ "code" : -32021, "message" : "Tool \"pr' + #$C3#$BC + 'f' +
+    #$F0#$9F#$98#$80 + '\" requires the client capability \"sampling\"", ' +
+    '"data" : { "requiredCapabilities" : { "sampling" : {} } } } }');
+end;
+
+procedure TDeclaredCapabilities.TestPresentRuns;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(NeedyCall('{"elicitation":{},"sampling":{}}'));
+  try
+    Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+      .AsString).ToBe('ran');
+  finally
+    Response.Free;
+  end;
+  Expect<Integer>(NeedyRuns).ToBe(1);
+end;
+
+procedure TDeclaredCapabilities.TestLegacyEraNotChecked;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification('{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"needy","arguments":{}}}');
+  try
+    Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+      .AsString).ToBe('ran');
+  finally
+    Response.Free;
+  end;
+end;
+
+procedure TDeclaredCapabilities.TestGuards;
+var
+  Raised: Boolean;
+begin
+  Raised := False;
+  try
+    FServer.RegisterTool('nameless', 'x', '{"type":"object"}', NeedyHandler)
+      .RequiresClientCapability('');
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  // A second declaration of the same capability is a mistake.
+  Raised := False;
+  try
+    FServer.RegisterTool('twice', 'x', '{"type":"object"}', NeedyHandler)
+      .RequiresClientCapability('sampling')
+      .RequiresClientCapability('sampling');
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+end;
+
+procedure TDeclaredCapabilities.SetupTests;
+begin
+  Test('a missing declared capability → -32021 before the handler runs',
+    TestMissingRefusedBeforeHandler);
+  Test('every missing declared capability is named in one refusal',
+    TestEveryMissingCapabilityNamed);
+  Test('a null, false or malformed declaration counts as missing',
+    TestMalformedDeclarationIsMissing);
+  Test('a non-ASCII tool name goes out byte-exact in the refusal',
+    TestNonASCIIToolName);
+  Test('a client capability of its own counts when present',
+    TestCustomCapabilityByPresence);
+  Test('classic clients: HasCapability by presence, as before',
+    TestClassicLookupByPresence);
+  Test('declared capabilities present → the handler runs', TestPresentRuns);
+  Test('classic era: not checked (no MRTR there)', TestLegacyEraNotChecked);
+  Test('an empty or repeated capability name is refused', TestGuards);
+end;
+
 { ───────── image results ───────── }
 
 const
@@ -6927,6 +7222,8 @@ begin
     TImageResults.Create('Server: image tool results'));
   TestRunnerProgram.AddSuite(
     TTypedNested.Create('Server: typed tools with nested arguments'));
+  TestRunnerProgram.AddSuite(
+    TDeclaredCapabilities.Create('Server: declared client capabilities'));
   TestRunnerProgram.AddSuite(
     TContentResults.Create('Server: content tool results and prompt messages'));
   TestRunnerProgram.AddSuite(
