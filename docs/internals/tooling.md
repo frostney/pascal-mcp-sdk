@@ -65,17 +65,28 @@ not in the hook. Override the binary with `PASCAL_MCP_SDK_LWPT=...` when
 lwpt is not on PATH.
 
 Commit-msg runs `.github/scripts/check-pr-title.py --commit-msg` on
-the message git is about to record: its subject, the first line that
-is neither blank nor a comment, must be a Conventional Commit of a
-`cliff.toml` type, the same rule as the required `conventional-title`
-check. Subjects starting with `fixup!`, `squash!` or `amend!` and a
-space, or with the word `Merge`, pass, since an autosquash rebase or the squash merge folds them away;
-CI still checks a PR whose only commit carries one. A refused commit is
-not made, and its message stays in `.git/COMMIT_EDITMSG`. `git revert`
-and `git cherry-pick` commit with `-n`, so no hook runs for them. The
-hook needs `python3` on PATH. It does not replace the CI check: the PR
-title is written on GitHub, and a hook runs only where
-`lefthook install` was run.
+the message git is about to record. Its subject must be a Conventional
+Commit of a `cliff.toml` type, the same rule as the required
+`conventional-title` check. The hook sees the message before git
+cleans it up, so it reads the subject as git will: the first line that
+is not blank, skipping comment lines only when git strips them, which
+under the default cleanup is when an editor opened (`git commit -m`
+keeps a `#` line). It reads `commit.cleanup` and `core.commentString`
+or `core.commentChar` from git's configuration; a `--cleanup` option
+on the command line is not visible to it, and `core.commentChar=auto`
+is read as `#`.
+
+Subjects starting with `fixup!`, `squash!` or `amend!` and a space, or
+with the word `Merge`, pass, since an autosquash rebase or the squash
+merge folds them away; CI still checks a PR whose only commit carries
+one. A refused commit is not made: the checker prints the file holding
+its message, and the same commit run again with `-e -F` and that file
+reopens it. A plain `git revert` or `git cherry-pick` commits with
+`-n`, so no hook runs; one that stopped on a conflict runs the hook
+when continued, and refuses a `Revert "…"` subject, which wants a
+`revert:` one. The hook needs `python3` on PATH. It does not replace
+the CI check: the PR title is written on GitHub, and a hook runs only
+where `lefthook install` was run.
 
 ## Changelog — git-cliff
 

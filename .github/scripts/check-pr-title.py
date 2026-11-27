@@ -41,6 +41,7 @@ stays the gate: the title is written on GitHub, where no hook runs.
 
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -66,31 +67,49 @@ def allowed_types(config_text):
 PASSED_PREFIXES = ('fixup! ', 'squash! ', 'amend! ', 'Merge ')
 
 
-def message_subject(text, comment_char='#'):
+def message_subject(text, strip_comments=False, comment='#'):
     """The subject git records for message TEXT: its first line that is
-    neither blank nor a comment. The commit-msg hook sees the message
-    before git strips its comment lines."""
+    not blank and, when git strips comments, not a comment. The
+    commit-msg hook sees the message before git cleans it up, so this
+    follows that cleanup: comments go only when STRIP_COMMENTS, and
+    nothing below an editor's scissors line counts."""
+    scissors = f'{comment} ' + '-' * 24 + ' >8 ' + '-' * 24
     for line in text.splitlines():
-        if line.startswith(comment_char):
+        if strip_comments and line.rstrip() == scissors:
+            break
+        if strip_comments and line.startswith(comment):
             continue
         if line.strip():
             return line.rstrip()
     return ''
 
 
-def comment_char():
-    """git's comment character: core.commentChar, '#' when unset or
-    'auto' (which picks a character the message does not use, after
-    the hook has run)."""
+def git_config(key):
+    """KEY's value in git's configuration, '' when unset."""
     try:
-        value = subprocess.run(
-            ['git', 'config', '--get', 'core.commentChar'],
+        return subprocess.run(
+            ['git', 'config', '--get', key],
             capture_output=True, text=True, check=False).stdout.strip()
     except OSError:
-        value = ''
-    if not value or value == 'auto':
-        return '#'
-    return value
+        return ''
+
+
+def message_cleanup():
+    """Whether git strips comment lines from the message it is about to
+    record, and its comment string. Git sets GIT_EDITOR to ':' for its
+    hooks when it opens no editor; under the default cleanup, comments
+    then stay in the message (git-commit(1), --cleanup). commit.cleanup
+    is read from the configuration; a --cleanup option on the command
+    line is not visible to the hook. core.commentChar 'auto' is read as
+    '#'."""
+    editing = os.environ.get('GIT_EDITOR') != ':'
+    mode = git_config('commit.cleanup') or 'default'
+    strip = mode == 'strip' or (mode == 'default' and editing)
+    comment = (git_config('core.commentString')
+               or git_config('core.commentChar') or '#')
+    if comment == 'auto':
+        comment = '#'
+    return strip, comment
 
 
 def commit_candidates(path):
@@ -98,7 +117,8 @@ def commit_candidates(path):
     for an empty message, which git refuses itself, or a subject the
     hook lets through."""
     with open(path, encoding='utf-8', errors='replace') as handle:
-        subject = message_subject(handle.read(), comment_char())
+        strip, comment = message_cleanup()
+        subject = message_subject(handle.read(), strip, comment)
     if not subject:
         return []
     if subject.startswith(PASSED_PREFIXES):
@@ -114,7 +134,8 @@ def error_prefix():
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if argv and argv[0] == '--commit-msg':
+    hook = bool(argv) and argv[0] == '--commit-msg'
+    if hook:
         if len(argv) != 2:
             print('usage: check-pr-title.py --commit-msg FILE')
             return 2
@@ -184,6 +205,12 @@ def main(argv=None):
         print(f'The type "{generic.group(1)}" is not one of this '
               "project's changelog types, so git-cliff would file the")
         print('entry under "Other Changes" instead of a curated section.')
+    elif hook:
+        print('The squash merge takes its subject, and the CHANGELOG')
+        print('entry, from the PR title. `gh pr create --fill` copies a')
+        print("single commit's subject into that title, and the PR title")
+        print("check also checks a single-commit PR's commit subject, so")
+        print('a subject git-cliff cannot parse would fail it there.')
     else:
         print('This repository squash-merges, so that text becomes the')
         print('commit subject and the CHANGELOG entry. A subject git-cliff')
@@ -208,11 +235,13 @@ def main(argv=None):
         print('parse. Retitle it as a revert commit, keeping the subject '
               'of the change being undone:')
         print('  revert: <original description>')
-    if argv and argv[0] == '--commit-msg':
+    if hook:
+        saved = shlex.quote(os.path.abspath(argv[1]))
         print()
-        print('The commit was not made. Your message is in '
-              '.git/COMMIT_EDITMSG; edit it with')
-        print('  git commit -e -F .git/COMMIT_EDITMSG')
+        print(f'The commit was not made. Its message is saved in {saved}.')
+        print('Run the same commit again, with the options and paths it')
+        print('had, adding -e -F and that file, for example:')
+        print(f'  git commit -e -F {saved}')
     return 1
 
 

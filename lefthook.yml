@@ -40,4 +40,5 @@ commit-msg:
 
     conventional-subject:
       # {1} is the file holding the message git is about to record.
-      run: python3 .github/scripts/check-pr-title.py --commit-msg {1}
+      # Quoted: a linked worktree can pass an absolute path with spaces.
+      run: python3 .github/scripts/check-pr-title.py --commit-msg "{1}"
