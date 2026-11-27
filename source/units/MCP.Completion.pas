@@ -50,9 +50,10 @@ type
   end;
 
 // The candidates that start with AValue, in their given order: the
-// completion a static list gives. Case is ignored for ASCII, Latin-1,
-// Latin Extended-A, Greek and Cyrillic letters, by a fixed simple fold
-// that does not depend on the locale.
+// completion a static list gives. Case is ignored by Unicode simple
+// case folding for Basic Latin, Latin-1, Latin Extended-A, Greek and
+// Coptic, and Cyrillic (with its supplement), independent of the
+// locale; other scripts compare exactly.
 function MCPCompleteFrom(const AValue: string;
   const ACandidates: array of string): TMCPCompletion;
 
@@ -80,24 +81,109 @@ uses
 
   MCP.UriTemplate;
 
-// A simple, locale-independent case fold of one code point: ASCII,
-// Latin-1, Latin Extended-A, Greek and Cyrillic capitals to their small
-// letters; anything else unchanged.
-function FoldCodePoint(C: Cardinal): Cardinal;
+// Unicode simple case folding (CaseFolding.txt, status C and S) for the
+// blocks MCPCompleteFrom documents: Basic Latin, Latin-1 Supplement,
+// Latin Extended-A, Greek and Coptic, Cyrillic and Cyrillic Supplement.
+// Locale-independent; anything outside those blocks is unchanged.
+// Verified 2026-11-27 against
+// https://www.unicode.org/Public/16.0.0/ucd/CaseFolding.txt
+// Basic Latin, Latin-1 Supplement and Latin Extended-A.
+function FoldLatin(C: Cardinal): Cardinal;
 begin
   Result := C;
   case C of
-    $41..$5A, $C0..$D6, $D8..$DE, $391..$3A1, $3A3..$3AB, $410..$42F:
+    $41..$5A, $C0..$D6, $D8..$DE:
       Result := C + $20;
-    $400..$40F:
-      Result := C + $50;
+    $B5:
+      Result := $3BC; // micro sign folds to Greek small mu
     $100..$12F, $132..$137, $14A..$177:
       Result := C or 1;
-    $130: // dotted capital I: its simple lowercase is i
-      Result := $69;
+    $130:
+      Result := $69; // dotted capital I lowercases to i
     $139..$148, $179..$17E:
       if Odd(C) then
         Result := C + 1;
+    $178:
+      Result := $FF;
+    $17F:
+      Result := $73; // long s
+  end;
+end;
+
+// Greek and Coptic letters that fold to another letter of the block.
+function FoldGreekLetter(C: Cardinal): Cardinal;
+begin
+  case C of
+    $386: Result := $3AC;
+    $38C: Result := $3CC;
+    $3C2: Result := $3C3; // final sigma
+    $3CF: Result := $3D7;
+    $3D0: Result := $3B2;
+    $3D1, $3F4: Result := $3B8;
+    $3D5: Result := $3C6;
+    $3D6: Result := $3C0;
+    $3F0: Result := $3BA;
+    $3F1: Result := $3C1;
+    $3F5: Result := $3B5;
+    $3F9: Result := $3F2;
+  else
+    Result := C;
+  end;
+end;
+
+// Greek and Coptic.
+function FoldGreek(C: Cardinal): Cardinal;
+begin
+  case C of
+    $370..$373, $376, $3D8..$3EF:
+      Result := C or 1;
+    $37F:
+      Result := $3F3;
+    $388..$38A:
+      Result := C + $25;
+    $38E, $38F:
+      Result := C + $3F;
+    $391..$3A1, $3A3..$3AB:
+      Result := C + $20;
+    $3F7, $3FA:
+      Result := C + 1;
+    $3FD..$3FF:
+      Result := C - $82;
+  else
+    Result := FoldGreekLetter(C);
+  end;
+end;
+
+// Cyrillic and Cyrillic Supplement.
+function FoldCyrillic(C: Cardinal): Cardinal;
+begin
+  Result := C;
+  case C of
+    $400..$40F:
+      Result := C + $50;
+    $410..$42F:
+      Result := C + $20;
+    $460..$481, $48A..$4BF, $4D0..$52F:
+      Result := C or 1;
+    $4C0:
+      Result := $4CF;
+    $4C1..$4CE:
+      if Odd(C) then
+        Result := C + 1;
+  end;
+end;
+
+function FoldCodePoint(C: Cardinal): Cardinal;
+begin
+  case C of
+    $0..$17F:
+      Result := FoldLatin(C);
+    $370..$3FF:
+      Result := FoldGreek(C);
+    $400..$52F:
+      Result := FoldCyrillic(C);
+  else
+    Result := C;
   end;
 end;
 
@@ -254,18 +340,35 @@ var
   Values: TJSONArray;
   I: Integer;
 begin
+  // Each tree is freed if building it fails before ownership moves.
   Values := TJSONArray.Create;
-  for I := 0 to Min(High(ACompletion.Values), MAX_VALUES - 1) do
-    Values.Add(ACompletion.Values[I]);
+  try
+    for I := 0 to Min(High(ACompletion.Values), MAX_VALUES - 1) do
+      Values.Add(ACompletion.Values[I]);
+  except
+    Values.Free;
+    raise;
+  end;
   Result := TJSONObject.Create;
-  Result.Add('values', Values);
-  if ACompletion.Total >= 0 then
-    Result.Add('total', Max(ACompletion.Total, Length(ACompletion.Values)));
-  // More exist when the handler says so, when values were cut to the
-  // cap, or when a known total exceeds what is sent.
-  Result.Add('hasMore', ACompletion.HasMore or
-    (Length(ACompletion.Values) > MAX_VALUES) or
-    (ACompletion.Total > Min(Length(ACompletion.Values), MAX_VALUES)));
+  try
+    Result.Add('values', Values);
+  except
+    Values.Free;
+    Result.Free;
+    raise;
+  end;
+  try
+    if ACompletion.Total >= 0 then
+      Result.Add('total', Max(ACompletion.Total, Length(ACompletion.Values)));
+    // More exist when the handler says so, when values were cut to the
+    // cap, or when a known total exceeds what is sent.
+    Result.Add('hasMore', ACompletion.HasMore or
+      (Length(ACompletion.Values) > MAX_VALUES) or
+      (ACompletion.Total > Min(Length(ACompletion.Values), MAX_VALUES)));
+  except
+    Result.Free;
+    raise;
+  end;
 end;
 
 end.

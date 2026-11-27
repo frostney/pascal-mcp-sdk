@@ -191,9 +191,10 @@ function MCPCompleteFrom(const AValue: string;
 ```
 
 A static list completes by prefix, in the order given (`MCPCompleteFrom`,
-which a handler can call too). Case is ignored for ASCII, Latin-1,
-Latin Extended-A, Greek and Cyrillic letters, by a fixed simple fold
-that does not depend on the locale; other scripts compare exactly. A
+which a handler can call too). Case is ignored by Unicode simple case
+folding for Basic Latin, Latin-1, Latin Extended-A, Greek and Coptic,
+and Cyrillic with its supplement (so `ſ` matches `s` and `ς` matches
+`σ`), independent of the locale; other scripts compare exactly. A
 handler gets the value typed so far and, in `AContext`, the arguments
 the client has already resolved (`nil` when none); a supplied `context`
 that is not an object, or whose `arguments` are not strings, is

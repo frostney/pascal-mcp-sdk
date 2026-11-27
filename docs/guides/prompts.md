@@ -128,7 +128,7 @@ Server.RegisterPromptCompletion('greet', 'name',
 ```
 
 A list completes by prefix, ignoring case for Latin, Greek and
-Cyrillic letters. A handler receives the
+Cyrillic letters (Unicode simple case folding, whatever the locale). A handler receives the
 typed value and the arguments already filled in, so one argument's
 suggestions can depend on another's (see
 [Argument completion](../reference/server.md#argument-completion)).

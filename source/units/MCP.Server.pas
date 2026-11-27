@@ -2030,19 +2030,25 @@ end;
 // Shared by server/discover (modern) and initialize (legacy).
 // Each capability is declared when the server offers something under
 // it ("Present if the server offers any tools to call", schema
-// ServerCapabilities, verified 2026-11-26), so a client does not list
-// what is not there.
+// ServerCapabilities, verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/schema#servercapabilities),
+// so a client does not list what is not there.
 function TMCPServer.ServerCapabilities: TJSONObject;
 begin
   Result := TJSONObject.Create;
-  if Length(FTools) > 0 then
-    Result.Add('tools', TJSONObject.Create);
-  if (Length(FResources) > 0) or (Length(FTemplates) > 0) then
-    Result.Add('resources', TJSONObject.Create);
-  if Length(FPrompts) > 0 then
-    Result.Add('prompts', TJSONObject.Create);
-  if Length(FCompletions) > 0 then
-    Result.Add('completions', TJSONObject.Create);
+  try
+    if Length(FTools) > 0 then
+      Result.Add('tools', TJSONObject.Create);
+    if (Length(FResources) > 0) or (Length(FTemplates) > 0) then
+      Result.Add('resources', TJSONObject.Create);
+    if Length(FPrompts) > 0 then
+      Result.Add('prompts', TJSONObject.Create);
+    if Length(FCompletions) > 0 then
+      Result.Add('completions', TJSONObject.Create);
+  except
+    Result.Free;
+    raise;
+  end;
 end;
 
 { ───────── completion (#81) ───────── }

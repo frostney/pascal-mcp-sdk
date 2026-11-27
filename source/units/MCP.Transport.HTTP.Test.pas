@@ -1057,7 +1057,9 @@ begin
 end;
 
 // completion/complete has no Mcp-Name, yet its callback can notify: an
-// opted-in request streams like the handler-backed methods.
+// opted-in request streams like the handler-backed methods. Header and
+// SSE rules verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http
 procedure THTTPBinding.TestCompletionStreams;
 var
   Body, ContentType: string;

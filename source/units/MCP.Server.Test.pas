@@ -460,6 +460,7 @@ type
     procedure TestRegistrationGuards;
     procedure TestCapabilities;
     procedure TestLegacyEra;
+    procedure TestFoldPairs;
   end;
 
   // MCPImageResult: the spec's image content block, the raw-bytes
@@ -6168,6 +6169,26 @@ begin
     '","value":"' + AValue + '"},' + AExtra + META_MODERN + '}}';
 end;
 
+// The JSON at APath of the response to ALine ('' when absent). The
+// response is freed here, whatever an assertion does after.
+function ResponsePath(ASuite: TDispatchSuite; const ALine,
+  APath: string): string;
+var
+  Response: TJSONObject;
+  Data: TJSONData;
+begin
+  Response := ASuite.Call(ALine);
+  try
+    Data := Response.FindPath(APath);
+    if Data = nil then
+      Result := ''
+    else
+      Result := Data.AsJSON;
+  finally
+    Response.Free;
+  end;
+end;
+
 // completion/complete, verified 2026-11-26 against
 // https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/completion
 // (CompleteRequest, CompleteResult at most 100 values, the completions
@@ -6185,7 +6206,6 @@ end;
 
 procedure TCompletionDispatch.TestCallableTemplateCompletion;
 var
-  Response: TJSONObject;
   Line: string;
 begin
   // A non-ASCII prefix in another case still matches, and the
@@ -6197,57 +6217,46 @@ begin
   Expect<Boolean>(Pos('"values" : ["K' + #$C3#$B6 + 'ln"]', Line) > 0)
     .ToBe(True);
   // An empty context is as good as none.
-  Response := Call(CompleteLine(
+  Expect<string>(ResponsePath(Self, CompleteLine(
     '{"type":"ref/resource","uri":"geo://{country}/{city}"}', 'city', 'pa',
-    '"context":{},'));
-  Expect<Integer>(TJSONArray(Response.FindPath('result.completion.values'))
-    .Count).ToBe(2);
-  Response.Free;
-  Response := Call(CompleteLine(
-    '{"type":"ref/resource","uri":"geo://{country}/{city}"}', 'city', 'pa'));
-  Expect<Integer>(TJSONArray(Response.FindPath('result.completion.values'))
-    .Count).ToBe(2);
-  Response.Free;
+    '"context":{},'), 'result.completion.values'))
+    .ToBe('["Paris", "Pau"]');
+  Expect<string>(ResponsePath(Self, CompleteLine(
+    '{"type":"ref/resource","uri":"geo://{country}/{city}"}', 'city', 'pa'),
+    'result.completion.values')).ToBe('["Paris", "Pau"]');
 end;
 
 procedure TCompletionDispatch.TestHundredValueCap;
 var
-  Response: TJSONObject;
+  Line: string;
 begin
-  Response := Call(CompleteLine(
-    '{"type":"ref/resource","uri":"geo://{country}/{city}"}', 'country', ''));
-  Expect<Integer>(TJSONArray(Response.FindPath('result.completion.values'))
-    .Count).ToBe(100);
-  // The first 100, in order.
-  Expect<string>(TJSONData(Response.FindPath('result.completion.values[0]'))
-    .AsString).ToBe('v0');
-  Expect<string>(TJSONData(Response.FindPath('result.completion.values[99]'))
-    .AsString).ToBe('v99');
-  Expect<Boolean>(TJSONData(Response.FindPath('result.completion.hasMore'))
-    .AsBoolean).ToBe(True);
+  Line := CompleteLine(
+    '{"type":"ref/resource","uri":"geo://{country}/{city}"}', 'country', '');
+  // The first 100, in order, and more exist.
+  Expect<string>(ResponsePath(Self, Line, 'result.completion.values[0]'))
+    .ToBe('"v0"');
+  Expect<string>(ResponsePath(Self, Line, 'result.completion.values[99]'))
+    .ToBe('"v99"');
+  Expect<string>(ResponsePath(Self, Line, 'result.completion.values[100]'))
+    .ToBe('');
+  Expect<string>(ResponsePath(Self, Line, 'result.completion.hasMore'))
+    .ToBe('true');
   // Total unknown (-1): left out.
-  Expect<Boolean>(Response.FindPath('result.completion.total') = nil).ToBe(True);
-  Response.Free;
+  Expect<string>(ResponsePath(Self, Line, 'result.completion.total')).ToBe('');
   // A handler that trimmed to 100 itself, total 150, HasMore unset:
   // more exist, so hasMore is true.
-  Response := Call(CompleteLine('{"type":"ref/resource","uri":"page://{n}"}',
-    'n', ''));
-  Expect<Integer>(TJSONData(Response.FindPath('result.completion.total'))
-    .AsInteger).ToBe(150);
-  Expect<Boolean>(TJSONData(Response.FindPath('result.completion.hasMore'))
-    .AsBoolean).ToBe(True);
-  Response.Free;
+  Line := CompleteLine('{"type":"ref/resource","uri":"page://{n}"}', 'n', '');
+  Expect<string>(ResponsePath(Self, Line, 'result.completion.total'))
+    .ToBe('150');
+  Expect<string>(ResponsePath(Self, Line, 'result.completion.hasMore'))
+    .ToBe('true');
 end;
 
 procedure TCompletionDispatch.TestUnregisteredArgumentIsEmpty;
-var
-  Response: TJSONObject;
 begin
-  Response := Call(CompleteLine('{"type":"ref/prompt","name":"code_review"}',
-    'style', 'x'));
-  Expect<Integer>(TJSONArray(Response.FindPath('result.completion.values'))
-    .Count).ToBe(0);
-  Response.Free;
+  Expect<string>(ResponsePath(Self, CompleteLine(
+    '{"type":"ref/prompt","name":"code_review"}', 'style', 'x'),
+    'result.completion.values')).ToBe('[]');
 end;
 
 function ErrorCode(ASuite: TDispatchSuite; const ALine: string): Integer;
@@ -6346,60 +6355,104 @@ begin
   FServer.RegisterPromptCompletion('code_review', 'style', ['terse']);
 end;
 
-procedure TCompletionDispatch.TestCapabilities;
+// What server/discover declares for AServer.
+function DiscoveredCapabilities(AServer: TMCPServer): string;
 var
-  Response: TJSONObject;
-  Bare: TMCPServer;
   Session: TMCPSession;
   Line: string;
+  Response: TJSONObject;
 begin
-  Response := Call('{"jsonrpc":"2.0","id":1,"method":"server/discover",' +
-    '"params":{' + META_MODERN + '}}');
-  Expect<Boolean>(Response.FindPath('result.capabilities.completions') <> nil)
-    .ToBe(True);
-  Expect<Boolean>(Response.FindPath('result.capabilities.prompts') <> nil)
-    .ToBe(True);
-  Response.Free;
-  // A server with nothing registered declares nothing.
-  Bare := TMCPServer.Create('bare', '1');
+  Session := AServer.CreateSession;
   try
-    Session := Bare.CreateSession;
-    try
-      Bare.HandleMessage(Session, '{"jsonrpc":"2.0","id":1,' +
-        '"method":"server/discover","params":{' + META_MODERN + '}}', Line);
-      Expect<Boolean>(Pos('"capabilities" : {}', Line) > 0).ToBe(True);
-    finally
-      Session.Free;
-    end;
+    AServer.HandleMessage(Session, '{"jsonrpc":"2.0","id":1,' +
+      '"method":"server/discover","params":{' + META_MODERN + '}}', Line);
   finally
-    Bare.Free;
+    Session.Free;
+  end;
+  Response := TJSONObject(GetJSON(Line));
+  try
+    Result := Response.FindPath('result.capabilities').AsJSON;
+  finally
+    Response.Free;
+  end;
+end;
+
+// Schema ServerCapabilities ("Present if the server offers ..."),
+// verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/schema#servercapabilities
+procedure TCompletionDispatch.TestCapabilities;
+var
+  Other: TMCPServer;
+begin
+  Expect<Boolean>(Pos('"completions" : {}',
+    DiscoveredCapabilities(FServer)) > 0).ToBe(True);
+  // Nothing registered: nothing declared.
+  Other := TMCPServer.Create('bare', '1');
+  try
+    Expect<string>(DiscoveredCapabilities(Other)).ToBe('{}');
+  finally
+    Other.Free;
+  end;
+  // A prompt without a completion: prompts, and no completions.
+  Other := TMCPServer.Create('prompts-only', '1');
+  try
+    Other.RegisterPrompt('code_review', 'Review code',
+      PromptArguments.Add('language'), LanguagePrompt);
+    Expect<string>(DiscoveredCapabilities(Other)).ToBe('{ "prompts" : {} }');
+  finally
+    Other.Free;
   end;
 end;
 
 procedure TCompletionDispatch.TestLegacyEra;
 var
-  Response: TJSONObject;
+  Line: string;
 begin
-  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
-    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
-    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
-  Expect<Boolean>(Response.FindPath('result.capabilities.completions') <> nil)
+  Expect<Boolean>(ResponsePath(Self, '{"jsonrpc":"2.0","id":1,' +
+    '"method":"initialize","params":{"protocolVersion":"2025-11-25",' +
+    '"capabilities":{},"clientInfo":{"name":"legacy-client",' +
+    '"version":"1.2.3"}}}', 'result.capabilities.completions') <> '')
     .ToBe(True);
-  Response.Free;
   SendNotification(
     '{"jsonrpc":"2.0","method":"notifications/initialized"}');
-  Response := Call('{"jsonrpc":"2.0","id":2,"method":"completion/complete",' +
+  Line := '{"jsonrpc":"2.0","id":2,"method":"completion/complete",' +
     '"params":{"ref":{"type":"ref/prompt","name":"code_review"},' +
-    '"argument":{"name":"language","value":"g"}}}');
-  Expect<string>(TJSONData(Response.FindPath('result.completion.values[0]'))
-    .AsString).ToBe('Go');
+    '"argument":{"name":"language","value":"g"}}}';
+  Expect<string>(ResponsePath(Self, Line, 'result.completion.values'))
+    .ToBe('["Go"]');
   // The classic dialect carries no resultType.
-  Expect<Boolean>(Response.FindPath('result.resultType') = nil).ToBe(True);
-  Response.Free;
+  Expect<string>(ResponsePath(Self, Line, 'result.resultType')).ToBe('');
+end;
+
+// Unicode simple case folding across the documented blocks (verified
+// 2026-11-27 against https://www.unicode.org/Public/16.0.0/ucd/CaseFolding.txt):
+// long s, Latin-1 y with diaeresis, a Greek capital with tonos, final
+// sigma and Cyrillic ghe with upturn match their pairs; a script outside
+// the blocks compares exactly. Values come back byte-exact.
+procedure TCompletionDispatch.TestFoldPairs;
+var
+  Got: TMCPCompletion;
+begin
+  Got := MCPCompleteFrom('NIKLAU' + #$C5#$BF, ['Niklaus']);
+  Expect<Integer>(Length(Got.Values)).ToBe(1);
+  Got := MCPCompleteFrom(#$C5#$B8, [#$C3#$BF + 'ber']);
+  Expect<Integer>(Length(Got.Values)).ToBe(1);
+  Expect<string>(Got.Values[0]).ToBe(#$C3#$BF + 'ber');
+  Got := MCPCompleteFrom(#$CE#$86, [#$CE#$AC + #$CE#$B8#$CE#$AE#$CE#$BD#$CE#$B1]);
+  Expect<Integer>(Length(Got.Values)).ToBe(1);
+  Got := MCPCompleteFrom(#$CF#$82, [#$CE#$A3]);
+  Expect<Integer>(Length(Got.Values)).ToBe(1);
+  Got := MCPCompleteFrom(#$D2#$90, [#$D2#$91 + #$D0#$B0]);
+  Expect<Integer>(Length(Got.Values)).ToBe(1);
+  // Armenian is outside the blocks: no fold.
+  Got := MCPCompleteFrom(#$D4#$B1, [#$D5#$A1]);
+  Expect<Integer>(Length(Got.Values)).ToBe(0);
 end;
 
 procedure TCompletionDispatch.SetupTests;
 begin
+  Test('the case fold covers its documented blocks, and only those',
+    TestFoldPairs);
   Test('static prompt completion by case-insensitive prefix',
     TestStaticPromptCompletion);
   Test('callable template completion sees context arguments, UTF-8',
