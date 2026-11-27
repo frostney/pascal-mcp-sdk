@@ -131,6 +131,9 @@ type
     procedure TestMissingInputSchemaRoot;
     procedure TestWrongInputSchemaRoot;
     procedure TestNonObjectOutputSchema;
+    procedure TestBadHeaderAnnotationRejected;
+    procedure TestHeaderAnnotatedToolValidated;
+    procedure TestHeaderParametersAreCopies;
     procedure TestWrongOutputSchemaRoot;
     procedure TestValidInputAndOutputSchemaRoots;
     procedure TestDuplicateResource;
@@ -1935,6 +1938,85 @@ begin
   end;
 end;
 
+// A client drops a tool whose x-mcp-header breaks a constraint, so the
+// server refuses it at registration; verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
+procedure TRegistrationGuards.TestBadHeaderAnnotationRejected;
+var
+  Server: TMCPServer;
+  Raised: string;
+begin
+  // A client would drop the whole tool, so registration refuses it
+  // (#90).
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := '';
+    try
+      Server.RegisterTool('bad', 'Bad', '{"type":"object","properties":' +
+        '{"n":{"type":"number","x-mcp-header":"N"}}}', EchoHandler)
+        .ApplicationValidated;
+    except
+      on E: EMCPServer do
+        Raised := E.Message;
+    end;
+    Expect<string>(Raised).ToBe('Tool "bad" inputSchema: x-mcp-header of ' +
+      '"n" needs type string, integer or boolean, not "number"');
+  finally
+    Server.Free;
+  end;
+end;
+
+// x-mcp-header is inside the enforced subset: a header-routed tool
+// keeps server-side argument validation (#90).
+// ToolHeaderParameters hands out a copy: changing it leaves what the
+// HTTP binding validates against untouched (#90 review).
+procedure TRegistrationGuards.TestHeaderParametersAreCopies;
+var
+  Server: TMCPServer;
+  First, Second: TMCPHeaderParameters;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Server.RegisterTool('routed', 'Routed', '{"type":"object","properties":' +
+      '{"region":{"type":"string","x-mcp-header":"Region"}}}', EchoHandler);
+    Server.CreateSession.Free;
+    First := Server.ToolHeaderParameters('routed');
+    First[0].Path[0] := 'changed';
+    First[0].Header := 'Changed';
+    Second := Server.ToolHeaderParameters('routed');
+    Expect<string>(Second[0].Path[0]).ToBe('region');
+    Expect<string>(Second[0].Header).ToBe('Region');
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestHeaderAnnotatedToolValidated;
+var
+  Server: TMCPServer;
+  Session: TMCPSession;
+  Line: string;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Server.RegisterTool('routed', 'Routed', '{"type":"object","properties":' +
+      '{"region":{"type":"string","x-mcp-header":"Region"}},' +
+      '"required":["region"]}', EchoHandler);
+    Session := Server.CreateSession;
+    try
+      Server.HandleMessage(Session, '{"jsonrpc":"2.0","id":1,"method":' +
+        '"tools/call","params":{"name":"routed","arguments":{"region":7},' +
+        META_MODERN + '}}', Line);
+      Expect<Boolean>(Pos('Argument \"region\" must be a string', Line) > 0)
+        .ToBe(True);
+    finally
+      Session.Free;
+    end;
+  finally
+    Server.Free;
+  end;
+end;
+
 procedure TRegistrationGuards.TestWrongOutputSchemaRoot;
 var
   Definition: TJSONObject;
@@ -2559,6 +2641,12 @@ begin
   Test('non-object definition inputSchema rejected',
     TestNonObjectDefinitionInputSchema);
   Test('inputSchema without root type rejected', TestMissingInputSchemaRoot);
+  Test('invalid x-mcp-header annotation rejected at registration',
+    TestBadHeaderAnnotationRejected);
+  Test('a header-annotated tool keeps server-side argument checks',
+    TestHeaderAnnotatedToolValidated);
+  Test('ToolHeaderParameters returns independent copies',
+    TestHeaderParametersAreCopies);
   Test('inputSchema array root rejected', TestWrongInputSchemaRoot);
   Test('non-object outputSchema rejected', TestNonObjectOutputSchema);
   Test('outputSchema with an array root accepted',

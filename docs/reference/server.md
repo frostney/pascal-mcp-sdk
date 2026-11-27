@@ -207,6 +207,18 @@ for each kind of thing registered: `tools` when there is a tool,
 `resources` when there is a resource or template, `prompts` when there
 is a prompt, `completions` when there is a completion.
 
+### x-mcp-header parameters
+
+```pascal
+function ToolHeaderParameters(const AName: string): TMCPHeaderParameters;
+```
+
+The parameters tool `AName` mirrors into `Mcp-Param-*` headers (header
+name, property path, type), as `MCP.Schema.MCPHeaderParameters`
+reads them from its `inputSchema`. The Streamable HTTP binding uses it
+to validate the headers; a custom transport can too. See
+[Routing headers](../guides/tools.md#routing-headers-x-mcp-header).
+
 ### The request context
 
 Every handler receives `TMCPRequestContext` (from `MCP.Protocol`):

@@ -166,6 +166,10 @@ type
     // Set at freeze: an outputSchema within the subset, so every
     // structuredContent is checked against it before it is sent (#91).
     OutputValidate: Boolean;
+    // Set at freeze: the inputSchema's x-mcp-header annotations, which
+    // registration already validated (#90), so a call does not walk
+    // the schema again.
+    HeaderParams: TMCPHeaderParameters;
   end;
 
   TMCPResourceRegistration = record
@@ -677,6 +681,12 @@ type
     function HandleMessage(ASession: TMCPSession; const ALine: string;
       ASink: TMCPLineSink; ASinkData: Pointer;
       out AResponse: string): Boolean; overload;
+
+    // The x-mcp-header parameters of tool AName (#90): the parameters a
+    // Streamable HTTP client mirrors into Mcp-Param-* headers, which
+    // the HTTP binding validates. Empty for an unknown tool or one
+    // without annotations.
+    function ToolHeaderParameters(const AName: string): TMCPHeaderParameters;
 
     function ToolCount: Integer;
     function ResourceCount: Integer;
@@ -2087,6 +2097,8 @@ begin
     OutputSchema := FTools[I].Definition.Find('outputSchema');
     FTools[I].OutputValidate := (OutputSchema <> nil) and
       (MCPSchemaSubsetViolation(TJSONObject(OutputSchema), False) = '');
+    MCPHeaderParameters(TJSONObject(FTools[I].Definition.Find(
+      'inputSchema')), FTools[I].HeaderParams);
   end;
   FFrozen := True;
 end;
@@ -2529,6 +2541,8 @@ procedure TMCPServer.ValidateToolDefinition(ADefinition: TJSONObject;
   out AToolName: string);
 var
   InputSchema, OutputSchema, SchemaType: TJSONData;
+  HeaderParams: TMCPHeaderParameters;
+  Violation: string;
 begin
   if ADefinition = nil then
     raise EMCPServer.Create('Tool definition must not be nil');
@@ -2559,6 +2573,12 @@ begin
         'Tool "%s" definition must carry an object-valued outputSchema',
         [AToolName]);
   end;
+  // x-mcp-header annotations a client would reject make it drop the
+  // whole tool, so they fail here instead (#90).
+  Violation := MCPHeaderParameters(TJSONObject(InputSchema), HeaderParams);
+  if Violation <> '' then
+    raise EMCPServer.CreateFmt('Tool "%s" inputSchema: %s',
+      [AToolName, Violation]);
   if FindTool(AToolName) >= 0 then
     raise EMCPServer.CreateFmt(
       'Tool "%s" is already registered', [AToolName]);
@@ -3109,6 +3129,28 @@ procedure TMCPServer.RegisterResource(const AUri, AName, AMimeType: string;
   AMethod: TMCPResourceMethod; const ADescription: string);
 begin
   AddResource(AUri, AName, AMimeType, ADescription, nil, AMethod, '', False);
+end;
+
+function TMCPServer.ToolHeaderParameters(
+  const AName: string): TMCPHeaderParameters;
+var
+  Index, I: Integer;
+begin
+  Result := nil;
+  Index := FindTool(AName);
+  if Index < 0 then
+    Exit;
+  if not FFrozen then
+  begin
+    MCPHeaderParameters(TJSONObject(FTools[Index].Definition.Find(
+      'inputSchema')), Result);
+    Exit;
+  end;
+  // An independent copy: dynamic arrays are shared, not copied, by
+  // assignment, and the cached paths must stay as frozen.
+  Result := Copy(FTools[Index].HeaderParams);
+  for I := 0 to High(Result) do
+    Result[I].Path := Copy(FTools[Index].HeaderParams[I].Path);
 end;
 
 function TMCPServer.FindTool(const AName: string): Integer;
