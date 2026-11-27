@@ -127,6 +127,9 @@ type
     // write loop, so this remains false there during handler execution;
     // transports with mid-request delivery points can flip it.
     CancellationProbe: TMCPCancellationProbe;
+    // True when clientCapabilities declare AName in its schema shape
+    // (an object; sampling's and elicitation's typed members objects
+    // too). null, false or a missing entry is not a declaration.
     function HasCapability(const AName: string): Boolean;
     function IsCancelled: Boolean;
   end;
@@ -187,6 +190,11 @@ function IsLegacyProtocolVersion(const AVersion: string): Boolean;
 // {requiredCapabilities: {<ACapability>: {}}}. Fresh, owned by the
 // caller.
 function BuildMissingCapabilityData(const ACapability: string): TJSONObject;
+  overload;
+// The same with every capability in ACapabilities, so a client learns
+// all it lacks from one refusal (#84).
+function BuildMissingCapabilityData(
+  const ACapabilities: array of string): TJSONObject; overload;
 
 // True when AData is valid -32021 data: an object whose
 // requiredCapabilities is a ClientCapabilities object naming at least
@@ -206,10 +214,16 @@ begin
   Result := False;
 end;
 
+function IsCapabilityEntry(const AName: string; AValue: TJSONData): Boolean;
+  forward;
+
+// A capability counts as declared only in the shape the ClientCapabilities
+// schema gives it: "sampling": null or false declares nothing (#84
+// review).
 function TMCPRequestContext.HasCapability(const AName: string): Boolean;
 begin
   Result := (ClientCapabilities <> nil) and
-    (ClientCapabilities.Find(AName) <> nil);
+    IsCapabilityEntry(AName, ClientCapabilities.Find(AName));
 end;
 
 function TMCPRequestContext.IsCancelled: Boolean;
@@ -411,13 +425,21 @@ end;
 // -32021 data payload: {requiredCapabilities: {<name>: {}}} (schema
 // anchor MissingRequiredClientCapabilityError, verified 2026-08-08).
 function BuildMissingCapabilityData(const ACapability: string): TJSONObject;
+begin
+  Result := BuildMissingCapabilityData([ACapability]);
+end;
+
+function BuildMissingCapabilityData(
+  const ACapabilities: array of string): TJSONObject;
 var
   Capabilities: TJSONObject;
+  Name: string;
 begin
   Capabilities := TJSONObject.Create;
-  Capabilities.Add(ACapability, TJSONObject.Create);
   Result := TJSONObject.Create;
   Result.Add('requiredCapabilities', Capabilities);
+  for Name in ACapabilities do
+    Capabilities.Add(Name, TJSONObject.Create);
 end;
 
 function IsJSONObjectValue(AData: TJSONData): Boolean;

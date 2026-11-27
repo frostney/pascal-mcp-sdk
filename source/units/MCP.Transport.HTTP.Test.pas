@@ -191,8 +191,27 @@ var
 begin
   MCPReportProgress(ACtx, 0.5, 1.0, 'halfway');
   Requests := TJSONObject.Create;
-  Requests.Add('s', MCPSamplingTextRequest('Say hi', 10));
+  try
+    Requests.Add('s', MCPSamplingTextRequest('Say hi', 10));
+  except
+    Requests.Free;
+    raise;
+  end;
   Result := MCPInputRequired(Requests);
+end;
+
+// An SSE body whose progress event comes first and whose last,
+// terminated event is the -32021 error.
+function ProgressThenFinalRefusal(const ABody: string): Boolean;
+var
+  LastEvent: string;
+begin
+  LastEvent := Copy(ABody, LastDelimiter(#10, Copy(ABody, 1,
+    Length(ABody) - 2)) + 1, MaxInt);
+  Result := (Pos('notifications/progress', ABody) > 0) and
+    (Pos('notifications/progress', ABody) < Pos('"code" : -32021', ABody)) and
+    (Copy(ABody, Length(ABody) - 1, 2) = #10#10) and
+    (Pos('"code" : -32021', LastEvent) > 0);
 end;
 
 // Emits nothing while it runs: a streaming-opted call to this tool
@@ -539,13 +558,7 @@ begin
   Expect<string>(ContentType).ToBe('text/event-stream');
   // Ordered frames: the progress event, then the error as the final,
   // terminated event.
-  Expect<Boolean>(Pos('notifications/progress', Body) > 0).ToBe(True);
-  Expect<Boolean>(Pos('notifications/progress', Body) <
-    Pos('"code" : -32021', Body)).ToBe(True);
-  Expect<string>(Copy(Body, Length(Body) - 1, 2)).ToBe(#10#10);
-  Expect<Boolean>(Pos('"code" : -32021', Copy(Body,
-    LastDelimiter(#10, Copy(Body, 1, Length(Body) - 2)) + 1, MaxInt)) > 0)
-    .ToBe(True);
+  Expect<Boolean>(ProgressThenFinalRefusal(Body)).ToBe(True);
 end;
 
 procedure THTTPBinding.TestBareDiscoverProbe;
@@ -1289,7 +1302,7 @@ begin
      HeaderPair('Mcp-Name', 'sampler_undeclared')], Body, ContentType);
   Expect<Integer>(Status).ToBe(200);
   Expect<string>(ContentType).ToBe('text/event-stream');
-  Expect<Boolean>(Pos('-32021', Body) > 0).ToBe(True);
+  Expect<Boolean>(ProgressThenFinalRefusal(Body)).ToBe(True);
 end;
 
 procedure THTTPBinding.SetupTests;

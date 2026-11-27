@@ -187,7 +187,8 @@ annotations — register the JSON directly, as a string or a
 ```pascal
 Server.RegisterTool('greet_user',
   'Greet a person; asks who to greet via elicitation (MRTR)',
-  '{"type":"object"}', GreetUserHandler);
+  '{"type":"object"}', GreetUserHandler)
+  .RequiresClientCapability('elicitation');
 ```
 
 Raw schemas are parsed for well-formedness at registration

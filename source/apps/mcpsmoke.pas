@@ -587,12 +587,16 @@ begin
     Response.Free;
 
     // MRTR without the declared capability — the spec forbids sending
-    // the request kind, so the call fails with -32021.
+    // the request kind, so the call fails with -32021; greet_user
+    // declares elicitation (#84), so it is refused before it runs and
+    // the data names what the client lacks.
     Response := RoundTrip(Demo,
       '{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{' +
       '"name":"greet_user",' + META_MODERN + '}}');
     Check(PathInt(Response, 'error.code') = -32021,
       'MRTR without capability: -32021');
+    Check(Response.FindPath('error.data.requiredCapabilities.elicitation') <>
+      nil, 'MRTR without capability: data names elicitation');
     Response.Free;
 
     // resources/list + read.
