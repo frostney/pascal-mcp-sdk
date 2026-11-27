@@ -531,6 +531,10 @@ begin
       'discover: supportedVersions lists 2026-07-28');
     Check(FindPath(Response, 'result.capabilities.tools') <> nil,
       'discover: tools capability');
+    ServerInfo := FindPath(Response, 'result.capabilities.extensions');
+    Check((ServerInfo <> nil) and (ServerInfo.JSONType = jtObject) and
+      (TJSONObject(ServerInfo).Find('io.modelcontextprotocol/ui') <> nil),
+      'discover: MCP Apps extension declared (#98)');
     // The serverInfo _meta key contains dots, so FindPath (which
     // splits on dots) cannot address it — navigate by hand.
     ServerInfo := FindPath(Response, 'result._meta');
@@ -558,6 +562,9 @@ begin
       META_MODERN + '}}');
     Check(PathString(Response, 'result.tools[0].name') = 'echo',
       'tools/list: echo first (registration order)');
+    Check(PathString(Response, 'result.tools[0]._meta.ui.resourceUri') =
+      'ui://pascal-mcp-sdk/echo-card',
+      'tools/list: echo links its MCP Apps card (#98)');
     Check(PathString(Response, 'result.tools[1].name') = 'add',
       'tools/list: add second');
     Check(FindPath(Response, 'result.tools[1].outputSchema') <> nil,
@@ -740,6 +747,18 @@ begin
       'MRTR without capability: -32021');
     Check(FindPath(Response, 'error.data.requiredCapabilities.elicitation') <>
       nil, 'MRTR without capability: error data names elicitation');
+    Response.Free;
+
+    // The MCP Apps card is an ordinary resources/read (#98).
+    Response := RoundTripWithLine(Demo,
+      '{"jsonrpc":"2.0","id":36,"method":"resources/read","params":{' +
+      '"uri":"ui://pascal-mcp-sdk/echo-card",' + META_MODERN + '}}',
+      ResponseLine);
+    Check((PathString(Response, 'result.contents[0].mimeType') =
+      'text/html;profile=mcp-app') and
+      (Pos('<!DOCTYPE html>', ResponseLine) > 0) and
+      (Pos('"prefersBorder" : true', ResponseLine) > 0),
+      'resources/read: MCP Apps card with its media type and _meta.ui');
     Response.Free;
 
     // resources/list + read.

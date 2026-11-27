@@ -16,6 +16,8 @@ the README links here.
 | MRTR `input_required` (SEP-2322) | ✅ on `tools/call` + `prompts/get`: elicitation (form + url), sampling, roots entry builders; capability-gated; stateless re-entry; `requestState` sealed by the server (HMAC-SHA-256, expiry, bound to the method, target, arguments and server) and verified before the handler runs |
 | Cancellation | ✅ `notifications/cancelled` and, on Streamable HTTP, a closed or reset connection reach a running handler through `ACtx.IsCancelled`; nothing more is sent for a cancelled request. Covered by the stdio and HTTP transport suites and the `mcpsmoke` countdown check |
 | Pagination | ✅ opt-in: `PageSize` pages all four list methods with opaque `nextCursor` tokens (caching fields on every modern page), and a cursor that is not one of that list's page cursors answers `-32602`; whole lists by default. Covered by the server suite and `mcpsmoke` (`mcpdemo --page-size 2` over stdio); the TypeScript batteries run `mcpdemo` unpaged |
+| Extensions | ✅ `capabilities.extensions` declared on opt-in (`DeclareExtension`); client declarations readable per request |
+| MCP Apps (`io.modelcontextprotocol/ui`) | ✅ `MCP.Apps`: `ui://` HTML resources with `_meta.ui` (CSP, permissions, domain, border), tool links with visibility, startup check of links |
 | `notifications/progress`, `notifications/message` | ✅ `MCPReportProgress` / `MCPLogMessage` from any handler; strictly opt-in per request (`progressToken` / `logLevel`), severity-filtered, emitted before the response |
 | `_meta` validation, version negotiation | ✅ `-32602` / `-32021` / `-32022` per spec |
 | `ttlMs` / `cacheScope` caching hints (SEP-2549) | ✅ on discover/list/read, tunable via `CacheTtlMs`/`CacheScope` |

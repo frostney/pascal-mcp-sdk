@@ -292,6 +292,23 @@ reads them from its `inputSchema`. The Streamable HTTP binding uses it
 to validate the headers; a custom transport can too. See
 [Routing headers](../guides/tools.md#routing-headers-x-mcp-header).
 
+### Extensions
+
+```pascal
+procedure DeclareExtension(const AId: string; ASettings: TJSONObject = nil);
+procedure SetResourceContentMeta(const AUri: string; AMeta: TJSONObject);
+```
+
+`DeclareExtension` adds `AId` to `capabilities.extensions` on
+`server/discover` and `initialize`, with `ASettings` (owned; `nil`
+gives `{}`). Identifiers need a prefix (`io.modelcontextprotocol/ui`);
+anything else raises `EMCPServer`. Extensions are opt-in
+([extension negotiation](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning#extension-negotiation),
+verified 2026-11-26), so nothing is declared until this is called.
+`SetResourceContentMeta` gives a static text resource's read contents a
+`_meta` object. `MCP.Apps` builds MCP Apps on both; see
+[Interactive UIs](../guides/apps.md).
+
 ### The request context
 
 Every handler receives `TMCPRequestContext` (from `MCP.Protocol`):
@@ -306,6 +323,7 @@ Every handler receives `TMCPRequestContext` (from `MCP.Protocol`):
 | `HasProgressToken`, `ProgressToken` | Progress opt-in state |
 | `InputResponses`, `RequestState` | MRTR retry payload — see [Client requests](client-requests.md) |
 | `Meta` | The request's whole `params._meta`, borrowed for the call and read-only (nil when absent, as a classic-era request may leave it), for keys the library does not interpret, such as `traceparent`; clone what you keep or change, as the server reads parts of it after the handler returns |
+| `HasExtension(Id)`, `ExtensionSettings(Id)` | Whether the client declared extension `Id` in `clientCapabilities.extensions`, and its settings object (borrowed; nil when absent) |
 | `IsCancelled` | Cooperative cancellation probe |
 
 ### Introspection and the sans-I/O seam

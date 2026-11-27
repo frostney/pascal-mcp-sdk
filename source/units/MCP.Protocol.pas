@@ -142,6 +142,12 @@ type
     // its value. A classic-handshake client, whose capabilities follow
     // its own revision's schema, counts by presence alone.
     function HasCapability(const AName: string): Boolean;
+    // The client declared extension AId in clientCapabilities.extensions
+    // (#98; versioning#extension-negotiation, verified 2026-11-26).
+    function HasExtension(const AId: string): Boolean;
+    // The client's settings object for extension AId, borrowed for the
+    // handler call; nil when not declared or not an object.
+    function ExtensionSettings(const AId: string): TJSONObject;
     function IsCancelled: Boolean;
   end;
 
@@ -223,6 +229,45 @@ function IsMissingCapabilityData(AData: TJSONData): Boolean;
 // https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation
 function CancellationRequestId(const AMessage: TJSONRPCMessage): TJSONData;
 
+// Whether AId is an extension identifier: a _meta key with its
+// mandatory prefix (dot-separated labels of letters, digits and
+// hyphens, each starting with a letter and ending with a letter or
+// digit), a slash, and a name of letters, digits, '-', '_' and '.' that
+// starts and ends with a letter or digit. Verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta.
+function IsExtensionId(const AId: string): Boolean;
+
+// Capability gating (moved from MCP.Server for its size, #98): the
+// capability an input request needs, the ones a request lacks, and the
+// automatic -32021 for them.
+
+// The client capability each embedded request kind requires. '' for
+// an unrecognized kind (rejected separately — the library only emits
+// the three MRTR kinds).
+function CapabilityForInputRequest(const AMethod: string): string;
+
+// '' when every inputRequests entry names a kind the client declared;
+// otherwise the first missing capability. AUnknownKind carries the
+// method of an entry that is not an MRTR kind at all, and stays
+// non-empty for a malformed entry too — one that is not an object, or
+// carries no string "method" — so callers can keep testing it with a
+// single `<> ''` guard and never emit such a map on the wire.
+function MissingInputCapability(AInputRequests: TJSONObject;
+  const ACtx: TMCPRequestContext; out AUnknownKind: string): string;
+
+// 'capability "a"' or 'capabilities "a", "b"' for a -32021 message.
+function CapabilityList(const ANames: array of string): string;
+
+// The automatic -32021 for a subject lacking ANames (not empty), both
+// for declared needs (#84) and for a run-time input request.
+function MissingCapabilityResponse(const AMessage: TJSONRPCMessage;
+  const ASubjectKind, ASubjectName: string;
+  const ANames: array of string): string;
+
+// The declared capabilities ACtx lacks, in declaration order (#84).
+function MissingDeclaredCapabilities(const ARequired: array of string;
+  const ACtx: TMCPRequestContext): TStringArray;
+
 implementation
 
 function IsLegacyProtocolVersion(const AVersion: string): Boolean;
@@ -266,6 +311,26 @@ begin
   Position := MemberPosition(ClientCapabilities, AName);
   Result := (Position >= 0) and
     IsCapabilityEntry(AName, ClientCapabilities.Items[Position]);
+end;
+
+function TMCPRequestContext.ExtensionSettings(const AId: string): TJSONObject;
+var
+  Extensions, Settings: TJSONData;
+begin
+  Result := nil;
+  if ClientCapabilities = nil then
+    Exit;
+  Extensions := ClientCapabilities.Find('extensions');
+  if (Extensions = nil) or (Extensions.JSONType <> jtObject) then
+    Exit;
+  Settings := TJSONObject(Extensions).Find(AId);
+  if (Settings <> nil) and (Settings.JSONType = jtObject) then
+    Result := TJSONObject(Settings);
+end;
+
+function TMCPRequestContext.HasExtension(const AId: string): Boolean;
+begin
+  Result := ExtensionSettings(AId) <> nil;
 end;
 
 function TMCPRequestContext.IsCancelled: Boolean;
@@ -585,6 +650,139 @@ begin
   ReasonData := AMessage.Params.Find('reason');
   if (ReasonData = nil) or (ReasonData.JSONType = jtString) then
     Result := AMessage.Params.Find('requestId');
+end;
+
+
+function IsExtensionId(const AId: string): Boolean;
+var
+  Slash, I, J: Integer;
+  Prefix, Name: string;
+  Labels: TStringArray;
+begin
+  Result := False;
+  Slash := Pos('/', AId);
+  if Slash < 2 then
+    Exit;
+  Prefix := Copy(AId, 1, Slash - 1);
+  Name := Copy(AId, Slash + 1, MaxInt);
+  if (Name = '') or not (Name[1] in ['A'..'Z', 'a'..'z', '0'..'9']) or
+    not (Name[Length(Name)] in ['A'..'Z', 'a'..'z', '0'..'9']) then
+    Exit;
+  for I := 1 to Length(Name) do
+    if not (Name[I] in ['A'..'Z', 'a'..'z', '0'..'9', '-', '_', '.']) then
+      Exit;
+  Labels := Prefix.Split(['.']);
+  for I := 0 to High(Labels) do
+  begin
+    if (Labels[I] = '') or not (Labels[I][1] in ['A'..'Z', 'a'..'z']) or
+      not (Labels[I][Length(Labels[I])] in ['A'..'Z', 'a'..'z', '0'..'9']) then
+      Exit;
+    for J := 1 to Length(Labels[I]) do
+      if not (Labels[I][J] in ['A'..'Z', 'a'..'z', '0'..'9', '-']) then
+        Exit;
+  end;
+  Result := True;
+end;
+
+// The client capability each embedded request kind requires. '' for
+// an unrecognized kind (rejected separately — the library only emits
+// the three MRTR kinds).
+function CapabilityForInputRequest(const AMethod: string): string;
+begin
+  if AMethod = 'elicitation/create' then
+    Result := 'elicitation'
+  else if AMethod = 'sampling/createMessage' then
+    Result := 'sampling'
+  else if AMethod = 'roots/list' then
+    Result := 'roots'
+  else
+    Result := '';
+end;
+
+// '' when every inputRequests entry names a kind the client declared;
+// otherwise the first missing capability. AUnknownKind carries the
+// method of an entry that is not an MRTR kind at all, and stays
+// non-empty for a malformed entry too — one that is not an object, or
+// carries no string "method" — so callers can keep testing it with a
+// single `<> ''` guard and never emit such a map on the wire.
+function MissingInputCapability(AInputRequests: TJSONObject;
+  const ACtx: TMCPRequestContext; out AUnknownKind: string): string;
+var
+  I: Integer;
+  Entry, MethodData: TJSONData;
+  Method, Capability: string;
+begin
+  Result := '';
+  AUnknownKind := '';
+  if AInputRequests = nil then
+    Exit;
+  for I := 0 to AInputRequests.Count - 1 do
+  begin
+    Entry := AInputRequests.Items[I];
+    Method := '';
+    // An entry stored as nil is malformed too (#96 review).
+    if (Entry <> nil) and (Entry.JSONType = jtObject) then
+    begin
+      MethodData := TJSONObject(Entry).Find('method');
+      if (MethodData <> nil) and (MethodData.JSONType = jtString) then
+        Method := MethodData.AsString;
+    end;
+    Capability := CapabilityForInputRequest(Method);
+    if Capability = '' then
+    begin
+      // A malformed entry has no method to quote back; the placeholder
+      // keeps the unknown-kind signal distinguishable from success.
+      if Method = '' then
+        AUnknownKind := '(missing method)'
+      else
+        AUnknownKind := Method;
+      Exit;
+    end;
+    if not ACtx.HasCapability(Capability) then
+      Exit(Capability);
+  end;
+end;
+
+// 'capability "a"' or 'capabilities "a", "b"' for a -32021 message.
+function CapabilityList(const ANames: array of string): string;
+var
+  I: Integer;
+begin
+  if Length(ANames) = 1 then
+    Exit('capability "' + ANames[0] + '"');
+  Result := 'capabilities';
+  for I := 0 to High(ANames) do
+  begin
+    if I > 0 then
+      Result := Result + ',';
+    Result := Result + ' "' + ANames[I] + '"';
+  end;
+end;
+
+// The automatic -32021 for a subject lacking ANames (not empty), both
+// for declared needs (#84) and for a run-time input request.
+function MissingCapabilityResponse(const AMessage: TJSONRPCMessage;
+  const ASubjectKind, ASubjectName: string;
+  const ANames: array of string): string;
+begin
+  Result := BuildErrorResponse(AMessage.Id, MCP_ERROR_MISSING_CLIENT_CAPABILITY,
+    ASubjectKind + ' "' + ASubjectName + '" requires the client ' +
+    CapabilityList(ANames), BuildMissingCapabilityData(ANames));
+end;
+
+// The declared capabilities ACtx lacks, in declaration order (#84).
+function MissingDeclaredCapabilities(const ARequired: array of string;
+  const ACtx: TMCPRequestContext): TStringArray;
+var
+  Name: string;
+begin
+  Result := nil;
+  for Name in ARequired do
+    if not ACtx.HasCapability(Name) then
+    begin
+      SetLength(Result, Length(Result) + 1);
+      Result[High(Result)] := Name;
+    end;
 end;
 
 end.
