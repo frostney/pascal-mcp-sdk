@@ -597,6 +597,7 @@ end;
 procedure TEventsSuite.TestGuards;
 var
   Raised: Boolean;
+  Built: TJSONObject;
 begin
   GuardServer := FServer;
   try
@@ -607,6 +608,20 @@ begin
     // Outside the subset the server checks arguments against.
     Expect<Boolean>(Refused('a', '{"type":"object","properties":{"r":' +
       '{"type":"string","pattern":"^x"}}}')).ToBe(True);
+    // An x-mcp-header stored as nil in code is a null, refused as one
+    // (#118 review).
+    Built := TJSONObject(MCPParseJSON('{"type":"object","properties":{"r":' +
+      '{"type":"string"}}}'));
+    TJSONObject(Built.FindPath('properties.r')).Add('x-mcp-header',
+      TJSONData(nil));
+    Raised := False;
+    try
+      RegisterEvent(FServer, 'a', 'd', Built, ObjectSchema.Build, ClockCheck);
+    except
+      on E: EMCPServer do
+        Raised := True;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
     Expect<Boolean>(Refused('a', '{"type":"object"}')).ToBe(False);
     Expect<Boolean>(Refused('a', '{"type":"object"}')).ToBe(True);
     Raised := False;
