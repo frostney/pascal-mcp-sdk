@@ -20,10 +20,13 @@ uses
 
   fpjson;
 
-// '' when ASrc and ATheme make a valid icon, else the problem. Clients
-// reject icon URIs other than https: and data:, so registration does
-// too; ATheme is '', 'light' or 'dark'.
-function IconProblem(const ASrc, ATheme: string): string;
+// '' when ASrc and ATheme make a valid icon for ADefinition, else the
+// problem. Clients reject icon URIs other than https: and data:, so
+// registration does too: an https: URI needs a host, a data: URI its
+// comma. ATheme is '', 'light' or 'dark'. An "icons" member already on
+// ADefinition must be an array.
+function IconProblem(ADefinition: TJSONObject;
+  const ASrc, ATheme: string): string;
 
 // Appends an icon object to ADefinition's "icons" array, creating the
 // array when absent. ASizes is space-separated ('48x48 96x96'). Check
@@ -31,11 +34,23 @@ function IconProblem(const ASrc, ATheme: string): string;
 procedure AddIcon(ADefinition: TJSONObject; const ASrc, AMimeType, ASizes,
   ATheme: string);
 
+// '' when AKey and AValue can go under ADefinition's "_meta", else the
+// problem: AKey must not be empty, AValue not nil, and a "_meta"
+// member already on ADefinition must be an object.
+function MetaProblem(ADefinition: TJSONObject; const AKey: string;
+  AValue: TJSONData): string;
+
 // Sets AKey under ADefinition's "_meta", replacing an earlier value.
-// Takes ownership of AValue; AKey must not be empty and AValue not nil
-// (raise before calling).
+// Takes ownership of AValue; check MetaProblem first. Children of
+// AValue stored as nil become JSON nulls, so the definition still
+// clones for every list.
 procedure SetMetaEntry(ADefinition: TJSONObject; const AKey: string;
   AValue: TJSONData);
+
+// Replaces every child stored as nil (which fpjson writes as null but
+// cannot clone, FPC 3.2.2) with a JSON null, so a definition can be
+// cloned for every list.
+procedure NilChildrenToNull(AData: TJSONData);
 
 // Sets the string member AName, replacing an earlier value.
 procedure SetStringMember(ADefinition: TJSONObject; const AName,
@@ -54,14 +69,51 @@ implementation
 uses
   MCP.Schema;
 
-function IconProblem(const ASrc, ATheme: string): string;
+// The host of an https: URI ('' when it has none): what follows
+// "https://" up to the path, query or fragment, less any user info and
+// port.
+function HttpsHost(const ASrc: string): string;
+var
+  Stop: Integer;
+begin
+  Result := Copy(ASrc, 9, MaxInt);
+  Stop := Length(Result) + 1;
+  if Pos('/', Result) > 0 then
+    Stop := Pos('/', Result);
+  if (Pos('?', Result) > 0) and (Pos('?', Result) < Stop) then
+    Stop := Pos('?', Result);
+  if (Pos('#', Result) > 0) and (Pos('#', Result) < Stop) then
+    Stop := Pos('#', Result);
+  Result := Copy(Result, 1, Stop - 1);
+  Delete(Result, 1, Pos('@', Result));
+  if Pos(':', Result) > 0 then
+    Result := Copy(Result, 1, Pos(':', Result) - 1);
+end;
+
+function IconProblem(ADefinition: TJSONObject;
+  const ASrc, ATheme: string): string;
+var
+  Icons: TJSONData;
 begin
   Result := '';
-  if not (SameText(Copy(ASrc, 1, 8), 'https://') or
-    SameText(Copy(ASrc, 1, 5), 'data:')) then
+  if SameText(Copy(ASrc, 1, 8), 'https://') then
+  begin
+    if HttpsHost(ASrc) = '' then
+      Exit(Format('Icon "%s" needs a host', [ASrc]));
+  end
+  else if SameText(Copy(ASrc, 1, 5), 'data:') then
+  begin
+    // data:[<media type>][;base64],<data> (RFC 2397)
+    if Pos(',', ASrc) = 0 then
+      Exit(Format('Icon "%s" is no data: URI (it has no comma)', [ASrc]));
+  end
+  else
     Exit(Format('Icon "%s" must be an https: or data: URI', [ASrc]));
   if (ATheme <> '') and (ATheme <> 'light') and (ATheme <> 'dark') then
-    Result := Format('Icon theme "%s" must be light or dark', [ATheme]);
+    Exit(Format('Icon theme "%s" must be light or dark', [ATheme]));
+  Icons := ADefinition.Find('icons');
+  if (Icons <> nil) and (Icons.JSONType <> jtArray) then
+    Result := '"icons" of the definition must be an array';
 end;
 
 procedure AddIcon(ADefinition: TJSONObject; const ASrc, AMimeType, ASizes,
@@ -101,11 +153,38 @@ begin
   TJSONArray(Icons).Add(Icon);
 end;
 
+function MetaProblem(ADefinition: TJSONObject; const AKey: string;
+  AValue: TJSONData): string;
+var
+  Meta: TJSONData;
+begin
+  Result := '';
+  if (AKey = '') or (AValue = nil) then
+    Exit('_meta needs a key and a value');
+  Meta := ADefinition.Find('_meta');
+  if (Meta <> nil) and (Meta.JSONType <> jtObject) then
+    Result := '"_meta" of the definition must be an object';
+end;
+
+procedure NilChildrenToNull(AData: TJSONData);
+var
+  I: Integer;
+begin
+  if (AData = nil) or not (AData.JSONType in [jtObject, jtArray]) then
+    Exit;
+  for I := 0 to AData.Count - 1 do
+    if AData.Items[I] = nil then
+      AData.Items[I] := TJSONNull.Create
+    else
+      NilChildrenToNull(AData.Items[I]);
+end;
+
 procedure SetMetaEntry(ADefinition: TJSONObject; const AKey: string;
   AValue: TJSONData);
 var
   Meta: TJSONData;
 begin
+  NilChildrenToNull(AValue);
   Meta := ADefinition.Find('_meta');
   if Meta = nil then
   begin

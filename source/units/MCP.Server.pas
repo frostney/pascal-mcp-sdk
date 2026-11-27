@@ -521,20 +521,20 @@ type
     function AddTypedTool(ADefinition: TJSONObject;
       AArgsClass: TMCPArgsClass; AHandler: TMCPArgsHandler;
       AMethod: TMCPArgsMethod): TMCPToolOptions;
-    procedure AddResource(const AUri, AName, AMimeType, ADescription: string;
+    function AddResource(const AUri, AName, AMimeType, ADescription: string;
       AReader: TMCPResourceReader; AMethod: TMCPResourceMethod;
-      const AStaticText: string; AHasStaticText: Boolean);
+      const AStaticText: string; AHasStaticText: Boolean): TMCPDefinitionOptions;
     function FindTool(const AName: string): Integer;
     function FindResource(const AUri: string): Integer;
     function FindPrompt(const AName: string): Integer;
-    procedure AddPrompt(const AName, ADescription: string;
+    function AddPrompt(const AName, ADescription: string;
       AArguments: TJSONArray; AHandler: TMCPPromptHandler;
       AMethod: TMCPPromptMethod;
       AResultHandler: TMCPPromptResultHandler = nil;
-      AResultMethod: TMCPPromptResultMethod = nil);
-    procedure AddTemplate(const AUriTemplate, AName, AMimeType,
+      AResultMethod: TMCPPromptResultMethod = nil): TMCPDefinitionOptions;
+    function AddTemplate(const AUriTemplate, AName, AMimeType,
       ADescription: string; AReader: TMCPTemplateReader;
-      AMethod: TMCPTemplateMethod);
+      AMethod: TMCPTemplateMethod): TMCPDefinitionOptions;
     function ServerCapabilities: TJSONObject;
     // ACallable: the handler or method overload, so a nil one is a
     // mistake, not an empty list.
@@ -584,10 +584,13 @@ type
       ALegacy: Boolean): string;
     function HandlePromptsGet(const AMessage: TJSONRPCMessage;
       const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
+    // AMeta (owned, may be nil): the handler's _meta for the interim
+    // result; consumed on every path.
     function InputRequiredResponse(const AMessage: TJSONRPCMessage;
       const ACtx: TMCPRequestContext;
       const ASubjectKind, ASubjectName: string;
-      AInputRequests: TJSONObject; const ARequestState: string): string;
+      AInputRequests: TJSONObject; const ARequestState: string;
+      AMeta: TJSONObject = nil): string;
     function ResultResponse(const AMessage: TJSONRPCMessage;
       AResult: TJSONObject; ALegacy: Boolean): string;
     procedure AddCacheFields(AResult: TJSONObject; ATtlMs: Integer);
@@ -1829,8 +1832,6 @@ begin
   Result.Add(Item);
 end;
 
-{ ───────── metadata: icons, titles, _meta (#96) ───────── }
-
 { ───────── metadata: icons, titles, _meta (#96; MCP.Metadata) ───────── }
 
 // MCP.Metadata's icon, checked here so a bad one raises EMCPServer.
@@ -1839,7 +1840,7 @@ procedure AddCheckedIcon(ADefinition: TJSONObject; const ASrc, AMimeType,
 var
   Problem: string;
 begin
-  Problem := IconProblem(ASrc, ATheme);
+  Problem := IconProblem(ADefinition, ASrc, ATheme);
   if Problem <> '' then
     raise EMCPServer.Create(Problem);
   AddIcon(ADefinition, ASrc, AMimeType, ASizes, ATheme);
@@ -1848,11 +1849,14 @@ end;
 // AKey under ADefinition's "_meta" (ownership of AValue transfers).
 procedure AddCheckedMeta(ADefinition: TJSONObject; const AKey: string;
   AValue: TJSONData);
+var
+  Problem: string;
 begin
-  if (AKey = '') or (AValue = nil) then
+  Problem := MetaProblem(ADefinition, AKey, AValue);
+  if Problem <> '' then
   begin
     AValue.Free;
-    raise EMCPServer.Create('_meta needs a key and a value');
+    raise EMCPServer.Create(Problem);
   end;
   SetMetaEntry(ADefinition, AKey, AValue);
 end;
@@ -1920,6 +1924,10 @@ end;
 function TMCPDefinitionOptions.CacheTtlMs(AValue: Integer): TMCPDefinitionOptions;
 begin
   RequireResource('CacheTtlMs');
+  // Static text is served with the server's CacheTtlMs; a per-resource
+  // value would be ignored there, so it is refused (#96 review).
+  if FServer.FResources[FIndex].HasStaticText then
+    raise EMCPServer.Create('CacheTtlMs applies to resources with a reader');
   if AValue < 0 then
     raise EMCPServer.Create('CacheTtlMs must not be negative');
   FServer.FResources[FIndex].TtlMs := AValue;
@@ -1973,7 +1981,10 @@ begin
 end;
 
 // The serverInfo object of discover and initialize results: name and
-// version plus the optional Implementation fields set on the server.
+// version plus the optional Implementation fields set on the server
+// (title, description, websiteUrl, icons; schema 2026-07-28
+// Implementation, verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/schema).
 function TMCPServer.ServerInfoObject: TJSONObject;
 var
   Icons: TJSONData;
@@ -2782,22 +2793,6 @@ begin
       'Tool "%s" is already registered', [AToolName]);
 end;
 
-// Replaces every child stored as nil (which fpjson writes as null but
-// cannot clone, FPC 3.2.2) with a JSON null, so a definition can be
-// cloned for every tools/list.
-procedure NilChildrenToNull(AData: TJSONData);
-var
-  I: Integer;
-begin
-  if (AData = nil) or not (AData.JSONType in [jtObject, jtArray]) then
-    Exit;
-  for I := 0 to AData.Count - 1 do
-    if AData.Items[I] = nil then
-      AData.Items[I] := TJSONNull.Create
-    else
-      NilChildrenToNull(AData.Items[I]);
-end;
-
 function TMCPServer.AddTool(ADefinition: TJSONObject;
   AHandler: TMCPToolHandler; AMethod: TMCPToolMethod): TMCPToolOptions;
 var
@@ -2851,14 +2846,9 @@ begin
 end;
 
 function TMCPToolOptions.Title(const ATitle: string): TMCPToolOptions;
-var
-  Index: Integer;
 begin
   FServer.EnsureMutable;
-  Index := FDefinition.IndexOfName('title');
-  if Index >= 0 then
-    FDefinition.Delete(Index);
-  FDefinition.Add('title', ATitle);
+  SetStringMember(FDefinition, 'title', ATitle);
   Result := Self;
 end;
 
@@ -3113,10 +3103,10 @@ begin
     AArgsClass, nil, AMethod);
 end;
 
-procedure TMCPServer.AddResource(const AUri, AName, AMimeType,
+function TMCPServer.AddResource(const AUri, AName, AMimeType,
   ADescription: string; AReader: TMCPResourceReader;
   AMethod: TMCPResourceMethod; const AStaticText: string;
-  AHasStaticText: Boolean);
+  AHasStaticText: Boolean): TMCPDefinitionOptions;
 var
   Definition: TJSONObject;
 begin
@@ -3152,27 +3142,25 @@ begin
   FResources[High(FResources)].Reader := AReader;
   FResources[High(FResources)].Method := AMethod;
   FResources[High(FResources)].TtlMs := -1;
+  Result := DefinitionOptions(dkResource, High(FResources), FResources[High(FResources)].Definition);
 end;
 
 function TMCPServer.RegisterTextResource(const AUri, AName, AMimeType,
   AText: string; const ADescription: string): TMCPDefinitionOptions;
 begin
-  AddResource(AUri, AName, AMimeType, ADescription, nil, nil, AText, True);
-  Result := DefinitionOptions(dkResource, High(FResources), FResources[High(FResources)].Definition);
+  Result := AddResource(AUri, AName, AMimeType, ADescription, nil, nil, AText, True);
 end;
 
 function TMCPServer.RegisterResource(const AUri, AName, AMimeType: string;
   AReader: TMCPResourceReader; const ADescription: string): TMCPDefinitionOptions;
 begin
-  AddResource(AUri, AName, AMimeType, ADescription, AReader, nil, '', False);
-  Result := DefinitionOptions(dkResource, High(FResources), FResources[High(FResources)].Definition);
+  Result := AddResource(AUri, AName, AMimeType, ADescription, AReader, nil, '', False);
 end;
 
 function TMCPServer.RegisterResource(const AUri, AName, AMimeType: string;
   AMethod: TMCPResourceMethod; const ADescription: string): TMCPDefinitionOptions;
 begin
-  AddResource(AUri, AName, AMimeType, ADescription, nil, AMethod, '', False);
-  Result := DefinitionOptions(dkResource, High(FResources), FResources[High(FResources)].Definition);
+  Result := AddResource(AUri, AName, AMimeType, ADescription, nil, AMethod, '', False);
 end;
 
 function TMCPServer.ToolHeaderParameters(
@@ -3217,9 +3205,9 @@ begin
   Result := -1;
 end;
 
-procedure TMCPServer.AddTemplate(const AUriTemplate, AName, AMimeType,
+function TMCPServer.AddTemplate(const AUriTemplate, AName, AMimeType,
   ADescription: string; AReader: TMCPTemplateReader;
-  AMethod: TMCPTemplateMethod);
+  AMethod: TMCPTemplateMethod): TMCPDefinitionOptions;
 var
   Definition: TJSONObject;
   ValidationError: string;
@@ -3250,22 +3238,21 @@ begin
   FTemplates[High(FTemplates)].UriTemplate := AUriTemplate;
   FTemplates[High(FTemplates)].Reader := AReader;
   FTemplates[High(FTemplates)].Method := AMethod;
+  Result := DefinitionOptions(dkTemplate, High(FTemplates), FTemplates[High(FTemplates)].Definition);
 end;
 
 function TMCPServer.RegisterResourceTemplate(const AUriTemplate, AName,
   AMimeType: string; AReader: TMCPTemplateReader;
   const ADescription: string): TMCPDefinitionOptions;
 begin
-  AddTemplate(AUriTemplate, AName, AMimeType, ADescription, AReader, nil);
-  Result := DefinitionOptions(dkTemplate, High(FTemplates), FTemplates[High(FTemplates)].Definition);
+  Result := AddTemplate(AUriTemplate, AName, AMimeType, ADescription, AReader, nil);
 end;
 
 function TMCPServer.RegisterResourceTemplate(const AUriTemplate, AName,
   AMimeType: string; AMethod: TMCPTemplateMethod;
   const ADescription: string): TMCPDefinitionOptions;
 begin
-  AddTemplate(AUriTemplate, AName, AMimeType, ADescription, nil, AMethod);
-  Result := DefinitionOptions(dkTemplate, High(FTemplates), FTemplates[High(FTemplates)].Definition);
+  Result := AddTemplate(AUriTemplate, AName, AMimeType, ADescription, nil, AMethod);
 end;
 
 function TMCPServer.FindPrompt(const AName: string): Integer;
@@ -3278,10 +3265,10 @@ begin
   Result := -1;
 end;
 
-procedure TMCPServer.AddPrompt(const AName, ADescription: string;
+function TMCPServer.AddPrompt(const AName, ADescription: string;
   AArguments: TJSONArray; AHandler: TMCPPromptHandler;
   AMethod: TMCPPromptMethod; AResultHandler: TMCPPromptResultHandler;
-  AResultMethod: TMCPPromptResultMethod);
+  AResultMethod: TMCPPromptResultMethod): TMCPDefinitionOptions;
 var
   Definition: TJSONObject;
   CallableCount: Integer;
@@ -3323,64 +3310,57 @@ begin
   FPrompts[High(FPrompts)].Method := AMethod;
   FPrompts[High(FPrompts)].ResultHandler := AResultHandler;
   FPrompts[High(FPrompts)].ResultMethod := AResultMethod;
+  Result := DefinitionOptions(dkPrompt, High(FPrompts), FPrompts[High(FPrompts)].Definition);
 end;
 
 function TMCPServer.RegisterPrompt(const AName, ADescription: string;
   AHandler: TMCPPromptHandler): TMCPDefinitionOptions;
 begin
-  AddPrompt(AName, ADescription, nil, AHandler, nil);
-  Result := DefinitionOptions(dkPrompt, High(FPrompts), FPrompts[High(FPrompts)].Definition);
+  Result := AddPrompt(AName, ADescription, nil, AHandler, nil);
 end;
 
 function TMCPServer.RegisterPrompt(const AName, ADescription: string;
   AMethod: TMCPPromptMethod): TMCPDefinitionOptions;
 begin
-  AddPrompt(AName, ADescription, nil, nil, AMethod);
-  Result := DefinitionOptions(dkPrompt, High(FPrompts), FPrompts[High(FPrompts)].Definition);
+  Result := AddPrompt(AName, ADescription, nil, nil, AMethod);
 end;
 
 function TMCPServer.RegisterPrompt(const AName, ADescription: string;
   constref AArguments: TMCPPromptArguments; AHandler: TMCPPromptHandler): TMCPDefinitionOptions;
 begin
-  AddPrompt(AName, ADescription, AArguments.Build, AHandler, nil);
-  Result := DefinitionOptions(dkPrompt, High(FPrompts), FPrompts[High(FPrompts)].Definition);
+  Result := AddPrompt(AName, ADescription, AArguments.Build, AHandler, nil);
 end;
 
 function TMCPServer.RegisterPrompt(const AName, ADescription: string;
   constref AArguments: TMCPPromptArguments; AMethod: TMCPPromptMethod): TMCPDefinitionOptions;
 begin
-  AddPrompt(AName, ADescription, AArguments.Build, nil, AMethod);
-  Result := DefinitionOptions(dkPrompt, High(FPrompts), FPrompts[High(FPrompts)].Definition);
+  Result := AddPrompt(AName, ADescription, AArguments.Build, nil, AMethod);
 end;
 
 function TMCPServer.RegisterPrompt(const AName, ADescription: string;
   AHandler: TMCPPromptResultHandler): TMCPDefinitionOptions;
 begin
-  AddPrompt(AName, ADescription, nil, nil, nil, AHandler, nil);
-  Result := DefinitionOptions(dkPrompt, High(FPrompts), FPrompts[High(FPrompts)].Definition);
+  Result := AddPrompt(AName, ADescription, nil, nil, nil, AHandler, nil);
 end;
 
 function TMCPServer.RegisterPrompt(const AName, ADescription: string;
   AMethod: TMCPPromptResultMethod): TMCPDefinitionOptions;
 begin
-  AddPrompt(AName, ADescription, nil, nil, nil, nil, AMethod);
-  Result := DefinitionOptions(dkPrompt, High(FPrompts), FPrompts[High(FPrompts)].Definition);
+  Result := AddPrompt(AName, ADescription, nil, nil, nil, nil, AMethod);
 end;
 
 function TMCPServer.RegisterPrompt(const AName, ADescription: string;
   constref AArguments: TMCPPromptArguments;
   AHandler: TMCPPromptResultHandler): TMCPDefinitionOptions;
 begin
-  AddPrompt(AName, ADescription, AArguments.Build, nil, nil, AHandler, nil);
-  Result := DefinitionOptions(dkPrompt, High(FPrompts), FPrompts[High(FPrompts)].Definition);
+  Result := AddPrompt(AName, ADescription, AArguments.Build, nil, nil, AHandler, nil);
 end;
 
 function TMCPServer.RegisterPrompt(const AName, ADescription: string;
   constref AArguments: TMCPPromptArguments;
   AMethod: TMCPPromptResultMethod): TMCPDefinitionOptions;
 begin
-  AddPrompt(AName, ADescription, AArguments.Build, nil, nil, nil, AMethod);
-  Result := DefinitionOptions(dkPrompt, High(FPrompts), FPrompts[High(FPrompts)].Definition);
+  Result := AddPrompt(AName, ADescription, AArguments.Build, nil, nil, nil, AMethod);
 end;
 
 function TMCPServer.ToolCount: Integer;
@@ -3846,16 +3826,28 @@ end;
 // plus the registered name). AInputRequests is consumed on every
 // path, error paths included. Modern era only — each caller keeps its
 // own legacy-era branch, which never reaches here.
+// AMeta with the reserved serverInfo key removed: the stamp is the
+// server's, added after (#96 review), so a handler cannot replace the
+// name and version it promises.
+function HandlerMeta(AMeta: TJSONObject): TJSONObject;
+begin
+  AMeta.Delete(META_KEY_SERVER_INFO);
+  Result := AMeta;
+end;
+
 function TMCPServer.InputRequiredResponse(const AMessage: TJSONRPCMessage;
   const ACtx: TMCPRequestContext;
   const ASubjectKind, ASubjectName: string;
-  AInputRequests: TJSONObject; const ARequestState: string): string;
+  AInputRequests: TJSONObject; const ARequestState: string;
+  AMeta: TJSONObject): string;
 var
   MissingCapability, UnknownKind: string;
   InterimResult: TJSONObject;
 begin
   MissingCapability := MissingInputCapability(AInputRequests, ACtx,
     UnknownKind);
+  if (UnknownKind <> '') or (MissingCapability <> '') then
+    AMeta.Free;
   if UnknownKind <> '' then
   begin
     AInputRequests.Free;
@@ -3881,12 +3873,18 @@ begin
       InterimResult.Add('requestState',
         TMCPRequestStateSealer(FSealer).Seal(AMessage.Method, ASubjectName,
         RequestArguments(AMessage), ARequestState));
+    // The handler's _meta rides on the interim result too (#96 review):
+    // the schema allows it on every result.
+    if AMeta <> nil then
+      InterimResult.Add('_meta', HandlerMeta(AMeta));
+    AMeta := nil;
   except
     // Sealing can raise (an argument tree it cannot serialize): the
     // tree, the input requests included, is ours until the response
     // builder takes it.
     InterimResult.Free;
     AInputRequests.Free;
+    AMeta.Free;
     raise;
   end;
   Result := ResultResponse(AMessage, InterimResult, False);
@@ -3967,6 +3965,7 @@ procedure CheckStructuredOutput(const AToolName: string;
   AOutputSchema: TJSONObject; var AResult: TMCPToolResult);
 var
   Violation: string;
+  Meta: TJSONObject;
 begin
   if AResult.IsError then
   begin
@@ -3983,8 +3982,11 @@ begin
     Exit;
   AResult.Content.Free;
   AResult.StructuredContent.Free;
+  // The handler's _meta stays with the error that replaces its result.
+  Meta := AResult.Meta;
   AResult := MCPErrorResult('Tool "' + AToolName + '" produced output that ' +
     'does not match its outputSchema: ' + Violation);
+  AResult.Meta := Meta;
 end;
 
 // The declared capabilities ACtx lacks, in declaration order (#84).
@@ -4085,9 +4087,9 @@ begin
     // client's declared capabilities.
     ToolResult.Content.Free;
     ToolResult.StructuredContent.Free;
-    ToolResult.Meta.Free;
     if ALegacy then
     begin
+      ToolResult.Meta.Free;
       ToolResult.InputRequests.Free;
       ToolResult := MCPErrorResult('Tool "' + ToolName +
         '" requires additional input (input_required), which is not ' +
@@ -4095,7 +4097,7 @@ begin
     end
     else
       Exit(InputRequiredResponse(AMessage, ACtx, 'Tool', ToolName,
-        ToolResult.InputRequests, ToolResult.RequestState));
+        ToolResult.InputRequests, ToolResult.RequestState, ToolResult.Meta));
   end;
 
   if ToolResult.Content = nil then
@@ -4116,6 +4118,7 @@ begin
   except
     ToolResult.Content.Free;
     ToolResult.StructuredContent.Free;
+    ToolResult.Meta.Free;
     raise;
   end;
 
@@ -4126,7 +4129,7 @@ begin
     CallResult.Add('structuredContent', ToolResult.StructuredContent);
   // The handler's own _meta keys; the serverInfo stamp joins them (#96).
   if ToolResult.Meta <> nil then
-    CallResult.Add('_meta', ToolResult.Meta);
+    CallResult.Add('_meta', HandlerMeta(ToolResult.Meta));
 
   Result := ResultResponse(AMessage, CallResult, ALegacy);
 end;
@@ -4170,6 +4173,9 @@ begin
       Contents := FResources[Index].Method(Uri, ACtx)
     else if Assigned(FResources[Index].Reader) then
       Contents := FResources[Index].Reader(Uri, ACtx);
+    // A reader's declared ttlMs (#96); the caching hint, verified
+    // 2026-11-26 against
+    // https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/caching.
     if not FResources[Index].HasStaticText and (FResources[Index].TtlMs >= 0) then
       ReadTtlMs := FResources[Index].TtlMs;
     if FResources[Index].HasStaticText then

@@ -35,8 +35,10 @@ the answer stays valid:
 - `CacheScope` — `'private'` (default) or `'public'`.
 
 One exception is applied per-result: a `resources/read` served by a
-**dynamic reader** always advertises `ttlMs: 0` (revalidate) — the
-library cannot know how fresh a callback's data stays.
+**dynamic reader** advertises `ttlMs: 0` (revalidate) by default, since
+the library cannot know how fresh a callback's data stays. A reader
+whose data stays fresh for a known time says so on its registration
+with `.CacheTtlMs` (see [Resources](resources.md)).
 
 ## RedactErrorDetails
 

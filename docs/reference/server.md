@@ -127,6 +127,12 @@ function RegisterResourceTemplate(const AUriTemplate, AName,
   const ADescription: string = ''): TMCPDefinitionOptions;
 ```
 
+Since #96 these registrations, like `RegisterPrompt`, are functions
+returning `TMCPDefinitionOptions`. A call written as a statement
+compiles as before. Code that assigned one of them to a variable of a
+`procedure ... of object` type needs a matching `function ... of
+object` type, or a small wrapper procedure that makes the call.
+
 Reader signatures:
 
 ```pascal
@@ -294,7 +300,7 @@ Every handler receives `TMCPRequestContext` (from `MCP.Protocol`):
 | `LogLevel` | Client's requested log floor; `''` = no log opt-in |
 | `HasProgressToken`, `ProgressToken` | Progress opt-in state |
 | `InputResponses`, `RequestState` | MRTR retry payload — see [Client requests](client-requests.md) |
-| `Meta` | The request's whole `params._meta`, borrowed (nil when absent), for keys the library does not interpret, such as `traceparent` |
+| `Meta` | The request's whole `params._meta`, borrowed for the call and read-only (nil when absent, as a classic-era request may leave it), for keys the library does not interpret, such as `traceparent`; clone what you keep or change, as the server reads parts of it after the handler returns |
 | `IsCancelled` | Cooperative cancellation probe |
 
 ### Introspection and the sans-I/O seam

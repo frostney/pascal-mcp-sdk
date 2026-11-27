@@ -121,8 +121,11 @@ type
     InputResponses: TJSONObject;
     RequestState: string;
     // The request's whole params._meta object, borrowed for the handler
-    // call (nil when absent), for keys the library does not interpret,
-    // such as W3C trace context (#96). Do not keep or free it.
+    // call (nil when absent, as a classic-era request may leave it), for
+    // keys the library does not interpret, such as W3C trace context
+    // (#96). Read-only: the server still reads parts of it after the
+    // handler returns, so clone what you keep or change, and never free
+    // it.
     Meta: TJSONObject;
     // Set by the dispatching server, not by ExtractRequestContext.
     Notifier: TMCPNotifier;
@@ -174,9 +177,10 @@ function ExtractRequestContext(AParams: TJSONObject;
 
 // The {name, version} server identity object. Returns a fresh owned
 // object; the caller transfers it into a result tree or frees it.
-// Lives here because this unit owns response identity — the _meta
-// stamp below and the top-level serverInfo fields on
-// initialize/discover results must stay the same shape.
+// Lives here because this unit owns response identity: the _meta stamp
+// below and the top-level serverInfo of initialize and discover results
+// share these name and version fields (the top-level one may carry the
+// server's other Implementation fields too, #96).
 function BuildServerInfo(const AName, AVersion: string): TJSONObject;
 
 // Stamp the fields the spec expects on every result: resultType
