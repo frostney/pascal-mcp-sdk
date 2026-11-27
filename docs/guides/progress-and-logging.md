@@ -34,6 +34,16 @@ preferences. The token round-trips verbatim into
 
 ## Log messages
 
+> [!WARNING]
+> Logging is deprecated as of protocol revision `2026-07-28`
+> ([SEP-2577](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2577)).
+> It keeps working during the deprecation window, which is at least
+> twelve months, but new servers should not rely on it: log to stderr
+> with `MCPLogToStderr` (see [Process diagnostics](#process-diagnostics))
+> or use OpenTelemetry. Verified 2026-11-27 against the
+> [logging page](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/logging)
+> and the revision's changelog.
+
 `MCPLogMessage(ACtx, Level, Data, Logger)` emits
 `notifications/message` entries scoped to the request:
 

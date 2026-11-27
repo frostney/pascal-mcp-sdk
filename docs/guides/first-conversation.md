@@ -3,9 +3,10 @@
 What talking to an MCP client *actually looks like* — a complete
 session between an AI agent and the
 [demo server](../../source/apps/mcpdemo.pas), shown twice: as the
-user saw it, and as your server saw it on the wire. The transcripts
-are from 2026-08-10; the client versions shown are the releases
-current on that date.
+user saw it, and as your server saw it on the wire. The wire
+transcript is Claude Code 2.1.332's, captured on 2026-11-27; the
+terminal view and the classic handshake further down are from
+2026-08-10, with the client releases current then.
 
 ## The user's view
 
@@ -27,13 +28,86 @@ claude mcp list        # → demo: … - ✔ Connected
 
 ## The same session on the wire
 
-Three requests — plus one notification — travelled over the server's
-stdin/stdout. Everything below your handler's one line of arithmetic
-was produced by the library.
+Claude Code 2.1.332 was asked to add 19 and 23 with the demo's `add`
+tool. Five requests travelled over the server's stdin and stdout, all
+at the stateless `2026-07-28` revision: there is no handshake, and
+every request carries its own `_meta`. Everything below your handler's
+one line of arithmetic was produced by the library. The client's
+`_meta` is shown once and elided after that.
 
-**1. The client introduces itself** — the `initialize` handshake
-(this client speaks protocol revision `2025-06-18`; the library
-serves it via its dual-era support without any configuration):
+**1. The client asks what the server is** — `server/discover`, with
+its identity and capabilities in `_meta`:
+
+```json
+{"jsonrpc":"2.0","id":"server-discover-probe-1","method":"server/discover","params":{
+  "_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",
+    "io.modelcontextprotocol/clientInfo":{"name":"claude-code","title":"Claude Code","version":"2.1.332","…":"…"},
+    "io.modelcontextprotocol/clientCapabilities":{"roots":{"listChanged":true},"elicitation":{"form":{},"url":{}}}}}}
+```
+
+The server answers with the revisions it serves, its capabilities and
+extensions, its identity and the `Instructions` you set — the text the
+model reads to learn when to use your server:
+
+```json
+{"jsonrpc":"2.0","id":"server-discover-probe-1","result":{
+  "supportedVersions":["2026-07-28"],
+  "capabilities":{"tools":{},"resources":{},"prompts":{},"completions":{},"extensions":{"…":"…"}},
+  "serverInfo":{"name":"pascal-mcp-sdk-demo","version":"0.1.0","…":"…"},
+  "instructions":"Demo server for the pascal-mcp-sdk library. Use \"echo\" to mirror a message, \"add\" to add two numbers, \"pixel\" for a sample image; read mcp://pascal-mcp-sdk/greeting for a hello.",
+  "ttlMs":300000,"cacheScope":"private","resultType":"complete","_meta":{"…":"…"}}}
+```
+
+**2. Discovery** — `prompts/list`, `resources/list` and `tools/list`,
+and the client hands the catalog to the model. Note that your
+`RegisterTool` call became a JSON Schema the model uses to shape its
+arguments:
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"…":"…"}}}
+```
+
+```json
+{"jsonrpc":"2.0","id":2,"result":{"tools":[
+  {"name":"echo","description":"Echo a message back to the caller","inputSchema":{"…":"…"},"…":"…"},
+  {"name":"add","description":"Add two numbers and return the sum",
+   "inputSchema":{"type":"object",
+     "properties":{"a":{"type":"number"},"b":{"type":"number"}},
+     "required":["a","b"]},
+   "outputSchema":{"type":"object","properties":{"sum":{"type":"number"}},"required":["sum"]},
+   "…":"…"},
+  "…"],"resultType":"complete","…":"…"}}
+```
+
+**3. The model calls your tool.** The arguments match the schema —
+the library has already validated them before your handler runs:
+
+```json
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+  "name":"add","arguments":{"a":19,"b":23},"_meta":{"…":"…","progressToken":3}}}
+```
+
+**4. Your handler's result goes back** — human-readable `content`
+plus the `structuredContent` matching the tool's output schema:
+
+```json
+{"jsonrpc":"2.0","id":3,"result":{
+  "content":[{"type":"text","text":"The sum is 42"}],
+  "isError":false,
+  "structuredContent":{"sum":42},
+  "resultType":"complete",
+  "_meta":{"io.modelcontextprotocol/serverInfo":{"name":"pascal-mcp-sdk-demo","version":"0.1.0"}}}}
+```
+
+Then the model answered "42" — and when the session ended, the host
+closed the server's stdin and the process exited. That
+EOF-means-shutdown contract is why a pascal-mcp-sdk server needs no
+signal handling and no restart loop.
+
+## What a classic-handshake client sends
+
+Clients that predate the stateless revision open with the classic
+`initialize` handshake instead. Codex 0.145.0, captured on 2026-08-10:
 
 ```json
 {"jsonrpc":"2.0","id":0,"method":"initialize","params":{
@@ -42,87 +116,15 @@ serves it via its dual-era support without any configuration):
   "clientInfo":{"name":"codex-mcp-client","title":"Codex","version":"0.145.0"}}}
 ```
 
-The server answers with its identity and the `Instructions` you set —
-the text the model reads to learn when to use your server:
-
-```json
-{"jsonrpc":"2.0","id":0,"result":{
-  "protocolVersion":"2025-06-18",
-  "capabilities":{"tools":{},"resources":{},"prompts":{}},
-  "serverInfo":{"name":"pascal-mcp-sdk-demo","version":"0.1.0"},
-  "instructions":"Demo server for the pascal-mcp-sdk library. Use \"echo\" to mirror a message, \"add\" to add two numbers; read mcp://pascal-mcp-sdk/greeting for a hello."}}
-```
-
-The client then confirms the handshake with a notification (no
-response expected):
-
-```json
-{"jsonrpc":"2.0","method":"notifications/initialized"}
-```
-
-**2. Discovery** — the client asks what you offer and hands the
-catalog to the model. Note that your `RegisterTool` call became a
-JSON Schema the model uses to shape its arguments:
-
-```json
-{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"progressToken":0}}}
-```
-
-```json
-{"jsonrpc":"2.0","id":1,"result":{"tools":[
-  {"name":"echo","description":"Echo a message back to the caller", "inputSchema":{"…":"…"}},
-  {"name":"add","description":"Add two numbers and return the sum",
-   "inputSchema":{"type":"object",
-     "properties":{"a":{"type":"number"},"b":{"type":"number"}},
-     "required":["a","b"]}, "…":"…"}]}}
-```
-
-**3. The model calls your tool.** The arguments match the schema —
-the library has already validated them before your handler runs
-(client-specific `_meta` bookkeeping elided):
-
-```json
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
-  "name":"add","arguments":{"a":19,"b":23},"_meta":{"…":"…"}}}
-```
-
-**4. Your handler's result goes back** — human-readable `content`
-plus the `structuredContent` matching the tool's output schema (the
-float is serialized in FPC's exponent form; every client reads it as
-plain JSON 42):
-
-```json
-{"jsonrpc":"2.0","id":2,"result":{
-  "content":[{"type":"text","text":"The sum is 42"}],
-  "isError":false,
-  "structuredContent":{"sum":4.2E+001}}}
-```
-
-Then the model told the user "The result is 42." — and when the
-session ended, the host closed the server's stdin and the process
-exited. That EOF-means-shutdown contract is why a pascal-mcp-sdk
-server needs no signal handling and no restart loop.
-
-## What Claude Code sends
-
-Same choreography from Claude Code (versions 2.1.217 and 2.1.226
-both open with this):
-
-```json
-{"jsonrpc":"2.0","id":0,"method":"initialize","params":{
-  "protocolVersion":"2025-11-25",
-  "capabilities":{"roots":{"listChanged":true},"elicitation":{}},
-  "clientInfo":{"name":"claude-code","title":"Claude Code","version":"2.1.226"}}}
-```
-
-Different client, different protocol revision (`2025-11-25` vs
-Codex's `2025-06-18`) — same server, zero configuration. That is what
-the dual-era default buys you: the library speaks each classic
-handshake revision it supports (`2024-11-05`, `2025-06-18`,
-`2025-11-25` — the revisions current clients use) *and* the newest
-stateless `2026-07-28` revision, and picks per connection — so as
-clients migrate to the stateless revision, your server needs no
-change (see [Configuration](configuration.md#dualera)).
+The server answers in that revision's dialect, and the client confirms
+with `notifications/initialized` before its first request. Claude Code
+2.1.226 still opened this way on 2026-08-10, at `2025-11-25`.
+On stdio the library serves both: it speaks each classic revision it
+supports (`2024-11-05`, `2025-06-18`, `2025-11-25`) *and* the
+stateless `2026-07-28` revision, and picks per connection by how the
+client opens — so as clients move to the stateless revision, your
+server needs no change (see [Configuration](configuration.md#dualera)).
+The Streamable HTTP binding serves `2026-07-28` only.
 
 ## The same conversation, stateless style
 
@@ -147,6 +149,6 @@ surface this way.
   library produced every other byte on this page.
 - Model-facing text matters: the tool `description` and the server
   `Instructions` are what made the model pick `add` unprompted.
-- Clients disagree about protocol revisions today — the dual-era
-  default absorbs that so you never have to ask which client your
-  users run.
+- Clients move between protocol revisions at their own pace — the
+  dual-era default on stdio absorbs that, so you never have to ask
+  which client your users run.

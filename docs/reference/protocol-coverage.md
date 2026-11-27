@@ -13,20 +13,22 @@ the README links here.
 | `resources/templates/list` + template matching | ✅ RFC 6570 level-1 (`{var}`), exact resources win, vars passed to readers |
 | `prompts/list`, `prompts/get` | ✅ fluent argument declaration, message builders for every content type, spec error codes |
 | `completion/complete` | ✅ prompt arguments and resource-template variables, from a static list (prefix match) or a handler with context arguments; `completions` capability declared when registered |
-| MRTR `input_required` (SEP-2322) | ✅ on `tools/call` + `prompts/get`: elicitation (form + url), sampling, roots entry builders; capability-gated, including the elicitation mode and `sampling.tools`; stateless re-entry; `requestState` sealed by the server (HMAC-SHA-256, expiry, bound to the method, target, arguments and server) and verified before the handler runs |
+| MRTR `input_required` (SEP-2322) | ✅ on `tools/call` + `prompts/get`: elicitation (form + url), sampling, roots entry builders (sampling and roots are deprecated in `2026-07-28`, SEP-2577); capability-gated, including the elicitation mode and `sampling.tools`; stateless re-entry; `requestState` sealed by the server (HMAC-SHA-256, expiry, bound to the method, target, arguments and server) and verified before the handler runs |
 | Cancellation | ✅ `notifications/cancelled` and, on Streamable HTTP, a closed or reset connection reach a running handler through `ACtx.IsCancelled`; nothing more is sent for a cancelled request. Covered by the stdio and HTTP transport suites and the `mcpsmoke` countdown check |
 | Pagination | ✅ opt-in: `PageSize` pages the four core list methods, and `skills/list` and `resources/directory/read` from `MCP.Skills` (covered by the Skills suite's paging tests), with opaque `nextCursor` tokens (caching fields on every modern page), and a cursor that is not one of that list's page cursors answers `-32602`; whole lists by default. Covered by the server suite and `mcpsmoke` (`mcpdemo --page-size 2` over stdio); the TypeScript batteries run `mcpdemo` unpaged |
 | Extensions | ✅ `capabilities.extensions` declared on opt-in (`DeclareExtension`); client declarations readable per request |
 | MCP Apps (`io.modelcontextprotocol/ui`) | ✅ `MCP.Apps`: `ui://` HTML resources with `_meta.ui` (CSP, permissions, domain, border), tool links with visibility, startup check of links |
 | Skills (`io.modelcontextprotocol/skills`) | ✅ `MCP.Skills`: skills defined in code as `skill://` resources, `skills/list` (paged), `skills/get`, `resources/directory/read`, SHA-256 digests and sizes, nested skills, the Agent Skills name and field rules; skills loaded from a directory, their frontmatter read with a YAML subset YAML 1.1 and 1.2 parsers agree on |
 | Events (`io.modelcontextprotocol/events`) | ✅ `MCP.Events`: event types with input and payload schemas, `events/list` (paged), poll delivery (`events/poll`) with cursors, `maxEvents`/`hasMore`, truncation and types without replay, derived event ids, the SEP-3415 error codes, `Mcp-Name`/`Mcp-Param-*` on Streamable HTTP; push delivery (`events/stream`) from the same check, one occurrence per call: active, event, heartbeat, error and terminated notifications and the final frame, an SSE stream on Streamable HTTP, streams multiplexed in the single-threaded stdio loop and cancelled with `notifications/cancelled`; 2026-07-28 only. Webhooks and `list_changed`: not served |
-| `notifications/progress`, `notifications/message` | ✅ `MCPReportProgress` / `MCPLogMessage` from any handler; strictly opt-in per request (`progressToken` / `logLevel`), severity-filtered, emitted before the response |
+| `notifications/progress`, `notifications/message` | ✅ `MCPReportProgress` / `MCPLogMessage` from any handler; strictly opt-in per request (`progressToken` / `logLevel`), severity-filtered, emitted before the response. Logging is deprecated in `2026-07-28` (SEP-2577) |
 | `_meta` validation, version negotiation | ✅ `-32602` / `-32021` / `-32022` per spec |
 | `ttlMs` / `cacheScope` caching hints (SEP-2549) | ✅ on discover/list/read, tunable via `CacheTtlMs`/`CacheScope` |
 | stdio transport | ✅ newline-delimited, EOF shutdown contract |
 | Streamable HTTP transport | ✅ `MCP.Transport.HTTP`: single POST endpoint, SSE response streams, mirrored-header validation (`Mcp-Name`, and `Mcp-Param-*` for `x-mcp-header` parameters), Origin allowlist |
-| Classic handshake era (`initialize`: 2024-11-05, 2025-06-18, 2025-11-25) | ✅ dual-era default: era-faithful dialect (unstamped results, `-32002`, `ping`); `DualEra := False` for strict modern-only |
+| Classic handshake era (`initialize`: 2024-11-05, 2025-06-18, 2025-11-25) | ✅ dual-era default on stdio: era-faithful dialect (unstamped results, `-32002`, `ping`); `DualEra := False` for strict modern-only. The Streamable HTTP binding is modern-only |
 | `subscriptions/listen`, list-changed | ⏳ not implemented (registries are static after startup) |
+| Tasks (`io.modelcontextprotocol/tasks`) | ⏳ not implemented ([#82](https://github.com/frostney/pascal-mcp-sdk/issues/82)); its conformance scenarios are expected failures in the baseline |
+| Authorization (OAuth 2.1 for HTTP transports) | ⏳ not in the library, deliberately: beyond loopback, a reverse proxy or the platform's edge authenticates and terminates TLS in front of the Streamable HTTP binding (see [Deployment](../guides/deployment.md#tls-auth-and-the-proxy-in-front)) |
 
 Resource-template matching is intentionally limited to simple `{var}`
 expressions. Variables must be non-empty and separated by literal
@@ -72,13 +74,15 @@ the replay floor and the schedule on a test clock), the HTTP binding
 suite for the routing headers, the SSE stream, a client close and
 `Stop`, the stdio loop suite for streams beside requests, cancellation,
 the end of input and an idle stdin, and `mcpsmoke`, which polls
-`mcpdemo`'s minute clock over stdio and streams it over real pipes. MCP Apps and extension negotiation are covered
-by the
-`MCP.Apps` unit suite and the `mcpsmoke` checks of `mcpdemo`'s card
-over stdio: the wire data and the served HTML. No host renders the card
-in these checks.
+`mcpdemo`'s minute clock over stdio and streams it over real pipes.
+MCP Apps and extension negotiation are covered by the `MCP.Apps` unit
+suite and the `mcpsmoke` checks of `mcpdemo`'s card over stdio: the
+wire data and the served HTML. No host renders the card in these
+checks.
 
-Wire captures from 2026-08-10 show current clients still opening
-with the classic handshake — Claude Code 2.1.226 with `2025-11-25`,
-Codex 0.145.0 with `2025-06-18`; the transcripts are in
+A wire capture from 2026-11-27 shows Claude Code 2.1.332 opening with
+`server/discover` and sending every request at `2026-07-28`, over
+stdio. Captures from 2026-08-10 show the classic handshake: Claude Code
+2.1.226 with `2025-11-25`, Codex 0.145.0 with `2025-06-18`. The
+transcripts are in
 [Your first conversation](../guides/first-conversation.md).

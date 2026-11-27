@@ -7,7 +7,7 @@ unit MCP.JSONRPC;
 // are strings or numbers and MUST NOT be null, and params, when present,
 // is an object. Wire framing (one message per line) belongs to the
 // transport (MCP.Transport.Stdio); this unit only turns one line into a
-// decoded message and result/error payloads back into compact single-line
+// decoded message and result/error payloads back into single-line
 // JSON. Batch requirement verified 2026-07-20:
 // modelcontextprotocol.io/specification/2025-03-26/basic
 //
@@ -106,8 +106,10 @@ function BuildErrorResponse(AId: TJSONData; ACode: Integer;
 // requests for the core, such as MCP.Testing (#97 review).
 function MCPParseJSON(const AText: string): TJSONData;
 
-// Compact single-line serialization (fpjson escapes embedded newlines,
-// which is what keeps the stdio framing invariant).
+// Single-line serialization: fpjson's AsJSON, which escapes embedded
+// newlines (what keeps the stdio framing invariant) and puts spaces
+// around ":" and after ",". The name predates that wording; it is kept
+// as public API.
 function SerializeCompact(AData: TJSONData): string;
 
 // One diagnostic line on stderr, for every library logger: written and
