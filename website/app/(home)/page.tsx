@@ -31,7 +31,7 @@ const FAQ: { q: string; a: string; extra?: React.ReactNode }[] = [
   },
   {
     q: 'Does Claude Code work with a Pascal MCP server?',
-    a: 'Yes — and so does Codex. Servers are dual-era by default: registered over stdio, they answer the stateless 2026-07-28 revision Claude Code now opens with, and the classic initialize handshake older clients still speak, each request in its own revision. Beyond registering the server with the client, there is nothing to configure.',
+    a: 'Yes — and so does Codex. Servers are dual-era by default: registered over stdio, they answer the stateless 2026-07-28 revision Claude Code now opens with, and the classic initialize handshake Codex still opens with, each request in its own revision. Beyond registering the server with the client, there is nothing to configure.',
   },
   {
     q: 'How do I build an MCP server in Pascal?',
@@ -158,8 +158,8 @@ export default async function HomePage() {
           </a>{' '}
           before the handler runs, turns exceptions into errors the model
           can correct against, and speaks both the newest stateless
-          protocol revision and, over stdio, the classic handshake older
-          clients use.{' '}
+          protocol revision and, over stdio, the classic handshake
+          clients such as Codex still use.{' '}
           <Link href="/docs/guides/tools" className="underline">
             How tools work →
           </Link>

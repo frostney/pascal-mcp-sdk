@@ -6,7 +6,8 @@ it and as your server saw it on the wire. These are two recordings of
 the same request, adding 19 and 23 with the demo's `add` tool: the
 terminal view is Codex 0.145.0's, recorded on 2026-08-10, and the wire
 transcript is Claude Code 2.1.332's, captured on 2026-11-27. The
-classic handshake further down is from the August recording.
+classic handshake further down is Codex 0.171.0's, captured the same
+day as Claude Code's.
 
 ## The user's view
 
@@ -106,19 +107,21 @@ signal handling and no restart loop.
 
 ## What a classic-handshake client sends
 
-Clients that predate the stateless revision open with the classic
-`initialize` handshake instead. Codex 0.145.0, captured on 2026-08-10:
+Other clients still open with the classic `initialize` handshake.
+Codex 0.171.0, asked the same on 2026-11-27:
 
 ```json
 {"jsonrpc":"2.0","id":0,"method":"initialize","params":{
   "protocolVersion":"2025-06-18",
-  "capabilities":{"elicitation":{"form":{},"url":{}}},
-  "clientInfo":{"name":"codex-mcp-client","title":"Codex","version":"0.145.0"}}}
+  "capabilities":{"experimental":{"codex/auth-change":{}},"elicitation":{"form":{},"url":{}}},
+  "clientInfo":{"name":"codex-mcp-client","title":"Codex","version":"0.171.0"}}}
 ```
 
-The server answers in that revision's dialect, and the client confirms
-with `notifications/initialized` before its first request. Claude Code
-2.1.226 still opened this way on 2026-08-10, at `2025-11-25`.
+The server answers in that revision's dialect, without the stateless
+stamps (`resultType`, the `serverInfo` `_meta`), and the client
+confirms with `notifications/initialized`, then sends `tools/list` and
+`tools/call` with no per-request `_meta` revision. Claude Code 2.1.226
+opened this way too on 2026-08-10, at `2025-11-25`.
 On stdio the library serves both: a classic handshake is negotiated to
 one of the classic revisions it supports (`2024-11-05`, `2025-06-18`,
 `2025-11-25`), and a request carrying `2026-07-28` in its `_meta` is

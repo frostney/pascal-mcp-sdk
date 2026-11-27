@@ -16,9 +16,9 @@ agents — no second language runtime, no framework.
 - **Stateless spec, dual-era by default** — native 2026-07-28
   (per-request `_meta`, mandatory `server/discover`, no session
   handshake) *and*, on stdio, the classic `initialize` handshake
-  older clients still speak: registered over stdio, **Claude Code,
-  Claude Desktop, and Codex connect** whichever supported revision
-  they open with.
+  clients such as Codex still open with: registered over stdio,
+  **Claude Code, Claude Desktop, and Codex connect** whichever
+  supported revision they open with.
 - **MRTR (`input_required`)** — handlers can ask the client for more
   input mid-call (elicitation, sampling, roots) using the 2026-07-28
   multi-round-trip pattern, without any server-side session state.

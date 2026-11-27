@@ -79,9 +79,10 @@ suite and the `mcpsmoke` checks of `mcpdemo`'s card over stdio: the
 wire data and the served HTML. No host renders the card in these
 checks.
 
-A wire capture from 2026-11-27 shows Claude Code 2.1.332 opening with
-`server/discover` and sending every request at `2026-07-28`, over
-stdio. Captures from 2026-08-10 show the classic handshake: Claude Code
-2.1.226 with `2025-11-25`, Codex 0.145.0 with `2025-06-18`.
+Wire captures over stdio from 2026-11-27 show Claude Code 2.1.332
+opening with `server/discover` and sending every request at
+`2026-07-28`, and Codex 0.171.0 still opening with the classic
+`initialize` at `2025-06-18`. Captures from 2026-08-10 show Claude Code
+2.1.226 with `2025-11-25` and Codex 0.145.0 with `2025-06-18`.
 [Your first conversation](../guides/first-conversation.md) shows the
-November Claude Code session and the August Codex `initialize`.
+November Claude Code session and Codex `initialize`.
