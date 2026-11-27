@@ -45,8 +45,7 @@ unit MCP.Server;
 //                                      belong to TMCPSession.
 // Not implemented (deliberate): subscriptions/listen and the
 // listChanged capability flags (registries are fixed after startup, so
-// there is nothing to notify), pagination cursors (lists are returned
-// whole), and a general JSON-Schema validation engine — the schema
+// there is nothing to notify), and a general JSON-Schema validation engine — the schema
 // subset the builders emit is server-enforced per call (#23);
 // beyond it, handlers validate their own inputs and report problems
 // as isError tool results, which is what models can act on.
@@ -401,6 +400,9 @@ type
     type
       // Registry name lookup (FindTool / FindPrompt): index or < 0.
       TRegistryLookup = function(const AName: string): Integer of object;
+      // The registry entry AIndex as it is listed (an owned copy).
+      TListedDefinition = function(AIndex: Integer;
+        ALegacy: Boolean): TJSONObject of object;
   private
     FName: string;
     FVersion: string;
@@ -416,6 +418,7 @@ type
     FRequestStateKeys: array of RawByteString;
     FRequestStateTtlMs: Integer;
     FSealer: TObject;
+    FPageSize: Integer;
     FTools: array of TMCPToolRegistration;
     FResources: array of TMCPResourceRegistration;
     FTemplates: array of TMCPTemplateRegistration;
@@ -434,6 +437,18 @@ type
     // client's token verifies for this request; False when it does not.
     function OpenRequestState(const AMessage: TJSONRPCMessage;
       var ACtx: TMCPRequestContext): Boolean;
+    procedure SetPageSize(AValue: Integer);
+    function ToolDefinitionAt(AIndex: Integer;
+      ALegacy: Boolean): TJSONObject;
+    function ResourceDefinitionAt(AIndex: Integer;
+      ALegacy: Boolean): TJSONObject;
+    function TemplateDefinitionAt(AIndex: Integer;
+      ALegacy: Boolean): TJSONObject;
+    function PromptDefinitionAt(AIndex: Integer;
+      ALegacy: Boolean): TJSONObject;
+    function PagedListResponse(const AMessage: TJSONRPCMessage;
+      ALegacy: Boolean; const AKey: string; ACount: Integer;
+      ADefinition: TListedDefinition): string;
     function ExceptionClientMessage(const ASite, AVerbosePrefix,
       ARedactedMessage: string; E: Exception): string;
     // E is an EMCPProtocolError, declared after this class.
@@ -581,6 +596,12 @@ type
     // Token lifetime in milliseconds (default 600000, ten minutes).
     property RequestStateTtlMs: Integer read FRequestStateTtlMs
       write SetRequestStateTtlMs;
+    // Pagination of tools/list, resources/list, resources/templates/list
+    // and prompts/list (#94): at most PageSize entries per page, with a
+    // nextCursor while more remain. 0 (the default) lists everything at
+    // once. Cursors are opaque and stay valid for the server's life
+    // (registries are fixed after startup); a malformed one is -32602.
+    property PageSize: Integer read FPageSize write SetPageSize;
 
     // The response a transport sends for an inbound line it refused to
     // buffer (length cap). Kept here so the error shape remains a
@@ -922,6 +943,7 @@ implementation
 uses
   Math,
 
+  base64,
   MCP.Content,
   MCP.Crypto,
   MCP.RequestState;
@@ -2103,6 +2125,126 @@ procedure TMCPServer.SetRedactErrorDetails(AValue: Boolean);
 begin
   EnsureMutable;
   FRedactErrorDetails := AValue;
+end;
+
+procedure TMCPServer.SetPageSize(AValue: Integer);
+begin
+  EnsureMutable;
+  if AValue < 0 then
+    raise EMCPServer.Create('PageSize must not be negative');
+  FPageSize := AValue;
+end;
+
+function TMCPServer.ToolDefinitionAt(AIndex: Integer;
+  ALegacy: Boolean): TJSONObject;
+var
+  OutputSchema: TJSONData;
+begin
+  Result := TJSONObject(FTools[AIndex].Definition.Clone);
+  // The classic dialect's outputSchema has an object root (2025-11-25
+  // schema, Tool.outputSchema, verified 2026-11-27 against
+  // https://modelcontextprotocol.io/specification/2025-11-25/schema#tool).
+  // A tool with any other root stays listed, so classic clients can
+  // still call it, but without the schema they could not accept (#91).
+  OutputSchema := Result.Find('outputSchema');
+  if ALegacy and (OutputSchema <> nil) and
+    (TJSONObject(OutputSchema).Get('type', '') <> 'object') then
+    Result.Delete('outputSchema');
+end;
+
+function TMCPServer.ResourceDefinitionAt(AIndex: Integer;
+  ALegacy: Boolean): TJSONObject;
+begin
+  Result := TJSONObject(FResources[AIndex].Definition.Clone);
+end;
+
+function TMCPServer.TemplateDefinitionAt(AIndex: Integer;
+  ALegacy: Boolean): TJSONObject;
+begin
+  Result := TJSONObject(FTemplates[AIndex].Definition.Clone);
+end;
+
+function TMCPServer.PromptDefinitionAt(AIndex: Integer;
+  ALegacy: Boolean): TJSONObject;
+begin
+  Result := TJSONObject(FPrompts[AIndex].Definition.Clone);
+end;
+
+// Cursor for the page of AMethod's list starting at AOffset: opaque to
+// the client (pagination#pagination-model), base64 of "method:offset".
+function ListCursor(const AMethod: string; AOffset: Integer): string;
+begin
+  Result := EncodeStringBase64(AMethod + ':' + IntToStr(AOffset));
+end;
+
+// The offset ACursor points at in AMethod's list of ACount entries
+// paged APageSize at a time, or False for a cursor that is not one of
+// that list's page cursors: paging off, an offset that is no page
+// boundary inside the list, or any spelling other than the one
+// ListCursor gives (#94 review).
+function TryCursorOffset(const ACursor, AMethod: string;
+  ACount, APageSize: Integer; out AOffset: Integer): Boolean;
+var
+  Decoded: string;
+begin
+  Result := False;
+  AOffset := 0;
+  if APageSize <= 0 then
+    Exit;
+  try
+    Decoded := DecodeStringBase64(ACursor);
+  except
+    Exit;
+  end;
+  if Copy(Decoded, 1, Length(AMethod) + 1) <> AMethod + ':' then
+    Exit;
+  Result := TryStrToInt(Copy(Decoded, Length(AMethod) + 2, MaxInt), AOffset) and
+    (AOffset > 0) and (AOffset < ACount) and (AOffset mod APageSize = 0) and
+    (ListCursor(AMethod, AOffset) = ACursor);
+end;
+
+// One page of a list result (#94). Without a cursor and with PageSize
+// 0 this is the whole list, as before. Invalid cursors: -32602
+// (verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/pagination).
+function TMCPServer.PagedListResponse(const AMessage: TJSONRPCMessage;
+  ALegacy: Boolean; const AKey: string; ACount: Integer;
+  ADefinition: TListedDefinition): string;
+var
+  CursorData: TJSONData;
+  First, Last, I: Integer;
+  Items: TJSONArray;
+  ListResult: TJSONObject;
+begin
+  First := 0;
+  CursorData := nil;
+  if AMessage.Params <> nil then
+    CursorData := AMessage.Params.Find('cursor');
+  if (CursorData <> nil) and ((CursorData.JSONType <> jtString) or
+    not TryCursorOffset(CursorData.AsString, AMessage.Method, ACount,
+    FPageSize, First)) then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
+      'Invalid params: unknown cursor'));
+  Last := ACount - 1;
+  // Compared before adding, so a huge PageSize cannot overflow.
+  if (FPageSize > 0) and (FPageSize < ACount - First) then
+    Last := First + FPageSize - 1;
+  // Registration order: the deterministic ordering the spec asks for.
+  ListResult := TJSONObject.Create;
+  try
+    Items := TJSONArray.Create;
+    ListResult.Add(AKey, Items);
+    for I := First to Last do
+      Items.Add(ADefinition(I, ALegacy));
+    if Last < ACount - 1 then
+      ListResult.Add('nextCursor', ListCursor(AMessage.Method, Last + 1));
+    if not ALegacy then
+      AddCacheFields(ListResult, FCacheTtlMs);
+  except
+    ListResult.Free;
+    raise;
+  end;
+  Result := ResultResponse(AMessage, ListResult, ALegacy);
 end;
 
 procedure TMCPServer.SetDualEra(AValue: Boolean);
@@ -3485,39 +3627,8 @@ end;
 
 function TMCPServer.HandleToolsList(const AMessage: TJSONRPCMessage;
   ALegacy: Boolean): string;
-var
-  ListResult, Definition: TJSONObject;
-  OutputSchema: TJSONData;
-  Tools: TJSONArray;
-  I: Integer;
 begin
-  // Whole list, registration order: deterministic ordering is what the
-  // spec asks for, and without pagination there is no cursor to honor.
-  Tools := TJSONArray.Create;
-  try
-  for I := 0 to High(FTools) do
-  begin
-    Definition := TJSONObject(FTools[I].Definition.Clone);
-    // The classic dialect's outputSchema has an object root (2025-11-25
-    // schema, Tool.outputSchema, verified 2026-11-27 against
-    // https://modelcontextprotocol.io/specification/2025-11-25/schema#tool).
-    // A tool with any other root stays listed, so classic clients can
-    // still call it, but without the schema they could not accept (#91).
-    OutputSchema := Definition.Find('outputSchema');
-    if ALegacy and (OutputSchema <> nil) and
-      (TJSONObject(OutputSchema).Get('type', '') <> 'object') then
-      Definition.Delete('outputSchema');
-    Tools.Add(Definition);
-  end;
-  except
-    Tools.Free;
-    raise;
-  end;
-  ListResult := TJSONObject.Create;
-  ListResult.Add('tools', Tools);
-  if not ALegacy then
-    AddCacheFields(ListResult, FCacheTtlMs);
-  Result := ResultResponse(AMessage, ListResult, ALegacy);
+  Result := PagedListResponse(AMessage, ALegacy, 'tools', Length(FTools), ToolDefinitionAt);
 end;
 
 // 'capability "a"' or 'capabilities "a", "b"' for a -32021 message.
@@ -3838,19 +3949,8 @@ end;
 
 function TMCPServer.HandleResourcesList(const AMessage: TJSONRPCMessage;
   ALegacy: Boolean): string;
-var
-  ListResult: TJSONObject;
-  Resources: TJSONArray;
-  I: Integer;
 begin
-  Resources := TJSONArray.Create;
-  for I := 0 to High(FResources) do
-    Resources.Add(FResources[I].Definition.Clone);
-  ListResult := TJSONObject.Create;
-  ListResult.Add('resources', Resources);
-  if not ALegacy then
-    AddCacheFields(ListResult, FCacheTtlMs);
-  Result := ResultResponse(AMessage, ListResult, ALegacy);
+  Result := PagedListResponse(AMessage, ALegacy, 'resources', Length(FResources), ResourceDefinitionAt);
 end;
 
 function TMCPServer.HandleResourcesRead(const AMessage: TJSONRPCMessage;
@@ -3936,36 +4036,14 @@ end;
 
 function TMCPServer.HandleTemplatesList(const AMessage: TJSONRPCMessage;
   ALegacy: Boolean): string;
-var
-  ListResult: TJSONObject;
-  Templates: TJSONArray;
-  I: Integer;
 begin
-  Templates := TJSONArray.Create;
-  for I := 0 to High(FTemplates) do
-    Templates.Add(FTemplates[I].Definition.Clone);
-  ListResult := TJSONObject.Create;
-  ListResult.Add('resourceTemplates', Templates);
-  if not ALegacy then
-    AddCacheFields(ListResult, FCacheTtlMs);
-  Result := ResultResponse(AMessage, ListResult, ALegacy);
+  Result := PagedListResponse(AMessage, ALegacy, 'resourceTemplates', Length(FTemplates), TemplateDefinitionAt);
 end;
 
 function TMCPServer.HandlePromptsList(const AMessage: TJSONRPCMessage;
   ALegacy: Boolean): string;
-var
-  ListResult: TJSONObject;
-  Prompts: TJSONArray;
-  I: Integer;
 begin
-  Prompts := TJSONArray.Create;
-  for I := 0 to High(FPrompts) do
-    Prompts.Add(FPrompts[I].Definition.Clone);
-  ListResult := TJSONObject.Create;
-  ListResult.Add('prompts', Prompts);
-  if not ALegacy then
-    AddCacheFields(ListResult, FCacheTtlMs);
-  Result := ResultResponse(AMessage, ListResult, ALegacy);
+  Result := PagedListResponse(AMessage, ALegacy, 'prompts', Length(FPrompts), PromptDefinitionAt);
 end;
 
 function TMCPServer.HandlePromptsGet(const AMessage: TJSONRPCMessage;

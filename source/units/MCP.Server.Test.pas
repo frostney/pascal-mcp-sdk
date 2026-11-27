@@ -497,6 +497,20 @@ type
     procedure TestGuards;
   end;
 
+  // PageSize and cursors on the four list methods (#94).
+  TPagination = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestPagesConcatenateInOrder;
+    procedure TestInvalidCursors;
+    procedure TestNoPagingByDefault;
+    procedure TestOtherListsPage;
+    procedure TestLegacyDialectPages;
+    procedure TestContinuationPageBytes;
+  end;
+
   // MCPImageResult: the spec's image content block, the raw-bytes
   // overload's base64 encoding (asserted against literal fixtures, not
   // against a decode of what we just encoded), mimeType passthrough,
@@ -7050,6 +7064,277 @@ begin
   Test('an empty or repeated capability name is refused', TestGuards);
 end;
 
+{ ───────── pagination (#94) ───────── }
+
+// Pagination, verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/pagination:
+// list results MAY carry nextCursor, the page size is the server's to
+// choose, cursors are opaque and stable, and an invalid one SHOULD be
+// -32602.
+const
+  // Two-byte and astral characters, adjacent.
+  PAGED_DESCRIPTION = 'Gr' + #$C3#$B6 + #$C3#$9F + 'e ' + #$F0#$9F#$98#$80;
+
+procedure TPagination.BeforeEach;
+var
+  I: Integer;
+  Definition: TJSONObject;
+  Description: string;
+begin
+  inherited BeforeEach;
+  // Every list spans pages of four: eleven tools, and five resources,
+  // templates and prompts. extra1, on the second tools page, has a
+  // non-ASCII description and an array outputSchema, which the classic
+  // dialect drops (#91).
+  // Parsed from JSON text, as a definition read from a file would be.
+  // Through a variable: a constant expression passed straight to an
+  // fpjson UTF8String parameter is converted at compile time, which
+  // would re-encode these bytes before the library sees them.
+  Description := PAGED_DESCRIPTION;
+  Definition := TJSONObject(GetJSON('{"name":"extra1","description":"' +
+    Description + '","inputSchema":{"type":"object"},' +
+    '"outputSchema":{"type":"array"}}'));
+  FServer.RegisterTool(Definition, EchoHandler);
+  for I := 2 to 4 do
+    FServer.RegisterTool('extra' + IntToStr(I), 'Extra', '{"type":"object"}',
+      EchoHandler);
+  for I := 1 to 2 do
+    FServer.RegisterTextResource('mem://extra' + IntToStr(I),
+      'extra' + IntToStr(I), 'text/plain', 'x');
+  for I := 1 to 4 do
+    FServer.RegisterResourceTemplate('mem://t' + IntToStr(I) + '/{a}',
+      't' + IntToStr(I), 'text/plain', PairReader);
+  for I := 1 to 2 do
+    FServer.RegisterPrompt('extra' + IntToStr(I), 'Extra', HelloPromptHandler);
+  FServer.PageSize := 4;
+end;
+
+function ListLine(const AMethod, ACursor: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":3,"method":"' + AMethod + '","params":{';
+  if ACursor <> '' then
+    Result := Result + '"cursor":"' + ACursor + '",';
+  Result := Result + META_MODERN + '}}';
+end;
+
+// Walks AMethod's list page by page; returns the names (AField of each
+// entry, comma-separated) and the page count, and checks each page: at
+// most four entries, both modern cache fields, and a nextCursor on
+// every page but the last.
+function WalkList(ASuite: TDispatchSuite; const AMethod, AKey,
+  AField: string; out APages: Integer; out APagesOk: Boolean): string;
+var
+  Response: TJSONObject;
+  Items: TJSONArray;
+  Cursor: string;
+  I: Integer;
+begin
+  Result := '';
+  Cursor := '';
+  APages := 0;
+  APagesOk := True;
+  repeat
+    Response := ASuite.Call(ListLine(AMethod, Cursor));
+    try
+      Items := TJSONArray(Response.FindPath('result.' + AKey));
+      APagesOk := APagesOk and (Items <> nil) and (Items.Count <= 4) and
+        (Response.FindPath('result.ttlMs') <> nil) and
+        (Response.FindPath('result.cacheScope') <> nil);
+      if Items <> nil then
+        for I := 0 to Items.Count - 1 do
+          Result := Result + TJSONObject(Items[I]).Get(AField, '') + ',';
+      if Response.FindPath('result.nextCursor') <> nil then
+      begin
+        Cursor := TJSONData(Response.FindPath('result.nextCursor')).AsString;
+        APagesOk := APagesOk and (Cursor <> '') and (Items.Count = 4);
+      end
+      else
+        Cursor := '';
+    finally
+      Response.Free;
+    end;
+    Inc(APages);
+  until (Cursor = '') or (APages > 10);
+end;
+
+procedure TPagination.TestPagesConcatenateInOrder;
+var
+  Pages: Integer;
+  PagesOk: Boolean;
+begin
+  Expect<string>(WalkList(Self, 'tools/list', 'tools', 'name', Pages,
+    PagesOk)).ToBe('echo,sum,boom,whoami,scale,repeat,noisy,' +
+    'extra1,extra2,extra3,extra4,');
+  Expect<Integer>(Pages).ToBe(3);
+  Expect<Boolean>(PagesOk).ToBe(True);
+end;
+
+// The other three lists continue the same way (#94 review).
+procedure TPagination.TestOtherListsPage;
+var
+  Pages: Integer;
+  PagesOk: Boolean;
+begin
+  Expect<string>(WalkList(Self, 'resources/list', 'resources', 'uri', Pages,
+    PagesOk)).ToBe('mem://static,mem://clock,mem://pair/one/two,' +
+    'mem://extra1,mem://extra2,');
+  Expect<Integer>(Pages).ToBe(2);
+  Expect<Boolean>(PagesOk).ToBe(True);
+  Expect<string>(WalkList(Self, 'resources/templates/list',
+    'resourceTemplates', 'name', Pages, PagesOk)).ToBe('pair,t1,t2,t3,t4,');
+  Expect<Integer>(Pages).ToBe(2);
+  Expect<Boolean>(PagesOk).ToBe(True);
+  Expect<string>(WalkList(Self, 'prompts/list', 'prompts', 'name', Pages,
+    PagesOk)).ToBe('review,hello,promptboom,extra1,extra2,');
+  Expect<Integer>(Pages).ToBe(2);
+  Expect<Boolean>(PagesOk).ToBe(True);
+end;
+
+// The cursor tools/list hands out for its second page.
+function FirstToolsCursor(ASuite: TDispatchSuite): string;
+var
+  Response: TJSONObject;
+begin
+  Response := ASuite.Call(ListLine('tools/list', ''));
+  try
+    Result := TJSONData(Response.FindPath('result.nextCursor')).AsString;
+  finally
+    Response.Free;
+  end;
+end;
+
+procedure TPagination.TestInvalidCursors;
+var
+  ToolsCursor: string;
+begin
+  ToolsCursor := FirstToolsCursor(Self);
+  Expect<Integer>(ErrorCode(Self, ListLine('tools/list', 'not-ours')))
+    .ToBe(-32602);
+  // A cursor names its list: tools/list's offset 4 would be a page
+  // boundary of resources/list too, yet it is refused there.
+  Expect<Integer>(ErrorCode(Self, ListLine('resources/list', ToolsCursor)))
+    .ToBe(-32602);
+  // Offsets that are no page of the list: a page boundary past the end
+  // ("tools/list:12"), and one inside a page ("tools/list:1") (#94
+  // review).
+  Expect<Integer>(ErrorCode(Self, ListLine('tools/list',
+    'dG9vbHMvbGlzdDoxMg=='))).ToBe(-32602);
+  Expect<Integer>(ErrorCode(Self, ListLine('tools/list',
+    'dG9vbHMvbGlzdDox'))).ToBe(-32602);
+  // A different spelling of a real cursor ("tools/list:04").
+  Expect<Integer>(ErrorCode(Self, ListLine('tools/list',
+    'dG9vbHMvbGlzdDowNA=='))).ToBe(-32602);
+  Expect<Integer>(ErrorCode(Self, '{"jsonrpc":"2.0","id":3,' +
+    '"method":"tools/list","params":{"cursor":7,' + META_MODERN + '}}'))
+    .ToBe(-32602);
+end;
+
+procedure TPagination.TestNoPagingByDefault;
+var
+  Bare: TMCPServer;
+  Session: TMCPSession;
+  Line: string;
+begin
+  Bare := TMCPServer.Create('bare', '1');
+  try
+    Bare.RegisterTool('a', 'A', '{"type":"object"}', EchoHandler);
+    Bare.RegisterTool('b', 'B', '{"type":"object"}', EchoHandler);
+    Session := Bare.CreateSession;
+    try
+      Bare.HandleMessage(Session, ListLine('tools/list', ''), Line);
+      Expect<Boolean>(Pos('nextCursor', Line) = 0).ToBe(True);
+      Expect<Boolean>(Pos('"name" : "b"', Line) > 0).ToBe(True);
+      // With paging off no cursor was handed out, so none is valid,
+      // not even one that would point into the list ("tools/list:1").
+      Bare.HandleMessage(Session, ListLine('tools/list', 'dG9vbHMvbGlzdDox'),
+        Line);
+      Expect<Boolean>(Pos('"code" : -32602', Line) > 0).ToBe(True);
+    finally
+      Session.Free;
+    end;
+  finally
+    Bare.Free;
+  end;
+end;
+
+// The comma-separated names of a list result's tools.
+function PageNames(AResponse: TJSONObject): string;
+var
+  Tools: TJSONArray;
+  I: Integer;
+begin
+  Result := '';
+  Tools := TJSONArray(AResponse.FindPath('result.tools'));
+  if Tools <> nil then
+    for I := 0 to Tools.Count - 1 do
+      Result := Result + TJSONObject(Tools[I]).Get('name', '') + ',';
+end;
+
+procedure TPagination.TestLegacyDialectPages;
+var
+  Response: TJSONObject;
+  Cursor, Line: string;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification('{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}');
+  try
+    Cursor := TJSONData(Response.FindPath('result.nextCursor')).AsString;
+    Expect<Boolean>(Response.FindPath('result.ttlMs') = nil).ToBe(True);
+  finally
+    Response.Free;
+  end;
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":3,"method":"tools/list",' +
+    '"params":{"cursor":"' + Cursor + '"}}', Line)).ToBe(True);
+  Response := TJSONObject(GetJSON(Line));
+  try
+    Expect<string>(PageNames(Response)).ToBe('scale,repeat,noisy,extra1,');
+    Expect<Boolean>(Response.FindPath('result.ttlMs') = nil).ToBe(True);
+    Expect<Boolean>(Response.FindPath('result.cacheScope') = nil).ToBe(True);
+    // extra1 stays listed; its array outputSchema is dropped (#91).
+    Expect<Boolean>(Response.FindPath('result.tools[3].outputSchema') = nil)
+      .ToBe(True);
+  finally
+    Response.Free;
+  end;
+  // The description goes out byte-exact.
+  Expect<Boolean>(Pos('"description" : "' + PAGED_DESCRIPTION + '"', Line) > 0)
+    .ToBe(True);
+end;
+
+// The second modern page carries extra1 whole: its array outputSchema
+// and its description, byte-exact.
+procedure TPagination.TestContinuationPageBytes;
+var
+  Line: string;
+begin
+  Expect<Boolean>(Dispatch(ListLine('tools/list', FirstToolsCursor(Self)),
+    Line)).ToBe(True);
+  Expect<Boolean>(Pos('"description" : "' + PAGED_DESCRIPTION + '"', Line) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Pos('"outputSchema" : { "type" : "array" }', Line) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Pos('"name" : "extra1"', Line) > 0).ToBe(True);
+end;
+
+procedure TPagination.SetupTests;
+begin
+  Test('pages concatenate to the whole list in registration order',
+    TestPagesConcatenateInOrder);
+  Test('foreign, garbled, misplaced and non-string cursors → -32602',
+    TestInvalidCursors);
+  Test('PageSize 0 lists everything and accepts no cursor',
+    TestNoPagingByDefault);
+  Test('resources, templates and prompts lists page too', TestOtherListsPage);
+  Test('classic dialect pages without caching fields',
+    TestLegacyDialectPages);
+  Test('a continuation page carries its entries byte-exact',
+    TestContinuationPageBytes);
+end;
+
 { ───────── image results ───────── }
 
 const
@@ -7388,6 +7673,7 @@ begin
     TMRTRDispatch.Create('Server: MRTR input_required'));
   TestRunnerProgram.AddSuite(
     TImageResults.Create('Server: image tool results'));
+  TestRunnerProgram.AddSuite(TPagination.Create('Server: pagination'));
   TestRunnerProgram.AddSuite(
     TTypedNested.Create('Server: typed tools with nested arguments'));
   TestRunnerProgram.AddSuite(

@@ -2,9 +2,9 @@
 
 ## Executive Summary
 
-`TMCPServer` has six request-visible configuration properties —
+`TMCPServer` has seven request-visible configuration properties —
 `Instructions`, `CacheTtlMs`, `CacheScope`, `RedactErrorDetails`,
-`DualEra` and `RequestStateTtlMs` — plus the `requestState` keys
+`DualEra`, `PageSize` and `RequestStateTtlMs` — plus the `requestState` keys
 (`SetRequestStateKeys`), all set between `Create` and serving. Configuration
 freezes together with the registries when the first session is
 created; a later write raises `EMCPServer`.
@@ -72,6 +72,28 @@ is rejected with a diagnostic naming the supported versions. The
 Streamable HTTP binding forces this mode — HTTP clients speak
 `2026-07-28`.
 
+## PageSize
+
+`0` by default: every list method returns the whole registry. Set it to
+hand lists out in pages (useful once a server registers hundreds of
+tools):
+
+```pascal
+Server.PageSize := 50;
+```
+
+Each page then carries at most 50 entries, the caching fields on every
+modern page, and a `nextCursor` while more remain; the client sends it
+back as `cursor` to get the next page. The cursor is opaque and stays
+valid for the server's life, because the registries do not change after
+startup. A cursor that is not one of that list's page cursors (garbled,
+from another list, or not at a page boundary inside it) is answered
+`-32602`, as the
+[pagination](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/pagination)
+page asks (verified 2026-11-26). With `PageSize` 0 there are no pages,
+so a request without a cursor gets the whole list as before, and one
+with a cursor gets `-32602`.
+
 ## requestState sealing
 
 A handler that asks for more input (MRTR) can return a `requestState`
@@ -130,7 +152,7 @@ Server.RequestStateTtlMs := 120000;                      // two minutes
 
 ## Freeze semantics
 
-All six properties and the keys, like the registries, are mutable only until the
+All seven properties and the keys, like the registries, are mutable only until the
 first session exists (`RunMCPStdioServer` and `TMCPHTTPServer` create
 sessions internally). Configure fully, then serve:
 

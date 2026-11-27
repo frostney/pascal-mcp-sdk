@@ -227,6 +227,118 @@ end;
 // https://modelcontextprotocol.io/specification/2026-07-28/server/tools#tool-result
 // and .../server/prompts#embedded-resources (an embedded resource in a
 // prompt message MUST carry a URI and a MIME type).
+var
+  // The demo's tools/list names, unpaged, for the paged run to match.
+  DemoToolNames: string;
+
+// The comma-separated names of a tools/list result's tools.
+function ToolNames(AResponse: TJSONObject): string;
+var
+  Tools: TJSONData;
+  I: Integer;
+begin
+  Result := '';
+  Tools := FindPath(AResponse, 'result.tools');
+  if (Tools = nil) or (Tools.JSONType <> jtArray) then
+    Exit;
+  for I := 0 to Tools.Count - 1 do
+    Result := Result + TJSONObject(Tools.Items[I]).Get('name', '') + ',';
+end;
+
+// Pagination over stdio (#94; spec verified 2026-11-26:
+// https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/pagination):
+// mcpdemo --page-size 2 hands tools/list out in pages whose names, in
+// order, are the unpaged list's, the last without a nextCursor, and
+// refuses another list's cursor.
+procedure PagedDemoBattery;
+var
+  Paged: TProcess;
+  Response: TJSONObject;
+  Tools: TJSONData;
+  Cursor, Names, FirstCursor: string;
+  Pages: Integer;
+  PageOk, PagesOk, Answered: Boolean;
+begin
+  Paged := TProcess.Create(nil);
+  try
+    Paged.Executable := DemoBinary;
+    Paged.Parameters.Add('--page-size');
+    Paged.Parameters.Add('2');
+    Paged.Options := [poUsePipes];
+    try
+      Paged.Execute;
+    except
+      on E: Exception do
+      begin
+        Check(False, 'pagination: launch ' + DemoBinary + ': ' + E.Message);
+        Exit;
+      end;
+    end;
+    try
+      Cursor := '';
+      FirstCursor := '';
+      Names := '';
+      Pages := 0;
+      PagesOk := True;
+      Answered := True;
+      repeat
+        if Cursor = '' then
+          Response := RoundTrip(Paged, '{"jsonrpc":"2.0","id":1,' +
+            '"method":"tools/list","params":{' + META_MODERN + '}}')
+        else
+          Response := RoundTrip(Paged, '{"jsonrpc":"2.0","id":1,' +
+            '"method":"tools/list","params":{"cursor":"' + Cursor + '",' +
+            META_MODERN + '}}');
+        if Response = nil then
+        begin
+          Answered := False;
+          Break;
+        end;
+        try
+          // An error reply has no result.tools: the walk stops there.
+          Tools := FindPath(Response, 'result.tools');
+          PageOk := (Tools <> nil) and (Tools.JSONType = jtArray) and
+            (Tools.Count > 0) and (Tools.Count <= 2) and
+            (FindPath(Response, 'result.ttlMs') <> nil) and
+            (FindPath(Response, 'result.cacheScope') <> nil);
+          PagesOk := PagesOk and PageOk;
+          if PageOk then
+            Names := Names + ToolNames(Response);
+          if FindPath(Response, 'result.nextCursor') <> nil then
+            Cursor := PathString(Response, 'result.nextCursor')
+          else
+            Cursor := '';
+        finally
+          Response.Free;
+        end;
+        if Pages = 0 then
+          FirstCursor := Cursor;
+        Inc(Pages);
+      until (Cursor = '') or not PageOk or (Pages > 50);
+      Check(Answered, 'pagination: every tools/list page answered');
+      Check(PagesOk and (Pages > 1),
+        'pagination: pages of one or two tools, with caching fields');
+      Check(Answered and PagesOk and (Cursor = ''),
+        'pagination: the walk ends on a page without nextCursor');
+      Check((DemoToolNames <> '') and (Names = DemoToolNames),
+        'pagination: the pages concatenate to the unpaged list, in order');
+      Response := RoundTrip(Paged, '{"jsonrpc":"2.0","id":2,' +
+        '"method":"prompts/list","params":{"cursor":"' + FirstCursor + '",' +
+        META_MODERN + '}}');
+      try
+        Check(PathInt(Response, 'error.code') = -32602,
+          'pagination: another list''s cursor → -32602');
+      finally
+        Response.Free;
+      end;
+    finally
+      Shutdown(Paged, 'pagination');
+    end;
+  finally
+    Paged.Free;
+  end;
+end;
+
 procedure FixtureContentBattery;
 const
   // The fixture's complete one-frame WAV, written out literally.
@@ -450,6 +562,7 @@ begin
       'tools/list: add carries outputSchema');
     Check(PathString(Response, 'result.cacheScope') = 'private',
       'tools/list: cacheScope present (SEP-2549)');
+    DemoToolNames := ToolNames(Response);
     Response.Free;
 
     // tools/call echo.
@@ -827,6 +940,7 @@ begin
   end;
 
   FixtureContentBattery;
+  PagedDemoBattery;
 
   WriteLn;
   if Failures = 0 then
