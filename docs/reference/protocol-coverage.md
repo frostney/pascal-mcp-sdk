@@ -8,12 +8,12 @@ the README links here.
 | --- | --- |
 | `server/discover` | ✅ mandatory entry point, capabilities + instructions |
 | `tools/list` | ✅ registered tool definitions, whole list in registration order (deterministic; no pagination cursor) |
-| `tools/call` | ✅ text / image / audio / resource-link / embedded-resource / structured content, in-band execution errors, server-side subset validation of arguments |
+| `tools/call` | ✅ text / image / audio / resource-link / embedded-resource / structured content, in-band execution errors, server-side subset validation of arguments, structured output of any JSON type checked against a subset `outputSchema` |
 | `resources/list`, `resources/read` | ✅ static + dynamic, text + blob builders |
 | `resources/templates/list` + template matching | ✅ RFC 6570 level-1 (`{var}`), exact resources win, vars passed to readers |
 | `prompts/list`, `prompts/get` | ✅ fluent argument declaration, message builders for every content type, spec error codes |
 | `completion/complete` | ✅ prompt arguments and resource-template variables, from a static list (prefix match) or a handler with context arguments; `completions` capability declared when registered |
-| MRTR `input_required` (SEP-2322) | ✅ on `tools/call` + `prompts/get`: elicitation (form + url), sampling, roots entry builders; capability-gated; stateless re-entry |
+| MRTR `input_required` (SEP-2322) | ✅ on `tools/call` + `prompts/get`: elicitation (form + url), sampling, roots entry builders; capability-gated; stateless re-entry; `requestState` sealed by the server (HMAC-SHA-256, expiry, bound to the method, target, arguments and server) and verified before the handler runs |
 | `notifications/progress`, `notifications/message` | ✅ `MCPReportProgress` / `MCPLogMessage` from any handler; strictly opt-in per request (`progressToken` / `logLevel`), severity-filtered, emitted before the response |
 | `_meta` validation, version negotiation | ✅ `-32602` / `-32021` / `-32022` per spec |
 | `ttlMs` / `cacheScope` caching hints (SEP-2549) | ✅ on discover/list/read, tunable via `CacheTtlMs`/`CacheScope` |

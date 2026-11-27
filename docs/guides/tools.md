@@ -7,7 +7,8 @@ name, a description the model reads, a JSON Schema for its arguments,
 and a Pascal handler. Register tools on a `TMCPServer` before serving;
 the library validates every call against the schema before your
 handler runs, turns handler exceptions into in-band errors the model
-can correct against, and stamps the protocol envelope — your handler
+can correct against (an `EMCPProtocolError` answers with its JSON-RPC
+error instead), and stamps the protocol envelope — your handler
 contains domain logic and nothing else.
 
 ## The registration model
@@ -79,25 +80,38 @@ Results are built with the helpers in
 
 - `MCPTextResult('...')` — plain text content.
 - `MCPStructuredResult(Text, StructuredData)` — text plus
-  `structuredContent` matching your output schema.
+  `structuredContent` matching your output schema, which the server
+  checks before sending when the schema is inside
+  [the enforced subset](schemas.md#the-enforced-subset).
+  `MCPStructuredResult(StructuredData)` uses the serialized JSON as the
+  text. The value can be any JSON value: an array of records, a number.
 - `MCPImageResult(Bytes, 'image/png')` — one image content block;
   takes raw bytes (base64-encoded for you) or already-base64 data.
 - `MCPErrorResult('...')` — an explicit in-band error
   (`isError: true`).
 
+An exception a handler raises also becomes an in-band `isError`
+result: that is the channel a model reads and corrects against. When
+the request itself must be refused with a JSON-RPC error instead, for
+example a client capability it needs and did not declare, raise
+`EMCPProtocolError` (see
+[Answering with a JSON-RPC error](../reference/server.md#answering-with-a-json-rpc-error)).
+
 ## Validation before your handler runs
 
-Every call is checked against the registered schema's enforceable
-subset — `type`, `properties`, `required`, `enum`, `default` —
-before the handler runs. Violations become in-band `isError` results
+Every call is checked before the handler runs. A raw schema's
+arguments are checked against the enforced subset — `type`,
+`properties`, `required`, `items`, `enum`, `default`, nested to any
+depth; a typed tool's are checked as they bind to its argument class.
+Violations become in-band `isError` results
 in the same shape for raw and typed tools, so the model sees what it
 got wrong and retries. Absent optional arguments are seeded with their
 schema `default`; unknown argument properties are ignored.
 
 A raw schema that uses keywords *outside* the enforced subset fails at
 startup, naming the offending keyword, unless the registration is
-marked `.ApplicationValidated` — the documented escape hatch that
-hands argument validation to your handler (see
+marked `.ApplicationValidated` — the documented escape hatch, for input
+schemas only, that hands argument validation to your handler (see
 [Schemas](schemas.md#the-enforced-subset)).
 
 Deeper, semantic validation stays your handler's job — report
@@ -105,7 +119,8 @@ violations with `MCPErrorResult`, not exceptions, when you want the
 model to read and correct them. Exceptions work too: an escaped
 handler exception becomes an `isError: true` result automatically
 (with the message redactable — see
-[Configuration](configuration.md#redacterrordetails)).
+[Configuration](configuration.md#redacterrordetails)); an
+`EMCPProtocolError` is the exception to that, and is never redacted.
 
 ## Annotations
 
@@ -275,8 +290,13 @@ begin
 end;
 ```
 
-The server stays stateless across rounds — your `requestState` string
-is echoed back by the client (treat it as untrusted input). Request
+The server stays stateless across rounds: your `requestState` string
+travels through the client, sealed by the server so that a tampered or
+expired copy, or one presented for another tool, other arguments or
+another server, is refused before your handler runs. A valid token can
+be presented again until it expires, so a side effect that must happen
+once needs its own guard (see
+[requestState sealing](configuration.md#requeststate-sealing)). Request
 kinds are capability-gated per request. The entry builders and
 accessors are documented in
 [Client requests](../reference/client-requests.md).
