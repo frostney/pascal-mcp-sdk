@@ -668,25 +668,23 @@ begin
         // the end of it.
         on EStreamError do;
       end;
-      if not Stream.HeadersSent then
-        // No notification flowed, so the opt-in changed nothing about
-        // how this request is answered.
-        if Produced then
-          AnswerJSON(AResponse, HTTPStatusForResponse(ResponseLine,
-            AMalformedRequest), ResponseLine)
-        else
-          AResponse.Code := 202;
+      // Once the stream is open, the response went out as its last
+      // event. Otherwise no notification flowed, so the opt-in changed
+      // nothing about how this request is answered.
+      if Stream.HeadersSent then
+        Exit;
     end
     else
-    begin
-      if FServer.HandleMessage(Session, ABody, nil, nil, ResponseLine) then
-        AnswerJSON(AResponse, HTTPStatusForResponse(ResponseLine,
-          AMalformedRequest), ResponseLine)
-      else
-        // Notification-shaped bodies (including malformed ones the
-        // core drops as fire-and-forget) are accepted with no body.
-        AResponse.Code := 202;
-    end;
+      Produced := FServer.HandleMessage(Session, ABody, nil, nil,
+        ResponseLine);
+    // One place answers every non-streamed request (#79 review).
+    if Produced then
+      AnswerJSON(AResponse, HTTPStatusForResponse(ResponseLine,
+        AMalformedRequest), ResponseLine)
+    else
+      // Notification-shaped bodies (including malformed ones the core
+      // drops as fire-and-forget) are accepted with no body.
+      AResponse.Code := 202;
   finally
     Session.Free;
   end;
