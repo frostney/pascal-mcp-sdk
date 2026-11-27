@@ -119,10 +119,43 @@ uses
   MCP.Errors,
   MCP.JSONRPC;
 
+{$IFDEF DARWIN}
+// FPC's GetTickCount64 reads CLOCK_MONOTONIC only on Linux and FreeBSD
+// and falls back to wall time elsewhere, so on macOS a clock stepped
+// back would hold every stream's timer for as long (#134). The Mach
+// clock is monotonic, exists on every macOS, and like Linux's
+// CLOCK_MONOTONIC stops while the machine sleeps.
+type
+  TMachTimebaseInfo = record
+    Numer, Denom: Cardinal;
+  end;
+
+function mach_absolute_time: QWord; cdecl;
+  external 'c' name 'mach_absolute_time';
+function mach_timebase_info(var AInfo: TMachTimebaseInfo): LongInt; cdecl;
+  external 'c' name 'mach_timebase_info';
+
+var
+  // Set once, at unit initialization.
+  MachTimebase: TMachTimebaseInfo;
+
+function MCPNowMs: Int64;
+var
+  Ticks: QWord;
+begin
+  Ticks := mach_absolute_time;
+  // Ticks times Numer / Denom is nanoseconds; dividing first keeps the
+  // product in range for centuries of uptime.
+  Result := Int64((Ticks div MachTimebase.Denom * MachTimebase.Numer +
+    Ticks mod MachTimebase.Denom * MachTimebase.Numer div
+    MachTimebase.Denom) div 1000000);
+end;
+{$ELSE}
 function MCPNowMs: Int64;
 begin
   Result := Int64(GetTickCount64);
 end;
+{$ENDIF}
 
 function MCPStreamNow: Int64;
 begin
@@ -235,4 +268,13 @@ begin
   end;
 end;
 
+{$IFDEF DARWIN}
+initialization
+  if (mach_timebase_info(MachTimebase) <> 0) or (MachTimebase.Denom = 0) then
+  begin
+    // Never on a supported macOS; nanosecond ticks, as on Intel.
+    MachTimebase.Numer := 1;
+    MachTimebase.Denom := 1;
+  end;
+{$ENDIF}
 end.

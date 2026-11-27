@@ -1052,7 +1052,7 @@ type
   // checked.
   THTTPDisconnectPoll = record
     Socket: THandle;
-    LastCheck: QWord;
+    LastCheck: Int64;
     Closed: Boolean;
   end;
   PHTTPDisconnectPoll = ^THTTPDisconnectPoll;
@@ -1139,9 +1139,9 @@ function HTTPDisconnectPoll(ASession: TMCPSession;
 begin
   with PHTTPDisconnectPoll(AUserData)^ do
   begin
-    if not Closed and (GetTickCount64 - LastCheck >= DISCONNECT_POLL_INTERVAL_MS) then
+    if not Closed and (MCPNowMs - LastCheck >= DISCONNECT_POLL_INTERVAL_MS) then
     begin
-      LastCheck := GetTickCount64;
+      LastCheck := MCPNowMs;
       Closed := SocketClosedByPeer(Socket);
     end;
     Result := Closed;
@@ -1213,9 +1213,9 @@ begin
             // Until the stream is due or the socket is probed again,
             // whichever comes first.
             Wait := Due - Now;
-            if Int64(PHTTPDisconnectPoll(APoll)^.LastCheck) +
+            if PHTTPDisconnectPoll(APoll)^.LastCheck +
               DISCONNECT_POLL_INTERVAL_MS - Now < Wait then
-              Wait := Int64(PHTTPDisconnectPoll(APoll)^.LastCheck) +
+              Wait := PHTTPDisconnectPoll(APoll)^.LastCheck +
                 DISCONNECT_POLL_INTERVAL_MS - Now;
             if Wait < 1 then
               Wait := 1;
