@@ -28,7 +28,9 @@ const
     '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
     '"io.modelcontextprotocol/clientCapabilities":{}}';
   // sha256 and sizes from Python's hashlib over the exact bytes.
-  DIGEST_GIT = 'sha256:66d07730c749a68c1cb8837eae6a59df47b04444b48bf76c9f6c631fd916c2c4';
+  DIGEST_GIT = 'sha256:b566e84e460f4448d8945fbd9d42f25d59cfda5fb51b0ad89b06b596f7e41d21';
+  // "grüße", raw UTF-8 bytes.
+  GRUSSE = 'gr' + #$C3#$BC + #$C3#$9F + 'e';
   DIGEST_REBASE = 'sha256:9c3474bebc1f3cff4252f48d2b77b28f7ff9c22dd879eb86cd9f44db3fe77196';
   DIGEST_REFUNDS = 'sha256:9e1f9c19d7482d24e367227fbb5dc2fe9f289c386424bf0c75926be8e10977d8';
   DIGEST_COMMITS = 'sha256:ec6c670d5c3de3539ccc588c99ff9d82575ef9eadefe21b2fbe17e4467be5fa2';
@@ -96,13 +98,14 @@ end;
 
 procedure TSkillsSuite.RegisterFixture;
 var
-  Description, GitBody: string;
+  GitBody: string;
 begin
-  Description := 'Follow the team''s Git conventions';
   // "Grüße", raw UTF-8 bytes, through a variable.
   GitBody := '# Git' + #10 + 'Gr' + #$C3#$BC + #$C3#$9F + 'e' + #10;
-  RegisterSkill(FServer, 'git-workflow', TJSONObject.Create(['name',
-    'git-workflow', 'description', Description]), GitBody,
+  // A non-ASCII description, parsed as the server parses requests.
+  RegisterSkill(FServer, 'git-workflow', TJSONObject(MCPParseJSON(
+    '{"name":"git-workflow","description":"Follow the team''s Git ' +
+    'conventions, gr\u00fc\u00dfe"}')), GitBody,
     [MCPSkillFile('references/commits.md', Body('Use feat: and fix:|')),
     MCPSkillFile('assets/logo.png', Logo)]);
   RegisterSkill(FServer, 'git-workflow/rebase',
@@ -181,9 +184,9 @@ begin
     '{ "skills" : [' +
     '{ "uri" : "skill://git-workflow/SKILL.md", "frontmatter" : ' +
     '{ "name" : "git-workflow", "description" : ' +
-    '"Follow the team''s Git conventions" }, "resources" : [' +
+    '"Follow the team''s Git conventions, ' + GRUSSE + '" }, "resources" : [' +
     '{ "uri" : "skill://git-workflow/SKILL.md", "digest" : "' + DIGEST_GIT +
-    '", "size" : 92 }, ' +
+    '", "size" : 101 }, ' +
     '{ "uri" : "skill://git-workflow/references/commits.md", "digest" : "' +
     DIGEST_COMMITS + '", "size" : 19 }, ' +
     '{ "uri" : "skill://git-workflow/assets/logo.png", "digest" : "' +
@@ -265,8 +268,8 @@ begin
   Expect<Boolean>(Pos('"contents" : [{ "uri" : ' +
     '"skill://git-workflow/SKILL.md", "mimeType" : "text/markdown", ' +
     '"text" : "---\nname: \"git-workflow\"\ndescription: \"Follow the ' +
-    'team''s Git conventions\"\n---\n# Git\nGr' + #$C3#$BC + #$C3#$9F +
-    'e\n" }]', Line) > 0).ToBe(True);
+    'team''s Git conventions, ' + GRUSSE + '\"\n---\n# Git\nGr' +
+    #$C3#$BC + #$C3#$9F + 'e\n" }]', Line) > 0).ToBe(True);
   Line := Send('{"jsonrpc":"2.0","id":2,"method":"resources/read",' +
     '"params":{"uri":"skill://git-workflow/assets/logo.png",' + META + '}}');
   Expect<Boolean>(Pos('"contents" : [{ "uri" : ' +
@@ -345,7 +348,8 @@ begin
     '"params":{"uri":"skill://git-workflow",' + META + '}}');
   Expect<Boolean>(Pos('"resources" : [' +
     '{ "uri" : "skill://git-workflow/SKILL.md", "name" : "git-workflow", ' +
-    '"description" : "Follow the team''s Git conventions", "mimeType" : ' +
+    '"description" : "Follow the team''s Git conventions, ' + GRUSSE +
+    '", "mimeType" : ' +
     '"text/markdown" }, ' +
     '{ "uri" : "skill://git-workflow/assets", "name" : "assets", ' +
     '"mimeType" : "inode/directory" }, ' +
@@ -733,30 +737,25 @@ begin
   end;
 end;
 
-// Under skill:// only the catalog answers: a template there does not
-// serve a file the manifest leaves out (#115 review).
+// Under skill:// only the catalog answers, so a template there, which
+// clients would list and never reach, fails startup (#115 review).
 procedure TSkillsSuite.TestTemplateCannotAddFiles;
 var
-  Response: TJSONObject;
+  Message: string;
 begin
   FServer.RegisterResourceTemplate('skill://x/{name}', 'extra',
     'text/plain', ExtraReader);
   RegisterSkill(FServer, 'x', TJSONObject.Create(['name', 'x',
     'description', 'd']), 'Body', []);
-  Response := Call('resources/read', '"uri":"skill://x/extra.md"');
+  Message := '';
   try
-    Expect<Integer>(TJSONData(Response.FindPath('error.code')).AsInteger)
-      .ToBe(-32602);
-  finally
-    Response.Free;
+    FServer.CreateSession.Free;
+  except
+    on E: EMCPServer do
+      Message := E.Message;
   end;
-  Response := Call('resources/read', '"uri":"skill://x/SKILL.md"');
-  try
-    Expect<string>(Str(Response, 'result.contents[0].mimeType'))
-      .ToBe('text/markdown');
-  finally
-    Response.Free;
-  end;
+  Expect<string>(Message).ToBe('Resource template "skill://x/{name}" lies ' +
+    'under a URI prefix an extension serves');
 end;
 
 // A member stored as nil is a null, and checked as one (#115 review).
@@ -815,7 +814,7 @@ begin
   Test('a refused first call installs nothing', TestAtomicFirstCall);
   Test('a resource under skill:// fails startup', TestShadowingResource);
   Test('file bytes are kept whatever their code page', TestRawBytes);
-  Test('a template under skill:// serves no file of a skill',
+  Test('a template under skill:// fails startup',
     TestTemplateCannotAddFiles);
   Test('a frontmatter member stored as nil is checked as null',
     TestNilFrontmatterMember);

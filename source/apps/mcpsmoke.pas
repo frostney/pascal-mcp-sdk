@@ -799,6 +799,14 @@ begin
       'skills: SKILL.md read back matches its listed digest and size');
     Response.Free;
     Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":40,"method":"skills/get","params":{' +
+      '"uri":"skill://pascal-mcp-sdk/echo-usage/SKILL.md",' + META_MODERN +
+      '}}');
+    Check((PathString(Response, 'result.skill.resources[0].digest') =
+      SkillDigest) and (PathString(Response, 'result.skill.frontmatter.license')
+      = 'MIT'), 'skills/get: the demo skill''s entry, with the listed digest');
+    Response.Free;
+    Response := RoundTrip(Demo,
       '{"jsonrpc":"2.0","id":39,"method":"resources/directory/read",' +
       '"params":{"uri":"skill://pascal-mcp-sdk/echo-usage",' + META_MODERN +
       '}}');

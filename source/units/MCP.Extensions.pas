@@ -89,6 +89,10 @@ function FindCoreMethod(const AName: string;
 // Whether AName is a core method, so no extension may add it.
 function IsBuiltInMethod(const AName: string): Boolean;
 
+// The literal text of AUriTemplate before its first variable: every URI
+// the template matches starts with it.
+function TemplateLiteralPrefix(const AUriTemplate: string): string;
+
 // Adds ttlMs (ATtlMs) and cacheScope (AScope) to AResult (borrowed),
 // each only when it is missing, so a handler's own values stay.
 procedure AddMissingCacheFields(AResult: TJSONObject; ATtlMs: Integer;
@@ -243,6 +247,16 @@ end;
 function TMCPExtensionHooks.HasResolvers: Boolean;
 begin
   Result := Length(FResolvers) > 0;
+end;
+
+function TemplateLiteralPrefix(const AUriTemplate: string): string;
+var
+  Brace: Integer;
+begin
+  Brace := Pos('{', AUriTemplate);
+  if Brace = 0 then
+    Exit(AUriTemplate);
+  Result := Copy(AUriTemplate, 1, Brace - 1);
 end;
 
 procedure AddMissingCacheFields(AResult: TJSONObject; ATtlMs: Integer;

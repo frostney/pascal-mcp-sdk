@@ -98,7 +98,8 @@ type
     function FileIndex(const AUri: string): Integer;
     function IsDirectory(const AUri: string): Boolean;
     function SkillEntry(ASkill: Integer): TJSONObject;
-    procedure CheckLimits(const ARoot: string);
+    procedure CheckLimits(const ARoot: string;
+      const AContents: array of RawByteString);
     function SkillsList(AParams: TJSONObject; const ACtx: TMCPRequestContext;
       ALegacy: Boolean): TJSONObject;
     function SkillsGet(AParams: TJSONObject; const ACtx: TMCPRequestContext;
@@ -481,7 +482,7 @@ procedure TSkillCatalog.Add(const ASkillPath: string;
 var
   Root, Problem: string;
   Normalized: TJSONObject;
-  Uris: array of string;
+  Uris, Digests: array of string;
   Contents: array of RawByteString;
   I, J, Skill, Slot: Integer;
 begin
@@ -536,6 +537,13 @@ begin
           raise EMCPServer.CreateFmt('Skill file "%s" lies under the file ' +
             '"%s"', [Uris[I], FFiles[J].Uri]);
     end;
+    // The limits before any hashing, then the digests while the skill
+    // is still staged, so a failure leaves the catalog as it was (#115
+    // review).
+    CheckLimits(Root, Contents);
+    SetLength(Digests, Length(Contents));
+    for I := 0 to High(Contents) do
+      Digests[I] := SkillDigest(Contents[I]);
   except
     AFrontmatter.Free;
     raise;
@@ -550,7 +558,7 @@ begin
     SetLength(FFiles, Slot + 1);
     FFiles[Slot].Uri := Uris[I];
     FFiles[Slot].Content := Contents[I];
-    FFiles[Slot].Digest := SkillDigest(Contents[I]);
+    FFiles[Slot].Digest := Digests[I];
     FFiles[Slot].Skill := -1;
     if I = 0 then
     begin
@@ -563,43 +571,43 @@ begin
       FFiles[Slot].MimeType := GuessMimeType(AFiles[I - 1].Path,
         Contents[I]);
   end;
-  try
-    CheckLimits(Root);
-  except
-    // Leave the catalog as it was before this skill.
-    SetLength(FFiles, Length(FFiles) - Length(Uris));
-    FSkills[Skill].Frontmatter.Free;
-    SetLength(FSkills, Skill);
-    raise;
-  end;
 end;
 
-// The skill at ARoot and the skills it is nested in, the only totals a
-// new skill changes, its nested skills' files included (skills.mdx,
-// Resources: "Completeness extends to nested skills").
-procedure TSkillCatalog.CheckLimits(const ARoot: string);
-var
-  I, J, Count: Integer;
-  Bytes: Int64;
-begin
-  for I := 0 to High(FSkills) do
+// A new skill at ARoot with files AContents (all under ARoot), and the
+// skills it is nested in: the only totals it changes, nested skills'
+// files included (skills.mdx, Resources: "Completeness extends to
+// nested skills").
+procedure TSkillCatalog.CheckLimits(const ARoot: string;
+  const AContents: array of RawByteString);
+
+  procedure Check(const ASkillRoot: string);
+  var
+    I, Count: Integer;
+    Bytes: Int64;
   begin
-    if (FSkills[I].Root <> ARoot) and not IsUnder(ARoot, FSkills[I].Root) then
-      Continue;
-    Count := 0;
+    Count := Length(AContents);
     Bytes := 0;
-    for J := 0 to High(FFiles) do
-      if Copy(FFiles[J].Uri, 1, Length(FSkills[I].Root) + 1) =
-        FSkills[I].Root + '/' then
+    for I := 0 to High(AContents) do
+      Inc(Bytes, Length(AContents[I]));
+    for I := 0 to High(FFiles) do
+      if IsUnder(FFiles[I].Uri, ASkillRoot) then
       begin
         Inc(Count);
-        Inc(Bytes, Length(FFiles[J].Content));
+        Inc(Bytes, Length(FFiles[I].Content));
       end;
     if (Count > MCP_SKILL_MAX_FILES) or (Bytes > MCP_SKILL_MAX_BYTES) then
-      raise EMCPServer.CreateFmt('Skill "%s" has %d files and %d bytes; ' +
-        'hosts need at most %d files and %d bytes', [FSkills[I].Root, Count,
+      raise EMCPServer.CreateFmt('Skill "%s" would have %d files and %d ' +
+        'bytes; hosts need at most %d files and %d bytes', [ASkillRoot, Count,
         Bytes, MCP_SKILL_MAX_FILES, MCP_SKILL_MAX_BYTES]);
   end;
+
+var
+  I: Integer;
+begin
+  Check(ARoot);
+  for I := 0 to High(FSkills) do
+    if IsUnder(ARoot, FSkills[I].Root) then
+      Check(FSkills[I].Root);
 end;
 
 function TSkillCatalog.SkillEntry(ASkill: Integer): TJSONObject;

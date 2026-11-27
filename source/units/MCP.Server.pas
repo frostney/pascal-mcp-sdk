@@ -681,10 +681,11 @@ type
     // changes, so an extension checks before it registers anything.
     function HookProblem(const AMethods: array of string;
       const AUriPrefix: string): string;
-    // AObject (owned from here, also when refused) is freed with the
-    // server, after its handlers, so an extension's state outlives every
-    // request; adopting it again changes nothing, and after the server
-    // started raises EMCPServer. Adopted returns the first adopted
+    // AObject (owned from here) is freed with the server, after its
+    // handlers, so an extension's state outlives every request; adopting
+    // it again changes nothing. After the server started it raises
+    // EMCPServer and frees AObject, unless the server owns it already,
+    // which then lives on until the server is freed. Adopted returns the first adopted
     // object of class AClass, or nil.
     procedure Adopt(AObject: TObject);
     function Adopted(AClass: TClass): TObject;
@@ -2377,6 +2378,12 @@ begin
     if FHooks.Covers(FResources[I].Definition.Get('uri', '')) then
       raise EMCPServer.CreateFmt('Resource "%s" lies under a URI prefix an ' +
         'extension serves', [FResources[I].Definition.Get('uri', '')]);
+  // So would a template whose every expansion lies under one: its reads
+  // never reach it.
+  for I := 0 to High(FTemplates) do
+    if FHooks.Covers(TemplateLiteralPrefix(FTemplates[I].UriTemplate)) then
+      raise EMCPServer.CreateFmt('Resource template "%s" lies under a URI ' +
+        'prefix an extension serves', [FTemplates[I].UriTemplate]);
   FSealer := CreateSealer(FName, FRequestStateKeys, FRequestStateTtlMs);
   // Structured output is checked whenever the output schema is inside
   // the subset (#91); a richer one is the handler's to honour.

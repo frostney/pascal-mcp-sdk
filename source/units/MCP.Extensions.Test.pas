@@ -258,6 +258,7 @@ end;
 procedure THooksSuite.TestAdopt;
 var
   Probe: TFreeProbe;
+  Raised: Boolean;
 begin
   FreedProbes := 0;
   Probe := TFreeProbe.Create;
@@ -289,12 +290,14 @@ begin
   FServer.Adopt(Probe);
   Send('{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{' +
     META + '}}');
+  Raised := False;
   try
     FServer.Adopt(Probe);
   except
     on E: EMCPServer do
-      ;
+      Raised := True;
   end;
+  Expect<Boolean>(Raised).ToBe(True);
   Expect<Integer>(FreedProbes).ToBe(2);
   FreeAndNil(FSession);
   FreeAndNil(FServer);

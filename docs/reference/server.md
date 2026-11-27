@@ -362,7 +362,8 @@ listed, its reads carry the registry's `ttlMs`, and it makes the
 server declare the `resources` capability. A resolver returns new contents, or `nil` for a URI that
 is none of its resources. Prefixes may not overlap, and a registered
 resource under a resolver's prefix fails startup, since it would hide
-what the extension serves there. `Adopt` hands the
+what the extension serves there; so does a resource template whose
+text before its first variable lies under the prefix. `Adopt` hands the
 server an object to free after its handlers are gone, such as the
 state those handlers read, and `Adopted` finds the first adopted
 object of a class; adopting the same object again changes nothing.
@@ -370,7 +371,8 @@ object of a class; adopting the same object again changes nothing.
 fail, or `''`, without changing anything, so an extension can check
 everything before it registers its first hook. Registering or adopting
 after the server started raises `EMCPServer`; a refused `Adopt` frees
-the object.
+the object then, unless the server owns it already, in which case it
+is freed with the server as before.
 
 From `MCP.Apps`, MCP Apps on top of these
 ([Interactive UIs](../guides/mcp-apps.md)):
