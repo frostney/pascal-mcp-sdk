@@ -188,10 +188,11 @@ function MCPWireNumber(AValue: Double): TJSONData;
 //   array       items (a node)
 //   primitives  enum (entries of another type never match), default
 //               (a primitive)
-//   any node    description, title, x-mcp-header (checked by
-//               MCPHeaderParameters); $schema at the root, naming
+//   any node    description, title; $schema at the root, naming
 //               2020-12 (the default dialect; a schema declaring
 //               another is outside the subset)
+//   input only  x-mcp-header on a property (checked by
+//               MCPHeaderParameters)
 // Nesting is unlimited. Verified 2026-11-26 against the structured
 // content and output schema rules of
 // https://modelcontextprotocol.io/specification/2026-07-28/server/tools
@@ -1436,16 +1437,39 @@ begin
       Exit(False);
 end;
 
+const
+  // Marks a path segment that is a subschema array index, not a name.
+  INDEX_MARK = #1;
+
+function IndexSegment(AIndex: Integer): string;
+begin
+  Result := INDEX_MARK + IntToStr(AIndex);
+end;
+
+// The path for messages: names joined by dots, a name holding a dot,
+// bracket, quote or nothing quoted as ["..."], and array branches as
+// [n], so a literal key "a.b" and the nesting a -> b differ.
 function PathText(const APath: array of string): string;
 var
   I: Integer;
+  Segment: string;
 begin
   Result := '';
   for I := 0 to High(APath) do
   begin
-    if I > 0 then
-      Result := Result + '.';
-    Result := Result + APath[I];
+    Segment := APath[I];
+    if (Segment <> '') and (Segment[1] = INDEX_MARK) then
+      Result := Result + '[' + Copy(Segment, 2, MaxInt) + ']'
+    else if (Segment = '') or (Pos('.', Segment) > 0) or
+      (Pos('[', Segment) > 0) or (Pos('"', Segment) > 0) then
+      Result := Result + '["' + StringReplace(Segment, '"', '\"',
+        [rfReplaceAll]) + '"]'
+    else
+    begin
+      if I > 0 then
+        Result := Result + '.';
+      Result := Result + Segment;
+    end;
   end;
 end;
 
@@ -1500,22 +1524,25 @@ type
   TSchemaKeywordKind = (skNone, skSubschema, skSubschemaArray, skSubschemaMap);
 
 // How a JSON Schema 2020-12 keyword holds subschemas (plus the draft
-// names "definitions" and "additionalItems"). Other keywords, such as
-// examples, enum, const and default, hold data, never annotations.
+// names "definitions", "additionalItems" and "dependencies"). Other
+// keywords, such as examples, enum, const and default, hold data,
+// never annotations.
 function SchemaKeywordKind(const AKey: string): TSchemaKeywordKind;
 begin
   if (AKey = 'items') or (AKey = 'additionalProperties') or (AKey = 'not') or
     (AKey = 'if') or (AKey = 'then') or (AKey = 'else') or
     (AKey = 'contains') or (AKey = 'propertyNames') or
     (AKey = 'unevaluatedItems') or (AKey = 'unevaluatedProperties') or
-    (AKey = 'additionalItems') then
+    (AKey = 'additionalItems') or (AKey = 'contentSchema') then
     Result := skSubschema
   else if (AKey = 'allOf') or (AKey = 'anyOf') or (AKey = 'oneOf') or
     (AKey = 'prefixItems') then
     Result := skSubschemaArray
   else if (AKey = 'properties') or (AKey = 'patternProperties') or
     (AKey = '$defs') or (AKey = 'definitions') or
-    (AKey = 'dependentSchemas') then
+    (AKey = 'dependentSchemas') or (AKey = 'dependencies') then
+    // draft-07 "dependencies" maps to schemas or to name arrays; only an
+    // object entry is visited, an array of names is data.
     Result := skSubschemaMap
   else
     Result := skNone;
@@ -1546,8 +1573,9 @@ begin
       if AValue.JSONType = jtArray then
         for I := 0 to AValue.Count - 1 do
         begin
-          Result := CollectHeaders(AValue.Items[I], ExtendPath(APath, AKey),
-            False, AParameters);
+          Result := CollectHeaders(AValue.Items[I],
+            ExtendPath(ExtendPath(APath, AKey), IndexSegment(I)), False,
+            AParameters);
           if Result <> '' then
             Exit;
         end;

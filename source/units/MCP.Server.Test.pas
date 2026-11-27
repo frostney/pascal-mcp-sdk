@@ -133,6 +133,7 @@ type
     procedure TestNonObjectOutputSchema;
     procedure TestBadHeaderAnnotationRejected;
     procedure TestHeaderAnnotatedToolValidated;
+    procedure TestHeaderParametersAreCopies;
     procedure TestWrongOutputSchemaRoot;
     procedure TestValidInputAndOutputSchemaRoots;
     procedure TestDuplicateResource;
@@ -1948,6 +1949,29 @@ end;
 
 // x-mcp-header is inside the enforced subset: a header-routed tool
 // keeps server-side argument validation (#90).
+// ToolHeaderParameters hands out a copy: changing it leaves what the
+// HTTP binding validates against untouched (#90 review).
+procedure TRegistrationGuards.TestHeaderParametersAreCopies;
+var
+  Server: TMCPServer;
+  First, Second: TMCPHeaderParameters;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Server.RegisterTool('routed', 'Routed', '{"type":"object","properties":' +
+      '{"region":{"type":"string","x-mcp-header":"Region"}}}', EchoHandler);
+    Server.CreateSession.Free;
+    First := Server.ToolHeaderParameters('routed');
+    First[0].Path[0] := 'changed';
+    First[0].Header := 'Changed';
+    Second := Server.ToolHeaderParameters('routed');
+    Expect<string>(Second[0].Path[0]).ToBe('region');
+    Expect<string>(Second[0].Header).ToBe('Region');
+  finally
+    Server.Free;
+  end;
+end;
+
 procedure TRegistrationGuards.TestHeaderAnnotatedToolValidated;
 var
   Server: TMCPServer;
@@ -2602,6 +2626,8 @@ begin
     TestBadHeaderAnnotationRejected);
   Test('a header-annotated tool keeps server-side argument checks',
     TestHeaderAnnotatedToolValidated);
+  Test('ToolHeaderParameters returns independent copies',
+    TestHeaderParametersAreCopies);
   Test('inputSchema array root rejected', TestWrongInputSchemaRoot);
   Test('non-object outputSchema rejected', TestNonObjectOutputSchema);
   Test('outputSchema with an array root accepted',

@@ -141,14 +141,17 @@ validates the arguments.
 
 Over Streamable HTTP the client then sends `Mcp-Param-Region:
 us-west1` with the call, and the server checks that the header matches
-the body: a missing, extra, repeated or different header is refused
-with HTTP 400 and `-32020`. An empty header is the empty string's, and
-integers compare as numbers within the JavaScript safe range, so a
+the body. For each header the called tool designates, the call is
+refused with HTTP 400 and `-32020` when the header is missing, sent
+more than once, different from the body, or sent while the argument
+is absent or `null`; `Mcp-Param-*` headers the tool does not designate
+are ignored, as the spec asks. An empty header is the empty string's,
+and integers compare as numbers within the JavaScript safe range, so a
 body `42.0` matches a header `42`. The comparison goes by the declared
 type: a body value of another type, or an array or object, never
-matches. The HTTP server trims a header's leading and trailing
-whitespace before the check sees it, so a plain value with edge
-whitespace (which a client must base64-encode) is not caught; the
+matches. The HTTP server strips a header value's leading and trailing
+whitespace and control bytes before the check sees it, so a plain value
+with such edges (which a client must base64-encode) is not caught; the
 decoded comparison still holds. At registration the server checks the annotations
 the way a client would: a non-empty header token, unique (ignoring
 case), only on a `string`, `integer` or `boolean` property, and only on
@@ -158,6 +161,14 @@ its list
 ([x-mcp-header](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header),
 verified 2026-11-26). Header values are visible to every intermediary,
 so do not mark secrets or personal data.
+
+> [!NOTE]
+> Upgrading (breaking): `=?base64?...?=` values in `Mcp-Name`, sent for
+> every tool, prompt and resource whether annotated or not, now decode
+> strictly too. A custom client that left the base64 padding off gets
+> 400; send standard base64 with its `=` padding, as the spec's Value
+> Encoding asks. The official TypeScript client (2.0.0) already does
+> (verified 2026-11-27: it encodes with `btoa`, which pads).
 
 ## Annotations
 

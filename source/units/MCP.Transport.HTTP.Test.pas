@@ -70,10 +70,11 @@ type
     function Exchange(const AMethod, APath, ABody: string;
       const AHeaders: array of THeaderPair; out AResponseBody: string;
       out AContentType: string): Integer;
-    // POST to the endpoint with the standard modern headers for
-    // AMcpMethod/AMcpName; '' skips a header entirely.
+    // A tools/call of 'routed' (#90) with AArguments and extra headers.
     function PostRouted(const AArguments: string;
       const AHeaders: array of THeaderPair; out ABody: string): Integer;
+    // POST to the endpoint with the standard modern headers for
+    // AMcpMethod/AMcpName; '' skips a header entirely.
     function Post(const ABody, AMcpMethod, AMcpName: string;
       out AResponseBody: string): Integer;
     // A well-formed tools/call POST that differs only in Origin, then
@@ -787,9 +788,13 @@ begin
   Expect<Integer>(PostRouted('{"region":"Hello"}',
     [HeaderPair('Mcp-Param-Region', '=?base64?SGVsbG8?=')], Body)).ToBe(400);
   Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  // A foreign character in a payload of whole 4-character groups, which
+  // a lenient decoder would skip to "Hello": only the alphabet check
+  // refuses it.
   Expect<Integer>(PostRouted('{"region":"Hello"}',
-    [HeaderPair('Mcp-Param-Region', '=?base64?SGVs!!!bG8=?=')], Body))
-    .ToBe(400);
+    [HeaderPair('Mcp-Param-Region', '=?base64?SGVsbG8!?=')], Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  Expect<Boolean>(Pos('is not valid base64', Body) > 0).ToBe(True);
   // Without the full sentinel the value is literal.
   Expect<Integer>(PostRouted('{"region":"SGVsbG8="}',
     [HeaderPair('Mcp-Param-Region', 'SGVsbG8=')], Body)).ToBe(200);

@@ -164,6 +164,10 @@ type
     // Set at freeze: an outputSchema within the subset, so every
     // structuredContent is checked against it before it is sent (#91).
     OutputValidate: Boolean;
+    // Set at freeze: the inputSchema's x-mcp-header annotations, which
+    // registration already validated (#90), so a call does not walk
+    // the schema again.
+    HeaderParams: TMCPHeaderParameters;
   end;
 
   TMCPResourceRegistration = record
@@ -2030,6 +2034,8 @@ begin
     OutputSchema := FTools[I].Definition.Find('outputSchema');
     FTools[I].OutputValidate := (OutputSchema <> nil) and
       (MCPSchemaSubsetViolation(TJSONObject(OutputSchema), False) = '');
+    MCPHeaderParameters(TJSONObject(FTools[I].Definition.Find(
+      'inputSchema')), FTools[I].HeaderParams);
   end;
   FFrozen := True;
 end;
@@ -2819,13 +2825,23 @@ end;
 function TMCPServer.ToolHeaderParameters(
   const AName: string): TMCPHeaderParameters;
 var
-  Index: Integer;
+  Index, I: Integer;
 begin
   Result := nil;
   Index := FindTool(AName);
-  if Index >= 0 then
+  if Index < 0 then
+    Exit;
+  if not FFrozen then
+  begin
     MCPHeaderParameters(TJSONObject(FTools[Index].Definition.Find(
       'inputSchema')), Result);
+    Exit;
+  end;
+  // An independent copy: dynamic arrays are shared, not copied, by
+  // assignment, and the cached paths must stay as frozen.
+  Result := Copy(FTools[Index].HeaderParams);
+  for I := 0 to High(Result) do
+    Result[I].Path := Copy(FTools[Index].HeaderParams[I].Path);
 end;
 
 function TMCPServer.FindTool(const AName: string): Integer;

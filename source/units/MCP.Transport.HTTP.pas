@@ -378,10 +378,8 @@ begin
     Result := (AValue.JSONType = jtString) and (AText = AValue.AsString);
 end;
 
-// Undo the =?base64?...?= sentinel encoding the transport spec
-// defines for header values that are not header-safe ASCII. Returns
-// False when the payload is not decodable base64.
-// True when AValue is =?base64?<APayload>?= (markers case-sensitive).
+// True when AValue is =?base64?<APayload>?= (markers case-sensitive);
+// only splits, never decodes.
 function SentinelPayload(const AValue: string; out APayload: string): Boolean;
 const
   SENTINEL_PREFIX = '=?base64?';

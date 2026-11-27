@@ -1121,7 +1121,7 @@ begin
     'through "properties" from the root');
   Expect<string>(HeaderViolation('{"type":"object","anyOf":[{"properties":' +
     '{"a":{"type":"string","x-mcp-header":"A"}}}]}'))
-    .ToBe('x-mcp-header at "anyOf.properties.a" is not on a property ' +
+    .ToBe('x-mcp-header at "anyOf[0].properties.a" is not on a property ' +
     'reachable through "properties" from the root');
   Expect<string>(HeaderViolation('{"type":"object","x-mcp-header":"Root"}'))
     .ToBe('x-mcp-header at "" is not on a property reachable through ' +
@@ -1150,6 +1150,27 @@ begin
   Expect<string>(Violation('{"type":"object","properties":{"a":' +
     '{"type":"string","x-mcp-header":"A"}}}', False))
     .ToBe('property "a" uses unsupported keyword "x-mcp-header"');
+  // contentSchema (2020-12) and draft-07 dependencies hold subschemas:
+  // an annotation there is out of place. A dependencies entry that
+  // lists property names is data.
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"blob":' +
+    '{"type":"string","contentSchema":{"type":"object","properties":{' +
+    '"k":{"type":"string","x-mcp-header":"K"}}}}}}'))
+    .ToBe('x-mcp-header at "blob.contentSchema.properties.k" is not on a ' +
+    'property reachable through "properties" from the root');
+  Expect<string>(HeaderViolation('{"type":"object","dependencies":{"a":' +
+    '{"properties":{"b":{"type":"string","x-mcp-header":"B"}}}}}'))
+    .ToBe('x-mcp-header at "dependencies.a.properties.b" is not on a ' +
+    'property reachable through "properties" from the root');
+  Expect<string>(HeaderViolation('{"type":"object","dependencies":{"a":' +
+    '["b","x-mcp-header"]}}')).ToBe('');
+  // A literal key with a dot is quoted, so it differs from nesting.
+  Expect<string>(HeaderViolation('{"type":"object","properties":{' +
+    '"a.b":{"type":"string","x-mcp-header":"Key"},' +
+    '"a":{"type":"object","properties":{"b":{"type":"string",' +
+    '"x-mcp-header":"KEY"}}}}}'))
+    .ToBe('x-mcp-header "KEY" is used twice, at "["a.b"]" and "a.b" ' +
+    '(headers compare case-insensitively)');
   // An annotation inside a $defs schema is still out of place.
   Expect<string>(HeaderViolation('{"type":"object","$defs":{"d":' +
     '{"type":"string","x-mcp-header":"D"}}}'))
