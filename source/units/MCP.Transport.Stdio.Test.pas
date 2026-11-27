@@ -229,12 +229,26 @@ type
     procedure Close(ASink: TMCPLineSink; ASinkData: Pointer); override;
   end;
 
+  // A stream that stays open after its first step and never asks its
+  // cancellation probe, so only the loop's own read of a
+  // notifications/cancelled can end it before the input does. It adds
+  // s to CallLog for each step and x when it is destroyed (#132).
+  TOpenStream = class(TMCPStream)
+  public
+    destructor Destroy; override;
+    function Step(ASink: TMCPLineSink; ASinkData: Pointer): Int64; override;
+    procedure Close(ASink: TMCPLineSink; ASinkData: Pointer); override;
+  end;
+
   // test/park: parks a dummy stream, then sees a cancellation waiting;
-  // test/parkfail parks one and then raises.
+  // test/parkfail parks one and then raises; test/parkopen parks an
+  // open stream and answers without asking IsCancelled.
   TParkMethod = class
     function Park(AParams: TJSONObject; const ACtx: TMCPRequestContext;
       ALegacy: Boolean): TJSONObject;
     function ParkFail(AParams: TJSONObject; const ACtx: TMCPRequestContext;
+      ALegacy: Boolean): TJSONObject;
+    function ParkOpen(AParams: TJSONObject; const ACtx: TMCPRequestContext;
       ALegacy: Boolean): TJSONObject;
   end;
 
@@ -246,6 +260,25 @@ begin
 end;
 
 procedure TDummyStream.Close(ASink: TMCPLineSink; ASinkData: Pointer);
+begin
+  Finish;
+end;
+
+destructor TOpenStream.Destroy;
+begin
+  CallLog := CallLog + 'x';
+  inherited Destroy;
+end;
+
+function TOpenStream.Step(ASink: TMCPLineSink; ASinkData: Pointer): Int64;
+begin
+  CallLog := CallLog + 's';
+  // Never due again, whatever the clock does; half the range leaves the
+  // loop's deadline arithmetic room (#132 review).
+  Result := High(Int64) div 2;
+end;
+
+procedure TOpenStream.Close(ASink: TMCPLineSink; ASinkData: Pointer);
 begin
   Finish;
 end;
@@ -264,6 +297,13 @@ begin
   TMCPStreamHost(ACtx.StreamHost).Park(TDummyStream.Create(ACtx.RequestId));
   raise EMCPProtocolError.Create(-32602, 'Invalid params: refused after ' +
     'parking');
+end;
+
+function TParkMethod.ParkOpen(AParams: TJSONObject;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+begin
+  TMCPStreamHost(ACtx.StreamHost).Park(TOpenStream.Create(ACtx.RequestId));
+  Result := TJSONObject.Create;
 end;
 
 var
@@ -354,6 +394,7 @@ begin
     .AddInteger('n'), BeatCheck);
   FServer.RegisterMethod('test/park', ParkMethod.Park);
   FServer.RegisterMethod('test/parkfail', ParkMethod.ParkFail);
+  FServer.RegisterMethod('test/parkopen', ParkMethod.ParkOpen);
   BeatHead := 2;
   BeatPollMs := 60000;
   BeatCalls := 0;
@@ -1006,49 +1047,21 @@ begin
   Expect<Boolean>(Pos('"eventId" : "e1"', Output) > 0).ToBe(True);
 end;
 
-// A cancellation that arrives while its stream is not due is read by
-// the loop itself, and the stream is dropped there: it is not checked
-// again when it would have been due.
+// A cancellation that arrives while its stream is open and not due is
+// read by the loop itself, which drops the stream there: the stream
+// ends before the request on the next line is served, not at the end of
+// input. The stream never asks its probe, and the three lines are on
+// the pipe in order before the loop starts, so the outcome does not
+// depend on timing (#132).
 procedure TStdioLoop.TestStreamCancelledBetweenSteps;
-var
-  InFile, OutFile: Text;
-  PipeReader: THandle;
-  Request: string;
-  Bytes: TStringStream;
-  Cancel, Closer: TPipeScript;
 begin
-  BeatPollMs := 400;
-  Request := StreamLine('5', '"cursor":"2",') + #10;
-  Bytes := TStringStream.Create('');
-  try
-    Bytes.SaveToFile(FDir + 'in.txt');
-  finally
-    Bytes.Free;
-  end;
-  OpenPipe(PipeReader, PipeWriter);
-  PipeOpen := 1;
-  FileWrite(PipeWriter, Request[1], Length(Request));
-  Assign(InFile, FDir + 'in.txt');
-  Reset(InFile);
-  FileClose(TextRec(InFile).Handle);
-  TextRec(InFile).Handle := PipeReader;
-  Assign(OutFile, FDir + 'out.txt');
-  Rewrite(OutFile);
-  Cancel := TPipeScript.Create(100, '{"jsonrpc":"2.0","method":' +
-    '"notifications/cancelled","params":{"requestId":5}}' + #10, False);
-  Closer := TPipeScript.Create(900, '', True);
-  try
-    RunMCPStdioLoop(InFile, OutFile, FServer);
-  finally
-    Close(InFile);
-    Close(OutFile);
-    Cancel.WaitFor;
-    Cancel.Free;
-    Closer.WaitFor;
-    Closer.Free;
-  end;
-  // The handler's check only: none at 400 ms.
-  Expect<string>(CallLog).ToBe('5');
+  RunPipe('{"jsonrpc":"2.0","id":5,"method":"test/parkopen","params":{' +
+    META_MODERN + '}}' + #10 + '{"jsonrpc":"2.0","method":' +
+    '"notifications/cancelled","params":{"requestId":5}}' + #10 +
+    '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":' +
+    '"ping",' + META_MODERN + '}}' + #10, 300);
+  // Its first step, its end, then the ping.
+  Expect<string>(CallLog).ToBe('sx|ping');
 end;
 
 // A cancellation that a cooperative first check sees: no stream opens

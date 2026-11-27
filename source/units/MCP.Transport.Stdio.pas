@@ -839,7 +839,10 @@ begin
   FStreams[High(FStreams)] := AStream;
   FProbes[High(FProbes)] := TStdioStreamProbe.Create(FReader, AStream.Id);
   AStream.CancelProbe := FProbes[High(FProbes)].Cancelled;
-  FDue[High(FDue)] := MCPNowMs;
+  // Due before any time the clock reads, so the first step runs here
+  // even when the clock steps back between two readings: FPC's
+  // GetTickCount64 is wall time on macOS (#132 review).
+  FDue[High(FDue)] := 0;
   StepDue(AOutput);
 end;
 
