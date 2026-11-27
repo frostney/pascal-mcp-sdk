@@ -297,7 +297,8 @@ to validate the headers; a custom transport can too. See
 ```pascal
 procedure DeclareExtension(const AId: string; ASettings: TJSONObject = nil);
 procedure EnsureExtension(const AId: string);
-procedure RequireResource(const AUri, AWho: string);
+procedure RequireResource(const AUri, AWho: string;
+  const AMimeType: string = '');
 procedure SetResourceContentMeta(const AUri: string; AMeta: TJSONObject);
 ```
 
@@ -310,7 +311,9 @@ verified 2026-11-26), so nothing is declared until this is called.
 Declaring again replaces the settings; `EnsureExtension` declares `{}`
 only when the extension is not declared yet, which is how helpers opt
 in. `RequireResource` makes startup (the first `CreateSession`) raise
-`EMCPServer` unless `AUri` is a registered resource, naming `AWho`.
+`EMCPServer` unless `AUri` is a registered resource, declared with
+media type `AMimeType` unless that is `''`, naming `AWho`. A second
+call with the same `AWho` replaces the first.
 `SetResourceContentMeta` gives a static text resource's read contents a
 `_meta` object (owned). Settings and content `_meta` with children
 stored as nil keep JSON nulls there.
@@ -345,7 +348,7 @@ function AppResource(const AUri: string;
 | `MCPAppUiMeta` | A new `_meta.ui` object the caller owns until it hands it over: the CSP domain lists (empty ones left out), permissions, domain, and `APrefersBorder` (`-1` unset, `0` false, `1` true) |
 | `MCPAppContents` | A reader's contents: the HTML as text with the app media type, and `AUiMeta` (owned) as `_meta.ui`; the array is the caller's to return |
 | `MCPClientRendersApps` | Whether the request's client declared the extension with the app media type in its `mimeTypes` |
-| `.AppResource` | Links the tool to `AUri`: `_meta.ui` with `resourceUri` and `visibility` (`'model'`, `'app'`; `[]` for both), and the older flat `ui/resourceUri` key. Startup requires `AUri` registered, and the extension is declared unless it is already |
+| `.AppResource` | Links the tool to `AUri`: `_meta.ui` with `resourceUri` and `visibility` (`'model'`, `'app'`; `[]` for both), and the older flat `ui/resourceUri` key. Startup requires `AUri` registered with the app media type, and the extension is declared unless it is already. Linking the tool again replaces the earlier link |
 
 ### The request context
 

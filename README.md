@@ -183,7 +183,8 @@ walkthrough lives in [docs/guides/quick-start.md](docs/guides/quick-start.md).
 
 Implemented: tools, resources (including RFC 6570 templates),
 prompts, argument completion, MRTR, progress/log notifications,
-caching hints, both
+caching hints, extension negotiation with
+[MCP Apps](docs/guides/mcp-apps.md) interactive UIs, both
 transports, and the classic `initialize` era. Deliberately out:
 `subscriptions/listen` and list-changed notifications — registries
 are static after startup. The authoritative surface-by-surface table,

@@ -762,8 +762,10 @@ begin
     // The View opens with the handshake a host waits for before it
     // sends the tool result (ext-apps specification 2026-01-26).
     Check((Pos('ui/initialize', ResponseLine) > 0) and
-      (Pos('ui/notifications/initialized', ResponseLine) > 0),
-      'MCP Apps: the card sends ui/initialize, then initialized');
+      (Pos('ui/notifications/initialized', ResponseLine) > 0) and
+      (Pos('ui/resource-teardown', ResponseLine) > 0),
+      'MCP Apps: the card sends ui/initialize, then initialized, and ' +
+      'answers teardown');
     Response.Free;
 
     // resources/list + read.

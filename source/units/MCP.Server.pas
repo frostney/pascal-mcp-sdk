@@ -466,7 +466,7 @@ type
     FExtensions: TJSONObject; // owned: capabilities.extensions (#98)
     // Resources that must be registered at startup, and who needs each.
     FRequiredResources: array of record
-      Uri, Who: string;
+      Uri, Who, MimeType: string;
     end;
     FInstructions: string;
     FCacheTtlMs: Integer;
@@ -635,9 +635,13 @@ type
     // (#98 review).
     procedure EnsureExtension(const AId: string);
     // At startup (the first CreateSession), AUri must be a registered
-    // resource; AWho names what needs it in the error EMCPServer raises
-    // otherwise. MCP.Apps requires each tool's linked UI resource.
-    procedure RequireResource(const AUri, AWho: string);
+    // resource, declared with media type AMimeType unless that is '';
+    // AWho names what needs it in the error EMCPServer raises
+    // otherwise. A second call with the same AWho replaces the first, so
+    // a corrected link is what startup checks. MCP.Apps requires each
+    // tool's linked UI resource, with the app media type.
+    procedure RequireResource(const AUri, AWho: string;
+      const AMimeType: string = '');
     // Static text read contents for resource AUri carry AMeta (owned)
     // as their _meta (MCP.Apps puts _meta.ui there).
     procedure SetResourceContentMeta(const AUri: string; AMeta: TJSONObject);
@@ -2226,23 +2230,39 @@ end;
 // 2026-11-26).
 procedure TMCPServer.CheckRequiredResources;
 var
-  I: Integer;
+  I, Index: Integer;
 begin
   for I := 0 to High(FRequiredResources) do
-    if FindResource(FRequiredResources[I].Uri) < 0 then
-      raise EMCPServer.CreateFmt('%s needs resource "%s", which is not ' +
-        'registered', [FRequiredResources[I].Who, FRequiredResources[I].Uri]);
+    with FRequiredResources[I] do
+    begin
+      Index := FindResource(Uri);
+      if Index < 0 then
+        raise EMCPServer.CreateFmt('%s needs resource "%s", which is not ' +
+          'registered', [Who, Uri]);
+      // MCP Apps resources "MUST" have the app media type (ext-apps
+      // specification 2026-01-26, content requirements, verified
+      // 2026-11-27).
+      if (MimeType <> '') and
+        (FResources[Index].Definition.Get('mimeType', '') <> MimeType) then
+        raise EMCPServer.CreateFmt('%s needs resource "%s" with media type ' +
+          '%s', [Who, Uri, MimeType]);
+    end;
 end;
 
-procedure TMCPServer.RequireResource(const AUri, AWho: string);
+procedure TMCPServer.RequireResource(const AUri, AWho, AMimeType: string);
 var
   Slot: Integer;
 begin
   EnsureMutable;
-  Slot := Length(FRequiredResources);
-  SetLength(FRequiredResources, Slot + 1);
+  Slot := 0;
+  while (Slot < Length(FRequiredResources)) and
+    (FRequiredResources[Slot].Who <> AWho) do
+    Inc(Slot);
+  if Slot = Length(FRequiredResources) then
+    SetLength(FRequiredResources, Slot + 1);
   FRequiredResources[Slot].Uri := AUri;
   FRequiredResources[Slot].Who := AWho;
+  FRequiredResources[Slot].MimeType := AMimeType;
 end;
 
 function TMCPToolOptions.ToolName: string;

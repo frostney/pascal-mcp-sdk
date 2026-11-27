@@ -51,7 +51,8 @@ type
     // 'model' and/or 'app' ([] leaves it out: both, the default).
     // Writes _meta.ui and the flat "ui/resourceUri" key older hosts read,
     // as the official helper does, declares the extension unless it is
-    // declared already, and makes startup require AUri registered.
+    // declared already, and makes startup require AUri registered with
+    // the app media type. Linking again replaces the earlier link.
     function AppResource(const AUri: string;
       const AVisibility: array of string): TMCPToolOptions;
   end;
@@ -81,7 +82,8 @@ function RegisterAppResource(AServer: TMCPServer; const AUri, AName: string;
 function MCPClientRendersApps(const ACtx: TMCPRequestContext): Boolean;
 
 // resources/read contents for a UI resource: the app media type, the
-// HTML as text, and AUiMeta (owned; nil for none) as _meta.ui.
+// HTML as text, and AUiMeta (owned; nil for none) as _meta.ui. The
+// array is new and the caller's, as a reader returns it.
 function MCPAppContents(const AUri, AHtml: string;
   AUiMeta: TJSONObject = nil): TJSONArray;
 
@@ -264,7 +266,7 @@ begin
   end;
   Result := Meta('ui', Ui).Meta('ui/resourceUri', TJSONString.Create(AUri));
   // This link, not any _meta.ui a tool carries, is what startup checks.
-  Server.RequireResource(AUri, 'Tool "' + ToolName + '"');
+  Server.RequireResource(AUri, 'Tool "' + ToolName + '"', MCP_APP_MIME_TYPE);
   Server.EnsureExtension(MCP_APPS_EXTENSION);
 end;
 

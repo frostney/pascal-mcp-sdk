@@ -241,6 +241,7 @@ function IsExtensionId(const AId: string): Boolean;
 // capability an input request needs, the ones a request lacks, and the
 // automatic -32021 for them.
 
+// AInputRequests is borrowed.
 // '' when every inputRequests entry names a kind the client declared;
 // otherwise the first missing capability. AUnknownKind carries the
 // method of an entry that is not an MRTR kind at all, and stays

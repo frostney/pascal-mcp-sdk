@@ -57,6 +57,11 @@ the grounding notes.
 Paging, which `mcpdemo` leaves off by default, is covered by the server
 unit suite and the `mcpsmoke` pagination battery, which runs
 `mcpdemo --page-size 2` over stdio.
+The TypeScript batteries exercise the transports and the core protocol,
+not MCP Apps. Apps and extension negotiation are covered by the
+`MCP.Apps` unit suite and the `mcpsmoke` checks of `mcpdemo`'s card
+over stdio: the wire data and the served HTML. No host renders the card
+in these checks.
 
 Wire captures from 2026-08-10 show current clients still opening
 with the classic handshake — Claude Code 2.1.226 with `2025-11-25`,

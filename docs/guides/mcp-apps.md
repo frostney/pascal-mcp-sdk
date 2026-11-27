@@ -43,28 +43,35 @@ Server.RegisterTool('get_weather', 'Current weather for a city',
   (its format depends on the client), and whether the client should
   draw a border (`1`) or not (`0`).
 - `.AppResource(Uri, Visibility)` links a tool. `Visibility` holds
-  `'model'` and/or `'app'`; `[]` means both, the default. A tool marked
-  only `'app'` is hidden from the model and callable from the page.
+  `'model'` and/or `'app'`; `[]` means both, the default. Visibility is
+  advice to the host: a host that supports Apps leaves a tool marked
+  only `'app'` out of what the model sees and lets the page call it.
+  The server still answers `tools/list` and `tools/call` for it like any
+  other tool, so it is no access control.
   The link also writes the older flat `ui/resourceUri` key, as the
   official TypeScript helper does, for clients that still read it.
 
 Using either declares the extension in the server's capabilities,
 unless you declared it with your own settings already; nothing is
 declared otherwise. A tool linked with `.AppResource` to a `ui://` URI
-that is not registered fails when the server starts.
+that is not registered, or registered with another media type than
+`text/html;profile=mcp-app`, fails when the server starts. Linking the
+same tool again replaces its earlier link.
 
 ## Keep the text result
 
 The specification requires a linked tool to return meaningful content
 for clients without the extension. Return the same `MCPTextResult` or
-`MCPStructuredResult` you would without a UI; the page gets that result
-too. To tailor the content, ask whether the client renders apps, which
-means it declared the extension with the app media type among its
-`mimeTypes`:
+`MCPStructuredResult` you would without a UI, whichever client calls:
+the page gets that result too, and a host that renders the page may
+still pass the content to the model. You can still tailor the wording
+when the client renders apps, which means it declared the extension
+with the app media type among its `mimeTypes`; keep the result
+meaningful in both branches:
 
 ```pascal
 if MCPClientRendersApps(ACtx) then
-  ...   // the client renders the UI
+  ...   // the UI shows the details; the text still says what happened
 ```
 
 `ACtx.HasExtension(Id)` only says the client declared an extension, and

@@ -55,6 +55,9 @@ type
     procedure TestFailedStartCanBeRetried;
     procedure TestNilChildrenAndEmptyName;
     procedure TestClientRendersApps;
+    procedure TestEachOptInDeclares;
+    procedure TestLinkedResourceMediaType;
+    procedure TestRelinkReplacesRequirement;
   end;
 
 function WeatherHandler(AArguments: TJSONObject;
@@ -109,11 +112,55 @@ begin
 end;
 
 procedure TAppsSuite.TestNoExtensionUnlessUsed;
+var
+  Line: string;
 begin
   FServer.RegisterTool('plain', 'Plain', '{"type":"object"}', PlainHandler);
-  Expect<Boolean>(Pos('extensions', Send('{"jsonrpc":"2.0","id":1,' +
-    '"method":"server/discover","params":{' + META_PLAIN_CLIENT + '}}')) = 0)
-    .ToBe(True);
+  Line := Send('{"jsonrpc":"2.0","id":1,"method":"server/discover",' +
+    '"params":{' + META_PLAIN_CLIENT + '}}');
+  // A successful answer, with capabilities and no extensions member.
+  Expect<Boolean>(Pos('"capabilities" : { "tools" : {', Line) > 0).ToBe(True);
+  Expect<Boolean>(Pos('extensions', Line) = 0).ToBe(True);
+end;
+
+const
+  APPS_DECLARED = '"extensions" : { "io.modelcontextprotocol/ui" : {} }';
+
+// Each Apps entry point declares the extension on its own: a fresh
+// server per path, so no other helper declares it first (#98 review).
+function DeclaresApps(AServer: TMCPServer): Boolean;
+var
+  Session: TMCPSession;
+  Line: string;
+begin
+  Session := AServer.CreateSession;
+  try
+    AServer.HandleMessage(Session, '{"jsonrpc":"2.0","id":1,' +
+      '"method":"server/discover","params":{' + META_PLAIN_CLIENT + '}}', Line);
+    Result := Pos(APPS_DECLARED, Line) > 0;
+  finally
+    Session.Free;
+    AServer.Free;
+  end;
+end;
+
+procedure TAppsSuite.TestEachOptInDeclares;
+var
+  Server: TMCPServer;
+begin
+  Server := TMCPServer.Create('static', '1');
+  RegisterAppResource(Server, 'ui://s', 's', HTML);
+  Expect<Boolean>(DeclaresApps(Server)).ToBe(True);
+  Server := TMCPServer.Create('reader', '1');
+  RegisterAppResource(Server, 'ui://r', 'r', DynamicReader);
+  Expect<Boolean>(DeclaresApps(Server)).ToBe(True);
+  // The link alone, to a resource the core API registered with the app
+  // media type.
+  Server := TMCPServer.Create('link', '1');
+  Server.RegisterTextResource('ui://l', 'l', MCP_APP_MIME_TYPE, HTML);
+  Server.RegisterTool('t', 't', '{"type":"object"}', PlainHandler)
+    .AppResource('ui://l', []);
+  Expect<Boolean>(DeclaresApps(Server)).ToBe(True);
 end;
 
 procedure TAppsSuite.TestResourceDeclaration;
@@ -160,7 +207,8 @@ procedure TAppsSuite.TestToolLink;
 var
   Line: string;
 begin
-  RegisterAppResource(FServer, 'ui://weather/dashboard', 'Dashboard', HTML);
+  FServer.RegisterTextResource('ui://weather/dashboard', 'Dashboard',
+    MCP_APP_MIME_TYPE, HTML);
   FServer.RegisterTool('get_weather', 'Weather', '{"type":"object"}',
     WeatherHandler).AppResource('ui://weather/dashboard', ['model', 'app']);
   Line := Send('{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{' +
@@ -189,6 +237,42 @@ begin
   end;
   Expect<string>(Message).ToBe('Tool "orphan" needs resource ' +
     '"ui://nowhere", which is not registered');
+end;
+
+function StartupError(AServer: TMCPServer): string;
+begin
+  Result := '';
+  try
+    AServer.CreateSession.Free;
+  except
+    on E: EMCPServer do
+      Result := E.Message;
+  end;
+end;
+
+// A link to a resource of another media type fails at startup (#98
+// review).
+procedure TAppsSuite.TestLinkedResourceMediaType;
+begin
+  FServer.RegisterTextResource('ui://plain', 'plain', 'text/plain', 'x');
+  FServer.RegisterTool('typed', 'Typed', '{"type":"object"}', PlainHandler)
+    .AppResource('ui://plain', []);
+  Expect<string>(StartupError(FServer)).ToBe('Tool "typed" needs resource ' +
+    '"ui://plain" with media type text/html;profile=mcp-app');
+end;
+
+// Linking a tool again replaces its earlier link, so startup checks
+// only the final one (#98 review).
+procedure TAppsSuite.TestRelinkReplacesRequirement;
+var
+  Options: TMCPToolOptions;
+begin
+  RegisterAppResource(FServer, 'ui://new', 'new', HTML);
+  Options := FServer.RegisterTool('moved', 'Moved', '{"type":"object"}',
+    PlainHandler);
+  Options.AppResource('ui://old', []);
+  Options.AppResource('ui://new', []);
+  Expect<string>(StartupError(FServer)).ToBe('');
 end;
 
 procedure TAppsSuite.TestClientExtensionSettings;
@@ -401,6 +485,12 @@ begin
     TestNilChildrenAndEmptyName);
   Test('MCPClientRendersApps needs the app media type',
     TestClientRendersApps);
+  Test('each Apps entry point declares the extension on its own',
+    TestEachOptInDeclares);
+  Test('a linked resource of another media type fails at startup',
+    TestLinkedResourceMediaType);
+  Test('linking a tool again replaces its earlier link',
+    TestRelinkReplacesRequirement);
   Test('non-ui:// URIs, bad visibility and bad extension ids refused',
     TestGuards);
 end;
