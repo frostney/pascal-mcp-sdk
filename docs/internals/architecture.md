@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-pascal-mcp-sdk is eleven units layered strictly bottom-up. Four form the
+pascal-mcp-sdk is thirteen units layered strictly bottom-up. Four form the
 request chain — `MCP.JSONRPC` (the JSON-RPC 2.0 profile MCP mandates),
 `MCP.Protocol` (the stateless per-request `_meta` model of spec
 revision 2026-07-28), `MCP.Server` (the sans-I/O dispatch core), and a
@@ -15,7 +15,8 @@ transport shell (`MCP.Transport.Stdio` or `MCP.Transport.HTTP`) — and
 `MCP.Schema` and `MCP.Content` sit beside the chain as the schema and
 content-block helpers `MCP.Server` consumes, `MCP.Completion` and
 `MCP.UriTemplate` read completion requests and match resource templates
-for it, and `MCP.RequestState` with `MCP.Crypto` seal the MRTR
+for it, `MCP.Metadata` and `MCP.Pagination` build definition metadata
+and list cursors for it, and `MCP.RequestState` with `MCP.Crypto` seal the MRTR
 `requestState` for it. The core performs no I/O, with one scoped exception: when no
 `requestState` keys are set, the first `CreateSession` reads 32 bytes
 from the operating system's random source for the instance's sealing
@@ -37,7 +38,7 @@ flowchart TB
     SCHEMA["MCP.Schema<br/>fluent builder +<br/>RTTI argument classes"]
     CONTENT["MCP.Content<br/>content blocks for<br/>results and messages"]
     SEAL["MCP.RequestState + MCP.Crypto<br/>requestState sealing,<br/>in-tree SHA-256 / HMAC"]
-    HELPERS["MCP.Completion + MCP.UriTemplate<br/>completion requests,<br/>resource templates"]
+    HELPERS["MCP.Completion + MCP.UriTemplate<br/>+ MCP.Metadata + MCP.Pagination<br/>completion requests, resource<br/>templates, icons/_meta, cursors"]
     SERVER["MCP.Server<br/>frozen registries + sessions<br/>HandleMessage(session, line) → line"]
     PROTOCOL["MCP.Protocol<br/>_meta validation, version<br/>negotiation, result stamping"]
     JSONRPC["MCP.JSONRPC<br/>JSON-RPC 2.0 parse/build<br/>MCP profile + error codes"]
@@ -55,23 +56,26 @@ flowchart TB
 
 The strict bottom-up request chain is `MCP.JSONRPC` → `MCP.Protocol` →
 `MCP.Server` → transport. `MCP.Schema`, `MCP.Content`,
-`MCP.Completion` and `MCP.UriTemplate` sit to the side of that chain:
-helpers `MCP.Server` consumes to build and enforce tool schemas, build
-content blocks, read completion requests and match resource templates,
-not layers a request passes through.
+`MCP.Completion`, `MCP.UriTemplate`, `MCP.Metadata` and `MCP.Pagination`
+sit to the side of that chain: helpers `MCP.Server` consumes to build
+and enforce tool schemas, build content blocks, read completion
+requests, match resource templates, build definition metadata and make
+and check list cursors, not layers a request passes through.
 
 Rules live in the layer that owns them and nowhere else:
 
 | Unit | Owns | Knows nothing about |
 | --- | --- | --- |
-| `MCP.JSONRPC` | Message classification (request / notification / invalid), MCP's tightened id rules (string or number, never null), batch rejection, params-must-be-object, id preservation into error replies, compact single-line serialization | MCP methods |
-| `MCP.Protocol` | The reserved `_meta` keys, the two required per-request fields (`protocolVersion`, `clientCapabilities`), `-32602` for their absence, `-32022` (+ `supported` list) for version mismatch, the `-32021` data payload and its shape check, response-side stamping (`resultType: "complete"`, `serverInfo`) | Tools and resources |
+| `MCP.JSONRPC` | Message classification (request / notification / invalid), MCP's tightened id rules (string or number, never null), batch rejection, params-must-be-object, id preservation into error replies, compact single-line serialization, and request-id matching (strings by value, numbers by value) | MCP methods |
+| `MCP.Protocol` | The reserved `_meta` keys, the two required per-request fields (`protocolVersion`, `clientCapabilities`), `-32602` for their absence, `-32022` (+ `supported` list) for version mismatch, the `-32021` data payload and its shape check, response-side stamping (`resultType: "complete"`, `serverInfo`), the well-formed `notifications/cancelled` and its `requestId` | Tools and resources |
 | `MCP.Server` | Method dispatch (`server/discover`, `tools/*`, `resources/*`, `prompts/*`, `completion/complete`), capabilities computed from the registrations, frozen registries and request-visible configuration, per-connection legacy state, cooperative cancellation, in-band vs. protocol error policy (handler exceptions → `isError: true` results; a handler's `EMCPProtocolError` and dispatch faults → JSON-RPC errors), the legacy-`initialize` rejection that names supported versions | Bytes and streams |
 | `MCP.Schema` | The fluent builder (`ObjectSchema.AddString(...)`) and the RTTI-derived `TMCPArgs` argument classes, both emitting the JSON Schema 2020-12 subset the server enforces | Dispatch, bytes, streams |
 | `MCP.Content` | The five content block shapes tool results and prompt messages carry (text, image, audio, resource link, embedded resource) and the base64 encoding of raw-bytes payloads | Dispatch, registries, bytes and streams |
 | `MCP.RequestState` | Sealing and verifying the MRTR `requestState` envelope (expiry, method, target, argument digest, audience) | Dispatch, transports |
 | `MCP.Completion` | The `completion/complete` request parameters, the target check, the static-list matcher and the capped `CompleteResult` | Registries, dispatch |
 | `MCP.UriTemplate` | RFC 6570 level-1 template validation and URI matching | Registries, readers |
+| `MCP.Metadata` | The icon, `_meta` and resource-annotation objects the registration options add to definitions, and their checks | Registries, dispatch |
+| `MCP.Pagination` | The opaque list cursor and the check of one a client sends back | Registries, dispatch |
 | `MCP.Crypto` | SHA-256, HMAC-SHA-256, constant-time comparison, the OS random source and base64url, in-tree because FPC 3.2.2 ships no SHA-256 | Everything MCP |
 | `MCP.Transport.Stdio` | LF-terminated writes on every platform, CR tolerance on reads, blank-line skipping, stderr-only logging, EOF as the graceful-shutdown signal | Protocol decisions — it contains not a single one |
 

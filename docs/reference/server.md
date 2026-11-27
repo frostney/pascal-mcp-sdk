@@ -28,6 +28,7 @@ is created, and later mutation raises `EMCPServer`.
 | `RequestStateTtlMs` | `Integer` | `600000` | Lifetime of a sealed `requestState` token; must be > 0 |
 | `SetRequestStateKeys(Keys)` | method | random per server instance | HMAC keys for `requestState` sealing, each ≥ 32 bytes; the first seals, all verify |
 | `Name`, `Version` | `string` | — | Read-only, from `Create` |
+| `Title`, `Description`, `WebsiteUrl` | `string` | `''` | Optional `serverInfo` fields on `server/discover` and `initialize`; `AddIcon(Src, MimeType, Sizes, Theme)` adds an icon |
 
 Semantics and guidance: [Configuration](../guides/configuration.md).
 
@@ -110,21 +111,27 @@ classic-handshake clients, which get no input requests anyway.
 ### Registering resources
 
 ```pascal
-procedure RegisterTextResource(const AUri, AName, AMimeType, AText: string;
-  const ADescription: string = '');
+function RegisterTextResource(const AUri, AName, AMimeType, AText: string;
+  const ADescription: string = ''): TMCPDefinitionOptions;
 
-procedure RegisterResource(const AUri, AName, AMimeType: string;
-  AReader: TMCPResourceReader; const ADescription: string = '');
-procedure RegisterResource(const AUri, AName, AMimeType: string;
-  AMethod: TMCPResourceMethod; const ADescription: string = '');
+function RegisterResource(const AUri, AName, AMimeType: string;
+  AReader: TMCPResourceReader; const ADescription: string = ''): TMCPDefinitionOptions;
+function RegisterResource(const AUri, AName, AMimeType: string;
+  AMethod: TMCPResourceMethod; const ADescription: string = ''): TMCPDefinitionOptions;
 
-procedure RegisterResourceTemplate(const AUriTemplate, AName,
+function RegisterResourceTemplate(const AUriTemplate, AName,
   AMimeType: string; AReader: TMCPTemplateReader;
-  const ADescription: string = '');
-procedure RegisterResourceTemplate(const AUriTemplate, AName,
+  const ADescription: string = ''): TMCPDefinitionOptions;
+function RegisterResourceTemplate(const AUriTemplate, AName,
   AMimeType: string; AMethod: TMCPTemplateMethod;
-  const ADescription: string = '');
+  const ADescription: string = ''): TMCPDefinitionOptions;
 ```
+
+Since #96 these registrations, like `RegisterPrompt`, are functions
+returning `TMCPDefinitionOptions`. A call written as a statement
+compiles as before. Code that assigned one of them to a variable of a
+`procedure ... of object` type needs a matching `function ... of
+object` type, or a small wrapper procedure that makes the call.
 
 Reader signatures:
 
@@ -144,17 +151,55 @@ function MatchUriTemplate(const ATemplate, AUri: string;
   out AVars: TJSONObject): Boolean;
 ```
 
+Resource, template and prompt registrations return
+`TMCPDefinitionOptions` for fluent decoration, like tools return
+`TMCPToolOptions`:
+
+```pascal
+function Title(const ATitle: string): TMCPDefinitionOptions;
+function Icon(const ASrc: string; const AMimeType: string = '';
+  const ASizes: string = ''; const ATheme: string = ''): TMCPDefinitionOptions;
+function Meta(const AKey: string; AValue: TJSONData): TMCPDefinitionOptions;
+// resources only:
+function Annotations(const AAudience: array of string;
+  APriority: Double = -1; const ALastModified: string = ''): TMCPDefinitionOptions;
+function Size(ABytes: Int64): TMCPDefinitionOptions;
+function CacheTtlMs(AValue: Integer): TMCPDefinitionOptions;
+```
+
+```pascal
+Server.RegisterResource('mcp://app/report', 'report', 'text/csv', ReportReader)
+  .Title('Monthly report')
+  .Annotations(['user'], 0.8, '2026-11-01T00:00:00Z')
+  .CacheTtlMs(60000);
+```
+
+An icon's `ASrc` must be a well-formed `https:` URI (a valid host,
+IPv6 in brackets, and a numeric port if any) or `data:` URI (base64
+data when it says `;base64`), `ASizes` is space-separated
+(`'48x48 96x96'`) and `ATheme` is `light` or `dark`. An annotation's
+`ALastModified` is a date-time with a time zone
+(`2026-11-01T00:00:00Z` or a `+HH:MM` offset), as clients check it;
+anything else raises `EMCPServer`. `Meta` takes ownership of its value
+and puts it under the definition's `_meta`. `CacheTtlMs` sets the
+`ttlMs` of reads served by the resource's reader (by default `0`,
+revalidate every time); static text uses the server's `CacheTtlMs`,
+and `CacheTtlMs` on it raises.
+`TMCPToolOptions` has the same `Icon` and `Meta`. Fields from the
+[schema](https://modelcontextprotocol.io/specification/2026-07-28/schema)
+(verified 2026-11-26).
+
 ### Registering prompts
 
 Eight overloads: with or without declared arguments, message-array or
 result handlers, each in function and method shape:
 
 ```pascal
-procedure RegisterPrompt(const AName, ADescription: string;
-  AHandler: TMCPPromptHandler);
-procedure RegisterPrompt(const AName, ADescription: string;
+function RegisterPrompt(const AName, ADescription: string;
+  AHandler: TMCPPromptHandler): TMCPDefinitionOptions;
+function RegisterPrompt(const AName, ADescription: string;
   constref AArguments: TMCPPromptArguments;
-  AHandler: TMCPPromptHandler);
+  AHandler: TMCPPromptHandler): TMCPDefinitionOptions;
 // same two with TMCPPromptResultHandler — the MRTR-capable shape
 // whose handler returns TMCPPromptResult
 // ...and all four as of-object Method variants
@@ -260,6 +305,7 @@ Every handler receives `TMCPRequestContext` (from `MCP.Protocol`):
 | `LogLevel` | Client's requested log floor; `''` = no log opt-in |
 | `HasProgressToken`, `ProgressToken` | Progress opt-in state |
 | `InputResponses`, `RequestState` | MRTR retry payload — see [Client requests](client-requests.md) |
+| `Meta` | The request's whole `params._meta`, borrowed for the call and read-only (nil when absent, as a classic-era request may leave it), for keys the library does not interpret, such as `traceparent`; clone what you keep or change, as the server reads parts of it after the handler returns |
 | `IsCancelled` | Cooperative cancellation probe |
 
 ### Introspection and the sans-I/O seam

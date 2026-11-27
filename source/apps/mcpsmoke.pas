@@ -548,6 +548,8 @@ begin
       'discover: ttlMs present (SEP-2549)');
     Check(FindPath(Response, 'result.capabilities.completions') <> nil,
       'discover: completions capability (a completion is registered)');
+    Check(PathString(Response, 'result.serverInfo.title') = 'pascal-mcp-sdk demo',
+      'discover: serverInfo title (#96)');
     Response.Free;
 
     // tools/list.
@@ -747,6 +749,8 @@ begin
     Check(PathString(Response, 'result.resources[0].uri') =
       'mcp://pascal-mcp-sdk/greeting',
       'resources/list: greeting present');
+    Check(PathString(Response, 'result.resources[0].title') = 'Greeting',
+      'resources/list: greeting title (#96)');
     Response.Free;
 
     Response := RoundTrip(Demo,

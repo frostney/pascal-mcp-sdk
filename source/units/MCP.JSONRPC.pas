@@ -111,6 +111,12 @@ function SerializeCompact(AData: TJSONData): string;
 // errors propagate.
 procedure MCPWriteStderrLine(const AText: string);
 
+// Whether two request ids name the same request, as
+// notifications/cancelled matches them: strings by decoded value,
+// integers by value, other numbers by float value; a string never
+// matches a number, and nil matches nothing. Both are borrowed.
+function SameRequestId(ALeft, ARight: TJSONData): Boolean;
+
 implementation
 
 {$IFDEF WINDOWS}
@@ -477,6 +483,27 @@ begin
   finally
     System.LeaveCriticalSection(StderrWriteLock);
   end;
+end;
+
+function IsIntegralJSONNumber(AValue: TJSONData): Boolean;
+begin
+  Result := (AValue <> nil) and (AValue.JSONType = jtNumber) and
+    not (AValue is TJSONFloatNumber);
+end;
+
+function SameRequestId(ALeft, ARight: TJSONData): Boolean;
+begin
+  Result := False;
+  if (ALeft = nil) or (ARight = nil) then
+    Exit;
+  if (ALeft.JSONType = jtString) and (ARight.JSONType = jtString) then
+    Exit(ALeft.AsString = ARight.AsString);
+  if (ALeft.JSONType <> jtNumber) or (ARight.JSONType <> jtNumber) then
+    Exit;
+  if IsIntegralJSONNumber(ALeft) and IsIntegralJSONNumber(ARight) then
+    Result := ALeft.AsInt64 = ARight.AsInt64
+  else
+    Result := ALeft.AsFloat = ARight.AsFloat;
 end;
 
 // Every platform: strings are UTF-8 in a program built with this

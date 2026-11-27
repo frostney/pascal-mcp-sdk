@@ -511,6 +511,23 @@ type
     procedure TestContinuationPageBytes;
   end;
 
+  // Metadata fields and handler _meta (#96).
+  TMetadataFields = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestServerInfoFields;
+    procedure TestResourceAndPromptFields;
+    procedure TestToolIconAndMeta;
+    procedure TestHandlerMetaOnEveryResult;
+    procedure TestTemplateAndPromptMeta;
+    procedure TestClassicEra;
+    procedure TestHandlerMetaInAndOut;
+    procedure TestReaderTtl;
+    procedure TestGuards;
+  end;
+
   // MCPImageResult: the spec's image content block, the raw-bytes
   // overload's base64 encoding (asserted against literal fixtures, not
   // against a decode of what we just encoded), mimeType passthrough,
@@ -7335,6 +7352,495 @@ begin
     TestContinuationPageBytes);
 end;
 
+{ ───────── metadata fields (#96) ───────── }
+
+// Spec verified 2026-11-26 against the 2026-07-28 schema
+// (https://modelcontextprotocol.io/specification/2026-07-28/schema):
+// Implementation (title, description, websiteUrl, icons), Icon,
+// Resource, ResourceTemplate, Prompt and Tool (title, icons, _meta;
+// resources also annotations and size), _meta on every result
+// (https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta),
+// and ttlMs on reads
+// (https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/caching).
+
+// Returns no structuredContent although its outputSchema needs one,
+// with its own _meta.
+function BadOutputHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPTextResult('no structure');
+  Result.Meta := TJSONObject(GetJSON('{"com.example/kept":true}'));
+end;
+
+// Asks for elicitation, with its own _meta.
+function InterimMetaHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPInputRequired(TJSONObject.Create(['who',
+    MCPElicitFormRequest('Who?', ObjectSchema.AddString('name', 'Name'))]));
+  Result.Meta := TJSONObject(GetJSON('{"com.example/round":1}'));
+end;
+
+// Tries to set the reserved serverInfo key itself.
+function StampForgerHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPTextResult('forged');
+  Result.Meta := TJSONObject(GetJSON('{"io.modelcontextprotocol/serverInfo":' +
+    'null,"com.example/own":2}'));
+end;
+
+// An input-request map whose one entry is stored as nil.
+function NilEntryHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Requests: TJSONObject;
+begin
+  Requests := TJSONObject.Create;
+  Requests.Add('x', TJSONData(nil));
+  Result := MCPInputRequired(Requests);
+  Result.Meta := TJSONObject(GetJSON('{"com.example/lost":false}'));
+end;
+
+function NilChildMeta: TJSONObject;
+begin
+  Result := TJSONObject.Create;
+  Result.Add('empty', TJSONData(nil));
+end;
+
+function MetaEchoHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  // nil when the request has no _meta, as a classic call may.
+  if ACtx.Meta <> nil then
+    Result := MCPTextResult(ACtx.Meta.Get('traceparent', 'none'))
+  else
+    Result := MCPTextResult('none');
+  Result.Meta := TJSONObject(GetJSON('{"com.example/elapsedMs":12}'));
+end;
+
+function FreshReader(const AUri: string;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPTextContents(AUri, 'text/plain', 'fresh');
+end;
+
+function PlainPrompt(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPMessages([MCPUserMessage('p')]);
+end;
+
+procedure TMetadataFields.BeforeEach;
+begin
+  inherited BeforeEach;
+  FServer.Title := 'Test ' + #$C3#$9C + 'ber Server';
+  FServer.Description := 'Serves tests';
+  FServer.WebsiteUrl := 'https://example.com';
+  FServer.AddIcon('https://example.com/i.png', 'image/png', '48x48 96x96', 'dark');
+  FServer.RegisterTextResource('mem://titled', 'titled', 'text/plain', 'x')
+    .Title('Betitelt ' + #$E2#$9C#$93).Icon('data:image/png;base64,AA==')
+    .Annotations(['user', 'assistant'], 0.25, '2026-11-26T00:00:00Z')
+    .Size(1)
+    .Meta('com.example/tag', TJSONString.Create('t'));
+  FServer.RegisterResource('mem://fresh', 'fresh', 'text/plain', FreshReader)
+    .CacheTtlMs(60000);
+  FServer.RegisterPrompt('titled_prompt', 'A prompt', PlainPrompt)
+    .Title('Prompt ' + #$C3#$A9).Icon('https://example.com/p.svg');
+  FServer.RegisterTool('meta_echo', 'Echoes trace', '{"type":"object"}',
+    MetaEchoHandler).Icon('https://example.com/t.png')
+    .Meta('com.example/x', TJSONIntegerNumber.Create(1));
+  FServer.RegisterResourceTemplate('mem://doc/{id}', 'doc', 'text/plain',
+    PairReader).Title('Dok ' + #$C3#$BC).Icon('https://example.com/d.png')
+    .Meta('com.example/kind', TJSONString.Create('doc'));
+  FServer.RegisterPrompt('meta_prompt', 'Has _meta', PlainPrompt)
+    .Meta('com.example/p', NilChildMeta);
+  FServer.RegisterTool(TJSONObject(GetJSON('{"name":"bad_out",' +
+    '"inputSchema":{"type":"object"},"outputSchema":{"type":"object",' +
+    '"properties":{"n":{"type":"integer"}},"required":["n"]}}')),
+    BadOutputHandler);
+  FServer.RegisterTool('interim_meta', 'Asks', '{"type":"object"}',
+    InterimMetaHandler);
+  FServer.RegisterTool('stamp_forger', 'Forges', '{"type":"object"}',
+    StampForgerHandler);
+  FServer.RegisterTool('nil_entry', 'Malformed input request',
+    '{"type":"object"}', NilEntryHandler);
+end;
+
+const
+  // The complete stamp every modern result carries.
+  FULL_STAMP = '"io.modelcontextprotocol/serverInfo" : { "name" : ' +
+    '"test-server", "version" : "9.9.9" }';
+  META_ELICIT = '"_meta":{"io.modelcontextprotocol/protocolVersion":' +
+    '"2026-07-28","io.modelcontextprotocol/clientCapabilities":' +
+    '{"elicitation":{}}}';
+
+procedure TMetadataFields.TestServerInfoFields;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"server/discover",' +
+    '"params":{' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"serverInfo" : { "name" : "test-server", "version" : ' +
+    '"9.9.9", "title" : "Test ' + #$C3#$9C + 'ber Server", "description" : ' +
+    '"Serves tests", "websiteUrl" : "https://example.com", "icons" : [{ "src" : ' +
+    '"https://example.com/i.png", "mimeType" : "image/png", "sizes" : ["48x48", ' +
+    '"96x96"], "theme" : "dark" }] }', Response) > 0).ToBe(True);
+end;
+
+procedure TMetadataFields.TestResourceAndPromptFields;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"resources/list",' +
+    '"params":{' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"uri" : "mem://titled", "name" : "titled", "mimeType" : ' +
+    '"text/plain", "title" : "Betitelt ' + #$E2#$9C#$93 + '", "icons" : [{ "src" : ' +
+    '"data:image/png;base64,AA==" }], "annotations" : { "audience" : ["user", ' +
+    '"assistant"], "priority" : 0.25, "lastModified" : "2026-11-26T00:00:00Z" }, ' +
+    '"size" : 1, "_meta" : { "com.example/tag" : "t" }', Response) > 0).ToBe(True);
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":2,"method":"prompts/list",' +
+    '"params":{' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"title" : "Prompt ' + #$C3#$A9 + '", "icons" : [{ "src" : ' +
+    '"https://example.com/p.svg" }]', Response) > 0).ToBe(True);
+end;
+
+procedure TMetadataFields.TestToolIconAndMeta;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"tools/list",' +
+    '"params":{' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"icons" : [{ "src" : "https://example.com/t.png" }], ' +
+    '"_meta" : { "com.example/x" : 1 }', Response) > 0).ToBe(True);
+end;
+
+procedure TMetadataFields.TestHandlerMetaInAndOut;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"meta_echo","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"traceparent":"00-abc-def-01"}}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "00-abc-def-01"', Response) > 0).ToBe(True);
+  // Handler keys first, then the whole serverInfo stamp, in one _meta.
+  Expect<Boolean>(Pos('"_meta" : { "com.example/elapsedMs" : 12, ' +
+    FULL_STAMP + ' }', Response) > 0).ToBe(True);
+end;
+
+// The handler's _meta survives the error that replaces a result whose
+// structured output is missing, and rides on an interim input_required
+// result; the reserved stamp stays the server's (#96 review).
+procedure TMetadataFields.TestHandlerMetaOnEveryResult;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"bad_out",' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"isError" : true', Response) > 0).ToBe(True);
+  Expect<Boolean>(Pos('"_meta" : { "com.example/kept" : true, ' + FULL_STAMP,
+    Response) > 0).ToBe(True);
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+    '"params":{"name":"interim_meta",' + META_ELICIT + '}}', Response))
+    .ToBe(True);
+  Expect<Boolean>(Pos('"resultType" : "input_required"', Response) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Pos('"_meta" : { "com.example/round" : 1, ' + FULL_STAMP,
+    Response) > 0).ToBe(True);
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":4,"method":"tools/call",' +
+    '"params":{"name":"stamp_forger",' + META_MODERN + '}}', Response))
+    .ToBe(True);
+  Expect<Boolean>(Pos('"_meta" : { "com.example/own" : 2, ' + FULL_STAMP +
+    ' }', Response) > 0).ToBe(True);
+  // An input-request entry stored as nil is malformed: -32603, not a
+  // crash, and both trees are released (#96 review).
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":5,"method":"tools/call",' +
+    '"params":{"name":"nil_entry",' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"code" : -32603', Response) > 0).ToBe(True);
+  Expect<Boolean>(Pos('unsupported input request kind', Response) > 0)
+    .ToBe(True);
+end;
+
+// Templates and prompts carry their metadata; a nil child in a fluent
+// _meta value is a JSON null and the list still clones (#96 review).
+procedure TMetadataFields.TestTemplateAndPromptMeta;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,' +
+    '"method":"resources/templates/list","params":{' + META_MODERN + '}}',
+    Response)).ToBe(True);
+  Expect<Boolean>(Pos('"uriTemplate" : "mem://doc/{id}", "name" : "doc", ' +
+    '"mimeType" : "text/plain", "title" : "Dok ' + #$C3#$BC + '", "icons" : ' +
+    '[{ "src" : "https://example.com/d.png" }], "_meta" : { ' +
+    '"com.example/kind" : "doc" }', Response) > 0).ToBe(True);
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":2,"method":"prompts/list",' +
+    '"params":{' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"_meta" : { "com.example/p" : { "empty" : null } }',
+    Response) > 0).ToBe(True);
+end;
+
+// The classic handshake carries the server's fields in initialize, and
+// a classic call keeps the handler's _meta without the modern stamp.
+procedure TMetadataFields.TestClassicEra;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}', Response))
+    .ToBe(True);
+  Expect<Boolean>(Pos('"serverInfo" : { "name" : "test-server", "version" : ' +
+    '"9.9.9", "title" : "Test ' + #$C3#$9C + 'ber Server", "description" : ' +
+    '"Serves tests", "websiteUrl" : "https://example.com", "icons" : [{ "src" : ' +
+    '"https://example.com/i.png", "mimeType" : "image/png", "sizes" : ["48x48", ' +
+    '"96x96"], "theme" : "dark" }] }', Response) > 0).ToBe(True);
+  SendNotification('{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"meta_echo","arguments":{}}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"_meta" : { "com.example/elapsedMs" : 12 }', Response) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Pos('serverInfo', Response) = 0).ToBe(True);
+  // A classic request's own _meta reaches the handler (#96 review).
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+    '"params":{"name":"meta_echo","arguments":{},' +
+    '"_meta":{"traceparent":"00-classic-01"}}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "00-classic-01"', Response) > 0).ToBe(True);
+  // The classic fallback for input_required keeps the handler's _meta.
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":4,"method":"tools/call",' +
+    '"params":{"name":"interim_meta","arguments":{}}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"isError" : true', Response) > 0).ToBe(True);
+  Expect<Boolean>(Pos('"_meta" : { "com.example/round" : 1 }', Response) > 0)
+    .ToBe(True);
+  // Classic lists carry the same definition metadata.
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":5,"method":"tools/list",' +
+    '"params":{}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"icons" : [{ "src" : "https://example.com/t.png" }], ' +
+    '"_meta" : { "com.example/x" : 1 }', Response) > 0).ToBe(True);
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":6,"method":"resources/list",' +
+    '"params":{}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"title" : "Betitelt ' + #$E2#$9C#$93 + '"', Response) > 0)
+    .ToBe(True);
+  // A classic read carries no caching hints, a reader's TTL included.
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":7,"method":"resources/read",' +
+    '"params":{"uri":"mem://fresh"}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "fresh"', Response) > 0).ToBe(True);
+  Expect<Boolean>(Pos('ttlMs', Response) = 0).ToBe(True);
+end;
+
+procedure TMetadataFields.TestReaderTtl;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"resources/read",' +
+    '"params":{"uri":"mem://fresh",' + META_MODERN + '}}');
+  Expect<Integer>(TJSONData(Response.FindPath('result.ttlMs')).AsInteger)
+    .ToBe(60000);
+  Response.Free;
+end;
+
+function RefusedBy(AProc: TProcedure): Boolean;
+begin
+  Result := False;
+  try
+    AProc();
+  except
+    on E: EMCPServer do
+      Result := True;
+  end;
+end;
+
+var
+  GuardServer: TMCPServer;
+
+procedure BadIcon;
+begin
+  GuardServer.AddIcon('http://example.com/i.png');
+end;
+
+procedure BadTheme;
+begin
+  GuardServer.AddIcon('https://example.com/i.png', '', '', 'sepia');
+end;
+
+procedure PromptSize;
+begin
+  GuardServer.RegisterPrompt('p2', 'x', PlainPrompt).Size(3);
+end;
+
+procedure HostlessIcon;
+begin
+  GuardServer.AddIcon('https:///i.png');
+end;
+
+procedure CommalessDataIcon;
+begin
+  GuardServer.AddIcon('data:image/png');
+end;
+
+procedure IconOnNullIcons;
+begin
+  GuardServer.RegisterTool(TJSONObject(GetJSON('{"name":"null_icons",' +
+    '"inputSchema":{"type":"object"},"icons":null}')), EchoHandler)
+    .Icon('https://example.com/x.png');
+end;
+
+procedure MetaOnArrayMeta;
+begin
+  GuardServer.RegisterTool(TJSONObject(GetJSON('{"name":"array_meta",' +
+    '"inputSchema":{"type":"object"},"_meta":[]}')), EchoHandler)
+    .Meta('k', TJSONString.Create('v'));
+end;
+
+procedure IconWithBadPort;
+begin
+  GuardServer.AddIcon('https://example.com:abc/i.png');
+end;
+
+procedure IconWithSpace;
+begin
+  GuardServer.AddIcon('https://bad host/i.png');
+end;
+
+procedure IconBadBase64;
+begin
+  GuardServer.AddIcon('data:image/png;base64,not-base64');
+end;
+
+procedure IconShortBase64;
+begin
+  GuardServer.AddIcon('data:image/png;base64,AAA');
+end;
+
+procedure GoodIcons;
+begin
+  GuardServer.AddIcon('https://user@example.com:8443/i.png');
+  GuardServer.AddIcon('https://[::1]/i.png');
+  GuardServer.AddIcon('https://[2001:db8::7]:443/i.png');
+  GuardServer.AddIcon('https://[::ffff:192.0.2.1]/i.png');
+  GuardServer.AddIcon('https://%65xample.com/i.png');
+  GuardServer.AddIcon('data:image/svg+xml,%3Csvg%3E');
+end;
+
+procedure IconNotIPv6;
+begin
+  GuardServer.AddIcon('https://[abcd]/i.png');
+end;
+
+procedure IconTwoCompressions;
+begin
+  GuardServer.AddIcon('https://[1::2::3]/i.png');
+end;
+
+procedure IconNineGroups;
+begin
+  GuardServer.AddIcon('https://[1:2:3:4:5:6:7:8:9]/i.png');
+end;
+
+procedure IconBadEscape;
+begin
+  GuardServer.AddIcon('https://%zzample.com/i.png');
+end;
+
+procedure LastModifiedWords;
+begin
+  GuardServer.RegisterTextResource('mem://lm1', 'l', 'text/plain', 'l')
+    .Annotations([], -1, 'yesterday');
+end;
+
+procedure LastModifiedNoZone;
+begin
+  GuardServer.RegisterTextResource('mem://lm2', 'l', 'text/plain', 'l')
+    .Annotations([], -1, '2026-11-26T00:00:00');
+end;
+
+procedure LastModifiedBadMonth;
+begin
+  GuardServer.RegisterTextResource('mem://lm3', 'l', 'text/plain', 'l')
+    .Annotations([], -1, '2026-13-01T00:00:00Z');
+end;
+
+procedure LastModifiedGood;
+begin
+  GuardServer.RegisterTextResource('mem://lm4', 'l', 'text/plain', 'l')
+    .Annotations([], -1, '2026-11-26T00:00:00Z');
+  GuardServer.RegisterTextResource('mem://lm5', 'l', 'text/plain', 'l')
+    .Annotations([], -1, '2026-11-26T08:30:00.25+01:00');
+  GuardServer.RegisterTextResource('mem://lm6', 'l', 'text/plain', 'l')
+    .Annotations([], -1, '2026-11-26T08:30:00-05:00');
+end;
+
+procedure StaticTtl;
+begin
+  GuardServer.RegisterTextResource('mem://static-ttl', 's', 'text/plain', 's')
+    .CacheTtlMs(10);
+end;
+
+procedure BadAudience;
+begin
+  GuardServer.RegisterTextResource('mem://a', 'a', 'text/plain', 'a')
+    .Annotations(['robot']);
+end;
+
+procedure TMetadataFields.TestGuards;
+begin
+  GuardServer := FServer;
+  Expect<Boolean>(RefusedBy(BadIcon)).ToBe(True);
+  Expect<Boolean>(RefusedBy(BadTheme)).ToBe(True);
+  Expect<Boolean>(RefusedBy(PromptSize)).ToBe(True);
+  Expect<Boolean>(RefusedBy(BadAudience)).ToBe(True);
+  // An https: URI needs a host, a data: URI its comma (#96 review).
+  Expect<Boolean>(RefusedBy(HostlessIcon)).ToBe(True);
+  Expect<Boolean>(RefusedBy(CommalessDataIcon)).ToBe(True);
+  // Inside an allowed scheme, the URI must still be well formed.
+  Expect<Boolean>(RefusedBy(IconWithBadPort)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconWithSpace)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconBadBase64)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconShortBase64)).ToBe(True);
+  Expect<Boolean>(RefusedBy(GoodIcons)).ToBe(False);
+  // IPv6 syntax and %XX escapes in hosts (#96 review).
+  Expect<Boolean>(RefusedBy(IconNotIPv6)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconTwoCompressions)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconNineGroups)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconBadEscape)).ToBe(True);
+  // lastModified is a date-time with a time zone, as clients check it
+  // (#96 review).
+  Expect<Boolean>(RefusedBy(LastModifiedWords)).ToBe(True);
+  Expect<Boolean>(RefusedBy(LastModifiedNoZone)).ToBe(True);
+  Expect<Boolean>(RefusedBy(LastModifiedBadMonth)).ToBe(True);
+  Expect<Boolean>(RefusedBy(LastModifiedGood)).ToBe(False);
+  // A raw definition's icons or _meta of the wrong type is refused, not
+  // cast (#96 review).
+  Expect<Boolean>(RefusedBy(IconOnNullIcons)).ToBe(True);
+  Expect<Boolean>(RefusedBy(MetaOnArrayMeta)).ToBe(True);
+  // Static text is served with the server's TTL, so a per-resource one
+  // is refused (#96 review).
+  Expect<Boolean>(RefusedBy(StaticTtl)).ToBe(True);
+  GuardServer := nil;
+end;
+
+procedure TMetadataFields.SetupTests;
+begin
+  Test('serverInfo carries title, description, websiteUrl and icons',
+    TestServerInfoFields);
+  Test('resources and prompts carry title, icons, annotations, size, _meta',
+    TestResourceAndPromptFields);
+  Test('tools carry icons and _meta', TestToolIconAndMeta);
+  Test('handlers read request _meta and add result _meta',
+    TestHandlerMetaInAndOut);
+  Test('a reader''s declared TTL is advertised', TestReaderTtl);
+  Test('handler _meta on error and interim results; the stamp is the server''s',
+    TestHandlerMetaOnEveryResult);
+  Test('templates and prompts carry title, icons and _meta',
+    TestTemplateAndPromptMeta);
+  Test('classic era: initialize serverInfo fields, handler _meta unstamped',
+    TestClassicEra);
+  Test('bad icon URIs, themes, audiences and misapplied options refused',
+    TestGuards);
+end;
+
 { ───────── image results ───────── }
 
 const
@@ -7673,6 +8179,7 @@ begin
     TMRTRDispatch.Create('Server: MRTR input_required'));
   TestRunnerProgram.AddSuite(
     TImageResults.Create('Server: image tool results'));
+  TestRunnerProgram.AddSuite(TMetadataFields.Create('Server: metadata fields'));
   TestRunnerProgram.AddSuite(TPagination.Create('Server: pagination'));
   TestRunnerProgram.AddSuite(
     TTypedNested.Create('Server: typed tools with nested arguments'));
