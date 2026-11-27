@@ -33,6 +33,8 @@ Task-oriented pages for building and shipping your own MCP server:
   declared arguments.
 - [Resources](guides/resources.md) — static text, reader callbacks,
   blobs, and RFC 6570 URI templates.
+- [Interactive UIs (MCP Apps)](guides/mcp-apps.md) — `ui://` HTML
+  resources and the tools that link them.
 - [Configuration](guides/configuration.md) — the server properties:
   instructions, caching hints, error redaction, dual-era mode.
 - [Progress and logging](guides/progress-and-logging.md) — in-request

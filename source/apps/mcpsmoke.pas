@@ -759,6 +759,11 @@ begin
       (Pos('<!DOCTYPE html>', ResponseLine) > 0) and
       (Pos('"prefersBorder" : true', ResponseLine) > 0),
       'resources/read: MCP Apps card with its media type and _meta.ui');
+    // The View opens with the handshake a host waits for before it
+    // sends the tool result (ext-apps specification 2026-01-26).
+    Check((Pos('ui/initialize', ResponseLine) > 0) and
+      (Pos('ui/notifications/initialized', ResponseLine) > 0),
+      'MCP Apps: the card sends ui/initialize, then initialized');
     Response.Free;
 
     // resources/list + read.

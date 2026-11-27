@@ -34,6 +34,8 @@ uses
   SysUtils,
 
   fpjson,
+  MCP.Metadata,
+  MCP.Protocol,
   MCP.Server;
 
 const
@@ -48,7 +50,8 @@ type
     // Links the tool to UI resource AUri (ui://...). AVisibility holds
     // 'model' and/or 'app' ([] leaves it out: both, the default).
     // Writes _meta.ui and the flat "ui/resourceUri" key older hosts read,
-    // as the official helper does, and declares the extension.
+    // as the official helper does, declares the extension unless it is
+    // declared already, and makes startup require AUri registered.
     function AppResource(const AUri: string;
       const AVisibility: array of string): TMCPToolOptions;
   end;
@@ -70,6 +73,12 @@ function RegisterAppResource(AServer: TMCPServer; const AUri, AName,
 function RegisterAppResource(AServer: TMCPServer; const AUri, AName: string;
   AReader: TMCPResourceReader; AUiMeta: TJSONObject = nil;
   const ADescription: string = ''): TMCPDefinitionOptions; overload;
+
+// Whether the client of this request renders MCP Apps: it declared
+// the extension with the app media type among its mimeTypes (ext-apps
+// specification 2026-01-26, server behavior, verified 2026-11-27).
+// HasExtension alone only says the client declared something.
+function MCPClientRendersApps(const ACtx: TMCPRequestContext): Boolean;
 
 // resources/read contents for a UI resource: the app media type, the
 // HTML as text, and AUiMeta (owned; nil for none) as _meta.ui.
@@ -133,23 +142,44 @@ begin
     Result.Add('prefersBorder', APrefersBorder > 0);
 end;
 
+// The text contents MCPTextContents builds, with AUiMeta as _meta.ui,
+// so static and reader-backed apps serialize alike.
 function MCPAppContents(const AUri, AHtml: string;
   AUiMeta: TJSONObject): TJSONArray;
 var
-  Item, Meta: TJSONObject;
+  Meta: TJSONObject;
 begin
-  Item := TJSONObject.Create;
-  Item.Add('uri', AUri);
-  Item.Add('mimeType', MCP_APP_MIME_TYPE);
-  Item.Add('text', AHtml);
-  if AUiMeta <> nil then
-  begin
-    Meta := TJSONObject.Create;
-    Meta.Add('ui', AUiMeta);
-    Item.Add('_meta', Meta);
+  try
+    Result := MCPTextContents(AUri, MCP_APP_MIME_TYPE, AHtml);
+  except
+    AUiMeta.Free;
+    raise;
   end;
-  Result := TJSONArray.Create;
-  Result.Add(Item);
+  if AUiMeta = nil then
+    Exit;
+  Meta := TJSONObject.Create;
+  TJSONObject(Result.Items[0]).Add('_meta', Meta);
+  NilChildrenToNull(AUiMeta);
+  Meta.Add('ui', AUiMeta);
+end;
+
+function MCPClientRendersApps(const ACtx: TMCPRequestContext): Boolean;
+var
+  Settings: TJSONObject;
+  Types: TJSONData;
+  I: Integer;
+begin
+  Result := False;
+  Settings := ACtx.ExtensionSettings(MCP_APPS_EXTENSION);
+  if Settings = nil then
+    Exit;
+  Types := Settings.Find('mimeTypes');
+  if (Types = nil) or (Types.JSONType <> jtArray) then
+    Exit;
+  for I := 0 to Types.Count - 1 do
+    if (Types.Items[I] <> nil) and (Types.Items[I].JSONType = jtString) and
+      (Types.Items[I].AsString = MCP_APP_MIME_TYPE) then
+      Exit(True);
 end;
 
 function RegisterAppResource(AServer: TMCPServer; const AUri, AName,
@@ -158,22 +188,35 @@ function RegisterAppResource(AServer: TMCPServer; const AUri, AName,
 var
   ContentMeta: TJSONObject;
 begin
+  // The read contents' copy is made before anything is registered, so
+  // a failure leaves no half-registered resource (#98 review).
+  ContentMeta := nil;
   try
     RequireUiUri(AUri);
+    if AUiMeta <> nil then
+    begin
+      NilChildrenToNull(AUiMeta);
+      ContentMeta := TJSONObject.Create;
+      ContentMeta.Add('ui', AUiMeta.Clone);
+    end;
     Result := AServer.RegisterTextResource(AUri, AName, MCP_APP_MIME_TYPE,
       AHtml, ADescription);
   except
+    ContentMeta.Free;
     AUiMeta.Free;
     raise;
   end;
-  if AUiMeta <> nil then
+  if ContentMeta <> nil then
   begin
-    ContentMeta := TJSONObject.Create;
-    ContentMeta.Add('ui', AUiMeta.Clone);
-    AServer.SetResourceContentMeta(AUri, ContentMeta);
+    try
+      AServer.SetResourceContentMeta(AUri, ContentMeta);
+    except
+      AUiMeta.Free;
+      raise;
+    end;
     Result.Meta('ui', AUiMeta);
   end;
-  AServer.DeclareExtension(MCP_APPS_EXTENSION);
+  AServer.EnsureExtension(MCP_APPS_EXTENSION);
 end;
 
 function RegisterAppResource(AServer: TMCPServer; const AUri, AName: string;
@@ -190,7 +233,7 @@ begin
   end;
   if AUiMeta <> nil then
     Result.Meta('ui', AUiMeta);
-  AServer.DeclareExtension(MCP_APPS_EXTENSION);
+  AServer.EnsureExtension(MCP_APPS_EXTENSION);
 end;
 
 function TMCPAppToolOptions.AppResource(const AUri: string;
@@ -220,7 +263,9 @@ begin
     Ui.Add('visibility', Visibility);
   end;
   Result := Meta('ui', Ui).Meta('ui/resourceUri', TJSONString.Create(AUri));
-  Server.DeclareExtension(MCP_APPS_EXTENSION);
+  // This link, not any _meta.ui a tool carries, is what startup checks.
+  Server.RequireResource(AUri, 'Tool "' + ToolName + '"');
+  Server.EnsureExtension(MCP_APPS_EXTENSION);
 end;
 
 end.

@@ -37,17 +37,25 @@ uses
   MCP.Transport.Stdio;
 
 const
-  // A minimal MCP App view: it receives the tool result from the host
-  // (ui/notifications/tool-result) and shows the text.
+  // A minimal MCP App view. It opens with the View handshake the host
+  // waits for (ui/initialize, then ui/notifications/initialized once the
+  // host answers; ext-apps specification 2026-01-26, verified
+  // 2026-11-27), then shows the text of the tool result the host sends
+  // (ui/notifications/tool-result).
   ECHO_CARD_HTML =
     '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Echo</title>' +
     '<style>body{font:16px system-ui;margin:0;padding:16px}' +
     'p{border:1px solid #ccc;border-radius:8px;padding:12px}</style>' +
     '</head><body><p id="out">Waiting for the result</p><script>' +
-    'addEventListener("message",e=>{const m=e.data;' +
-    'if(m&&m.method==="ui/notifications/tool-result"){' +
+    'const send=m=>parent.postMessage(Object.assign({jsonrpc:"2.0"},m),"*");' +
+    'addEventListener("message",e=>{const m=e.data;if(!m)return;' +
+    'if(m.id===1&&("result" in m||"error" in m)){' +
+    'send({method:"ui/notifications/initialized",params:{}});return;}' +
+    'if(m.method==="ui/notifications/tool-result"){' +
     'const c=(m.params.content||[])[0];' +
     'document.getElementById("out").textContent=c?c.text:"";}});' +
+    'send({id:1,method:"ui/initialize",params:{appInfo:{name:"echo-card",' +
+    'version:"1.0.0"},appCapabilities:{},protocolVersion:"2026-01-26"}});' +
     '</script></body></html>';
 
 function EchoHandler(AArguments: TJSONObject;

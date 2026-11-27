@@ -48,6 +48,13 @@ type
     procedure TestMissingLinkedResourceFailsStartup;
     procedure TestClientExtensionSettings;
     procedure TestGuards;
+    procedure TestSettingsInBothEras;
+    procedure TestClassicClientDeclarations;
+    procedure TestExplicitSettingsKept;
+    procedure TestOtherMetaUiNotChecked;
+    procedure TestFailedStartCanBeRetried;
+    procedure TestNilChildrenAndEmptyName;
+    procedure TestClientRendersApps;
   end;
 
 function WeatherHandler(AArguments: TJSONObject;
@@ -66,6 +73,14 @@ function PlainHandler(AArguments: TJSONObject;
 begin
   Result := MCPTextResult(BoolToStr(ACtx.HasExtension(MCP_APPS_EXTENSION),
     'ui', 'no ui'));
+end;
+
+function RendersHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPTextResult(BoolToStr(MCPClientRendersApps(ACtx), 'renders',
+    'does not render') + '|' + BoolToStr(ACtx.HasExtension(MCP_APPS_EXTENSION),
+    'declared', 'undeclared'));
 end;
 
 function DynamicReader(const AUri: string;
@@ -172,7 +187,7 @@ begin
     on E: EMCPServer do
       Message := E.Message;
   end;
-  Expect<string>(Message).ToBe('Tool "orphan" links UI resource ' +
+  Expect<string>(Message).ToBe('Tool "orphan" needs resource ' +
     '"ui://nowhere", which is not registered');
 end;
 
@@ -233,6 +248,131 @@ begin
   GuardServer := nil;
 end;
 
+const
+  INIT_CLASSIC = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":' +
+    '{"protocolVersion":"2025-11-25","capabilities":';
+  INIT_CLASSIC_END = ',"clientInfo":{"name":"c","version":"1"}}}';
+  DISCOVER = '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{' +
+    '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{}}}}';
+
+// The server's settings for an extension go out as declared, on
+// server/discover and on the classic initialize (#98 review).
+procedure TAppsSuite.TestSettingsInBothEras;
+const
+  DECLARED = '"extensions" : { "com.example/feature" : { "level" : 2 } }';
+begin
+  FServer.DeclareExtension('com.example/feature',
+    TJSONObject(GetJSON('{"level":2}')));
+  Expect<Boolean>(Pos(DECLARED, Send(DISCOVER)) > 0).ToBe(True);
+  FreeAndNil(FSession);
+  Expect<Boolean>(Pos(DECLARED, Send(INIT_CLASSIC + '{}' + INIT_CLASSIC_END)) > 0)
+    .ToBe(True);
+end;
+
+// A classic client's extensions come from its initialize capabilities:
+// present, absent and malformed.
+procedure TAppsSuite.TestClassicClientDeclarations;
+const
+  CALL = '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":' +
+    '{"name":"plain","arguments":{}}}';
+  INITIALIZED = '{"jsonrpc":"2.0","method":"notifications/initialized"}';
+
+  function Classic(ASuite: TAppsSuite; const ACapabilities: string): string;
+  begin
+    FreeAndNil(ASuite.FSession);
+    ASuite.Send(INIT_CLASSIC + ACapabilities + INIT_CLASSIC_END);
+    ASuite.Send(INITIALIZED);
+    Result := ASuite.Send(CALL);
+  end;
+
+begin
+  FServer.RegisterTool('plain', 'Plain', '{"type":"object"}', PlainHandler);
+  Expect<Boolean>(Pos('"text" : "ui"', Classic(Self, '{"extensions":{' +
+    '"io.modelcontextprotocol/ui":{"mimeTypes":["text/html;profile=mcp-app"]}}}')) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Pos('"text" : "no ui"', Classic(Self, '{}')) > 0).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "no ui"', Classic(Self,
+    '{"extensions":["io.modelcontextprotocol/ui"]}')) > 0).ToBe(True);
+end;
+
+// Settings declared first are kept when an Apps helper opts in later
+// (#98 review).
+procedure TAppsSuite.TestExplicitSettingsKept;
+begin
+  FServer.DeclareExtension(MCP_APPS_EXTENSION,
+    TJSONObject(GetJSON('{"note":"mine"}')));
+  RegisterAppResource(FServer, 'ui://kept', 'kept', HTML);
+  FServer.RegisterTool('t', 't', '{"type":"object"}', PlainHandler)
+    .AppResource('ui://kept', []);
+  Expect<Boolean>(Pos('"io.modelcontextprotocol/ui" : { "note" : "mine" }',
+    Send(DISCOVER)) > 0).ToBe(True);
+end;
+
+// A tool's own _meta.ui with any URI is not an Apps link: startup only
+// checks links .AppResource made (#98 review).
+procedure TAppsSuite.TestOtherMetaUiNotChecked;
+begin
+  FServer.RegisterTool('doc', 'Doc', '{"type":"object"}', PlainHandler)
+    .Meta('ui', TJSONObject(GetJSON('{"resourceUri":"https://example.com/d"}')));
+  Expect<Boolean>(Pos('"tools"', Send(DISCOVER)) > 0).ToBe(True);
+end;
+
+// A start that fails on a missing linked resource can be fixed and
+// retried (#98 review).
+procedure TAppsSuite.TestFailedStartCanBeRetried;
+var
+  Raised: Boolean;
+begin
+  FServer.RegisterTool('later', 'Later', '{"type":"object"}', PlainHandler)
+    .AppResource('ui://later', []);
+  Raised := False;
+  try
+    FServer.CreateSession.Free;
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  RegisterAppResource(FServer, 'ui://later', 'later', HTML);
+  Expect<Boolean>(Pos('"io.modelcontextprotocol/ui"', Send(DISCOVER)) > 0)
+    .ToBe(True);
+end;
+
+// Settings with a child stored as nil still clone for every answer, and
+// an extension id may have an empty name after its prefix (#98 review).
+procedure TAppsSuite.TestNilChildrenAndEmptyName;
+var
+  Settings: TJSONObject;
+begin
+  Settings := TJSONObject.Create;
+  Settings.Add('empty', TJSONData(nil));
+  FServer.DeclareExtension('com.example/', Settings);
+  Expect<Boolean>(Pos('"com.example/" : { "empty" : null }', Send(DISCOVER)) > 0)
+    .ToBe(True);
+end;
+
+// Rendering needs the app media type among the client's mimeTypes, not
+// just a declaration (#98 review).
+procedure TAppsSuite.TestClientRendersApps;
+const
+  CALL = '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":' +
+    '{"name":"renders",';
+  CAPS = '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":';
+begin
+  FServer.RegisterTool('renders', 'Renders', '{"type":"object"}', RendersHandler);
+  Expect<Boolean>(Pos('"text" : "renders|declared"', Send(CALL +
+    META_UI_CLIENT + '}}')) > 0).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "does not render|declared"', Send(CALL + CAPS +
+    '{"extensions":{"io.modelcontextprotocol/ui":{}}}}}}')) > 0).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "does not render|declared"', Send(CALL + CAPS +
+    '{"extensions":{"io.modelcontextprotocol/ui":{"mimeTypes":["text/html"]}}}}}}'))
+    > 0).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "does not render|undeclared"', Send(CALL +
+    META_PLAIN_CLIENT + '}}')) > 0).ToBe(True);
+end;
+
 procedure TAppsSuite.SetupTests;
 begin
   Test('no extensions declared unless something opts in',
@@ -247,6 +387,20 @@ begin
     TestMissingLinkedResourceFailsStartup);
   Test('HasExtension for present, absent and malformed declarations',
     TestClientExtensionSettings);
+  Test('extension settings go out on discover and classic initialize',
+    TestSettingsInBothEras);
+  Test('classic clients: present, absent and malformed extensions',
+    TestClassicClientDeclarations);
+  Test('explicit extension settings survive an Apps opt-in',
+    TestExplicitSettingsKept);
+  Test('a tool''s own _meta.ui is not checked as an Apps link',
+    TestOtherMetaUiNotChecked);
+  Test('a start that failed on a missing link can be retried',
+    TestFailedStartCanBeRetried);
+  Test('nil children in settings, and an empty extension name',
+    TestNilChildrenAndEmptyName);
+  Test('MCPClientRendersApps needs the app media type',
+    TestClientRendersApps);
   Test('non-ui:// URIs, bad visibility and bad extension ids refused',
     TestGuards);
 end;

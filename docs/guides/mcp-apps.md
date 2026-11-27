@@ -16,7 +16,7 @@ resource, its security metadata, and the tool link.
 ## Register a UI and link a tool
 
 ```pascal
-uses MCP.Apps, MCP.Server;
+uses MCP.Apps, MCP.Schema, MCP.Server;
 
 RegisterAppResource(Server, 'ui://weather/dashboard', 'Weather dashboard',
   DashboardHtml,
@@ -48,24 +48,27 @@ Server.RegisterTool('get_weather', 'Current weather for a city',
   The link also writes the older flat `ui/resourceUri` key, as the
   official TypeScript helper does, for clients that still read it.
 
-Using either declares the extension in the server's capabilities;
-nothing is declared otherwise. A tool linked to a `ui://` URI that is
-not registered fails when the server starts.
+Using either declares the extension in the server's capabilities,
+unless you declared it with your own settings already; nothing is
+declared otherwise. A tool linked with `.AppResource` to a `ui://` URI
+that is not registered fails when the server starts.
 
 ## Keep the text result
 
 The specification requires a linked tool to return meaningful content
 for clients without the extension. Return the same `MCPTextResult` or
 `MCPStructuredResult` you would without a UI; the page gets that result
-too. To tailor the content, ask the request:
+too. To tailor the content, ask whether the client renders apps, which
+means it declared the extension with the app media type among its
+`mimeTypes`:
 
 ```pascal
-if ACtx.HasExtension(MCP_APPS_EXTENSION) then
+if MCPClientRendersApps(ACtx) then
   ...   // the client renders the UI
 ```
 
-`ACtx.ExtensionSettings(Id)` returns the client's settings object for
-an extension (for MCP Apps, the `mimeTypes` it renders).
+`ACtx.HasExtension(Id)` only says the client declared an extension, and
+`ACtx.ExtensionSettings(Id)` returns its settings object.
 
 ## Other extensions
 
@@ -77,7 +80,10 @@ declare one gets core behaviour.
 ## The page
 
 The HTML runs in the client's sandbox and talks to the client with
-`postMessage` (`ui/initialize`, `ui/notifications/tool-result` and the
-other messages in the specification); the server only serves it.
+`postMessage`; the server only serves it. The page opens with
+`ui/initialize` and, once the client answers, sends
+`ui/notifications/initialized`; only then does the client send it the
+tool's input and result (`ui/notifications/tool-result`), and the other
+messages in the specification.
 `mcpdemo`'s `echo` tool links a small card (`ui://pascal-mcp-sdk/echo-card`)
 that shows the echoed text.

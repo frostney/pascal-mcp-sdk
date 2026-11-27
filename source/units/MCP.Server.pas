@@ -326,7 +326,6 @@ type
     // ttlMs on reads served by this resource's reader (default 0:
     // revalidate); static text uses the server's CacheTtlMs.
     function CacheTtlMs(AValue: Integer): TMCPDefinitionOptions;
-    property Server: TMCPServer read FServer;
   end;
 
   // Returned by every RegisterTool overload for optional fluent
@@ -367,9 +366,10 @@ type
     function Icon(const ASrc: string; const AMimeType: string = '';
       const ASizes: string = ''; const ATheme: string = ''): TMCPToolOptions;
     function Meta(const AKey: string; AValue: TJSONData): TMCPToolOptions;
-    // The server the tool belongs to, for helpers that extend these
-    // options (MCP.Apps).
+    // The server the tool belongs to and the tool's name, for helpers
+    // that extend these options (MCP.Apps).
     property Server: TMCPServer read FServer;
+    function ToolName: string;
   end;
 
   // Where the server writes server-to-client notification lines
@@ -464,6 +464,10 @@ type
     FWebsiteUrl: string;
     FIdentity: TJSONObject; // owned: holds the server's icons (#96)
     FExtensions: TJSONObject; // owned: capabilities.extensions (#98)
+    // Resources that must be registered at startup, and who needs each.
+    FRequiredResources: array of record
+      Uri, Who: string;
+    end;
     FInstructions: string;
     FCacheTtlMs: Integer;
     FCacheScope: string;
@@ -485,7 +489,7 @@ type
 
     procedure EnsureMutable;
     procedure FreezeConfiguration;
-    procedure CheckAppResourceLinks;
+    procedure CheckRequiredResources;
     procedure SetInstructions(const AValue: string);
     procedure SetTitle(const AValue: string);
     procedure SetDescription(const AValue: string);
@@ -626,6 +630,14 @@ type
     // prefix ('io.modelcontextprotocol/ui'); ASettings (owned; nil = {})
     // is the extension's settings object. Declaring again replaces it.
     procedure DeclareExtension(const AId: string; ASettings: TJSONObject = nil);
+    // Declares AId with {} unless it is declared already, so a helper
+    // that opts in never replaces settings set with DeclareExtension
+    // (#98 review).
+    procedure EnsureExtension(const AId: string);
+    // At startup (the first CreateSession), AUri must be a registered
+    // resource; AWho names what needs it in the error EMCPServer raises
+    // otherwise. MCP.Apps requires each tool's linked UI resource.
+    procedure RequireResource(const AUri, AWho: string);
     // Static text read contents for resource AUri carry AMeta (owned)
     // as their _meta (MCP.Apps puts _meta.ui there).
     procedure SetResourceContentMeta(const AUri: string; AMeta: TJSONObject);
@@ -2208,23 +2220,34 @@ begin
       Reason);
 end;
 
-// A tool linked to a UI resource (_meta.ui.resourceUri, MCP Apps)
-// needs that resource registered: "Resource MUST exist on the server"
-// (ext-apps specification 2026-01-26, verified 2026-11-26).
-procedure TMCPServer.CheckAppResourceLinks;
+// Only the links a helper declared (RequireResource): a tool's own
+// _meta may hold any URI. MCP Apps says the linked resource "MUST exist
+// on the server" (ext-apps specification 2026-01-26, verified
+// 2026-11-26).
+procedure TMCPServer.CheckRequiredResources;
 var
   I: Integer;
-  Uri: TJSONData;
 begin
-  for I := 0 to High(FTools) do
-  begin
-    Uri := FTools[I].Definition.FindPath('_meta.ui.resourceUri');
-    if (Uri <> nil) and (Uri.JSONType = jtString) and
-      (FindResource(Uri.AsString) < 0) then
-      raise EMCPServer.CreateFmt('Tool "%s" links UI resource "%s", which ' +
-        'is not registered', [FTools[I].Definition.Get('name', ''),
-        Uri.AsString]);
-  end;
+  for I := 0 to High(FRequiredResources) do
+    if FindResource(FRequiredResources[I].Uri) < 0 then
+      raise EMCPServer.CreateFmt('%s needs resource "%s", which is not ' +
+        'registered', [FRequiredResources[I].Who, FRequiredResources[I].Uri]);
+end;
+
+procedure TMCPServer.RequireResource(const AUri, AWho: string);
+var
+  Slot: Integer;
+begin
+  EnsureMutable;
+  Slot := Length(FRequiredResources);
+  SetLength(FRequiredResources, Slot + 1);
+  FRequiredResources[Slot].Uri := AUri;
+  FRequiredResources[Slot].Who := AWho;
+end;
+
+function TMCPToolOptions.ToolName: string;
+begin
+  Result := FDefinition.Get('name', '');
 end;
 
 procedure TMCPServer.FreezeConfiguration;
@@ -2254,6 +2277,9 @@ begin
           'the registration .ApplicationValidated to take over argument ' +
           'validation', [FTools[I].Definition.Get('name', ''), Violation]);
     end;
+  // Before anything is allocated, so a failed start can be fixed and
+  // retried (#98 review).
+  CheckRequiredResources;
   FSealer := CreateSealer(FName, FRequestStateKeys, FRequestStateTtlMs);
   // Structured output is checked whenever the output schema is inside
   // the subset (#91); a richer one is the handler's to honour.
@@ -2265,7 +2291,6 @@ begin
     MCPHeaderParameters(TJSONObject(FTools[I].Definition.Find(
       'inputSchema')), FTools[I].HeaderParams);
   end;
-  CheckAppResourceLinks;
   FFrozen := True;
 end;
 
@@ -2504,8 +2529,17 @@ begin
   end;
   if ASettings = nil then
     ASettings := TJSONObject.Create;
+  // Cloned for every capabilities answer, so no child stays nil.
+  NilChildrenToNull(ASettings);
   FExtensions.Delete(AId);
   FExtensions.Add(AId, ASettings);
+end;
+
+procedure TMCPServer.EnsureExtension(const AId: string);
+begin
+  EnsureMutable;
+  if FExtensions.Find(AId) = nil then
+    DeclareExtension(AId);
 end;
 
 procedure TMCPServer.SetResourceContentMeta(const AUri: string;
@@ -2523,6 +2557,8 @@ begin
     AMeta.Free;
     raise;
   end;
+  // Cloned for every read, so no child stays nil.
+  NilChildrenToNull(AMeta);
   FResources[Index].ContentMeta.Free;
   FResources[Index].ContentMeta := AMeta;
 end;

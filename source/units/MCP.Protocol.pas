@@ -232,19 +232,14 @@ function CancellationRequestId(const AMessage: TJSONRPCMessage): TJSONData;
 // Whether AId is an extension identifier: a _meta key with its
 // mandatory prefix (dot-separated labels of letters, digits and
 // hyphens, each starting with a letter and ending with a letter or
-// digit), a slash, and a name of letters, digits, '-', '_' and '.' that
-// starts and ends with a letter or digit. Verified 2026-11-26 against
+// digit), a slash, and a name, possibly empty, of letters, digits, '-',
+// '_' and '.' that starts and ends with a letter or digit. Verified 2026-11-26 against
 // https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta.
 function IsExtensionId(const AId: string): Boolean;
 
 // Capability gating (moved from MCP.Server for its size, #98): the
 // capability an input request needs, the ones a request lacks, and the
 // automatic -32021 for them.
-
-// The client capability each embedded request kind requires. '' for
-// an unrecognized kind (rejected separately — the library only emits
-// the three MRTR kinds).
-function CapabilityForInputRequest(const AMethod: string): string;
 
 // '' when every inputRequests entry names a kind the client declared;
 // otherwise the first missing capability. AUnknownKind carries the
@@ -254,9 +249,6 @@ function CapabilityForInputRequest(const AMethod: string): string;
 // single `<> ''` guard and never emit such a map on the wire.
 function MissingInputCapability(AInputRequests: TJSONObject;
   const ACtx: TMCPRequestContext; out AUnknownKind: string): string;
-
-// 'capability "a"' or 'capabilities "a", "b"' for a -32021 message.
-function CapabilityList(const ANames: array of string): string;
 
 // The automatic -32021 for a subject lacking ANames (not empty), both
 // for declared needs (#84) and for a run-time input request.
@@ -665,8 +657,9 @@ begin
     Exit;
   Prefix := Copy(AId, 1, Slash - 1);
   Name := Copy(AId, Slash + 1, MaxInt);
-  if (Name = '') or not (Name[1] in ['A'..'Z', 'a'..'z', '0'..'9']) or
-    not (Name[Length(Name)] in ['A'..'Z', 'a'..'z', '0'..'9']) then
+  // The name may be empty ("com.example/"), as the _meta rules allow.
+  if (Name <> '') and (not (Name[1] in ['A'..'Z', 'a'..'z', '0'..'9']) or
+    not (Name[Length(Name)] in ['A'..'Z', 'a'..'z', '0'..'9'])) then
     Exit;
   for I := 1 to Length(Name) do
     if not (Name[I] in ['A'..'Z', 'a'..'z', '0'..'9', '-', '_', '.']) then
