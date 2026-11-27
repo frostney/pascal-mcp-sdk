@@ -45,7 +45,9 @@ flowchart LR
   verify the checksum, put `lwpt` on PATH. Do not invoke `fpc`
   directly except as `fpc @lwpt.cfg`.
 - **lefthook** — `lefthook install` once per clone wires the
-  formatting pre-commit hook.
+  formatting pre-commit hook and a commit-msg hook that refuses a
+  subject that is not a Conventional Commit (Python 3; `fixup!`,
+  `squash!`, `amend!` and merge subjects pass).
 - **Node 24** — what CI uses; only for the interop harness
   (`tools/interop-ts/`), the conformance runner (`tools/conformance/`,
   at least 22) and the website (`website/`, whose Next.js needs at

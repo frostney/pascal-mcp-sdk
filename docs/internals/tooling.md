@@ -64,6 +64,35 @@ staged Pascal/TOML files and re-stages what it rewrites
 not in the hook. Override the binary with `PASCAL_MCP_SDK_LWPT=...` when
 lwpt is not on PATH.
 
+Commit-msg runs `.github/scripts/check-pr-title.py --commit-msg` on
+the message git is about to record. Its subject must be a Conventional
+Commit of a `cliff.toml` type, the same rule as the required
+`conventional-title` check. The hook sees the message before git
+cleans it up, so it cleans it up as git will, with `git stripspace`
+and git's own `commit.cleanup` and comment string: comment lines go
+under `strip`, and under the default cleanup only when an editor
+opened (`git commit -m` keeps a `#` line); an edited message ends at
+the scissors line under `commit.cleanup=scissors` or `commit.verbose`.
+The subject is the first line that is not blank. Options on the command
+line, such as `--cleanup` or `-v`, are not visible to the hook.
+
+Subjects starting with `fixup!`, `squash!` or `amend!` and a space, or
+with the word `Merge`, pass, since an autosquash rebase or the squash
+merge folds them away; CI still checks a PR whose only commit carries
+one. A refused commit is not made: the checker prints the file holding
+its message. Run the same commit again with `-m` or `-F` replaced by
+`-e -F` and that file, keeping its other options and paths, to reopen
+it; a commit made with `-C <commit>` keeps that commit's author when
+run again with `-c <commit>`. A plain `git revert` or `git cherry-pick` commits with
+`-n`, so no hook runs; one that stopped on a conflict runs the hook
+when continued, and refuses a `Revert "…"` subject, which wants a
+`revert:` one. The hook needs `python3` on PATH, and a repository path
+without a `'`. The checker's tests run with
+`python3 -m unittest discover -s .github/scripts -p 'test_*.py'`; those
+for `core.commentString` skip on git older than 2.45. It does not replace
+the CI check: the PR title is written on GitHub, and a hook runs only
+where `lefthook install` was run.
+
 ## Changelog — git-cliff
 
 `cliff.toml` maps Conventional Commit types straight to sections
