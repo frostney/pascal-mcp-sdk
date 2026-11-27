@@ -300,7 +300,7 @@ procedure EnsureExtension(const AId: string);
 procedure SetResourceContentMeta(const AUri: string; AMeta: TJSONObject);
 // on TMCPToolOptions:
 function RequireLinkedResource(const AMetaPaths: array of string;
-  const AMimeType: string = ''): TMCPToolOptions;
+  const AMimeType: string = ''; const AUriPrefix: string = ''): TMCPToolOptions;
 ```
 
 `DeclareExtension` adds `AId` to `capabilities.extensions` on
@@ -315,7 +315,8 @@ in. A tool's `RequireLinkedResource` makes startup (the first
 `CreateSession`) raise `EMCPServer`, naming the tool, unless each of
 `AMetaPaths` (`.`-separated keys under the tool's `_meta`) holds the
 same string, the URI of a registered resource declared with media type
-`AMimeType` unless that is `''`. Startup reads the tool's final
+`AMimeType` unless that is `''`, starting with `AUriPrefix` unless that
+is `''`. Startup reads the tool's final
 `_meta`, so a later `.Meta` that changes the link is checked too. A
 second call replaces the first.
 `SetResourceContentMeta` gives a static text resource's read contents a
@@ -352,7 +353,7 @@ function AppResource(const AUri: string;
 | `MCPAppUiMeta` | A new `_meta.ui` object the caller owns until it hands it over: the CSP domain lists (empty ones left out), permissions, domain, and `APrefersBorder` (`-1` unset, `0` false, `1` true) |
 | `MCPAppContents` | A reader's contents: the HTML as text with the app media type, and `AUiMeta` (owned) as `_meta.ui`; the array is the caller's to return |
 | `MCPClientRendersApps` | Whether the request's client declared the extension with the app media type in its `mimeTypes` |
-| `.AppResource` | Links the tool to `AUri`: `_meta.ui` with `resourceUri` and `visibility` (`'model'`, `'app'`; `[]` for both), and the older flat `ui/resourceUri` key. Through `RequireLinkedResource`, startup requires both keys to name the same resource, registered with the app media type; the extension is declared unless it is already. Linking the tool again replaces the earlier link |
+| `.AppResource` | Links the tool to `AUri`: `_meta.ui` with `resourceUri` and `visibility` (`'model'`, `'app'`; `[]` for both), and the older flat `ui/resourceUri` key. Through `RequireLinkedResource`, startup requires both keys to name the same `ui://` resource, registered with the app media type; the extension is declared unless it is already. Linking the tool again replaces the earlier link |
 
 ### The request context
 

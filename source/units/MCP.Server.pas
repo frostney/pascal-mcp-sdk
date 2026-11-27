@@ -369,12 +369,13 @@ type
     // Makes startup (the first CreateSession) require that each of
     // AMetaPaths ('.'-separated keys under the tool's _meta) holds the
     // same string, the URI of a registered resource declared with media
-    // type AMimeType unless that is ''. Startup reads the tool's final
-    // _meta, so it checks the link that goes out, after any later .Meta.
-    // A second call replaces the first. MCP.Apps requires each linked UI
-    // resource this way.
+    // type AMimeType unless that is '', starting with AUriPrefix unless
+    // that is ''. Startup reads the tool's final _meta, so it checks the
+    // link that goes out, after any later .Meta. A second call replaces
+    // the first. MCP.Apps requires each linked UI resource this way.
     function RequireLinkedResource(const AMetaPaths: array of string;
-      const AMimeType: string = ''): TMCPToolOptions;
+      const AMimeType: string = '';
+      const AUriPrefix: string = ''): TMCPToolOptions;
     // The server the tool belongs to and the tool's name, for helpers
     // that extend these options (MCP.Apps).
     property Server: TMCPServer read FServer;
@@ -478,7 +479,7 @@ type
     FRequiredResources: array of record
       Definition: TJSONObject; // borrowed: the tool's, owned by FTools
       Paths: TStringArray;
-      MimeType: string;
+      MimeType, UriPrefix: string;
     end;
     FInstructions: string;
     FCacheTtlMs: Integer;
@@ -2250,6 +2251,11 @@ begin
         else if Value <> Uri then
           raise EMCPServer.CreateFmt('%s links "%s" at _meta.%s but "%s" ' +
             'at _meta.%s', [Who, Uri, Paths[0], Value, Paths[J]]);
+      // MCP Apps links "MUST" use the ui:// scheme (ext-apps
+      // specification 2026-01-26, verified 2026-11-27).
+      if Copy(Uri, 1, Length(UriPrefix)) <> UriPrefix then
+        raise EMCPServer.CreateFmt('%s links "%s", which does not start ' +
+          'with %s', [Who, Uri, UriPrefix]);
       Index := FindResource(Uri);
       if Index < 0 then
         raise EMCPServer.CreateFmt('%s needs resource "%s", which is not ' +
@@ -2265,7 +2271,8 @@ begin
 end;
 
 function TMCPToolOptions.RequireLinkedResource(
-  const AMetaPaths: array of string; const AMimeType: string): TMCPToolOptions;
+  const AMetaPaths: array of string; const AMimeType: string;
+  const AUriPrefix: string): TMCPToolOptions;
 var
   Slot, I: Integer;
 begin
@@ -2285,6 +2292,7 @@ begin
     for I := 0 to High(AMetaPaths) do
       Paths[I] := AMetaPaths[I];
     MimeType := AMimeType;
+    UriPrefix := AUriPrefix;
   end;
   Result := Self;
 end;

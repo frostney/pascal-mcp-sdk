@@ -333,6 +333,21 @@ begin
   finally
     Server.Free;
   end;
+  // Both keys moved to a registered app-typed resource outside ui://.
+  Server := TMCPServer.Create('scheme', '1');
+  try
+    Server.RegisterTextResource('https://example.com/view', 'view',
+      MCP_APP_MIME_TYPE, HTML);
+    RegisterAppResource(Server, 'ui://a', 'a', HTML);
+    Server.RegisterTool('web', 'Web', '{"type":"object"}', PlainHandler)
+      .AppResource('ui://a', [])
+      .Meta('ui', TJSONObject(GetJSON('{"resourceUri":"https://example.com/view"}')))
+      .Meta('ui/resourceUri', TJSONString.Create('https://example.com/view'));
+    Expect<string>(StartupError(Server)).ToBe('Tool "web" links ' +
+      '"https://example.com/view", which does not start with ui://');
+  finally
+    Server.Free;
+  end;
 end;
 
 procedure TAppsSuite.TestClientExtensionSettings;

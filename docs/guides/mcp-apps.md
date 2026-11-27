@@ -61,7 +61,7 @@ that is not registered, or registered with another media type than
 same tool again replaces its earlier link. Startup checks the link as
 `tools/list` sends it, so a later `.Meta('ui', ...)` or
 `.Meta('ui/resourceUri', ...)` on that tool must name the same
-registered resource in both keys.
+registered `ui://` resource of the app media type in both keys.
 
 ## Keep the text result
 

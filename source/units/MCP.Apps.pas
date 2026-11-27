@@ -262,7 +262,7 @@ begin
   // _meta.ui, without this link, is not checked.
   Result := Meta('ui', Ui).Meta('ui/resourceUri', TJSONString.Create(AUri))
     .RequireLinkedResource(['ui.resourceUri', 'ui/resourceUri'],
-    MCP_APP_MIME_TYPE);
+    MCP_APP_MIME_TYPE, 'ui://');
   Server.EnsureExtension(MCP_APPS_EXTENSION);
 end;
 
