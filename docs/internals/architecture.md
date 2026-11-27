@@ -35,6 +35,7 @@ flowchart TB
     SCHEMA["MCP.Schema<br/>fluent builder +<br/>RTTI argument classes"]
     CONTENT["MCP.Content<br/>content blocks for<br/>results and messages"]
     SEAL["MCP.RequestState + MCP.Crypto<br/>requestState sealing,<br/>in-tree SHA-256 / HMAC"]
+    HELPERS["MCP.Completion + MCP.UriTemplate<br/>completion requests,<br/>resource templates"]
     SERVER["MCP.Server<br/>frozen registries + sessions<br/>HandleMessage(session, line) → line"]
     PROTOCOL["MCP.Protocol<br/>_meta validation, version<br/>negotiation, result stamping"]
     JSONRPC["MCP.JSONRPC<br/>JSON-RPC 2.0 parse/build<br/>MCP profile + error codes"]
@@ -44,16 +45,18 @@ flowchart TB
     SCHEMA -. "consumed by,<br/>off the request chain" .-> SERVER
     CONTENT -. "consumed by,<br/>off the request chain" .-> SERVER
     SEAL -. "consumed by,<br/>off the request chain" .-> SERVER
+    HELPERS -. "consumed by,<br/>off the request chain" .-> SERVER
     SERVER --> PROTOCOL
     PROTOCOL --> JSONRPC
     JSONRPC --> RTL
 ```
 
 The strict bottom-up request chain is `MCP.JSONRPC` → `MCP.Protocol` →
-`MCP.Server` → transport. `MCP.Schema` and `MCP.Content` sit to the
-side of that chain: helpers `MCP.Server` consumes to build and enforce
-tool schemas and to build content blocks, not layers a request passes
-through.
+`MCP.Server` → transport. `MCP.Schema`, `MCP.Content`,
+`MCP.Completion` and `MCP.UriTemplate` sit to the side of that chain:
+helpers `MCP.Server` consumes to build and enforce tool schemas, build
+content blocks, read completion requests and match resource templates,
+not layers a request passes through.
 
 Rules live in the layer that owns them and nowhere else:
 
@@ -65,6 +68,8 @@ Rules live in the layer that owns them and nowhere else:
 | `MCP.Schema` | The fluent builder (`ObjectSchema.AddString(...)`) and the RTTI-derived `TMCPArgs` argument classes, both emitting the JSON Schema 2020-12 subset the server enforces | Dispatch, bytes, streams |
 | `MCP.Content` | The five content block shapes tool results and prompt messages carry (text, image, audio, resource link, embedded resource) and the base64 encoding of raw-bytes payloads | Dispatch, registries, bytes and streams |
 | `MCP.RequestState` | Sealing and verifying the MRTR `requestState` envelope (expiry, method, target, argument digest, audience) | Dispatch, transports |
+| `MCP.Completion` | The `completion/complete` request parameters, the target check, the static-list matcher and the capped `CompleteResult` | Registries, dispatch |
+| `MCP.UriTemplate` | RFC 6570 level-1 template validation and URI matching | Registries, readers |
 | `MCP.Crypto` | SHA-256, HMAC-SHA-256, constant-time comparison, the OS random source and base64url, in-tree because FPC 3.2.2 ships no SHA-256 | Everything MCP |
 | `MCP.Transport.Stdio` | LF-terminated writes on every platform, CR tolerance on reads, blank-line skipping, stderr-only logging, EOF as the graceful-shutdown signal | Protocol decisions — it contains not a single one |
 
