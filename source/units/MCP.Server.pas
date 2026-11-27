@@ -185,7 +185,7 @@ type
     Uri: string;
     StaticText: string;      // used only when HasStaticText is true
     HasStaticText: Boolean;
-    TtlMs: Integer;          // reader results' ttlMs; < 0 = 0 (#96)
+    TtlMs: Integer;          // reader results' ttlMs, default 0 (#96)
     Reader: TMCPResourceReader;
     Method: TMCPResourceMethod;
   end;
@@ -584,8 +584,6 @@ type
       ALegacy: Boolean): string;
     function HandlePromptsGet(const AMessage: TJSONRPCMessage;
       const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
-    // AMeta (owned, may be nil): the handler's _meta for the interim
-    // result; consumed on every path.
     function InputRequiredResponse(const AMessage: TJSONRPCMessage;
       const ACtx: TMCPRequestContext;
       const ASubjectKind, ASubjectName: string;
@@ -1618,7 +1616,8 @@ begin
   begin
     Entry := AInputRequests.Items[I];
     Method := '';
-    if Entry.JSONType = jtObject then
+    // An entry stored as nil is malformed too (#96 review).
+    if (Entry <> nil) and (Entry.JSONType = jtObject) then
     begin
       MethodData := TJSONObject(Entry).Find('method');
       if (MethodData <> nil) and (MethodData.JSONType = jtString) then
@@ -1847,11 +1846,17 @@ begin
 end;
 
 // AKey under ADefinition's "_meta" (ownership of AValue transfers).
-procedure AddCheckedMeta(ADefinition: TJSONObject; const AKey: string;
-  AValue: TJSONData);
+procedure AddCheckedMeta(AServer: TMCPServer; ADefinition: TJSONObject;
+  const AKey: string; AValue: TJSONData);
 var
   Problem: string;
 begin
+  try
+    AServer.EnsureMutable;
+  except
+    AValue.Free;
+    raise;
+  end;
   Problem := MetaProblem(ADefinition, AKey, AValue);
   if Problem <> '' then
   begin
@@ -1879,13 +1884,7 @@ end;
 function TMCPDefinitionOptions.Meta(const AKey: string;
   AValue: TJSONData): TMCPDefinitionOptions;
 begin
-  try
-    FServer.EnsureMutable;
-  except
-    AValue.Free;
-    raise;
-  end;
-  AddCheckedMeta(FDefinition, AKey, AValue);
+  AddCheckedMeta(FServer, FDefinition, AKey, AValue);
   Result := Self;
 end;
 
@@ -1945,13 +1944,7 @@ end;
 function TMCPToolOptions.Meta(const AKey: string;
   AValue: TJSONData): TMCPToolOptions;
 begin
-  try
-    FServer.EnsureMutable;
-  except
-    AValue.Free;
-    raise;
-  end;
-  AddCheckedMeta(FDefinition, AKey, AValue);
+  AddCheckedMeta(FServer, FDefinition, AKey, AValue);
   Result := Self;
 end;
 
@@ -3141,7 +3134,7 @@ begin
   FResources[High(FResources)].HasStaticText := AHasStaticText;
   FResources[High(FResources)].Reader := AReader;
   FResources[High(FResources)].Method := AMethod;
-  FResources[High(FResources)].TtlMs := -1;
+  FResources[High(FResources)].TtlMs := 0;
   Result := DefinitionOptions(dkResource, High(FResources), FResources[High(FResources)].Definition);
 end;
 
@@ -3826,6 +3819,9 @@ end;
 // plus the registered name). AInputRequests is consumed on every
 // path, error paths included. Modern era only — each caller keeps its
 // own legacy-era branch, which never reaches here.
+// AInputRequests and AMeta (the handler's _meta for the interim result,
+// may be nil) are owned and consumed on every path, exceptions included.
+
 // AMeta with the reserved serverInfo key removed: the stamp is the
 // server's, added after (#96 review), so a handler cannot replace the
 // name and version it promises.
@@ -3844,8 +3840,15 @@ var
   MissingCapability, UnknownKind: string;
   InterimResult: TJSONObject;
 begin
-  MissingCapability := MissingInputCapability(AInputRequests, ACtx,
-    UnknownKind);
+  // Both trees are ours from here until the interim result takes them.
+  try
+    MissingCapability := MissingInputCapability(AInputRequests, ACtx,
+      UnknownKind);
+  except
+    AInputRequests.Free;
+    AMeta.Free;
+    raise;
+  end;
   if (UnknownKind <> '') or (MissingCapability <> '') then
     AMeta.Free;
   if UnknownKind <> '' then
@@ -4010,7 +4013,7 @@ var
   ToolName, BindError, TargetError: string;
   Index: Integer;
   Missing: TStringArray;
-  Arguments, OwnedEmpty, CallResult: TJSONObject;
+  Arguments, OwnedEmpty, CallResult, Meta: TJSONObject;
   ToolResult: TMCPToolResult;
   ArgsInstance: TMCPArgs;
 begin
@@ -4089,11 +4092,14 @@ begin
     ToolResult.StructuredContent.Free;
     if ALegacy then
     begin
-      ToolResult.Meta.Free;
       ToolResult.InputRequests.Free;
+      // The handler's _meta stays with the error that replaces it, as
+      // the classic CallToolResult allows (#96 review).
+      Meta := ToolResult.Meta;
       ToolResult := MCPErrorResult('Tool "' + ToolName +
         '" requires additional input (input_required), which is not ' +
         'available to legacy-era clients');
+      ToolResult.Meta := Meta;
     end
     else
       Exit(InputRequiredResponse(AMessage, ACtx, 'Tool', ToolName,
@@ -4176,7 +4182,7 @@ begin
     // A reader's declared ttlMs (#96); the caching hint, verified
     // 2026-11-26 against
     // https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/caching.
-    if not FResources[Index].HasStaticText and (FResources[Index].TtlMs >= 0) then
+    if not FResources[Index].HasStaticText then
       ReadTtlMs := FResources[Index].TtlMs;
     if FResources[Index].HasStaticText then
     begin

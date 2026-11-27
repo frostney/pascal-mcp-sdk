@@ -115,7 +115,7 @@ procedure MCPWriteStderrLine(const AText: string);
 // notifications/cancelled matches them: strings by decoded value,
 // integers by value, other numbers by float value; a string never
 // matches a number, and nil matches nothing. Both are borrowed.
-function SameRequestId(A, B: TJSONData): Boolean;
+function SameRequestId(ALeft, ARight: TJSONData): Boolean;
 
 implementation
 
@@ -491,19 +491,19 @@ begin
     not (AValue is TJSONFloatNumber);
 end;
 
-function SameRequestId(A, B: TJSONData): Boolean;
+function SameRequestId(ALeft, ARight: TJSONData): Boolean;
 begin
   Result := False;
-  if (A = nil) or (B = nil) then
+  if (ALeft = nil) or (ARight = nil) then
     Exit;
-  if (A.JSONType = jtString) and (B.JSONType = jtString) then
-    Exit(A.AsString = B.AsString);
-  if (A.JSONType <> jtNumber) or (B.JSONType <> jtNumber) then
+  if (ALeft.JSONType = jtString) and (ARight.JSONType = jtString) then
+    Exit(ALeft.AsString = ARight.AsString);
+  if (ALeft.JSONType <> jtNumber) or (ARight.JSONType <> jtNumber) then
     Exit;
-  if IsIntegralJSONNumber(A) and IsIntegralJSONNumber(B) then
-    Result := A.AsInt64 = B.AsInt64
+  if IsIntegralJSONNumber(ALeft) and IsIntegralJSONNumber(ARight) then
+    Result := ALeft.AsInt64 = ARight.AsInt64
   else
-    Result := A.AsFloat = B.AsFloat;
+    Result := ALeft.AsFloat = ARight.AsFloat;
 end;
 
 // Every platform: strings are UTF-8 in a program built with this

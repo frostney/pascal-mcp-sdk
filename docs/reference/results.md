@@ -29,7 +29,10 @@ function MCPContentResult(const ABlocks: array of TJSONObject): TMCPToolResult;
 
 - `MCPTextResult` — one text content block.
 - Any result: set `Result.Meta` to an object (owned) to add keys to the
-  result's `_meta`; the server adds its `serverInfo` stamp beside them.
+  result's `_meta`, on an error or `input_required` result too; on a
+  2026-07-28 request the server adds its `serverInfo` stamp beside
+  them (a classic-handshake result carries no stamp), and the stamp's
+  key is the server's alone.
 - `MCPErrorResult` — the same shape with `isError: true`: the in-band
   error channel a model reads and corrects against. Use it for
   everything the *caller* did wrong; reserve exceptions for what went

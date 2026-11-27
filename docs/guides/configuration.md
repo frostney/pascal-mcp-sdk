@@ -16,6 +16,21 @@ Server.CacheTtlMs := 60000;
 Server.RedactErrorDetails := True;
 ```
 
+The server's identity goes in `serverInfo` on `server/discover` and
+`initialize`, set the same way and frozen at the same time (#96):
+
+```pascal
+Server.Title := 'Greeter';                       // display name
+Server.Description := 'Greets people by name.';  // for the people using it
+Server.WebsiteUrl := 'https://example.com/greeter';
+Server.AddIcon('https://example.com/greeter.png', 'image/png', '48x48');
+```
+
+`Description` tells the people choosing or configuring the server what
+it is; `Instructions` tells the model how to use it. Icon URIs must be
+`https:` or `data:` (see the
+[server reference](../reference/server.md)).
+
 ## Instructions
 
 A free-text description of how to use your server, surfaced to

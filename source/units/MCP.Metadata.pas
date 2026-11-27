@@ -20,27 +20,30 @@ uses
 
   fpjson;
 
-// '' when ASrc and ATheme make a valid icon for ADefinition, else the
-// problem. Clients reject icon URIs other than https: and data:, so
-// registration does too: an https: URI needs a host, a data: URI its
-// comma. ATheme is '', 'light' or 'dark'. An "icons" member already on
-// ADefinition must be an array.
+// '' when ASrc and ATheme make a valid icon for ADefinition (borrowed),
+// else the problem. Clients reject icon URIs other than https: and
+// data:, so registration does too: no whitespace, an https: URI needs a
+// valid host (and port, if given), a data: URI its comma and, when it
+// says ;base64, base64 data. ATheme is '', 'light' or 'dark'. An
+// "icons" member already on ADefinition must be an array.
 function IconProblem(ADefinition: TJSONObject;
   const ASrc, ATheme: string): string;
 
-// Appends an icon object to ADefinition's "icons" array, creating the
+// Appends an icon object to ADefinition's (borrowed) "icons" array, creating the
 // array when absent. ASizes is space-separated ('48x48 96x96'). Check
 // the icon with IconProblem first.
 procedure AddIcon(ADefinition: TJSONObject; const ASrc, AMimeType, ASizes,
   ATheme: string);
 
-// '' when AKey and AValue can go under ADefinition's "_meta", else the
+// '' when AKey and AValue (both borrowed here) can go under
+// ADefinition's "_meta", else the
 // problem: AKey must not be empty, AValue not nil, and a "_meta"
 // member already on ADefinition must be an object.
 function MetaProblem(ADefinition: TJSONObject; const AKey: string;
   AValue: TJSONData): string;
 
-// Sets AKey under ADefinition's "_meta", replacing an earlier value.
+// Sets AKey under ADefinition's (borrowed) "_meta", replacing an
+// earlier value.
 // Takes ownership of AValue; check MetaProblem first. Children of
 // AValue stored as nil become JSON nulls, so the definition still
 // clones for every list.
@@ -49,10 +52,11 @@ procedure SetMetaEntry(ADefinition: TJSONObject; const AKey: string;
 
 // Replaces every child stored as nil (which fpjson writes as null but
 // cannot clone, FPC 3.2.2) with a JSON null, so a definition can be
-// cloned for every list.
+// cloned for every list. AData is borrowed and changed in place.
 procedure NilChildrenToNull(AData: TJSONData);
 
-// Sets the string member AName, replacing an earlier value.
+// Sets the string member AName of ADefinition (borrowed), replacing an
+// earlier value.
 procedure SetStringMember(ADefinition: TJSONObject; const AName,
   AValue: string);
 
@@ -69,25 +73,101 @@ implementation
 uses
   MCP.Schema;
 
-// The host of an https: URI ('' when it has none): what follows
-// "https://" up to the path, query or fragment, less any user info and
-// port.
-function HttpsHost(const ASrc: string): string;
+// Whether ASrc, an https: URI, has a usable authority: a host of
+// letters, digits, '.', '-', '_' and '~' (or a bracketed IPv6
+// address), after any user info, and a port of digits when one is
+// given (RFC 3986 section 3.2).
+function ValidHttpsAuthority(const ASrc: string): Boolean;
 var
-  Stop: Integer;
+  Authority, Host, Port: string;
+  Stop, I: Integer;
 begin
-  Result := Copy(ASrc, 9, MaxInt);
-  Stop := Length(Result) + 1;
-  if Pos('/', Result) > 0 then
-    Stop := Pos('/', Result);
-  if (Pos('?', Result) > 0) and (Pos('?', Result) < Stop) then
-    Stop := Pos('?', Result);
-  if (Pos('#', Result) > 0) and (Pos('#', Result) < Stop) then
-    Stop := Pos('#', Result);
-  Result := Copy(Result, 1, Stop - 1);
-  Delete(Result, 1, Pos('@', Result));
-  if Pos(':', Result) > 0 then
-    Result := Copy(Result, 1, Pos(':', Result) - 1);
+  Authority := Copy(ASrc, 9, MaxInt);
+  Stop := Length(Authority) + 1;
+  for I := Length(Authority) downto 1 do
+    if Authority[I] in ['/', '?', '#'] then
+      Stop := I;
+  Authority := Copy(Authority, 1, Stop - 1);
+  Delete(Authority, 1, LastDelimiter('@', Authority));
+  Port := '';
+  if Copy(Authority, 1, 1) = '[' then
+  begin
+    Stop := Pos(']', Authority);
+    if Stop < 3 then
+      Exit(False);
+    Host := Copy(Authority, 2, Stop - 2);
+    for I := 1 to Length(Host) do
+      if not (Host[I] in ['0'..'9', 'a'..'f', 'A'..'F', ':', '.']) then
+        Exit(False);
+    Delete(Authority, 1, Stop);
+    if Authority <> '' then
+    begin
+      if Authority[1] <> ':' then
+        Exit(False);
+      Port := Copy(Authority, 2, MaxInt);
+      if Port = '' then
+        Exit(False);
+    end;
+  end
+  else
+  begin
+    Stop := Pos(':', Authority);
+    if Stop > 0 then
+    begin
+      Host := Copy(Authority, 1, Stop - 1);
+      Port := Copy(Authority, Stop + 1, MaxInt);
+      if Port = '' then
+        Exit(False);
+    end
+    else
+      Host := Authority;
+    if Host = '' then
+      Exit(False);
+    for I := 1 to Length(Host) do
+      if not (Host[I] in ['A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_', '~']) then
+        Exit(False);
+  end;
+  for I := 1 to Length(Port) do
+    if not (Port[I] in ['0'..'9']) then
+      Exit(False);
+  Result := True;
+end;
+
+// Whether ASrc, a data: URI, has its comma and, when it says
+// ";base64", base64 data: the alphabet, padding only at the end, and a
+// length that is a multiple of four (RFC 2397, RFC 4648).
+function ValidDataUri(const ASrc: string): Boolean;
+var
+  Comma, I, Padding: Integer;
+  Data: string;
+begin
+  Comma := Pos(',', ASrc);
+  if Comma = 0 then
+    Exit(False);
+  if not SameText(Copy(ASrc, Comma - 7, 7), ';base64') then
+    Exit(True);
+  Data := Copy(ASrc, Comma + 1, MaxInt);
+  if Length(Data) mod 4 <> 0 then
+    Exit(False);
+  Padding := 0;
+  for I := 1 to Length(Data) do
+    if Data[I] = '=' then
+      Inc(Padding)
+    else if (Padding > 0) or
+      not (Data[I] in ['A'..'Z', 'a'..'z', '0'..'9', '+', '/']) then
+      Exit(False);
+  Result := Padding <= 2;
+end;
+
+// Whether ASrc has whitespace or control characters, which no URI may.
+function HasUriBlank(const ASrc: string): Boolean;
+var
+  I: Integer;
+begin
+  for I := 1 to Length(ASrc) do
+    if Ord(ASrc[I]) <= 32 then
+      Exit(True);
+  Result := False;
 end;
 
 function IconProblem(ADefinition: TJSONObject;
@@ -96,16 +176,18 @@ var
   Icons: TJSONData;
 begin
   Result := '';
+  if HasUriBlank(ASrc) then
+    Exit(Format('Icon "%s" must not contain spaces', [ASrc]));
   if SameText(Copy(ASrc, 1, 8), 'https://') then
   begin
-    if HttpsHost(ASrc) = '' then
-      Exit(Format('Icon "%s" needs a host', [ASrc]));
+    if not ValidHttpsAuthority(ASrc) then
+      Exit(Format('Icon "%s" needs a valid host and port', [ASrc]));
   end
   else if SameText(Copy(ASrc, 1, 5), 'data:') then
   begin
     // data:[<media type>][;base64],<data> (RFC 2397)
-    if Pos(',', ASrc) = 0 then
-      Exit(Format('Icon "%s" is no data: URI (it has no comma)', [ASrc]));
+    if not ValidDataUri(ASrc) then
+      Exit(Format('Icon "%s" is no valid data: URI', [ASrc]));
   end
   else
     Exit(Format('Icon "%s" must be an https: or data: URI', [ASrc]));

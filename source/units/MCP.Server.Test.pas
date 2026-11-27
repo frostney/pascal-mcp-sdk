@@ -7390,6 +7390,18 @@ begin
     'null,"com.example/own":2}'));
 end;
 
+// An input-request map whose one entry is stored as nil.
+function NilEntryHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Requests: TJSONObject;
+begin
+  Requests := TJSONObject.Create;
+  Requests.Add('x', TJSONData(nil));
+  Result := MCPInputRequired(Requests);
+  Result.Meta := TJSONObject(GetJSON('{"com.example/lost":false}'));
+end;
+
 function NilChildMeta: TJSONObject;
 begin
   Result := TJSONObject.Create;
@@ -7451,6 +7463,8 @@ begin
     InterimMetaHandler);
   FServer.RegisterTool('stamp_forger', 'Forges', '{"type":"object"}',
     StampForgerHandler);
+  FServer.RegisterTool('nil_entry', 'Malformed input request',
+    '{"type":"object"}', NilEntryHandler);
 end;
 
 const
@@ -7540,6 +7554,13 @@ begin
     .ToBe(True);
   Expect<Boolean>(Pos('"_meta" : { "com.example/own" : 2, ' + FULL_STAMP +
     ' }', Response) > 0).ToBe(True);
+  // An input-request entry stored as nil is malformed: -32603, not a
+  // crash, and both trees are released (#96 review).
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":5,"method":"tools/call",' +
+    '"params":{"name":"nil_entry",' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"code" : -32603', Response) > 0).ToBe(True);
+  Expect<Boolean>(Pos('unsupported input request kind', Response) > 0)
+    .ToBe(True);
 end;
 
 // Templates and prompts carry their metadata; a nil child in a fluent
@@ -7582,6 +7603,31 @@ begin
   Expect<Boolean>(Pos('"_meta" : { "com.example/elapsedMs" : 12 }', Response) > 0)
     .ToBe(True);
   Expect<Boolean>(Pos('serverInfo', Response) = 0).ToBe(True);
+  // A classic request's own _meta reaches the handler (#96 review).
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+    '"params":{"name":"meta_echo","arguments":{},' +
+    '"_meta":{"traceparent":"00-classic-01"}}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "00-classic-01"', Response) > 0).ToBe(True);
+  // The classic fallback for input_required keeps the handler's _meta.
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":4,"method":"tools/call",' +
+    '"params":{"name":"interim_meta","arguments":{}}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"isError" : true', Response) > 0).ToBe(True);
+  Expect<Boolean>(Pos('"_meta" : { "com.example/round" : 1 }', Response) > 0)
+    .ToBe(True);
+  // Classic lists carry the same definition metadata.
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":5,"method":"tools/list",' +
+    '"params":{}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"icons" : [{ "src" : "https://example.com/t.png" }], ' +
+    '"_meta" : { "com.example/x" : 1 }', Response) > 0).ToBe(True);
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":6,"method":"resources/list",' +
+    '"params":{}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"title" : "Betitelt ' + #$E2#$9C#$93 + '"', Response) > 0)
+    .ToBe(True);
+  // A classic read carries no caching hints, a reader's TTL included.
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":7,"method":"resources/read",' +
+    '"params":{"uri":"mem://fresh"}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "fresh"', Response) > 0).ToBe(True);
+  Expect<Boolean>(Pos('ttlMs', Response) = 0).ToBe(True);
 end;
 
 procedure TMetadataFields.TestReaderTtl;
@@ -7648,6 +7694,33 @@ begin
     .Meta('k', TJSONString.Create('v'));
 end;
 
+procedure IconWithBadPort;
+begin
+  GuardServer.AddIcon('https://example.com:abc/i.png');
+end;
+
+procedure IconWithSpace;
+begin
+  GuardServer.AddIcon('https://bad host/i.png');
+end;
+
+procedure IconBadBase64;
+begin
+  GuardServer.AddIcon('data:image/png;base64,not-base64');
+end;
+
+procedure IconShortBase64;
+begin
+  GuardServer.AddIcon('data:image/png;base64,AAA');
+end;
+
+procedure GoodIcons;
+begin
+  GuardServer.AddIcon('https://user@example.com:8443/i.png');
+  GuardServer.AddIcon('https://[::1]/i.png');
+  GuardServer.AddIcon('data:image/svg+xml,%3Csvg%3E');
+end;
+
 procedure StaticTtl;
 begin
   GuardServer.RegisterTextResource('mem://static-ttl', 's', 'text/plain', 's')
@@ -7670,6 +7743,12 @@ begin
   // An https: URI needs a host, a data: URI its comma (#96 review).
   Expect<Boolean>(RefusedBy(HostlessIcon)).ToBe(True);
   Expect<Boolean>(RefusedBy(CommalessDataIcon)).ToBe(True);
+  // Inside an allowed scheme, the URI must still be well formed.
+  Expect<Boolean>(RefusedBy(IconWithBadPort)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconWithSpace)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconBadBase64)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconShortBase64)).ToBe(True);
+  Expect<Boolean>(RefusedBy(GoodIcons)).ToBe(False);
   // A raw definition's icons or _meta of the wrong type is refused, not
   // cast (#96 review).
   Expect<Boolean>(RefusedBy(IconOnNullIcons)).ToBe(True);
