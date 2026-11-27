@@ -21,58 +21,109 @@ checker = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(checker)
 
 
-def run(argv, env=None):
-    """main(ARGV) with ENV as the only PR_*, GITHUB_*, GIT_EDITOR and
-    GIT_CONFIG* variables, and no global or system git configuration:
-    its exit status and what it printed."""
+# Every case starts from git's defaults, set explicitly: configuration
+# from the command line (GIT_CONFIG_COUNT) wins over a contributor's
+# repository, global or system settings (#124 review).
+BASELINE = [('commit.cleanup', 'default'), ('core.commentChar', '#')]
+
+
+def git_settings(editing=False, config=None):
+    """The environment git gives a commit-msg hook: GIT_EDITOR is ':'
+    when no editor opens, and the baseline then CONFIG as GIT_CONFIG_*
+    pairs (later pairs win)."""
+    env = {'GIT_EDITOR': 'vi' if editing else ':',
+           'GIT_CONFIG_GLOBAL': os.devnull,
+           'GIT_CONFIG_SYSTEM': os.devnull}
+    pairs = BASELINE + list((config or {}).items())
+    for index, (key, value) in enumerate(pairs):
+        env[f'GIT_CONFIG_KEY_{index}'] = key
+        env[f'GIT_CONFIG_VALUE_{index}'] = value
+    env['GIT_CONFIG_COUNT'] = str(len(pairs))
+    return env
+
+
+def isolated(env):
+    """os.environ with ENV as the only PR_*, GITHUB_*, GIT_EDITOR and
+    GIT_CONFIG* variables."""
     clean = {key: value for key, value in os.environ.items()
              if not key.startswith(('PR_', 'GITHUB_', 'GIT_EDITOR',
                                     'GIT_CONFIG'))}
-    clean.update({'GIT_CONFIG_GLOBAL': os.devnull,
-                  'GIT_CONFIG_SYSTEM': os.devnull})
-    clean.update(env or {})
+    clean.update(env)
+    return mock.patch.dict(os.environ, clean, clear=True)
+
+
+def run(argv, env=None):
+    """main(ARGV) under ENV: its exit status and what it printed."""
     output = io.StringIO()
-    with mock.patch.dict(os.environ, clean, clear=True), \
+    with isolated(env or git_settings()), \
             contextlib.redirect_stdout(output):
         status = checker.main(argv)
     return status, output.getvalue()
 
 
-def git_settings(editing, config=None):
-    """The environment git gives a commit-msg hook: GIT_EDITOR is ':'
-    when no editor opens, and CONFIG as GIT_CONFIG_* pairs."""
-    env = {'GIT_EDITOR': 'vi' if editing else ':'}
-    for index, (key, value) in enumerate((config or {}).items()):
-        env[f'GIT_CONFIG_KEY_{index}'] = key
-        env[f'GIT_CONFIG_VALUE_{index}'] = value
-    env['GIT_CONFIG_COUNT'] = str(len(config or {}))
-    return env
+def subject(message, editing=False, config=None):
+    """The subject recorded_subject reads from MESSAGE (str)."""
+    with isolated(git_settings(editing, config)):
+        return checker.recorded_subject(message.encode('utf-8'), editing)
 
 
-class MessageSubject(unittest.TestCase):
+SCISSORS = '# ' + '-' * 24 + ' >8 ' + '-' * 24
+
+
+class RecordedSubject(unittest.TestCase):
     def test_first_line(self):
-        self.assertEqual(checker.message_subject('fix: x\n\nbody\n'),
-                         'fix: x')
+        self.assertEqual(subject('fix: x\n\nbody\n'), 'fix: x')
 
-    def test_comments_kept_without_stripping(self):
-        self.assertEqual(checker.message_subject('# c\nfix: x\n'), '# c')
+    def test_comments_kept_without_an_editor(self):
+        self.assertEqual(subject('# c\nfix: x\n'), '# c')
 
-    def test_comments_and_blank_lines_stripped(self):
+    def test_comments_stripped_in_the_editor(self):
         text = '\n# Please enter the commit message\n\nfeat: y  \n# end\n'
-        self.assertEqual(checker.message_subject(text, True), 'feat: y')
+        self.assertEqual(subject(text, editing=True), 'feat: y')
 
-    def test_other_comment_string(self):
-        text = '// comment\n# not a comment here\n'
-        self.assertEqual(checker.message_subject(text, True, '//'),
-                         '# not a comment here')
+    def test_comment_string_and_its_alias(self):
+        # The alias set last wins, as git resolves it.
+        text = '// c\n; d\nfeat: z\n'
+        self.assertEqual(subject(text, True, {'core.commentString': '//'}),
+                         '; d')
+        self.assertEqual(
+            subject('; d\nfeat: z\n', True,
+                    {'core.commentString': '//', 'core.commentChar': ';'}),
+            'feat: z')
 
-    def test_nothing_below_the_scissors_line(self):
-        text = ('\n# ' + '-' * 24 + ' >8 ' + '-' * 24 +
-                '\ndiff --git a/x b/x\n')
-        self.assertEqual(checker.message_subject(text, True), '')
+    def test_comment_string_with_a_space(self):
+        text = '// c\n//x\n'
+        self.assertEqual(subject(text, True, {'core.commentString': '// '}),
+                         '//x')
+
+    def test_cleanup_modes(self):
+        self.assertEqual(subject('# c\nfix: x\n', False,
+                                 {'commit.cleanup': 'strip'}), 'fix: x')
+        self.assertEqual(subject('# c\nfix: x\n', True,
+                                 {'commit.cleanup': 'whitespace'}), '# c')
+        self.assertEqual(subject('\n  \nbad subject\n', True,
+                                 {'commit.cleanup': 'verbatim'}),
+                         'bad subject')
+
+    def test_scissors_only_when_an_editor_opened(self):
+        text = '\n' + SCISSORS + '\nbad subject\n'
+        self.assertEqual(subject(text, editing=True), '')
+        self.assertEqual(subject(text, False, {'commit.cleanup': 'strip'}),
+                         'bad subject')
+
+    def test_scissors_with_another_comment_string(self):
+        text = '\n//' + SCISSORS[1:] + '\nbad subject\n'
+        self.assertEqual(subject(text, True, {'core.commentString': '//'}),
+                         '')
+
+    def test_lines_split_at_lf_only(self):
+        self.assertEqual(subject('fix: a\u2028b\n'), 'fix: a\u2028b')
+
+    def test_non_breaking_space_is_not_blank(self):
+        self.assertEqual(subject('\u00a0\nfix: x\n'), '\u00a0')
 
     def test_empty(self):
-        self.assertEqual(checker.message_subject('# only\n\n', True), '')
+        self.assertEqual(subject('# only\n\n', editing=True), '')
 
 
 class CommitMsgMode(unittest.TestCase):
@@ -101,6 +152,7 @@ class CommitMsgMode(unittest.TestCase):
         self.assertIn('gh pr create --fill', output)
         self.assertIn('git commit -e -F ' +
                       shlex.quote(os.path.abspath(self.path)), output)
+        self.assertIn('replaced by -e -F', output)
 
     def test_comment_line_kept_by_git_commit_m(self):
         # git commit -m keeps "# ..." lines, so that is the subject.
@@ -136,6 +188,7 @@ class CommitMsgMode(unittest.TestCase):
         status, output = self.commit('wip: halfway\n')
         self.assertEqual(status, 1)
         self.assertIn('is not one of this project', output)
+        self.assertIn('from the PR title', output)
 
     def test_autosquash_and_merge_subjects_pass(self):
         for subject in ('fixup! fix: x', 'squash! feat: y',
@@ -155,7 +208,7 @@ class CommitMsgMode(unittest.TestCase):
         self.assertEqual(status, 0)
 
     def test_usage(self):
-        status, output = run(['--commit-msg'])
+        status, output = run(['--commit-msg'], git_settings())
         self.assertEqual(status, 2)
         self.assertIn('usage:', output)
 

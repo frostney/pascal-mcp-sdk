@@ -67,58 +67,69 @@ def allowed_types(config_text):
 PASSED_PREFIXES = ('fixup! ', 'squash! ', 'amend! ', 'Merge ')
 
 
-def message_subject(text, strip_comments=False, comment='#'):
-    """The subject git records for message TEXT: its first line that is
-    not blank and, when git strips comments, not a comment. The
-    commit-msg hook sees the message before git cleans it up, so this
-    follows that cleanup: comments go only when STRIP_COMMENTS, and
-    nothing below an editor's scissors line counts."""
-    scissors = f'{comment} ' + '-' * 24 + ' >8 ' + '-' * 24
-    for line in text.splitlines():
-        if strip_comments and line.rstrip() == scissors:
-            break
-        if strip_comments and line.startswith(comment):
-            continue
-        if line.strip():
-            return line.rstrip()
-    return ''
-
-
-def git_config(key):
-    """KEY's value in git's configuration, '' when unset."""
+def git_output(args, data=b''):
+    """git ARGS fed DATA on stdin: its output as bytes, b'' when git
+    fails or is missing."""
     try:
-        return subprocess.run(
-            ['git', 'config', '--get', key],
-            capture_output=True, text=True, check=False).stdout.strip()
+        result = subprocess.run(['git'] + args, input=data,
+                                capture_output=True, check=False)
     except OSError:
-        return ''
+        return b''
+    return result.stdout if result.returncode == 0 else b''
 
 
-def message_cleanup():
-    """Whether git strips comment lines from the message it is about to
-    record, and its comment string. Git sets GIT_EDITOR to ':' for its
-    hooks when it opens no editor; under the default cleanup, comments
-    then stay in the message (git-commit(1), --cleanup). commit.cleanup
-    is read from the configuration; a --cleanup option on the command
-    line is not visible to the hook. core.commentChar 'auto' is read as
-    '#'."""
-    editing = os.environ.get('GIT_EDITOR') != ':'
-    mode = git_config('commit.cleanup') or 'default'
-    strip = mode == 'strip' or (mode == 'default' and editing)
-    comment = (git_config('core.commentString')
-               or git_config('core.commentChar') or '#')
-    if comment == 'auto':
-        comment = '#'
-    return strip, comment
+def comment_prefix():
+    """git's comment string, as git itself resolves core.commentString
+    and core.commentChar (the one set last wins): `git stripspace -c`
+    writes it, then a space, before each line."""
+    marked = git_output(['stripspace', '-c'], b'x\n')
+    if marked.endswith(b' x\n'):
+        return marked[:-len(b' x\n')]
+    return b'#'
+
+
+def recorded_subject(message, editing):
+    """The subject git records for MESSAGE (bytes), the text the
+    commit-msg hook gets before git cleans it up, under git's own
+    cleanup (git-commit(1), --cleanup): with EDITING, nothing from the
+    scissors line on counts; comments go under `strip`, and under
+    `default` when an editor opened; `verbatim` keeps the text as it is.
+    The subject is the first line that is not blank, split at LF as
+    git splits it. A
+    --cleanup option on the command line is not visible to the hook,
+    and core.commentChar=auto is resolved by git, not as the editor's
+    template chose it."""
+    mode = git_output(['config', '--get', 'commit.cleanup']).strip()
+    mode = mode.decode('utf-8', 'replace') or 'default'
+    if editing:
+        scissors = (comment_prefix() + b' ' + b'-' * 24 + b' >8 ' +
+                    b'-' * 24 + b'\n')
+        cut = (b'\n' + message).find(b'\n' + scissors)
+        if cut >= 0:
+            message = message[:cut]
+    if mode == 'verbatim':
+        cleaned = message
+    elif mode == 'strip' or (mode == 'default' and editing):
+        cleaned = git_output(['stripspace', '--strip-comments'], message)
+    else:
+        cleaned = git_output(['stripspace'], message)
+    for line in cleaned.split(b'\n'):
+        # Blank as git counts it: ASCII whitespace only, so a line of a
+        # non-breaking space is a subject.
+        if line.strip():
+            return line.rstrip().decode('utf-8', 'replace')
+    return ''
 
 
 def commit_candidates(path):
     """The commit-msg hook's candidates for the message in PATH: none
     for an empty message, which git refuses itself, or a subject the
     hook lets through."""
-    with open(path, encoding='utf-8', errors='replace') as handle:
-        strip, comment = message_cleanup()
-        subject = message_subject(handle.read(), strip, comment)
+    with open(path, 'rb') as handle:
+        # Git sets GIT_EDITOR to ':' for its hooks when it opens no
+        # editor, whatever the caller's environment says.
+        subject = recorded_subject(handle.read(),
+                                   os.environ.get('GIT_EDITOR') != ':')
     if not subject:
         return []
     if subject.startswith(PASSED_PREFIXES):
@@ -205,13 +216,13 @@ def main(argv=None):
         print(f'The type "{generic.group(1)}" is not one of this '
               "project's changelog types, so git-cliff would file the")
         print('entry under "Other Changes" instead of a curated section.')
-    elif hook:
+    if hook:
         print('The squash merge takes its subject, and the CHANGELOG')
         print('entry, from the PR title. `gh pr create --fill` copies a')
         print("single commit's subject into that title, and the PR title")
         print("check also checks a single-commit PR's commit subject, so")
-        print('a subject git-cliff cannot parse would fail it there.')
-    else:
+        print('a subject this check refuses would fail it there.')
+    elif not generic:
         print('This repository squash-merges, so that text becomes the')
         print('commit subject and the CHANGELOG entry. A subject git-cliff')
         print('cannot parse is dropped from the changelog entirely and')
@@ -239,8 +250,9 @@ def main(argv=None):
         saved = shlex.quote(os.path.abspath(argv[1]))
         print()
         print(f'The commit was not made. Its message is saved in {saved}.')
-        print('Run the same commit again, with the options and paths it')
-        print('had, adding -e -F and that file, for example:')
+        print('Run the same commit again with its message option (-m, -F,')
+        print('-C, ...) replaced by -e -F and that file, keeping its other')
+        print('options and paths, for example:')
         print(f'  git commit -e -F {saved}')
     return 1
 

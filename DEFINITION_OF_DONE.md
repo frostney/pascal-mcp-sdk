@@ -69,8 +69,10 @@ recorded reason.
   version, and verification citations name the artifacts the
   interop battery pins.
 - PR titles follow Conventional Commits, and on a single-commit PR the
-  commit subject must too — a squash merge turns one of them into the
-  CHANGELOG entry. Reverts need a `revert:` title. Enforced by the
+  commit subject must too. The squash merge takes the PR title as its
+  subject and CHANGELOG entry; the check also covers the single
+  commit's subject, which `gh pr create --fill` copies into the title
+  and the `COMMIT_OR_PR_TITLE` squash setting would use instead. Reverts need a `revert:` title. Enforced by the
   `PR title` workflow, and checked locally for commit subjects by
   lefthook's commit-msg hook.
 - PR descriptions put each closing keyword on its own line

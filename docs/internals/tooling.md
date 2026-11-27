@@ -68,20 +68,20 @@ Commit-msg runs `.github/scripts/check-pr-title.py --commit-msg` on
 the message git is about to record. Its subject must be a Conventional
 Commit of a `cliff.toml` type, the same rule as the required
 `conventional-title` check. The hook sees the message before git
-cleans it up, so it reads the subject as git will: the first line that
-is not blank, skipping comment lines only when git strips them, which
-under the default cleanup is when an editor opened (`git commit -m`
-keeps a `#` line). It reads `commit.cleanup` and `core.commentString`
-or `core.commentChar` from git's configuration; a `--cleanup` option
-on the command line is not visible to it, and `core.commentChar=auto`
-is read as `#`.
+cleans it up, so it cleans it up as git will, with `git stripspace`
+and git's own `commit.cleanup` and comment string: comment lines go
+under `strip`, and under the default cleanup only when an editor
+opened (`git commit -m` keeps a `#` line); an edited message ends at
+the scissors line. The subject is the first line that is not blank. A
+`--cleanup` option on the command line is not visible to the hook.
 
 Subjects starting with `fixup!`, `squash!` or `amend!` and a space, or
 with the word `Merge`, pass, since an autosquash rebase or the squash
 merge folds them away; CI still checks a PR whose only commit carries
 one. A refused commit is not made: the checker prints the file holding
-its message, and the same commit run again with `-e -F` and that file
-reopens it. A plain `git revert` or `git cherry-pick` commits with
+its message. Run the same commit again with its message option (`-m`,
+`-F`, `-C`) replaced by `-e -F` and that file, keeping its other
+options and paths, to reopen it. A plain `git revert` or `git cherry-pick` commits with
 `-n`, so no hook runs; one that stopped on a conflict runs the hook
 when continued, and refuses a `Revert "…"` subject, which wants a
 `revert:` one. The hook needs `python3` on PATH. It does not replace
