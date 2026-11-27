@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-pascal-mcp-sdk is thirteen units layered strictly bottom-up. Four form the
+pascal-mcp-sdk is fourteen units layered strictly bottom-up. Four form the
 request chain — `MCP.JSONRPC` (the JSON-RPC 2.0 profile MCP mandates),
 `MCP.Protocol` (the stateless per-request `_meta` model of spec
 revision 2026-07-28), `MCP.Server` (the sans-I/O dispatch core), and a
@@ -17,7 +17,8 @@ content-block helpers `MCP.Server` consumes, `MCP.Completion` and
 `MCP.UriTemplate` read completion requests and match resource templates
 for it, `MCP.Metadata` and `MCP.Pagination` build definition metadata
 and list cursors for it, and `MCP.RequestState` with `MCP.Crypto` seal the MRTR
-`requestState` for it. The core performs no I/O, with one scoped exception: when no
+`requestState` for it; `MCP.Testing` sits above the core as the
+in-process test client for server authors. The core performs no I/O, with one scoped exception: when no
 `requestState` keys are set, the first `CreateSession` reads 32 bytes
 from the operating system's random source for the instance's sealing
 key (#89), and fails to start if that source is unavailable; setting
@@ -77,6 +78,7 @@ Rules live in the layer that owns them and nowhere else:
 | `MCP.Metadata` | The icon, `_meta` and resource-annotation objects the registration options add to definitions, and their checks | Registries, dispatch |
 | `MCP.Pagination` | The opaque list cursor and the check of one a client sends back | Registries, dispatch |
 | `MCP.Crypto` | SHA-256, HMAC-SHA-256, constant-time comparison, the OS random source and base64url, in-tree because FPC 3.2.2 ships no SHA-256 | Everything MCP |
+| `MCP.Testing` | The in-process test client (`TMCPTestClient`): request envelopes, notification capture, canned input answers, over `HandleMessage` with no transport | Bytes and streams |
 | `MCP.Transport.Stdio` | LF-terminated writes on every platform, CR tolerance on reads, blank-line skipping, stderr-only logging, EOF as the graceful-shutdown signal | Protocol decisions — it contains not a single one |
 
 ## The sans-I/O core
