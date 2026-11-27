@@ -9,24 +9,9 @@
   neither is notifications/events/list_changed, which needs
   subscriptions/listen.
 
-  An event type the check reads from an upstream with a position: one
-  page from the cursor, its own next position and HasMore (see the
-  Events guide for a fuller example).
-
-    function NewMail(const AQuery: TMCPEventQuery;
-      const ACtx: TMCPRequestContext): TMCPEventPoll;
-    begin
-      if AQuery.FromNow then
-        Exit(MCPEventPoll(Inbox.Position));
-      Page := Inbox.ReadFrom(AQuery.Cursor, AQuery.MaxAgeMs,
-        AQuery.MaxEvents);
-      Result := MCPEventPoll(Page.NextPosition, Page.Occurrences);
-      Result.HasMore := Page.HasMore;
-    end;
-
-    RegisterEvent(Server, 'email.received', 'Fires when an email arrives',
-      ObjectSchema.AddString('from'), ObjectSchema.AddString('subject'),
-      NewMail); }
+  The Events guide (docs/guides/events.md) shows a check that reads from
+  an upstream with a position.
+}
 
 unit MCP.Events;
 
@@ -209,15 +194,13 @@ end;
 function TEventCatalog.HeaderParameters(
   const AName: string): TMCPHeaderParameters;
 var
-  Index, I: Integer;
+  Index: Integer;
 begin
   Result := nil;
   Index := FindType(AName);
   if Index < 0 then
     Exit;
-  Result := Copy(FTypes[Index].Headers);
-  for I := 0 to High(Result) do
-    Result[I].Path := Copy(FTypes[Index].Headers[I].Path);
+  Result := CopyHeaderParameters(FTypes[Index].Headers);
 end;
 
 procedure TEventCatalog.Add(const AName, ADescription: string;
@@ -228,6 +211,7 @@ var
   Headers: TMCPHeaderParameters;
   Problem: string;
   RootType: TJSONData;
+  Swap: TJSONObject;
 begin
   try
     if AName = '' then
@@ -251,6 +235,23 @@ begin
       (RootType.AsString <> 'object') then
       raise EMCPServer.CreateFmt('Event type "%s" inputSchema must have ' +
         'root type "object"', [AName]);
+    // Children stored as nil are nulls, and the clones rebuild fpjson's
+    // name lookup, which misses a member replaced through Items[], so
+    // every check below sees what goes out (#118 review).
+    NilChildrenToNull(AInputSchema);
+    NilChildrenToNull(APayloadSchema);
+    Swap := TJSONObject(AInputSchema.Clone);
+    AInputSchema.Free;
+    AInputSchema := Swap;
+    Swap := TJSONObject(APayloadSchema.Clone);
+    APayloadSchema.Free;
+    APayloadSchema := Swap;
+    // Arguments are checked as for tools: an input schema outside the
+    // subset the server enforces is refused, not left unchecked.
+    Problem := MCPSchemaSubsetViolation(AInputSchema, True);
+    if Problem <> '' then
+      raise EMCPServer.CreateFmt('Event type "%s" inputSchema %s, outside ' +
+        'the subset the server checks arguments against', [AName, Problem]);
     Problem := MCPHeaderParameters(AInputSchema, Headers);
     if Problem <> '' then
       raise EMCPServer.CreateFmt('Event type "%s" inputSchema: %s',
@@ -260,16 +261,13 @@ begin
     APayloadSchema.Free;
     raise;
   end;
-  NilChildrenToNull(AInputSchema);
-  NilChildrenToNull(APayloadSchema);
   Slot := Length(FTypes);
   SetLength(FTypes, Slot + 1);
   FTypes[Slot].Name := AName;
   FTypes[Slot].Description := ADescription;
   FTypes[Slot].InputSchema := AInputSchema;
   FTypes[Slot].PayloadSchema := APayloadSchema;
-  FTypes[Slot].CheckArguments := MCPSchemaSubsetViolation(AInputSchema,
-    True) = '';
+  FTypes[Slot].CheckArguments := True;
   FTypes[Slot].CheckPayload := MCPSchemaSubsetViolation(APayloadSchema,
     False) = '';
   FTypes[Slot].Headers := Headers;
@@ -328,8 +326,11 @@ begin
   end;
 end;
 
-// A non-negative integer member AName of AParams, or -1 when absent.
-function OptionalCount(AParams: TJSONObject; const AName: string): Int64;
+// An integer member AName of AParams of at least AMin, or -1 when
+// absent: read as the schema validator reads integers, so 1e3 is 1000
+// and a fraction is refused (#118 review).
+function OptionalCount(AParams: TJSONObject; const AName: string;
+  AMin: Int64): Int64;
 var
   Value: TJSONData;
 begin
@@ -337,10 +338,9 @@ begin
   Value := AParams.Find(AName);
   if Value = nil then
     Exit;
-  if (Value.JSONType <> jtNumber) or
-    (TJSONNumber(Value).NumberType = ntFloat) or (Value.AsInt64 < 0) then
-    raise InvalidParams(AName + ' must be a non-negative integer');
-  Result := Value.AsInt64;
+  if not ReadSignedInteger(Value, Result) or (Result < AMin) then
+    raise InvalidParams(Format('%s must be an integer of at least %d',
+      [AName, AMin]));
 end;
 
 // A derived eventId: the same name, timestamp and data give the same
@@ -374,9 +374,16 @@ var
   I: Integer;
   Occurrence, Data, Timestamp, Field: TJSONData;
   Violation: string;
+  Rebuilt: TJSONArray;
 begin
   if APoll.Events = nil then
     APoll.Events := TJSONArray.Create;
+  // Children stored as nil are nulls, checked and hashed as such, on a
+  // clone whose name lookup sees them (#118 review).
+  NilChildrenToNull(APoll.Events);
+  Rebuilt := TJSONArray(APoll.Events.Clone);
+  APoll.Events.Free;
+  APoll.Events := Rebuilt;
   if AQuery.FromNow and (APoll.Events.Count > 0) then
     raise EMCPServer.CreateFmt('Event type "%s" returned events for a poll ' +
       'from now', [FTypes[AType].Name]);
@@ -468,8 +475,10 @@ begin
     Query.Cursor := CursorData.AsString;
   end;
   // maxAgeMs is ignored for a poll from now.
-  Query.MaxAgeMs := OptionalCount(AParams, 'maxAgeMs');
-  Count := OptionalCount(AParams, 'maxEvents');
+  Query.MaxAgeMs := OptionalCount(AParams, 'maxAgeMs', 0);
+  // A cap of zero could never move a cursor on: at least one (#118
+  // review).
+  Count := OptionalCount(AParams, 'maxEvents', 1);
   if Count > MaxInt then
     Count := MaxInt;
   Query.MaxEvents := Count;
@@ -552,7 +561,12 @@ begin
   // classic initialize offers nothing a classic client could call.
   AServer.EnsureExtension(MCP_EVENTS_EXTENSION);
   if Fresh then
+  begin
     AServer.RestrictExtensionToModern(MCP_EVENTS_EXTENSION);
+    // listChanged needs subscriptions/listen, which this server lacks:
+    // {} whatever is declared before or after (#118 review).
+    AServer.PinExtensionSettings(MCP_EVENTS_EXTENSION, TJSONObject.Create);
+  end;
 end;
 
 procedure RegisterEvent(AServer: TMCPServer; const AName,

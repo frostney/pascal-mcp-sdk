@@ -271,6 +271,16 @@ function MCPValidateAgainstSchema(ASchema: TJSONObject; AValue: TJSONData;
 function MCPHeaderParameters(ASchema: TJSONObject;
   out AParameters: TMCPHeaderParameters): string;
 
+// An independent copy of AParameters, their paths included (dynamic
+// arrays are shared by assignment), for lookups that hand cached
+// parameters out.
+function CopyHeaderParameters(
+  const AParameters: TMCPHeaderParameters): TMCPHeaderParameters;
+
+// A JSON integer as Int64: an integral float (2.0, 2e0) within 2^53
+// counts, as JSON Schema's integer does; False otherwise.
+function ReadSignedInteger(AValue: TJSONData; out AResult: Int64): Boolean;
+
 implementation
 
 uses
@@ -2466,6 +2476,16 @@ begin
   Result := CollectHeaders(ASchema, [], True, AParameters);
   if Result <> '' then
     AParameters := nil;
+end;
+
+function CopyHeaderParameters(
+  const AParameters: TMCPHeaderParameters): TMCPHeaderParameters;
+var
+  I: Integer;
+begin
+  Result := Copy(AParameters);
+  for I := 0 to High(Result) do
+    Result[I].Path := Copy(AParameters[I].Path);
 end;
 
 end.

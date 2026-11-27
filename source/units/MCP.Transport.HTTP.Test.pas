@@ -379,12 +379,19 @@ end;
 // Region for the target "tick" alone, so the check must use the value
 // the route names.
 function TRouteFixture.Headers(const AName: string): TMCPHeaderParameters;
+var
+  Schema: TJSONObject;
 begin
   Result := nil;
   if AName <> 'tick' then
     Exit;
-  MCPHeaderParameters(TJSONObject(GetJSON('{"type":"object","properties":' +
-    '{"region":{"type":"string","x-mcp-header":"Region"}}}')), Result);
+  Schema := TJSONObject(GetJSON('{"type":"object","properties":' +
+    '{"region":{"type":"string","x-mcp-header":"Region"}}}'));
+  try
+    MCPHeaderParameters(Schema, Result);
+  finally
+    Schema.Free;
+  end;
 end;
 
 function TickCheck(const AQuery: TMCPEventQuery;
@@ -398,9 +405,10 @@ var
   Attempt: Integer;
   Probe, ProbeType: string;
 begin
-  if FRouteFixture = nil then
-    FRouteFixture := TRouteFixture.Create;
   FServer := TMCPServer.Create('http-test', '1.0');
+  // The server owns the route fixture, freed with it.
+  FRouteFixture := TRouteFixture.Create;
+  FServer.Adopt(FRouteFixture);
   FServer.RegisterTool('ping', 'Ping', '{"type":"object"}', PingHandler);
   FServer.RegisterTool('echo', 'Echo',
     ObjectSchema.AddString('message', 'Text to echo'), NoisyEchoHandler);
@@ -966,6 +974,13 @@ begin
     HeaderPair('Mcp-Name', 'tick')], Body, ContentType)).ToBe(400);
   Expect<Boolean>(Pos('Mcp-Param-Region header is missing', Body) > 0)
     .ToBe(True);
+  // A name that is not plain ASCII travels base64-encoded; raw bytes are
+  // refused (#118 review). 'tick' as a sentinel matches.
+  Expect<Integer>(PostPoll('=?base64?dGljaw==?=', '"name":"tick",', [], Body))
+    .ToBe(200);
+  Expect<Integer>(PostPoll('ti' + #$C3#$A9 + 'ck', '"name":"tick",', [], Body))
+    .ToBe(400);
+  Expect<Boolean>(Pos('not plain ASCII', Body) > 0).ToBe(True);
 end;
 
 procedure THTTPBinding.TestParamHeaderMissing;

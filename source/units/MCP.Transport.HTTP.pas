@@ -892,6 +892,15 @@ begin
           'decodable base64';
         Exit;
       end;
+      // A name that is not plain ASCII must come base64-encoded
+      // (events.mdx, Streamable HTTP: Routing Headers; the transport's
+      // Value Encoding), so raw bytes are refused (#118 review).
+      if (DecodedName = HeaderName) and not IsPlainHeaderValue(HeaderName) then
+      begin
+        AFailure := 'Header mismatch: Mcp-Name header value is not plain ' +
+          'ASCII; send it base64-encoded';
+        Exit;
+      end;
       if DecodedName <> BodyName then
       begin
         AFailure := 'Header mismatch: Mcp-Name header value ''' +

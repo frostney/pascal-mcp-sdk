@@ -40,20 +40,23 @@ begin
 end;
 
 RegisterEvent(Server, 'email.received', 'Fires when an email arrives',
-  ObjectSchema.AddString('folder', 'Folder to watch'),
+  // folder is optional: without it, the inbox is watched.
+  TJSONObject(GetJSON('{"type":"object","properties":{"folder":' +
+    '{"type":"string","description":"Folder to watch"}}}')),
   ObjectSchema.AddString('from').AddString('subject'),
   NewMail);
 ```
 
 The check gets a `TMCPEventQuery` for each poll:
 
-- `Arguments`: the subscription's arguments. They are checked against
-  the input schema when it lies in the subset the server enforces for
+- `Arguments`: the subscription's arguments, checked against the
+  input schema, which must lie in the subset the server enforces for
   tools.
 - `Cursor`: the client's position, opaque to it. When it is null or
   absent, `FromNow` is true, and the check returns no events and a
   fresh cursor.
 - `MaxAgeMs` and `MaxEvents`: the client's limits, `-1` when absent.
+  `MaxEvents` is at least 1 when given.
 
 It returns a `TMCPEventPoll`, built with `MCPEventPoll(Cursor, Events)`:
 
@@ -66,8 +69,9 @@ It returns a `TMCPEventPoll`, built with `MCPEventPoll(Cursor, Events)`:
   with `HasMore`, the client reads on from here and skips nothing.
 - `HasMore`: more events are waiting beyond `MaxEvents`. The client
   polls again at once.
-- `Truncated`: the cursor fell outside what the upstream keeps, and
-  events were skipped.
+- `Truncated`: events were skipped. The cursor may have fallen outside
+  what the upstream keeps, `MaxAgeMs` may have moved the start past it,
+  or the server may apply its own replay ceiling.
 - `NoReplay`: the upstream has no history, so the cursor goes out as
   null.
 - `NextPollMs`: when the client should poll next. Zero takes the
@@ -81,8 +85,9 @@ subscription the caller may not have.
 
 ## What the server serves
 
-The first `RegisterEvent` call declares the extension with `{}` and
-serves:
+The first `RegisterEvent` call declares the extension with `{}`, which
+stays `{}` whatever `DeclareExtension` sets, since `listChanged` needs
+`subscriptions/listen`. It serves:
 
 - `events/list`: each type with its description, `"delivery":
   ["poll"]`, and its input and payload schemas, paged with `PageSize`.

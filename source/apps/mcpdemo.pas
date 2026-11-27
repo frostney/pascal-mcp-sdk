@@ -27,6 +27,7 @@ uses
   {$ENDIF}
   SysUtils,
   DateUtils,
+  Math,
 
   fpjson,
 
@@ -232,6 +233,19 @@ begin
     ASize := 0;
 end;
 
+var
+  // `--clock-at <ms>` fixes the clock (Unix milliseconds), so mcpsmoke
+  // can check replay windows without racing the minute.
+  ClockAtMs: Int64 = -1;
+
+function ClockNowMs: Int64;
+begin
+  if ClockAtMs >= 0 then
+    Exit(ClockAtMs);
+  Result := DateTimeToUnix(LocalTimeToUniversal(SysUtils.Now)) * 1000 +
+    MilliSecondOf(SysUtils.Now);
+end;
+
 // The Events demo (#118): one occurrence per minute of UTC time, the
 // cursor the minute read last (minutes since 1970). Stateless: the
 // clock is the upstream. A cursor over an hour old is truncated to the
@@ -239,9 +253,10 @@ end;
 function ClockMinuteCheck(const AQuery: TMCPEventQuery;
   const ACtx: TMCPRequestContext): TMCPEventPoll;
 var
-  Now, Minute, Last, Floor: Int64;
+  NowMs, Now, Minute, Last, Floor: Int64;
 begin
-  Now := DateTimeToUnix(LocalTimeToUniversal(SysUtils.Now)) div 60;
+  NowMs := ClockNowMs;
+  Now := NowMs div 60000;
   if AQuery.FromNow or not TryStrToInt64(AQuery.Cursor, Minute) or
     (Minute > Now) then
     Exit(MCPEventPoll(IntToStr(Now)));
@@ -249,9 +264,12 @@ begin
   // Replay starts at the later of the cursor and now minus maxAgeMs,
   // and at most an hour back; skipping is "truncated" (events.mdx,
   // Cursor Lifecycle).
+  // The cutoff from the actual instant: a tick at minute m (m * 60000
+  // ms) is replayed when m * 60000 >= now - maxAgeMs, so the last minute
+  // skipped is the one before the first such m (#118 review).
   Floor := Now - 60;
-  if (AQuery.MaxAgeMs >= 0) and (Now - AQuery.MaxAgeMs div 60000 > Floor) then
-    Floor := Now - AQuery.MaxAgeMs div 60000;
+  if (AQuery.MaxAgeMs >= 0) and (AQuery.MaxAgeMs < NowMs) then
+    Floor := Max(Floor, (NowMs - AQuery.MaxAgeMs + 59999) div 60000 - 1);
   if Minute < Floor then
   begin
     Minute := Floor;
@@ -268,7 +286,10 @@ begin
   begin
     Inc(Minute);
     Result.Events.Add(MCPEventOccurrence('minute-' + IntToStr(Minute),
-      FormatDateTime('yyyy-mm-dd"T"hh:nn:ss"Z"', UnixToDateTime(Minute * 60)),
+      // Literal colons: unquoted, FormatDateTime takes the locale's time
+      // separator (#118 review).
+      FormatDateTime('yyyy"-"mm"-"dd"T"hh":"nn":"ss"Z"',
+      UnixToDateTime(Minute * 60)),
       TJSONObject.Create(['minute', Minute])));
   end;
   Result.Cursor := IntToStr(Last);
@@ -379,6 +400,8 @@ begin
 
     if PageSizeFromArgs(PageSize) then
       Server.PageSize := PageSize;
+    if (ParamCount = 2) and (ParamStr(1) = '--clock-at') then
+      ClockAtMs := StrToInt64Def(ParamStr(2), -1);
     if SkillsDirFromArgs(SkillsDir) then
       RegisterSkillDirectory(Server, SkillsDir, 'disk');
 

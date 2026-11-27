@@ -595,6 +595,59 @@ begin
   end;
 end;
 
+// The minute clock with its time fixed (`mcpdemo --clock-at`), 10
+// seconds into minute M: maxAgeMs 30000 replays from 20 seconds before
+// M, so the tick of M is in the window and the one before is not
+// (events.mdx, Cursor Lifecycle, verified 2026-11-27; #118 review).
+procedure FixedClockBattery;
+const
+  M = 29929560; // 2026-11-27T10:00:00Z in minutes since 1970
+var
+  Clock: TProcess;
+  Response: TJSONObject;
+begin
+  Clock := TProcess.Create(nil);
+  try
+    Clock.Executable := DemoBinary;
+    Clock.Parameters.Add('--clock-at');
+    Clock.Parameters.Add(IntToStr(Int64(M) * 60000 + 10000));
+    Clock.Options := [poUsePipes];
+    try
+      Clock.Execute;
+    except
+      on E: Exception do
+      begin
+        Check(False, 'fixed clock: launch ' + DemoBinary + ': ' + E.Message);
+        Exit;
+      end;
+    end;
+    try
+      Response := RoundTrip(Clock, '{"jsonrpc":"2.0","id":1,' +
+        '"method":"events/poll","params":{"name":"clock.minute",' +
+        '"maxAgeMs":30000,"cursor":"' + IntToStr(M - 1) + '",' + META_MODERN +
+        '}}');
+      Check((PathString(Response, 'result.events[0].eventId') = 'minute-' +
+        IntToStr(M)) and (PathString(Response, 'result.events[0].timestamp') =
+        '2026-11-27T10:00:00Z') and (FindPath(Response, 'result.events[1]') =
+        nil) and not FindPath(Response, 'result.truncated').AsBoolean,
+        'events/poll at a fixed time: the tick inside a 30 s window replayed');
+      Response.Free;
+      Response := RoundTrip(Clock, '{"jsonrpc":"2.0","id":2,' +
+        '"method":"events/poll","params":{"name":"clock.minute",' +
+        '"maxAgeMs":30000,"cursor":"' + IntToStr(M - 3) + '",' + META_MODERN +
+        '}}');
+      Check((PathString(Response, 'result.events[0].eventId') = 'minute-' +
+        IntToStr(M)) and FindPath(Response, 'result.truncated').AsBoolean,
+        'events/poll at a fixed time: older ticks skipped and truncated');
+      Response.Free;
+    finally
+      Shutdown(Clock, 'fixed clock');
+    end;
+  finally
+    Clock.Free;
+  end;
+end;
+
 var
   Demo: TProcess;
   Response: TJSONObject;
@@ -1161,6 +1214,7 @@ begin
   FixtureContentBattery;
   PagedDemoBattery;
   SkillsDirBattery;
+  FixedClockBattery;
 
   WriteLn;
   if Failures = 0 then

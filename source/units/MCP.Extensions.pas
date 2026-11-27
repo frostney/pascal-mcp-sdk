@@ -57,6 +57,7 @@ type
     end;
     FAdopted: array of TObject;
     FModernOnly: array of string;
+    FPinned: TJSONObject; // owned: settings that replace a declaration
     FRoutes: array of record
       Method, NameParam: string;
       Headers: TMCPHeaderLookup;
@@ -94,9 +95,12 @@ type
       out AHeaders: TMCPHeaderLookup): Boolean;
     // Extension AId is left out of the classic capabilities.
     procedure RestrictToModern(const AId: string);
+    // Extension AId is answered with ASettings (owned), replacing what
+    // was declared.
+    procedure PinSettings(const AId: string; ASettings: TJSONObject);
     // The extensions to declare (new, the caller's; nil for none): a
-    // clone of ADeclared (borrowed), without the modern-only ones when
-    // ALegacy.
+    // clone of ADeclared (borrowed) with pinned settings in place,
+    // without the modern-only ones when ALegacy.
     function ExtensionsFor(ADeclared: TJSONObject;
       ALegacy: Boolean): TJSONObject;
     // Whether some resolver's prefix starts AUri.
@@ -159,6 +163,7 @@ destructor TMCPExtensionHooks.Destroy;
 var
   I: Integer;
 begin
+  FPinned.Free;
   for I := High(FAdopted) downto 0 do
     FAdopted[I].Free;
   inherited Destroy;
@@ -340,6 +345,15 @@ begin
   FModernOnly[High(FModernOnly)] := AId;
 end;
 
+procedure TMCPExtensionHooks.PinSettings(const AId: string;
+  ASettings: TJSONObject);
+begin
+  if FPinned = nil then
+    FPinned := TJSONObject.Create;
+  FPinned.Delete(AId);
+  FPinned.Add(AId, ASettings);
+end;
+
 function TMCPExtensionHooks.ExtensionsFor(ADeclared: TJSONObject;
   ALegacy: Boolean): TJSONObject;
 var
@@ -349,6 +363,13 @@ begin
   if ADeclared.Count = 0 then
     Exit;
   Result := TJSONObject(ADeclared.Clone);
+  if FPinned <> nil then
+    for I := 0 to FPinned.Count - 1 do
+      if Result.IndexOfName(FPinned.Names[I]) >= 0 then
+      begin
+        Result.Delete(FPinned.Names[I]);
+        Result.Add(FPinned.Names[I], FPinned.Items[I].Clone);
+      end;
   if ALegacy then
     for I := 0 to High(FModernOnly) do
       Result.Delete(FModernOnly[I]);

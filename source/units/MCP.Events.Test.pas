@@ -58,6 +58,7 @@ type
     procedure TestListPaging;
     procedure TestUtf8Occurrence;
     procedure TestRouteCopy;
+    procedure TestSettingsPinned;
   end;
 
 // The upstream: five occurrences at positions 1 to 5. A cursor is the
@@ -110,64 +111,92 @@ begin
     '2026-11-27T10:00:00Z', TJSONObject.Create(['n', 1]))]));
 end;
 
+// The occurrences a fault returns as JSON text, '' for a fault built in
+// code or raised.
+function FaultText(const AKind: string): string;
+const
+  OCCURRENCE = '{"eventId":"x","timestamp":"2026-11-27T10:00:00Z","data":';
+  KINDS: array[0..7] of string = ('payload', 'timestamp', 'many',
+    'february', 'idtype', 'meta', 'cursor', 'utf8');
+  TEXTS: array[0..7] of string = (
+    '[' + OCCURRENCE + '{"n":"not a number"}}]',
+    '[{"eventId":"x","timestamp":"yesterday","data":{"n":1}}]',
+    '[' + OCCURRENCE + '{"n":1}},{"eventId":"y","timestamp":' +
+      '"2026-11-27T10:00:00Z","data":{"n":2}}]',
+    '[{"eventId":"x","timestamp":"2026-02-31T10:00:00Z","data":{"n":1}}]',
+    '[{"eventId":7,"timestamp":"2026-11-27T10:00:00Z","data":{"n":1}}]',
+    '[{"timestamp":"2026-11-27T10:00:00Z","data":{"n":1},"_meta":[]}]',
+    '[{"timestamp":"2026-11-27T10:00:00Z","data":{"n":1},"cursor":"c"}]',
+    '[{"eventId":"u","timestamp":"2026-11-27T10:00:00Z","data":' +
+      '{"n":1,"note":"Gr\u00fc\u00dfe"}}]');
+var
+  I: Integer;
+begin
+  for I := 0 to High(KINDS) do
+    if KINDS[I] = AKind then
+      Exit(TEXTS[I]);
+  Result := '';
+end;
+
+// An occurrence built in code with a member stored as nil, which goes
+// out as a null (#118 review); nil for another fault.
+function NilFault(const AKind: string): TJSONObject;
+var
+  Payload: TJSONObject;
+begin
+  Result := nil;
+  if (AKind = 'nilcursor') or (AKind = 'nilmeta') then
+  begin
+    Result := MCPEventOccurrence('n', '2026-11-27T10:00:00Z',
+      TJSONObject.Create(['n', 1]));
+    if AKind = 'nilcursor' then
+      Result.Add('cursor', TJSONData(nil))
+    else
+      Result.Add('_meta', TJSONData(nil));
+  end
+  else if AKind = 'nildata' then
+  begin
+    // A payload member the schema leaves open, stored as nil, with a
+    // derived id.
+    Payload := TJSONObject.Create(['n', 1]);
+    Payload.Add('extra', TJSONData(nil));
+    Result := MCPEventOccurrence('', '2026-11-27T10:00:00Z', Payload);
+  end;
+end;
+
+// The extension's error codes, raised by a check.
+procedure RaiseFault(const AKind: string);
+begin
+  if AKind = 'refuse' then
+    raise EMCPProtocolError.Create(-32024, 'Forbidden',
+      TJSONObject.Create(['reason', 'not yours']))
+  else if AKind = 'exhausted' then
+    raise EMCPProtocolError.Create(-32025, 'ResourceExhausted',
+      TJSONObject.Create(['limit', 'subscriptions']))
+  else if AKind = 'unsupported' then
+    raise EMCPProtocolError.Create(-32026, 'Unsupported',
+      TJSONObject.Create(['feature', 'deliveryMode', 'value', 'push']))
+  else if AKind = 'callback' then
+    raise EMCPProtocolError.Create(-32027, 'CallbackEndpointError',
+      TJSONObject.Create(['reason', 'timeout']));
+end;
+
 // What the arguments ask for goes wrong on purpose.
 function FaultyCheck(const AQuery: TMCPEventQuery;
   const ACtx: TMCPRequestContext): TMCPEventPoll;
 var
-  Kind: string;
+  Kind, Text: string;
+  Built: TJSONObject;
 begin
   Kind := AQuery.Arguments.Get('fault', '');
+  RaiseFault(Kind);
+  Text := FaultText(Kind);
+  if Text <> '' then
+    Exit(MCPEventPoll('1', TJSONArray(MCPParseJSON(Text))));
   Result := MCPEventPoll('1', TJSONArray.Create);
-  if Kind = 'payload' then
-    Result.Events.Add(MCPEventOccurrence('x', '2026-11-27T10:00:00Z',
-      TJSONObject.Create(['n', 'not a number'])))
-  else if Kind = 'timestamp' then
-    Result.Events.Add(MCPEventOccurrence('x', 'yesterday',
-      TJSONObject.Create(['n', 1])))
-  else if Kind = 'many' then
-  begin
-    Result.Events.Add(MCPEventOccurrence('x', '2026-11-27T10:00:00Z',
-      TJSONObject.Create(['n', 1])));
-    Result.Events.Add(MCPEventOccurrence('y', '2026-11-27T10:00:00Z',
-      TJSONObject.Create(['n', 2])));
-  end
-  else if Kind = 'february' then
-    Result.Events.Add(MCPEventOccurrence('x', '2026-02-31T10:00:00Z',
-      TJSONObject.Create(['n', 1])))
-  else if Kind = 'idtype' then
-  begin
-    Result.Events.Add(TJSONObject(MCPParseJSON('{"eventId":7,"timestamp":' +
-      '"2026-11-27T10:00:00Z","data":{"n":1}}')));
-  end
-  else if Kind = 'meta' then
-    Result.Events.Add(TJSONObject(MCPParseJSON('{"timestamp":' +
-      '"2026-11-27T10:00:00Z","data":{"n":1},"_meta":[]}')))
-  else if Kind = 'cursor' then
-    Result.Events.Add(TJSONObject(MCPParseJSON('{"timestamp":' +
-      '"2026-11-27T10:00:00Z","data":{"n":1},"cursor":"c"}')))
-  else if Kind = 'utf8' then
-    Result.Events.Add(MCPEventOccurrence('u', '2026-11-27T10:00:00Z',
-      TJSONObject(MCPParseJSON('{"n":1,"note":"Gr\u00fc\u00dfe"}'))))
-  else if Kind = 'refuse' then
-  begin
-    Result.Events.Free;
-    raise EMCPProtocolError.Create(-32024, 'Forbidden',
-      TJSONObject.Create(['reason', 'not yours']));
-  end
-  else if (Kind = 'exhausted') or (Kind = 'unsupported') or
-    (Kind = 'callback') then
-  begin
-    Result.Events.Free;
-    if Kind = 'exhausted' then
-      raise EMCPProtocolError.Create(-32025, 'ResourceExhausted',
-        TJSONObject.Create(['limit', 'subscriptions']))
-    else if Kind = 'unsupported' then
-      raise EMCPProtocolError.Create(-32026, 'Unsupported',
-        TJSONObject.Create(['feature', 'deliveryMode', 'value', 'push']))
-    else
-      raise EMCPProtocolError.Create(-32027, 'CallbackEndpointError',
-        TJSONObject.Create(['reason', 'timeout']));
-  end;
+  Built := NilFault(Kind);
+  if Built <> nil then
+    Result.Events.Add(Built);
 end;
 
 procedure TEventsSuite.RegisterFixture;
@@ -367,6 +396,8 @@ end;
 
 // events.mdx, Error Handling.
 procedure TEventsSuite.TestErrors;
+var
+  Response: TJSONObject;
 begin
   RegisterFixture;
   Expect<string>(ErrorOf(Poll('"name":"nope"'))).ToBe('-32023 "Event type ' +
@@ -376,10 +407,14 @@ begin
   Expect<string>(ErrorOf(Poll('"name":"clock.tick","cursor":3'))).ToBe(
     '-32602 "Invalid params: cursor must be a string or null" <absent>');
   Expect<string>(ErrorOf(Poll('"name":"clock.tick","maxEvents":-1'))).ToBe(
-    '-32602 "Invalid params: maxEvents must be a non-negative integer" ' +
+    '-32602 "Invalid params: maxEvents must be an integer of at least 1" ' +
+    '<absent>');
+  // Zero could never move a cursor on (#118 review).
+  Expect<string>(ErrorOf(Poll('"name":"clock.tick","maxEvents":0'))).ToBe(
+    '-32602 "Invalid params: maxEvents must be an integer of at least 1" ' +
     '<absent>');
   Expect<string>(ErrorOf(Poll('"name":"clock.tick","maxAgeMs":1.5'))).ToBe(
-    '-32602 "Invalid params: maxAgeMs must be a non-negative integer" ' +
+    '-32602 "Invalid params: maxAgeMs must be an integer of at least 0" ' +
     '<absent>');
   Expect<string>(ErrorOf(Poll('"name":"clock.tick","arguments":[]'))).ToBe(
     '-32602 "Invalid params: arguments must be an object" <absent>');
@@ -390,6 +425,15 @@ begin
   Expect<string>(ErrorOf(Poll('"name":"faulty","cursor":"0","arguments":' +
     '{"fault":"refuse"}'))).ToBe('-32024 "Forbidden" { "reason" : ' +
     '"not yours" }');
+  // An integral float is the integer it spells, as the schema reads it.
+  Response := Poll('"name":"clock.tick","cursor":"2","maxEvents":2e0,' +
+    '"maxAgeMs":1e3');
+  try
+    Expect<Integer>(TJSONArray(Response.FindPath('result.events')).Count)
+      .ToBe(2);
+  finally
+    Response.Free;
+  end;
   Expect<string>(ErrorOf(Poll('"name":"faulty","cursor":"0","arguments":' +
     '{"fault":"exhausted"}'))).ToBe('-32025 "ResourceExhausted" ' +
     '{ "limit" : "subscriptions" }');
@@ -425,6 +469,15 @@ begin
     '"arguments":{"fault":"meta"}'))) = 1).ToBe(True);
   Expect<Boolean>(Pos('-32603', ErrorOf(Poll('"name":"faulty","cursor":"0",' +
     '"arguments":{"fault":"cursor"}'))) = 1).ToBe(True);
+  // The same members stored as nil in code are caught too, and a
+  // payload member stored as nil goes out and hashes as null.
+  Expect<Boolean>(Pos('-32603', ErrorOf(Poll('"name":"faulty","cursor":"0",' +
+    '"arguments":{"fault":"nilcursor"}'))) = 1).ToBe(True);
+  Expect<Boolean>(Pos('-32603', ErrorOf(Poll('"name":"faulty","cursor":"0",' +
+    '"arguments":{"fault":"nilmeta"}'))) = 1).ToBe(True);
+  Expect<Boolean>(Pos('"extra" : null', Send('{"jsonrpc":"2.0","id":8,' +
+    '"method":"events/poll","params":{"name":"faulty","cursor":"0",' +
+    '"arguments":{"fault":"nildata"},' + META + '}}')) > 0).ToBe(True);
 end;
 
 // The extension is defined for 2026-07-28: a classic client is told the
@@ -449,6 +502,22 @@ begin
     '"io.modelcontextprotocol/events" : {} }', Send('{"jsonrpc":"2.0",' +
     '"id":3,"method":"server/discover","params":{' + META + '}}')) > 0)
     .ToBe(True);
+end;
+
+// listChanged needs subscriptions/listen: the declaration stays {}
+// whether it is declared before or after (#118 review).
+procedure TEventsSuite.TestSettingsPinned;
+const
+  DISCOVER = '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{' +
+    META + '}}';
+begin
+  FServer.DeclareExtension('io.modelcontextprotocol/events',
+    TJSONObject.Create(['listChanged', True]));
+  RegisterFixture;
+  FServer.DeclareExtension('io.modelcontextprotocol/events',
+    TJSONObject.Create(['listChanged', True]));
+  Expect<Boolean>(Pos('"io.modelcontextprotocol/events" : {}', Send(DISCOVER))
+    > 0).ToBe(True);
 end;
 
 // events/list pages with PageSize; the cursor leads to the last page.
@@ -505,7 +574,9 @@ begin
   Params := Lookup('clock.tick');
   Expect<Integer>(Length(Params)).ToBe(1);
   Params[0].Header := 'Changed';
+  Params[0].Path[0] := 'changed';
   Expect<string>(Lookup('clock.tick')[0].Header).ToBe('Region');
+  Expect<string>(Lookup('clock.tick')[0].Path[0]).ToBe('region');
 end;
 
 var
@@ -533,6 +604,9 @@ begin
     Expect<Boolean>(Refused('a', '{"type":"string"}')).ToBe(True);
     Expect<Boolean>(Refused('a', '{"type":"object","properties":{"r":' +
       '{"type":"object","x-mcp-header":"R"}}}')).ToBe(True);
+    // Outside the subset the server checks arguments against.
+    Expect<Boolean>(Refused('a', '{"type":"object","properties":{"r":' +
+      '{"type":"string","pattern":"^x"}}}')).ToBe(True);
     Expect<Boolean>(Refused('a', '{"type":"object"}')).ToBe(False);
     Expect<Boolean>(Refused('a', '{"type":"object"}')).ToBe(True);
     Raised := False;
@@ -570,6 +644,8 @@ begin
   Test('events/list pages to its last page', TestListPaging);
   Test('a non-ASCII occurrence goes out byte-exact', TestUtf8Occurrence);
   Test('a route''s header parameters are a copy', TestRouteCopy);
+  Test('the Events declaration stays {} whatever else declares it',
+    TestSettingsPinned);
 end;
 
 begin

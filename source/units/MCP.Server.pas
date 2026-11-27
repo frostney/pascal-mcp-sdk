@@ -679,6 +679,10 @@ type
     // Declares nothing on the classic initialize for extension AId,
     // whose methods only 2026-07-28 requests reach (#118 review).
     procedure RestrictExtensionToModern(const AId: string);
+    // Extension AId is declared with ASettings (owned) whatever
+    // DeclareExtension set before or after, for settings an extension
+    // unit must keep true (#118 review).
+    procedure PinExtensionSettings(const AId: string; ASettings: TJSONObject);
     // On Streamable HTTP, a request for AMethod (registered with
     // RegisterMethod) carries Mcp-Name mirroring params.ANameParam and,
     // with AHeaders, Mcp-Param-* headers for the x-mcp-header parameters
@@ -2610,6 +2614,15 @@ begin
   FHooks.RestrictToModern(AId);
 end;
 
+procedure TMCPServer.PinExtensionSettings(const AId: string;
+  ASettings: TJSONObject);
+begin
+  if FFrozen then
+    ASettings.Free;
+  EnsureMutable;
+  FHooks.PinSettings(AId, ASettings);
+end;
+
 procedure TMCPServer.RegisterRoute(const AMethod, ANameParam: string;
   AHeaders: TMCPHeaderLookup);
 var
@@ -3309,11 +3322,8 @@ begin
       'inputSchema')), Result);
     Exit;
   end;
-  // An independent copy: dynamic arrays are shared, not copied, by
-  // assignment, and the cached paths must stay as frozen.
-  Result := Copy(FTools[Index].HeaderParams);
-  for I := 0 to High(Result) do
-    Result[I].Path := Copy(FTools[Index].HeaderParams[I].Path);
+  // An independent copy: the cached paths must stay as frozen.
+  Result := CopyHeaderParameters(FTools[Index].HeaderParams);
 end;
 
 function TMCPServer.FindTool(const AName: string): Integer;

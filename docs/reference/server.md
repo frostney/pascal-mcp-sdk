@@ -308,6 +308,7 @@ procedure RegisterMethod(const AMethod: string; AHandler: TMCPMethodHandler;
 procedure RegisterResourceResolver(const AUriPrefix: string;
   AResolver: TMCPResourceResolver);
 procedure RestrictExtensionToModern(const AId: string);
+procedure PinExtensionSettings(const AId: string; ASettings: TJSONObject);
 procedure RegisterRoute(const AMethod, ANameParam: string;
   AHeaders: TMCPHeaderLookup);
 function MethodRoute(const AMethod: string; out ANameParam: string;
@@ -374,7 +375,9 @@ state those handlers read, and `Adopted` finds the first adopted
 object of a class; adopting the same object again changes nothing.
 `RestrictExtensionToModern` leaves extension `AId` out of the classic
 `initialize` capabilities, for an extension whose methods answer
-2026-07-28 requests only. `RegisterRoute` makes a registered method routable on Streamable HTTP:
+2026-07-28 requests only. `PinExtensionSettings` declares `AId` with
+`ASettings` (owned) whatever `DeclareExtension` sets before or after,
+for settings an extension unit must keep true. `RegisterRoute` makes a registered method routable on Streamable HTTP:
 its requests carry an `Mcp-Name` header mirroring `params.ANameParam`
 and, when `AHeaders` (a `TMCPHeaderLookup`, from `MCP.Extensions`) is
 given, the `Mcp-Param-*` headers it names for that value, checked as for
@@ -489,8 +492,8 @@ procedure RegisterEvent(AServer: TMCPServer; const AName,
 
 | Member | Meaning |
 | --- | --- |
-| `RegisterEvent` | Event type `AName`, delivered by poll, before the server starts. `AInputSchema` (owned) describes the arguments: root type object, `x-mcp-header` annotations as for tools, checked against arguments when inside the server-enforced subset. `APayloadSchema` (owned) describes each occurrence's data, checked when inside the subset. The first call declares the extension with `{}` on `server/discover` only (`RestrictExtensionToModern`) and serves `events/list` and `events/poll` on 2026-07-28 (`-32601` for a classic client), routed on Streamable HTTP. A duplicate or empty name, a bad schema, a nil check or a call after the server started raises `EMCPServer` |
-| `TMCPEventQuery` | One poll: the arguments, the cursor or `FromNow` for a null or absent one, and the client's `maxAgeMs` and `maxEvents` |
+| `RegisterEvent` | Event type `AName`, delivered by poll, before the server starts. `AInputSchema` (owned) describes the arguments: root type object, `x-mcp-header` annotations as for tools, checked against arguments when inside the server-enforced subset. `APayloadSchema` (owned) describes each occurrence's data, checked when inside the subset. An input schema outside the subset is refused. The first call declares the extension with `{}` on `server/discover` only (`RestrictExtensionToModern`, `PinExtensionSettings`) and serves `events/list` and `events/poll` on 2026-07-28 (`-32601` for a classic client), routed on Streamable HTTP. A duplicate or empty name, a bad schema, a nil check or a call after the server started raises `EMCPServer` |
+| `TMCPEventQuery` | One poll: the arguments, the cursor or `FromNow` for a null or absent one, and the client's `maxAgeMs` (at least 0) and `maxEvents` (at least 1), read as the schema reads integers |
 | `TMCPEventPoll` | A check's answer: at most `MaxEvents` occurrences, the cursor after them (null with `NoReplay`), `HasMore`, `Truncated` and `NextPollMs`. Events on a poll from now, more than `MaxEvents`, or an occurrence without object data, an RFC 3339 timestamp or a payload matching its schema answer `-32603` |
 | `MCPEventOccurrence` | One occurrence: `AData` (owned) and `AMeta` (owned) as given. An empty `AEventId` is derived from the name, timestamp and data, so the same event keeps its id; the server adds the name |
 
