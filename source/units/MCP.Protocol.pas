@@ -122,10 +122,10 @@ type
     RequestState: string;
     // Set by the dispatching server, not by ExtractRequestContext.
     Notifier: TMCPNotifier;
-    // Set by the dispatching server. The serial stdio transport cannot
-    // receive a cancellation while a handler occupies its read-handle-
-    // write loop, so this remains false there during handler execution;
-    // transports with mid-request delivery points can flip it.
+    // Set by the dispatching server. It also consults the transport's
+    // cancellation poll (#93), so a notifications/cancelled waiting on
+    // stdin or a closed HTTP connection turns it true while the handler
+    // runs.
     CancellationProbe: TMCPCancellationProbe;
     // True when clientCapabilities declare AName. For a 2026-07-28
     // request, a capability that schema defines counts only in its

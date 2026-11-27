@@ -82,8 +82,8 @@ export async function runModernBattery(client) {
 
   const tools = await client.listTools();
   check(
-    tools.tools.map((t) => t.name).join(',') === 'echo,add,greet_user,pixel',
-    'tools/list: echo,add,greet_user,pixel in registration order',
+    tools.tools.map((t) => t.name).join(',') === 'echo,add,greet_user,countdown,pixel',
+    'tools/list: echo,add,greet_user,countdown,pixel in registration order',
   );
 
   const echo = await client.callTool({

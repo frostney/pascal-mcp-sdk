@@ -281,6 +281,42 @@ function OversizedLineResponse(AMaxLineLength: Integer): string;
 transports wrap — only custom transport authors call these directly
 (see [Architecture](../internals/architecture.md#the-sans-io-core)).
 
+A transport that can learn of a cancellation while a handler runs
+installs a poll on the session (#93):
+
+```pascal
+type
+  TMCPCancellationPoll = function(ASession: TMCPSession;
+    AUserData: Pointer): Boolean;
+
+procedure TMCPSession.SetCancellationPoll(APoll: TMCPCancellationPoll;
+  AUserData: Pointer);   // nil removes it
+function TMCPSession.IsActiveRequestId(ARequestId: TJSONData): Boolean;
+function TMCPSession.CancelsActiveRequest(const ALine: string): Boolean;
+function MCPCancellationTarget(const ALine: string): TJSONData;
+```
+
+The session calls the poll on the handler's own thread whenever the
+handler asks `IsCancelled` and before each in-request notification,
+and only while the running request is not cancelled yet. Returning
+`True` cancels that request. A poll may instead pass a
+`notifications/cancelled` line to `HandleMessage` for the same session,
+which cancels the request the ordinary way; that is the only re-entry
+allowed. `MCPCancellationTarget` returns the `requestId` of a line that
+is a `notifications/cancelled` dispatch would accept (well formed, with
+a string `reason` or none), as a new object the caller owns, or `nil`.
+`IsActiveRequestId` tells whether such an id names the running request,
+matched as `notifications/cancelled` matches it, and
+`CancelsActiveRequest` does both for one line. A transport that queues
+lines classifies each once with `MCPCancellationTarget` and matches the
+kept id on every poll.
+`AUserData` is borrowed and must stay valid until the poll is removed
+or the session is freed, and an exception from the poll reaches the
+handler's `IsCancelled` call. The poll stays on the session across its
+requests ([ADR-0001](../adr/0001-sans-io-core.md#amendment-2026-11-27-93)).
+The stdio loop's poll reads what is waiting on a plain file input, and
+the HTTP binding's reports a closed or reset connection.
+
 ### Schema builder and argument classes
 
 `MCP.Schema` builds the schemas tools register and binds arguments to
@@ -344,7 +380,13 @@ procedure MCPLogToStderr(const AMessage: string);
 graceful shutdown. `RunMCPStdioLoop` is the same loop over arbitrary
 `Text` files, for tests and custom stream transports reusing the
 newline framing. It writes UTF-8 to `AOutput` whatever that file's code
-page, and puts the code page back exactly when it returns.
+page, and puts the code page back exactly when it returns. On a plain
+file input (stdin, a file, a pipe) it reads the handle directly, after
+the bytes the `Text` had already buffered, so a `notifications/cancelled`
+reaches a running handler; a `Text` with its own I/O driver, such as
+one from `AssignStream`, is read through `Text` and learns of a
+cancellation only after the handler returns. A failed read raises
+`EInOutError` once the lines read before it are served.
 
 `MCPLogToStderr` writes one line to stderr and flushes it, under the
 lock every library diagnostic shares, so lines from different threads

@@ -72,8 +72,9 @@ end;
 client name/version and capabilities, the progress token and log level
 (see [Progress and logging](progress-and-logging.md)), the MRTR retry
 payload (below), and `IsCancelled` for cooperative cancellation.
-Handlers are synchronous — under stdio the loop is read-handle-write,
-so keep them short.
+Handlers are synchronous — under stdio the loop serves one request at
+a time, so keep them short, and have a long one poll `IsCancelled`
+(see [Cancellation](#cancellation)).
 
 Results are built with the helpers in
 [Results and content](../reference/results.md):
@@ -370,11 +371,27 @@ accessors are documented in
 
 ## Cancellation
 
-`notifications/cancelled` flips a per-request token; long-running
-handlers poll `ACtx.IsCancelled` and abandon work. The serial stdio
-transport cannot deliver a cancellation while a handler is running
-(one more reason to keep handlers short); transports with mid-request
-delivery points can.
+A client cancels a request with `notifications/cancelled`, or on
+Streamable HTTP by closing the connection. A long-running handler polls
+`ACtx.IsCancelled` and stops when it turns true; the server then sends
+nothing more for that request, neither notifications nor the response.
+Both transports deliver the cancellation while the handler runs. On
+stdio, `IsCancelled` checks for a `notifications/cancelled` naming the
+request among the lines waiting on stdin, reading what has arrived up
+to about one line's budget; a custom `Text` input learns of it only
+after the handler returns. On HTTP it checks for a closed or reset
+connection, at most every 50 ms. Once cancelled, a request that had
+already opened its SSE stream ends it without a final event.
+`mcpdemo`'s `countdown` tool shows the pattern:
+
+```pascal
+for Tick := 1 to Seconds * 10 do
+begin
+  if ACtx.IsCancelled then
+    Exit(MCPTextResult('cancelled'));
+  Sleep(100);
+end;
+```
 
 > These protocol behaviours implement spec revision 2026-07-28; the
 > dated official-spec citations live in the architecture page's

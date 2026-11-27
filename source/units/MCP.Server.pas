@@ -325,6 +325,22 @@ type
   // user data so procedural transports can register without objects.
   TMCPLineSink = procedure(const ALine: string; AUserData: Pointer);
 
+  TMCPSession = class;
+
+  // A transport's check for a cancellation that arrives while a handler
+  // runs (#93): a closed HTTP connection, a notifications/cancelled
+  // waiting on stdin. The request consults it whenever the handler asks
+  // IsCancelled and before each in-request notification, on the
+  // handler's own thread, and only while the request is not cancelled
+  // yet. Return True to cancel the active request. A poll may instead
+  // pass a notifications/cancelled line to HandleMessage for the same
+  // session, which cancels the request the ordinary way; that is the one
+  // re-entry allowed, as any other message would be handled in the
+  // middle of the running one. An exception from the poll propagates to
+  // the handler's IsCancelled call.
+  TMCPCancellationPoll = function(ASession: TMCPSession;
+    AUserData: Pointer): Boolean;
+
   // One transport connection's legacy lifecycle. ClientCapabilities is
   // an owned clone of initialize.params.capabilities; request contexts
   // borrow it only for the synchronous handler call.
@@ -338,6 +354,8 @@ type
     FLegacyIdentity: TObject;
     FOwner: TMCPServer; // borrowed: the server must outlive its sessions
     FCurrentRequestToken: TObject; // borrowed: dispatch owns the token
+    FCancellationPoll: TMCPCancellationPoll;
+    FCancellationPollData: Pointer;
     // ARequestId is borrowed; the returned token is owned by dispatch.
     function BeginRequest(ARequestId: TJSONData): TObject;
     procedure EndRequest(AToken: TObject);
@@ -361,6 +379,21 @@ type
     // the currently active matching string/number id is accepted;
     // unknown, finished, malformed, and repeated signals are no-ops.
     procedure CancelRequest(ARequestId: TJSONData);
+    // Installs the transport's cancellation poll for this session's
+    // requests (#93); nil removes it. AUserData is borrowed and passed
+    // back as is: it must stay valid until the poll is removed or the
+    // session is freed.
+    procedure SetCancellationPoll(APoll: TMCPCancellationPoll;
+      AUserData: Pointer);
+    // Whether ARequestId (borrowed; nil gives False) names the request
+    // this session is running, matched as notifications/cancelled
+    // matches it: strings by decoded value, numbers by value. With
+    // MCPCancellationTarget, lets a transport pick out the cancellation
+    // that concerns the running request (#93).
+    function IsActiveRequestId(ARequestId: TJSONData): Boolean;
+    // Whether ALine is a notifications/cancelled that HandleMessage
+    // would accept for the request this session is running.
+    function CancelsActiveRequest(const ALine: string): Boolean;
   end;
 
   TMCPServer = class
@@ -862,6 +895,13 @@ function MCPMessages(const AMessages: array of TJSONObject): TJSONArray;
 function MCPCompleteFrom(const AValue: string;
   const ACandidates: array of string): TMCPCompletion;
 
+// The requestId of ALine when it is a notifications/cancelled that
+// HandleMessage would accept (params present, a string reason or none),
+// as a new object the caller owns; nil for any other line. A transport
+// that classifies queued lines once keeps the result and matches it
+// with TMCPSession.IsActiveRequestId (#93).
+function MCPCancellationTarget(const ALine: string): TJSONData;
+
 // In-request notifications, callable from any handler. Both are
 // silent no-ops when the precondition is missing, so handlers can
 // call them unconditionally:
@@ -932,11 +972,12 @@ type
   TMCPRequestDispatch = class
   private
     FCancellationToken: TMCPRequestCancellationToken;
+    FSession: TMCPSession; // borrowed: its cancellation poll, if any
     FSink: TMCPLineSink;
     FSinkData: Pointer;
   public
     constructor Create(ACancellationToken: TMCPRequestCancellationToken;
-      ASink: TMCPLineSink; ASinkData: Pointer);
+      ASession: TMCPSession; ASink: TMCPLineSink; ASinkData: Pointer);
     function IsCancelled: Boolean;
     // Takes ownership of AParams.
     procedure EmitNotification(const AMethod: string;
@@ -1013,26 +1054,42 @@ end;
 
 constructor TMCPRequestDispatch.Create(
   ACancellationToken: TMCPRequestCancellationToken;
-  ASink: TMCPLineSink; ASinkData: Pointer);
+  ASession: TMCPSession; ASink: TMCPLineSink; ASinkData: Pointer);
 begin
   inherited Create;
   FCancellationToken := ACancellationToken;
+  FSession := ASession;
   FSink := ASink;
   FSinkData := ASinkData;
 end;
 
 function TMCPRequestDispatch.IsCancelled: Boolean;
 begin
-  Result := (FCancellationToken <> nil) and
-    FCancellationToken.IsCancelled;
+  if FCancellationToken = nil then
+    Exit(False);
+  // The transport's poll first (#93): it may cancel the request itself
+  // (True) or deliver a notifications/cancelled that does.
+  if not FCancellationToken.FCancelled and (FSession <> nil) and
+    Assigned(FSession.FCancellationPoll) and
+    FSession.FCancellationPoll(FSession, FSession.FCancellationPollData) then
+    FCancellationToken.FCancelled := True;
+  Result := FCancellationToken.IsCancelled;
 end;
 
 procedure TMCPRequestDispatch.EmitNotification(const AMethod: string;
   AParams: TJSONObject);
 var
   Line: string;
+  Cancelled: Boolean;
 begin
-  if IsCancelled then
+  // The poll can raise; AParams is owned here on every path.
+  try
+    Cancelled := IsCancelled;
+  except
+    AParams.Free;
+    raise;
+  end;
+  if Cancelled then
   begin
     AParams.Free;
     Exit;
@@ -1232,14 +1289,24 @@ begin
   Result := -1;
 end;
 
+// Checked once a notification is due: the server's own emitter checks
+// cancellation itself (TMCPRequestDispatch.EmitNotification, which
+// consults the transport's poll), so only another notifier, as a
+// handler outside dispatch might have, is checked here (#93 review).
+function CancelledBeforeEmit(const ACtx: TMCPRequestContext): Boolean;
+begin
+  Result := (TMethod(ACtx.Notifier).Code <>
+    Pointer(@TMCPRequestDispatch.EmitNotification)) and ACtx.IsCancelled;
+end;
+
 procedure MCPReportProgress(const ACtx: TMCPRequestContext;
   AProgress: Double; ATotal: Double; const AMessage: string);
 var
   NotificationParams, Params: TJSONObject;
   ProgressToken: TJSONData;
 begin
-  if ACtx.IsCancelled or
-     not (ACtx.HasProgressToken and Assigned(ACtx.Notifier)) then
+  if not (ACtx.HasProgressToken and Assigned(ACtx.Notifier)) or
+    CancelledBeforeEmit(ACtx) then
     Exit;
   Params := TJSONObject.Create;
   try
@@ -1279,10 +1346,9 @@ procedure MCPLogMessage(const ACtx: TMCPRequestContext;
 var
   NotificationParams, Params: TJSONObject;
 begin
-  if ACtx.IsCancelled or (ACtx.LogLevel = '') or
-     not Assigned(ACtx.Notifier) then
-    Exit;
-  if LogSeverity(ALevel) < LogSeverity(ACtx.LogLevel) then
+  if (ACtx.LogLevel = '') or not Assigned(ACtx.Notifier) or
+    (LogSeverity(ALevel) < LogSeverity(ACtx.LogLevel)) or
+    CancelledBeforeEmit(ACtx) then
     Exit;
   Params := TJSONObject.Create;
   try
@@ -1738,6 +1804,68 @@ end;
 procedure TMCPSession.CancelRequest(ARequestId: TJSONData);
 begin
   TryCancelRequest(ARequestId);
+end;
+
+procedure TMCPSession.SetCancellationPoll(APoll: TMCPCancellationPoll;
+  AUserData: Pointer);
+begin
+  FCancellationPoll := APoll;
+  FCancellationPollData := AUserData;
+end;
+
+// The requestId of a well-formed notifications/cancelled (borrowed from
+// AMessage), or nil: params present, and a reason absent or a string.
+// A malformed reason invalidates the whole notification. Spec verified
+// 2026-07-21:
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation
+function CancellationRequestId(const AMessage: TJSONRPCMessage): TJSONData;
+var
+  ReasonData: TJSONData;
+begin
+  Result := nil;
+  if (AMessage.Kind <> jrkNotification) or
+    (AMessage.Method <> 'notifications/cancelled') or
+    (AMessage.Params = nil) then
+    Exit;
+  ReasonData := AMessage.Params.Find('reason');
+  if (ReasonData = nil) or (ReasonData.JSONType = jtString) then
+    Result := AMessage.Params.Find('requestId');
+end;
+
+function MCPCancellationTarget(const ALine: string): TJSONData;
+var
+  Msg: TJSONRPCMessage;
+  Target: TJSONData;
+begin
+  Result := nil;
+  Msg := ParseJSONRPCMessage(ALine);
+  try
+    Target := CancellationRequestId(Msg);
+    if Target <> nil then
+      Result := Target.Clone;
+  finally
+    FreeJSONRPCMessage(Msg);
+  end;
+end;
+
+function TMCPSession.IsActiveRequestId(ARequestId: TJSONData): Boolean;
+begin
+  Result := (FCurrentRequestToken <> nil) and
+    TMCPRequestCancellationToken(FCurrentRequestToken).Matches(ARequestId);
+end;
+
+function TMCPSession.CancelsActiveRequest(const ALine: string): Boolean;
+var
+  Target: TJSONData;
+begin
+  if FCurrentRequestToken = nil then
+    Exit(False);
+  Target := MCPCancellationTarget(ALine);
+  try
+    Result := IsActiveRequestId(Target);
+  finally
+    Target.Free;
+  end;
 end;
 
 procedure TMCPSession.CompleteLegacyInitialize;
@@ -3003,19 +3131,11 @@ begin
         begin
           if Msg.Method = 'notifications/initialized' then
             ASession.CompleteLegacyInitialize;
-          if (Msg.Method = 'notifications/cancelled') and
-             (Msg.Params <> nil) then
+          // Accepted reasons are logged best-effort for debugging.
+          if ASession.TryCancelRequest(CancellationRequestId(Msg)) then
           begin
-            // A malformed reason invalidates the whole notification;
-            // accepted reasons are logged best-effort for debugging.
-            // Spec verified 2026-07-21:
-            // https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation
             ReasonData := Msg.Params.Find('reason');
-            if ((ReasonData = nil) or
-                (ReasonData.JSONType = jtString)) and
-               ASession.TryCancelRequest(
-                 Msg.Params.Find('requestId')) and
-               (ReasonData <> nil) then
+            if ReasonData <> nil then
               TryLogToStderr('MCP cancellation reason: ' +
                 SanitizeLogText(ReasonData.AsString));
           end;
@@ -3103,7 +3223,7 @@ begin
     Exit(DispatchLegacyRequest(ASession, ASink, ASinkData, AMessage));
 
   Dispatch := TMCPRequestDispatch.Create(
-    TMCPRequestCancellationToken(ASession.FCurrentRequestToken),
+    TMCPRequestCancellationToken(ASession.FCurrentRequestToken), ASession,
     ASink, ASinkData);
   try
     if not ExtractRequestContext(AMessage.Params, [MCP_PROTOCOL_VERSION],
@@ -3185,7 +3305,7 @@ begin
       'notifications/initialized first'));
 
   Dispatch := TMCPRequestDispatch.Create(
-    TMCPRequestCancellationToken(ASession.FCurrentRequestToken),
+    TMCPRequestCancellationToken(ASession.FCurrentRequestToken), ASession,
     ASink, ASinkData);
   try
     Ctx := ASession.LegacyContext(AMessage.Params);

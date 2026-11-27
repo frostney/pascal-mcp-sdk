@@ -31,3 +31,16 @@ never while a request is handled, and a server configured with
 first seal was rejected: the frozen server is shared across the HTTP
 binding's threads, so lazy creation would need a lock in the
 dispatch path.
+
+## Amendment (2026-11-27, #93)
+
+One hook outlives a call: a transport installs a cancellation poll on
+its session (`TMCPSession.SetCancellationPoll`) with borrowed user
+data, and the session keeps it across that connection's requests. The
+core calls it only while one of the session's requests runs, on the
+handler's thread, when the handler asks `IsCancelled` or a
+notification is due. Passing the poll with each `HandleMessage` call
+was rejected: the poll belongs to the connection (stdio's input
+reader, HTTP's socket) rather than to one request, and every
+transport would have to pass the same pair on every call to keep the
+core from holding it. The session holds no other transport state.

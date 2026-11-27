@@ -144,6 +144,11 @@ type
     procedure TestOversizedBody;
     procedure TestDeclaredCapabilityRefusedBeforeStreaming;
     procedure TestUndeclaredCapabilityStillEndsTheStream;
+    function AbandonWaiter(AReset: Boolean; const AExtra: string;
+      out ASawOpen, AResetSet: Boolean): string;
+    procedure TestBytesBeforeCloseStillCancel;
+    procedure TestDisconnectCancelsSilentHandler;
+    procedure TestResetCancelsSilentHandler;
     procedure TestSSEStream;
     procedure TestCompletionStreams;
     procedure TestStreamingProtocolErrorIsJSON;
@@ -234,6 +239,42 @@ end;
 
 // Emits nothing while it runs: a streaming-opted call to this tool
 // must still come back as a single JSON object.
+var
+  // How the polling handler ended: 'cancelled' or 'finished'. Written
+  // on the connection thread before WaiterDone is set, read after it.
+  WaiterOutcome: string;
+  // Set once the handler's first poll found the connection open, and
+  // once it has ended.
+  WaiterEntered, WaiterDone: PRTLEvent;
+  // The first poll found the connection open.
+  WaiterSawOpen: Boolean;
+
+// Polls IsCancelled for up to three seconds without writing anything:
+// only the binding's disconnect poll can cancel it (#93).
+function WaiterHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  I: Integer;
+begin
+  WaiterOutcome := 'finished';
+  for I := 1 to 300 do
+  begin
+    if ACtx.IsCancelled then
+    begin
+      WaiterOutcome := 'cancelled';
+      Break;
+    end;
+    if I = 1 then
+    begin
+      WaiterSawOpen := True;
+      RTLEventSetEvent(WaiterEntered);
+    end;
+    Sleep(10);
+  end;
+  Result := MCPTextResult(WaiterOutcome);
+  RTLEventSetEvent(WaiterDone);
+end;
+
 function QuietHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
@@ -344,6 +385,7 @@ begin
     '"limit":{"type":"integer","x-mcp-header":"Limit"},' +
     '"dry":{"type":"boolean","x-mcp-header":"Dry"}}}}}',
     QuietHandler).ApplicationValidated;
+  FServer.RegisterTool('waiter', 'Waits', '{"type":"object"}', WaiterHandler);
   FTransport := TMCPHTTPServer.Create(FServer);
   FTransport.Port := FindFreePort;
   FBaseUrl := 'http://127.0.0.1:' + IntToStr(FTransport.Port);
@@ -1314,6 +1356,99 @@ begin
   Expect<Boolean>(ProgressThenFinalRefusal(Body)).ToBe(True);
 end;
 
+// Sends a waiter call, waits until the handler's first poll found the
+// connection open, then gives up on it: an orderly close, or with
+// AReset a reset (SO_LINGER 0). Returns how the handler ended.
+function THTTPBinding.AbandonWaiter(AReset: Boolean; const AExtra: string;
+  out ASawOpen, AResetSet: Boolean): string;
+type
+  {$IFDEF WINDOWS}
+  TResetLinger = record
+    OnOff, Seconds: Word;
+  end;
+  {$ELSE}
+  TResetLinger = record
+    OnOff, Seconds: LongInt;
+  end;
+  {$ENDIF}
+var
+  Sock: TInetSocket;
+  Body, Request: string;
+  Linger: TResetLinger;
+begin
+  RTLEventResetEvent(WaiterEntered);
+  RTLEventResetEvent(WaiterDone);
+  WaiterOutcome := '';
+  WaiterSawOpen := False;
+  AResetSet := False;
+  Body := CallLine(1, 'waiter');
+  Request := 'POST /mcp HTTP/1.1'#13#10 +
+    'Host: 127.0.0.1:' + IntToStr(FTransport.Port) + #13#10 +
+    'Content-Type: application/json'#13#10 +
+    'Accept: application/json, text/event-stream'#13#10 +
+    'MCP-Protocol-Version: ' + MCP_PROTOCOL_VERSION + #13#10 +
+    'Mcp-Method: tools/call'#13#10 + 'Mcp-Name: waiter'#13#10 +
+    'Content-Length: ' + IntToStr(Length(Body)) + #13#10#13#10 + Body;
+  Sock := TInetSocket.Create('127.0.0.1', FTransport.Port);
+  try
+    Sock.WriteBuffer(Request[1], Length(Request));
+    RTLEventWaitFor(WaiterEntered, 5000);
+    // Bytes after the request, sent once the handler is running, then
+    // the close behind them.
+    if AExtra <> '' then
+      Sock.WriteBuffer(AExtra[1], Length(AExtra));
+    if AReset then
+    begin
+      Linger.OnOff := 1;
+      Linger.Seconds := 0;
+      AResetSet := fpsetsockopt(Sock.Handle, SOL_SOCKET, SO_LINGER, @Linger,
+        SizeOf(Linger)) = 0;
+    end;
+  finally
+    // The client gives up: closing the connection is the cancellation.
+    Sock.Free;
+  end;
+  RTLEventWaitFor(WaiterDone, 5000);
+  // Read after the handler's last write, which WaiterDone orders.
+  ASawOpen := WaiterSawOpen;
+  Result := WaiterOutcome;
+end;
+
+// Closing the connection cancels the request (spec verified 2026-11-27:
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#cancellation),
+// and the handler learns it while it runs, though it never writes.
+procedure THTTPBinding.TestDisconnectCancelsSilentHandler;
+var
+  SawOpen, ResetSet: Boolean;
+begin
+  // The handler first saw the connection open, then cancelled: the
+  // close caused it.
+  Expect<string>(AbandonWaiter(False, '', SawOpen, ResetSet))
+    .ToBe('cancelled');
+  Expect<Boolean>(SawOpen).ToBe(True);
+end;
+
+// Bytes the client sends after its request do not hide the close
+// behind them (#93 review).
+procedure THTTPBinding.TestBytesBeforeCloseStillCancel;
+var
+  SawOpen, ResetSet: Boolean;
+begin
+  Expect<string>(AbandonWaiter(False, 'extra bytes', SawOpen, ResetSet))
+    .ToBe('cancelled');
+  Expect<Boolean>(SawOpen).ToBe(True);
+end;
+
+// A reset is a closed connection too (#93 review).
+procedure THTTPBinding.TestResetCancelsSilentHandler;
+var
+  SawOpen, ResetSet: Boolean;
+begin
+  Expect<string>(AbandonWaiter(True, '', SawOpen, ResetSet)).ToBe('cancelled');
+  Expect<Boolean>(SawOpen).ToBe(True);
+  Expect<Boolean>(ResetSet).ToBe(True);
+end;
+
 procedure THTTPBinding.SetupTests;
 begin
   Test('completion/complete streams when its callback notifies',
@@ -1385,6 +1520,12 @@ begin
     TestDeclaredCapabilityRefusedBeforeStreaming);
   Test('undeclared capability after progress → error ends the stream',
     TestUndeclaredCapabilityStillEndsTheStream);
+  Test('client disconnect cancels a handler that never writes',
+    TestDisconnectCancelsSilentHandler);
+  Test('a reset connection cancels a handler that never writes',
+    TestResetCancelsSilentHandler);
+  Test('bytes sent before an orderly close do not hide it',
+    TestBytesBeforeCloseStillCancel);
   Test('notification-opted request → SSE stream, response last',
     TestSSEStream);
   Test('notification-opted protocol error → 400 JSON, -32022',
@@ -1398,6 +1539,10 @@ begin
 end;
 
 begin
+  WaiterEntered := RTLEventCreate;
+  WaiterDone := RTLEventCreate;
   TestRunnerProgram.AddSuite(THTTPBinding.Create('Transport.HTTP: binding'));
   TestRunnerProgram.Run;
+  RTLEventDestroy(WaiterDone);
+  RTLEventDestroy(WaiterEntered);
 end.

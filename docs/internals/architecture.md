@@ -93,8 +93,10 @@ errors.
 
 The one addition to line-in/line-out is the **per-call notification
 sink**: the sink and its user data are arguments to the
-`HandleMessage` overload, so neither shared server state nor a session
-retains transport state.
+`HandleMessage` overload, so shared server state retains no transport
+state. A session keeps one transport hook: the cancellation poll and
+its borrowed user data (#93), installed for the connection and
+consulted only while one of its requests runs.
 
 ```mermaid
 sequenceDiagram
@@ -127,7 +129,8 @@ Modern 2026-07-28 requests remain **stateless**: every request
 validates its own `_meta`, and the session contributes no negotiated
 identity to that path. The session exists for two things only —
 isolating legacy lifecycle/identity, and exposing the one currently
-active cooperative-cancellation token.
+active cooperative-cancellation token, together with the transport's
+cancellation poll.
 
 ```mermaid
 stateDiagram-v2
@@ -136,16 +139,36 @@ stateDiagram-v2
     Running --> Running: handler polls IsCancelled → false
     Running --> Idle: handler completes<br/>response written
     Running --> Cancelled: notifications/cancelled<br/>matches the active request id
+    Running --> Cancelled: transport poll reports cancellation<br/>(closed HTTP connection)
     Cancelled --> Idle: handler observes IsCancelled<br/>server suppresses notifications + response
 ```
 
 `notifications/cancelled` validates its payload, matches string ids by
 decoded value and numeric ids by value, and flips that token; handlers
 poll `TMCPRequestContext.IsCancelled`, after which the server
-suppresses notifications and the final response. The synchronous stdio
-read-handle-write loop cannot receive a cancellation while a handler
-is running, so stdio handlers should stay short; a future transport
-with mid-request delivery points can use the same session entry point.
+suppresses notifications and the final response.
+
+A cancellation can arrive while the handler runs (#93). Each transport
+installs a cancellation poll on its session
+(`TMCPSession.SetCancellationPoll`), which the request consults
+whenever the handler asks `IsCancelled` and before each in-request
+notification, on the handler's own thread. On a plain file input the
+stdio loop reads stdin into its own buffer; its poll checks the lines
+already queued, then reads at most one chunk that is waiting, without
+blocking. A `notifications/cancelled` the core accepts for the running
+request (`MCPCancellationTarget`, classified once per line, matched
+with `TMCPSession.IsActiveRequestId`) is taken out of the queue and the
+poll reports it, which cancels the request; it is not dispatched, so no
+reason is logged from inside the handler's `IsCancelled`. Other
+lines, cancellations for queued requests included, stay queued in
+order, and once about one line's budget is queued the poll stops
+reading, so a cancellation behind that backlog waits its turn. The
+HTTP binding's poll reports a closed or reset connection, checked at
+most every 50 ms. No thread is involved, so a stdio-only program needs
+no thread driver; cancellation stays cooperative, as handlers already
+code it. The poll lives on the session rather than arriving with each
+call, as [ADR-0001](../adr/0001-sans-io-core.md#amendment-2026-11-27-93)
+records.
 
 ## Registration and handler model
 
@@ -258,6 +281,9 @@ against the published final text
   [`_meta` + error codes](https://modelcontextprotocol.io/specification/2026-07-28/basic/index),
   [versioning](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning),
   [server/discover](https://modelcontextprotocol.io/specification/2026-07-28/server/discover),
+  [cancellation](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation),
+  [Streamable HTTP](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
+  (cancellation pages verified 2026-11-27),
   [tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools),
   [resources](https://modelcontextprotocol.io/specification/2026-07-28/server/resources).
 - The 2026-08-08 re-verification diffed the

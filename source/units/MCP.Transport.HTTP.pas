@@ -76,10 +76,19 @@ unit MCP.Transport.HTTP;
 //     is the stream's final event, not a mapped status (#84). All
 //     other requests get a single application/json object. (The spec
 //     lets the server choose per request; this is the policy.)
-//   - closing the SSE response stream is the cancellation signal:
-//     when a stream write fails, the failure aborts the running
-//     handler, the core converts it into a response the transport can
-//     no longer deliver, and nothing further is sent for that request
+//   - closing the connection is the cancellation signal: the
+//     session's cancellation poll (#93) reports a closed socket (an
+//     orderly close, a reset or another terminal error), checked at
+//     most every 50 ms, whenever the handler asks IsCancelled, so a
+//     handler that never writes stops too. Receive EOF cannot tell a
+//     client that closed only its sending side from one that closed
+//     both, so that client has cancelled too: its request ends and it
+//     gets no JSON-RPC message: an empty 202, or, when its SSE stream
+//     had already opened, the end of that stream without a final
+//     event. And when
+//     a stream write fails, the failure aborts the running handler,
+//     the core converts it into a response the transport can no
+//     longer deliver, and nothing further is sent for that request
 //     — subscriptions/listen streams do not arise because the core
 //     advertises no subscription capability.
 //
@@ -193,7 +202,12 @@ implementation
 uses
   base64,
   Math,
-  {$IFDEF DARWIN}
+  {$IFDEF UNIX}
+  BaseUnix,
+  {$ENDIF}
+  {$IFDEF WINDOWS}
+  winsock2,
+  {$ELSE}
   sockets,
   {$ENDIF}
   ssockets;
@@ -983,6 +997,107 @@ begin
   AResponse.Content := ABody;
 end;
 
+type
+  // The poll state of one POST (#93): its socket and when it was last
+  // checked.
+  THTTPDisconnectPoll = record
+    Socket: THandle;
+    LastCheck: QWord;
+    Closed: Boolean;
+  end;
+  PHTTPDisconnectPoll = ^THTTPDisconnectPoll;
+
+const
+  // How often a polling handler costs a system call.
+  DISCONNECT_POLL_INTERVAL_MS = 50;
+
+const
+  // Bytes one disconnect check discards at most; a client sending more
+  // than this after its request is seen closed on a later check.
+  DISCONNECT_DRAIN_LIMIT = 16 * 1024;
+
+// The client closed the connection: the socket reports a hang-up or an
+// error, or reading it finds the end of the stream (an orderly close)
+// or a terminal error such as a reset. The request body was read in
+// full before dispatch, and the binding serves one request per
+// connection, so bytes still arriving are not a request: they are read
+// and discarded, up to DISCONNECT_DRAIN_LIMIT per check, so an orderly
+// close behind them is still seen (#93 review); a peek would keep
+// finding the first of them. Errors that only say to try again leave
+// the request running. Receive EOF cannot tell a client that closed
+// only its sending side from one that closed both, so either counts as
+// having cancelled: the request ends and nothing more about it is sent.
+function SocketClosedByPeer(ASocket: THandle): Boolean;
+var
+  {$IFDEF WINDOWS}
+  ReadSet: winsock2.TFDSet;
+  Timeout: winsock2.TTimeVal;
+  Failure: Integer;
+  {$ELSE}
+  Fd: pollfd;
+  Failure: cint;
+  {$ENDIF}
+  Buffer: array[0..4095] of Byte;
+  Got, Drained: Integer;
+begin
+  Result := False;
+  Drained := 0;
+  while Drained < DISCONNECT_DRAIN_LIMIT do
+  begin
+    {$IFDEF WINDOWS}
+    // A Windows fd_set lists sockets, so any socket value fits it.
+    winsock2.FD_ZERO(ReadSet);
+    winsock2.FD_SET(ASocket, ReadSet);
+    Timeout.tv_sec := 0;
+    Timeout.tv_usec := 0;
+    if winsock2.select(0, @ReadSet, nil, nil, @Timeout) <= 0 then
+      Exit;
+    Got := winsock2.recv(ASocket, Buffer, SizeOf(Buffer), 0);
+    if Got < 0 then
+    begin
+      Failure := winsock2.WSAGetLastError;
+      Exit((Failure <> WSAEWOULDBLOCK) and (Failure <> WSAEINTR) and
+        (Failure <> WSAEINPROGRESS));
+    end;
+    {$ELSE}
+    // poll, not select: a descriptor above 1023 fits no TFDSet.
+    Fd.fd := ASocket;
+    Fd.events := POLLIN;
+    Fd.revents := 0;
+    if fpPoll(@Fd, 1, 0) <= 0 then
+      Exit;
+    if Fd.revents and (POLLERR or POLLHUP or POLLNVAL) <> 0 then
+      Exit(True);
+    Got := fpRecv(ASocket, @Buffer, SizeOf(Buffer), 0);
+    if Got < 0 then
+    begin
+      Failure := fpgeterrno;
+      Exit((Failure <> ESysEAGAIN) and (Failure <> ESysEINTR));
+    end;
+    {$ENDIF}
+    if Got = 0 then
+      Exit(True);
+    Inc(Drained, Got);
+  end;
+end;
+
+// The session's cancellation poll on HTTP (#93): closing the
+// connection is how a client cancels, so a handler that never writes
+// still learns about it. Checked at most every 50 ms.
+function HTTPDisconnectPoll(ASession: TMCPSession;
+  AUserData: Pointer): Boolean;
+begin
+  with PHTTPDisconnectPoll(AUserData)^ do
+  begin
+    if not Closed and (GetTickCount64 - LastCheck >= DISCONNECT_POLL_INTERVAL_MS) then
+    begin
+      LastCheck := GetTickCount64;
+      Closed := SocketClosedByPeer(Socket);
+    end;
+    Result := Closed;
+  end;
+end;
+
 // Dispatch one request body through the core and answer it — a
 // single JSON object, or an SSE stream when AStream is set and the
 // handler actually emits a notification.
@@ -994,9 +1109,14 @@ var
   Stream: TSSEStream;
   ResponseLine: string;
   Produced: Boolean;
+  Poll: THTTPDisconnectPoll;
 begin
   Session := FServer.CreateSession;
   try
+    Poll.Socket := ARequest.Connection.Socket.Handle;
+    Poll.LastCheck := 0;
+    Poll.Closed := False;
+    Session.SetCancellationPoll(HTTPDisconnectPoll, @Poll);
     if AStream then
     begin
       // Nothing is committed up front: the sink opens the stream on
