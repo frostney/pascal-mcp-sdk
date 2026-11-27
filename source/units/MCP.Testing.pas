@@ -47,8 +47,14 @@ type
     FNotifications: TStringList;
     FInputResponses: TJSONObject;
     FNextId: Integer;
+    FLastResponseLine: string;
+    FProgressToken: string;
+    FLogLevel: string;
     function Envelope(const AParamsJson: string): TJSONObject;
+    // One round: sends AMethod with AParams (consumed) and returns the
+    // parsed response. Notifications accumulate; Begin clears them.
     function Send(const AMethod: string; AParams: TJSONObject): TJSONObject;
+    function FirstRound(const AMethod: string; AParams: TJSONObject): TJSONObject;
     function SendAnsweringInput(const AMethod: string;
       AParams: TJSONObject): TJSONObject;
   public
@@ -58,21 +64,37 @@ type
     // The clientCapabilities every request declares, as JSON
     // ('{"elicitation":{},"sampling":{}}'); '{}' by default.
     procedure SetClientCapabilities(const AJson: string);
+    // The clientInfo every request carries ('mcp-test-client', '1.0.0'
+    // by default), as handlers see it in ACtx.ClientName and
+    // ACtx.ClientVersion.
     property ClientName: string read FClientName write FClientName;
     property ClientVersion: string read FClientVersion write FClientVersion;
+    // When not '', every request opts into progress notifications with
+    // this progressToken, and into log messages at and above this level
+    // ('debug' .. 'emergency'), so a typed helper's call records what
+    // MCPReportProgress and MCPLogMessage send.
+    property ProgressToken: string read FProgressToken write FProgressToken;
+    property LogLevel: string read FLogLevel write FLogLevel;
 
     // A canned answer for the input request AKey of an input_required
     // round, as the response JSON the client would send
     // ('{"action":"accept","content":{"name":"Ada"}}'). CallTool and
     // GetPrompt retry with the answers and the echoed requestState while
-    // every requested key has one; otherwise they return the
-    // input_required response as it is.
+    // every requested key has one, at most MAX_INPUT_ROUNDS (10) times;
+    // otherwise, or at that limit, they return the latest response,
+    // input_required as it is.
     procedure AnswerInput(const AKey, AResponseJson: string);
+    // Forgets every canned answer.
     procedure ClearInputAnswers;
 
+    // Every helper below returns the whole parsed JSON-RPC response, a
+    // result or an error, as a new object the caller frees; each raises
+    // EMCPTesting when the server sends no response or a JSON argument
+    // is malformed. JSON text is parsed as the server parses it
+    // (MCPParseJSON), escapes included.
+
     // One request with the _meta envelope added to AParamsJson (an
-    // object). Returns the whole parsed JSON-RPC response, which the
-    // caller frees; raises EMCPTesting when the server sends none.
+    // object); a key of yours in _meta wins over the envelope's.
     function Request(const AMethod: string;
       const AParamsJson: string = '{}'): TJSONObject;
 
@@ -88,40 +110,40 @@ type
     // ARefJson: '{"type":"ref/prompt","name":"greet"}' or a ref/resource.
     function Complete(const ARefJson, AArgument, AValue: string): TJSONObject;
 
-    // The notification lines (progress, log messages) the last request
-    // emitted, in order.
+    // The notification lines (progress, log messages) the last helper
+    // call emitted, in order, across every input round it answered.
+    // Owned by the client; cleared when the next call starts.
     property Notifications: TStringList read FNotifications;
+    // The raw response line of the last round, as the server wrote it,
+    // for byte-exact assertions.
+    property LastResponseLine: string read FLastResponseLine;
+    // The client's own session (owned), for calls into the server that
+    // need one, such as HandleMessage with a hand-written line.
     property Session: TMCPSession read FSession;
   end;
 
 implementation
 
 uses
-  jsonparser,
-  jsonscanner,
+  MCP.JSONRPC,
   MCP.Protocol;
 
 const
   MAX_INPUT_ROUNDS = 10;
 
-// Parses JSON text as the library does (UTF-8, strict); raises on
-// anything but an object.
+// Parses JSON text as the server does (MCPParseJSON: UTF-8, strict,
+// non-ASCII escapes decoded first); raises EMCPTesting on anything but
+// an object.
 function ParseObject(const AJson, AWhat: string): TJSONObject;
 var
-  Parser: TJSONParser;
   Data: TJSONData;
 begin
-  Parser := TJSONParser.Create(AJson, [joUTF8, joStrict]);
   try
-    try
-      Data := Parser.Parse;
-    except
-      on E: Exception do
-        raise EMCPTesting.CreateFmt('%s is not valid JSON: %s',
-          [AWhat, E.Message]);
-    end;
-  finally
-    Parser.Free;
+    Data := MCPParseJSON(AJson);
+  except
+    on E: Exception do
+      raise EMCPTesting.CreateFmt('%s is not valid JSON: %s',
+        [AWhat, E.Message]);
   end;
   if (Data = nil) or (Data.JSONType <> jtObject) then
   begin
@@ -206,9 +228,12 @@ begin
     Info.Add('version', FClientVersion);
     Meta.Add(META_KEY_CLIENT_INFO, Info);
   end;
+  if (FProgressToken <> '') and (Meta.Find('progressToken') = nil) then
+    Meta.Add('progressToken', FProgressToken);
+  if (FLogLevel <> '') and (Meta.Find(META_KEY_LOG_LEVEL) = nil) then
+    Meta.Add(META_KEY_LOG_LEVEL, FLogLevel);
 end;
 
-// Sends AMethod with AParams (consumed) and returns the response.
 function TMCPTestClient.Send(const AMethod: string;
   AParams: TJSONObject): TJSONObject;
 var
@@ -218,7 +243,7 @@ begin
   Inc(FNextId);
   Message := TJSONObject.Create;
   try
-    Message.Add('jsonrpc', '2.0');
+    Message.Add('jsonrpc', JSONRPC_VERSION);
     Message.Add('id', FNextId);
     Message.Add('method', AMethod);
     Message.Add('params', AParams);
@@ -226,11 +251,20 @@ begin
   finally
     Message.Free;
   end;
-  FNotifications.Clear;
   if not FServer.HandleMessage(FSession, Line, CollectNotification,
     FNotifications, Response) then
     raise EMCPTesting.CreateFmt('%s produced no response', [AMethod]);
+  FLastResponseLine := Response;
   Result := ParseObject(Response, 'the response');
+end;
+
+// The first round of a helper call: its notifications start empty and
+// collect across every round the call answers (#97 review).
+function TMCPTestClient.FirstRound(const AMethod: string;
+  AParams: TJSONObject): TJSONObject;
+begin
+  FNotifications.Clear;
+  Result := Send(AMethod, AParams);
 end;
 
 // Sends AMethod and answers input_required rounds from the canned
@@ -246,11 +280,12 @@ var
 begin
   Retry := TJSONObject(AParams.Clone);
   try
-    Result := Send(AMethod, AParams);
+    Result := FirstRound(AMethod, AParams);
     for Round := 1 to MAX_INPUT_ROUNDS do
     begin
       if (Result.FindPath('result.resultType') = nil) or
-        (Result.FindPath('result.resultType').AsString <> 'input_required') then
+        (Result.FindPath('result.resultType').AsString <>
+        RESULT_TYPE_INPUT_REQUIRED) then
         Exit;
       ResultObj := TJSONObject(Result.Find('result'));
       Requests := nil;
@@ -289,7 +324,7 @@ end;
 function TMCPTestClient.Request(const AMethod: string;
   const AParamsJson: string): TJSONObject;
 begin
-  Result := Send(AMethod, Envelope(AParamsJson));
+  Result := FirstRound(AMethod, Envelope(AParamsJson));
 end;
 
 function TMCPTestClient.Discover: TJSONObject;
@@ -334,7 +369,7 @@ var
 begin
   Params := Envelope('{}');
   Params.Add('uri', AUri);
-  Result := Send('resources/read', Params);
+  Result := FirstRound('resources/read', Params);
 end;
 
 function TMCPTestClient.ListPrompts: TJSONObject;
@@ -365,7 +400,7 @@ begin
   Argument.Add('name', AArgument);
   Argument.Add('value', AValue);
   Params.Add('argument', Argument);
-  Result := Send('completion/complete', Params);
+  Result := FirstRound('completion/complete', Params);
 end;
 
 end.

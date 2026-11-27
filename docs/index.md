@@ -41,6 +41,8 @@ Task-oriented pages for building and shipping your own MCP server:
   runtime contract, client registration, HTTP deployment posture.
 - [Deploying the HTTP binding](guides/deployment.md) — Docker,
   Vercel, always-on hosts, and the TLS/proxy operator contract.
+- [Testing your server](guides/testing.md) — the in-process test client
+  and a suite for `lwpt test`.
 - [Troubleshooting](guides/troubleshooting.md) — the failure modes
   everyone hits once.
 - [Cookbook](guides/cookbook.md) — complete worked examples, anchored
@@ -56,6 +58,8 @@ The public API surface, page by page:
   return results with.
 - [Client requests](reference/client-requests.md) — MRTR builders and
   accessors: elicitation, sampling, roots.
+- [Test client](reference/testing.md) — `TMCPTestClient`, for
+  testing your own server in-process.
 - [Protocol coverage](reference/protocol-coverage.md) — the
   surface-by-surface record of what the library implements, with
   verification and interop evidence.
