@@ -273,7 +273,9 @@ end;
 function TOpenStream.Step(ASink: TMCPLineSink; ASinkData: Pointer): Int64;
 begin
   CallLog := CallLog + 's';
-  Result := MCPNowMs + 60000;
+  // Never due again, whatever the clock does; half the range leaves the
+  // loop's deadline arithmetic room (#132 review).
+  Result := High(Int64) div 2;
 end;
 
 procedure TOpenStream.Close(ASink: TMCPLineSink; ASinkData: Pointer);
