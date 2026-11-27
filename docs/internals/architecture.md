@@ -411,7 +411,9 @@ The binding's rules, all transport-owned:
   the body before dispatch (`-32020` on mismatch). Which parameters a
   tool marks is a schema fact (`MCPHeaderParameters` in `MCP.Schema`,
   exposed as `TMCPServer.ToolHeaderParameters`); comparing header text
-  is the binding's job.
+  is the binding's job. An extension's routed method, such as
+  `events/poll`, gives its name parameter and header lookup through
+  `TMCPServer.MethodRoute`, checked the same way.
 - JSON-RPC outcomes map onto HTTP statuses: `-32601` → 404;
   parse/invalid/`-32020..-32022` → 400; `-32602` → 400 when the
   request lacks a required `_meta` field (`MissingRequiredMeta` in

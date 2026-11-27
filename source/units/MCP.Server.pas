@@ -565,7 +565,7 @@ type
     function AddTemplate(const AUriTemplate, AName, AMimeType,
       ADescription: string; AReader: TMCPTemplateReader;
       AMethod: TMCPTemplateMethod): TMCPDefinitionOptions;
-    function ServerCapabilities: TJSONObject;
+    function ServerCapabilities(ALegacy: Boolean): TJSONObject;
     // ACallable: the handler or method overload, so a nil one is a
     // mistake, not an empty list.
     procedure AddCompletion(const ARefType, ARefName, AArgument: string;
@@ -676,6 +676,9 @@ type
     // nil resolver or a prefix overlapping another raises EMCPServer.
     procedure RegisterResourceResolver(const AUriPrefix: string;
       AResolver: TMCPResourceResolver);
+    // Declares nothing on the classic initialize for extension AId,
+    // whose methods only 2026-07-28 requests reach (#118 review).
+    procedure RestrictExtensionToModern(const AId: string);
     // On Streamable HTTP, a request for AMethod (registered with
     // RegisterMethod) carries Mcp-Name mirroring params.ANameParam and,
     // with AHeaders, Mcp-Param-* headers for the x-mcp-header parameters
@@ -2517,7 +2520,9 @@ end;
 // ServerCapabilities, verified 2026-11-26 against
 // https://modelcontextprotocol.io/specification/2026-07-28/schema#servercapabilities),
 // so a client does not list what is not there.
-function TMCPServer.ServerCapabilities: TJSONObject;
+function TMCPServer.ServerCapabilities(ALegacy: Boolean): TJSONObject;
+var
+  Extensions: TJSONObject;
 begin
   Result := TJSONObject.Create;
   try
@@ -2530,8 +2535,11 @@ begin
       Result.Add('prompts', TJSONObject.Create);
     if Length(FCompletions) > 0 then
       Result.Add('completions', TJSONObject.Create);
-    if FExtensions.Count > 0 then
-      Result.Add('extensions', FExtensions.Clone);
+    // A classic client is not offered an extension only 2026-07-28
+    // serves (#118 review).
+    Extensions := FHooks.ExtensionsFor(FExtensions, ALegacy);
+    if Extensions <> nil then
+      Result.Add('extensions', Extensions);
   except
     Result.Free;
     raise;
@@ -2594,6 +2602,12 @@ begin
   Problem := FHooks.AddResolver(AUriPrefix, AResolver);
   if Problem <> '' then
     raise EMCPServer.Create(Problem);
+end;
+
+procedure TMCPServer.RestrictExtensionToModern(const AId: string);
+begin
+  EnsureMutable;
+  FHooks.RestrictToModern(AId);
 end;
 
 procedure TMCPServer.RegisterRoute(const AMethod, ANameParam: string;
@@ -3837,7 +3851,7 @@ begin
   ClientCapabilities := nil;
   try
     ClientCapabilities := TJSONObject(CapsData.Clone);
-    Capabilities := ServerCapabilities;
+    Capabilities := ServerCapabilities(True);
     ServerInfo := ServerInfoObject;
 
     InitResult := TJSONObject.Create;
@@ -3897,7 +3911,7 @@ begin
   Versions := TJSONArray.Create;
   Versions.Add(MCP_PROTOCOL_VERSION);
 
-  Capabilities := ServerCapabilities;
+  Capabilities := ServerCapabilities(False);
 
   // serverInfo is a required TOP-LEVEL DiscoverResult field in the
   // wire schema — the _meta stamp alone is not enough; the official

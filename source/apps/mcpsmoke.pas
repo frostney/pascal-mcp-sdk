@@ -926,6 +926,17 @@ begin
       FindPath(Response, 'result.hasMore').AsBoolean,
       'events/poll from a cursor: two occurrences, more waiting');
     Response.Free;
+    // maxAgeMs bounds the replay: one minute back at most, truncated.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":43,"method":"events/poll","params":{' +
+      '"name":"clock.minute","maxAgeMs":60000,"cursor":"' +
+      IntToStr(StrToInt64Def(EventCursor, 0) - 3) + '",' + META_MODERN + '}}');
+    Check((FindPath(Response, 'result.truncated') <> nil) and
+      FindPath(Response, 'result.truncated').AsBoolean and
+      (FindPath(Response, 'result.events') <> nil) and
+      (FindPath(Response, 'result.events').Count <= 2),
+      'events/poll with maxAgeMs: older minutes skipped and truncated');
+    Response.Free;
 
     // The MCP Apps card is an ordinary resources/read (#98).
     Response := RoundTripWithLine(Demo,

@@ -24,7 +24,7 @@ is created, and later mutation raises `EMCPServer`.
 | `CacheScope` | `string` | `'private'` | SEP-2549 `cacheScope`; `'private'` or `'public'` |
 | `RedactErrorDetails` | `Boolean` | `False` | `True` replaces escaped exception detail with a correlation reference, logging the full error to stderr; deliberate errors (`MCPErrorResult`, `EMCPProtocolError`) are sent as written |
 | `DualEra` | `Boolean` | `True` | Answer the classic `initialize` handshake alongside stateless 2026-07-28 requests |
-| `PageSize` | `Integer` | `0` | Entries per page of `tools/list`, `resources/list`, `resources/templates/list` and `prompts/list`, and of `skills/list` and `resources/directory/read` from `MCP.Skills`, with a `nextCursor` while more remain; `0` lists everything at once |
+| `PageSize` | `Integer` | `0` | Entries per page of `tools/list`, `resources/list`, `resources/templates/list` and `prompts/list`, of `skills/list` and `resources/directory/read` from `MCP.Skills`, and of `events/list` from `MCP.Events`, with a `nextCursor` while more remain; `0` lists everything at once |
 | `RequestStateTtlMs` | `Integer` | `600000` | Lifetime of a sealed `requestState` token; must be > 0 |
 | `SetRequestStateKeys(Keys)` | method | random per server instance | HMAC keys for `requestState` sealing, each ≥ 32 bytes; the first seals, all verify |
 | `Name`, `Version` | `string` | — | Read-only, from `Create` |
@@ -307,6 +307,7 @@ procedure RegisterMethod(const AMethod: string; AHandler: TMCPMethodHandler;
   ACacheable: Boolean = False);
 procedure RegisterResourceResolver(const AUriPrefix: string;
   AResolver: TMCPResourceResolver);
+procedure RestrictExtensionToModern(const AId: string);
 procedure RegisterRoute(const AMethod, ANameParam: string;
   AHeaders: TMCPHeaderLookup);
 function MethodRoute(const AMethod: string; out ANameParam: string;
@@ -371,7 +372,9 @@ text before its first variable lies under the prefix. `Adopt` hands the
 server an object to free after its handlers are gone, such as the
 state those handlers read, and `Adopted` finds the first adopted
 object of a class; adopting the same object again changes nothing.
-`RegisterRoute` makes a registered method routable on Streamable HTTP:
+`RestrictExtensionToModern` leaves extension `AId` out of the classic
+`initialize` capabilities, for an extension whose methods answer
+2026-07-28 requests only. `RegisterRoute` makes a registered method routable on Streamable HTTP:
 its requests carry an `Mcp-Name` header mirroring `params.ANameParam`
 and, when `AHeaders` (a `TMCPHeaderLookup`, from `MCP.Extensions`) is
 given, the `Mcp-Param-*` headers it names for that value, checked as for
@@ -486,7 +489,7 @@ procedure RegisterEvent(AServer: TMCPServer; const AName,
 
 | Member | Meaning |
 | --- | --- |
-| `RegisterEvent` | Event type `AName`, delivered by poll, before the server starts. `AInputSchema` (owned) describes the arguments: root type object, `x-mcp-header` annotations as for tools, checked against arguments when inside the server-enforced subset. `APayloadSchema` (owned) describes each occurrence's data, checked when inside the subset. The first call declares the extension with `{}` and serves `events/list` and `events/poll` on 2026-07-28 (`-32601` for a classic client), routed on Streamable HTTP. A duplicate or empty name, a bad schema, a nil check or a call after the server started raises `EMCPServer` |
+| `RegisterEvent` | Event type `AName`, delivered by poll, before the server starts. `AInputSchema` (owned) describes the arguments: root type object, `x-mcp-header` annotations as for tools, checked against arguments when inside the server-enforced subset. `APayloadSchema` (owned) describes each occurrence's data, checked when inside the subset. The first call declares the extension with `{}` on `server/discover` only (`RestrictExtensionToModern`) and serves `events/list` and `events/poll` on 2026-07-28 (`-32601` for a classic client), routed on Streamable HTTP. A duplicate or empty name, a bad schema, a nil check or a call after the server started raises `EMCPServer` |
 | `TMCPEventQuery` | One poll: the arguments, the cursor or `FromNow` for a null or absent one, and the client's `maxAgeMs` and `maxEvents` |
 | `TMCPEventPoll` | A check's answer: at most `MaxEvents` occurrences, the cursor after them (null with `NoReplay`), `HasMore`, `Truncated` and `NextPollMs`. Events on a poll from now, more than `MaxEvents`, or an occurrence without object data, an RFC 3339 timestamp or a payload matching its schema answer `-32603` |
 | `MCPEventOccurrence` | One occurrence: `AData` (owned) and `AMeta` (owned) as given. An empty `AEventId` is derived from the name, timestamp and data, so the same event keeps its id; the server adds the name |

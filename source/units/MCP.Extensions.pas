@@ -56,6 +56,7 @@ type
       Resolver: TMCPResourceResolver;
     end;
     FAdopted: array of TObject;
+    FModernOnly: array of string;
     FRoutes: array of record
       Method, NameParam: string;
       Headers: TMCPHeaderLookup;
@@ -91,6 +92,13 @@ type
       AHeaders: TMCPHeaderLookup): string;
     function FindRoute(const AMethod: string; out ANameParam: string;
       out AHeaders: TMCPHeaderLookup): Boolean;
+    // Extension AId is left out of the classic capabilities.
+    procedure RestrictToModern(const AId: string);
+    // The extensions to declare (new, the caller's; nil for none): a
+    // clone of ADeclared (borrowed), without the modern-only ones when
+    // ALegacy.
+    function ExtensionsFor(ADeclared: TJSONObject;
+      ALegacy: Boolean): TJSONObject;
     // Whether some resolver's prefix starts AUri.
     function Covers(const AUri: string): Boolean;
     // Whether AObject is adopted already.
@@ -324,6 +332,28 @@ begin
   ANameParam := '';
   AHeaders := nil;
   Result := False;
+end;
+
+procedure TMCPExtensionHooks.RestrictToModern(const AId: string);
+begin
+  SetLength(FModernOnly, Length(FModernOnly) + 1);
+  FModernOnly[High(FModernOnly)] := AId;
+end;
+
+function TMCPExtensionHooks.ExtensionsFor(ADeclared: TJSONObject;
+  ALegacy: Boolean): TJSONObject;
+var
+  I: Integer;
+begin
+  Result := nil;
+  if ADeclared.Count = 0 then
+    Exit;
+  Result := TJSONObject(ADeclared.Clone);
+  if ALegacy then
+    for I := 0 to High(FModernOnly) do
+      Result.Delete(FModernOnly[I]);
+  if Result.Count = 0 then
+    FreeAndNil(Result);
 end;
 
 function TMCPExtensionHooks.Owns(AObject: TObject): Boolean;

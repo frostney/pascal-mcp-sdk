@@ -239,19 +239,27 @@ end;
 function ClockMinuteCheck(const AQuery: TMCPEventQuery;
   const ACtx: TMCPRequestContext): TMCPEventPoll;
 var
-  Now, Minute, Last: Int64;
+  Now, Minute, Last, Floor: Int64;
 begin
   Now := DateTimeToUnix(LocalTimeToUniversal(SysUtils.Now)) div 60;
-  if AQuery.FromNow or not TryStrToInt64(AQuery.Cursor, Minute) then
+  if AQuery.FromNow or not TryStrToInt64(AQuery.Cursor, Minute) or
+    (Minute > Now) then
     Exit(MCPEventPoll(IntToStr(Now)));
   Result := MCPEventPoll(IntToStr(Now), TJSONArray.Create);
-  if Minute < Now - 60 then
+  // Replay starts at the later of the cursor and now minus maxAgeMs,
+  // and at most an hour back; skipping is "truncated" (events.mdx,
+  // Cursor Lifecycle).
+  Floor := Now - 60;
+  if (AQuery.MaxAgeMs >= 0) and (Now - AQuery.MaxAgeMs div 60000 > Floor) then
+    Floor := Now - AQuery.MaxAgeMs div 60000;
+  if Minute < Floor then
   begin
-    Minute := Now - 60;
+    Minute := Floor;
     Result.Truncated := True;
   end;
   Last := Now;
-  if (AQuery.MaxEvents >= 0) and (Minute + AQuery.MaxEvents < Last) then
+  // Compared before adding, so no cursor overflows.
+  if (AQuery.MaxEvents >= 0) and (Last - Minute > AQuery.MaxEvents) then
   begin
     Last := Minute + AQuery.MaxEvents;
     Result.HasMore := True;

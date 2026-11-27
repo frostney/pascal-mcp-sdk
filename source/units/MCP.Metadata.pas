@@ -89,6 +89,8 @@ function BuildAnnotations(const AAudience: array of string;
 implementation
 
 uses
+  DateUtils,
+
   MCP.Schema;
 
 // Whether AText is an IPv6 address (RFC 4291 section 2.2): eight
@@ -477,6 +479,10 @@ begin
     (Copy(AText, 9, 2) <> '00');
   if not Result then
     Exit;
+  // A day the month has: no February 31st (#118 review).
+  if StrToInt(Copy(AText, 9, 2)) > DaysInAMonth(StrToInt(Copy(AText, 1, 4)),
+    StrToInt(Copy(AText, 6, 2))) then
+    Exit(False);
   At := 20;
   if AText[At] = '.' then
   begin

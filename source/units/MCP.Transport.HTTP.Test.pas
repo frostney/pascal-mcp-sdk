@@ -29,6 +29,7 @@ uses
   sockets,
   ssockets,
   MCP.Events,
+  MCP.Extensions,
   MCP.Protocol,
   MCP.Schema,
   MCP.Server,
@@ -60,8 +61,17 @@ type
     Name, Value: string;
   end;
 
+  // A method and header lookup for a route named by "target".
+  TRouteFixture = class
+  public
+    function Answer(AParams: TJSONObject; const ACtx: TMCPRequestContext;
+      ALegacy: Boolean): TJSONObject;
+    function Headers(const AName: string): TMCPHeaderParameters;
+  end;
+
   THTTPBinding = class(TTestSuite)
   private
+    FRouteFixture: TRouteFixture;
     FServer: TMCPServer;
     FTransport: TMCPHTTPServer;
     FThread: TServerThread;
@@ -360,6 +370,23 @@ begin
     AThread.WaitFor;
 end;
 
+function TRouteFixture.Answer(AParams: TJSONObject;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+begin
+  Result := TJSONObject.Create;
+end;
+
+// Region for the target "tick" alone, so the check must use the value
+// the route names.
+function TRouteFixture.Headers(const AName: string): TMCPHeaderParameters;
+begin
+  Result := nil;
+  if AName <> 'tick' then
+    Exit;
+  MCPHeaderParameters(TJSONObject(GetJSON('{"type":"object","properties":' +
+    '{"region":{"type":"string","x-mcp-header":"Region"}}}')), Result);
+end;
+
 function TickCheck(const AQuery: TMCPEventQuery;
   const ACtx: TMCPRequestContext): TMCPEventPoll;
 begin
@@ -371,6 +398,8 @@ var
   Attempt: Integer;
   Probe, ProbeType: string;
 begin
+  if FRouteFixture = nil then
+    FRouteFixture := TRouteFixture.Create;
   FServer := TMCPServer.Create('http-test', '1.0');
   FServer.RegisterTool('ping', 'Ping', '{"type":"object"}', PingHandler);
   FServer.RegisterTool('echo', 'Echo',
@@ -398,11 +427,15 @@ begin
     '"dry":{"type":"boolean","x-mcp-header":"Dry"}}}}}',
     QuietHandler).ApplicationValidated;
   FServer.RegisterTool('waiter', 'Waits', '{"type":"object"}', WaiterHandler);
+  // A routed method whose name parameter is "target", with the event
+  // types' header lookup (#118 review).
+  FServer.RegisterMethod('example/route', FRouteFixture.Answer);
   // An event type whose region is mirrored into Mcp-Param-Region (#118).
   RegisterEvent(FServer, 'tick', 'Ticks',
     TJSONObject(GetJSON('{"type":"object","properties":{"region":' +
     '{"type":"string","x-mcp-header":"Region"}}}')), ObjectSchema.Build,
     TickCheck);
+  FServer.RegisterRoute('example/route', 'target', FRouteFixture.Headers);
   FTransport := TMCPHTTPServer.Create(FServer);
   FTransport.Port := FindFreePort;
   FBaseUrl := 'http://127.0.0.1:' + IntToStr(FTransport.Port);
@@ -907,7 +940,7 @@ end;
 
 procedure THTTPBinding.TestEventRouting;
 var
-  Body: string;
+  Body, ContentType: string;
 begin
   Expect<Integer>(PostPoll('tick', '"name":"tick","arguments":' +
     '{"region":"eu"},', [HeaderPair('Mcp-Param-Region', 'eu')], Body))
@@ -924,6 +957,15 @@ begin
     .ToBe(True);
   Expect<Integer>(Post('{"jsonrpc":"2.0","id":6,"method":"events/list",' +
     '"params":{' + META_MODERN + '}}', 'events/list', '', Body)).ToBe(200);
+  // A route whose name parameter is not "name" still checks the
+  // headers of the value it names (#118 review).
+  Expect<Integer>(Exchange('POST', '/mcp', '{"jsonrpc":"2.0","id":7,' +
+    '"method":"example/route","params":{"target":"tick","arguments":' +
+    '{"region":"eu"},' + META_MODERN + '}}', [HeaderPair('MCP-Protocol-Version',
+    MCP_PROTOCOL_VERSION), HeaderPair('Mcp-Method', 'example/route'),
+    HeaderPair('Mcp-Name', 'tick')], Body, ContentType)).ToBe(400);
+  Expect<Boolean>(Pos('Mcp-Param-Region header is missing', Body) > 0)
+    .ToBe(True);
 end;
 
 procedure THTTPBinding.TestParamHeaderMissing;

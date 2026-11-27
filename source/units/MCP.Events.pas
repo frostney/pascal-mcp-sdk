@@ -9,14 +9,19 @@
   neither is notifications/events/list_changed, which needs
   subscriptions/listen.
 
-  An event type the check reads from an upstream with a position:
+  An event type the check reads from an upstream with a position: one
+  page from the cursor, its own next position and HasMore (see the
+  Events guide for a fuller example).
 
     function NewMail(const AQuery: TMCPEventQuery;
       const ACtx: TMCPRequestContext): TMCPEventPoll;
     begin
       if AQuery.FromNow then
         Exit(MCPEventPoll(Inbox.Position));
-      Result := MCPEventPoll(Inbox.Position, Inbox.Since(AQuery.Cursor));
+      Page := Inbox.ReadFrom(AQuery.Cursor, AQuery.MaxAgeMs,
+        AQuery.MaxEvents);
+      Result := MCPEventPoll(Page.NextPosition, Page.Occurrences);
+      Result.HasMore := Page.HasMore;
     end;
 
     RegisterEvent(Server, 'email.received', 'Fires when an email arrives',
@@ -120,7 +125,8 @@ uses
   MCP.Extensions,
   MCP.JSONRPC,
   MCP.Metadata,
-  MCP.Pagination;
+  MCP.Pagination,
+  MCP.RequestState;
 
 type
   TEventCatalog = class
@@ -198,15 +204,20 @@ begin
   Result := -1;
 end;
 
+// An independent copy (#118 review): dynamic arrays are shared by
+// assignment, and the cached parameters must stay as registered.
 function TEventCatalog.HeaderParameters(
   const AName: string): TMCPHeaderParameters;
 var
-  Index: Integer;
+  Index, I: Integer;
 begin
   Result := nil;
   Index := FindType(AName);
-  if Index >= 0 then
-    Result := FTypes[Index].Headers;
+  if Index < 0 then
+    Exit;
+  Result := Copy(FTypes[Index].Headers);
+  for I := 0 to High(Result) do
+    Result[I].Path := Copy(FTypes[Index].Headers[I].Path);
 end;
 
 procedure TEventCatalog.Add(const AName, ADescription: string;
@@ -333,14 +344,22 @@ begin
 end;
 
 // A derived eventId: the same name, timestamp and data give the same
-// id, so a client deduplicates an event polled twice.
+// id, so a client deduplicates an event polled twice; the data in its
+// canonical form (sorted members), so member order does not matter.
 function DerivedEventId(const AName, ATimestamp: string;
   AData: TJSONData): string;
 var
   Digest: TSHA256Digest;
   I: Integer;
+  Canonical: UTF8String;
+  Bytes: string;
 begin
-  Digest := SHA256(AName + #0 + ATimestamp + #0 + AData.AsJSON);
+  // The canonical bytes as they are, no code page conversion.
+  Canonical := CanonicalJSON(AData);
+  SetLength(Bytes, Length(Canonical));
+  if Length(Bytes) > 0 then
+    Move(Canonical[1], Bytes[1], Length(Bytes));
+  Digest := SHA256(AName + #0 + ATimestamp + #0 + Bytes);
   Result := 'evt_';
   for I := 0 to 15 do
     Result := Result + LowerCase(IntToHex(Digest[I], 2));
@@ -353,7 +372,7 @@ function TEventCatalog.PollResult(AType: Integer; const AQuery: TMCPEventQuery;
   var APoll: TMCPEventPoll): TJSONObject;
 var
   I: Integer;
-  Occurrence, Data, Timestamp: TJSONData;
+  Occurrence, Data, Timestamp, Field: TJSONData;
   Violation: string;
 begin
   if APoll.Events = nil then
@@ -372,6 +391,17 @@ begin
         'that is no object', [FTypes[AType].Name]);
     Data := TJSONObject(Occurrence).Find('data');
     Timestamp := TJSONObject(Occurrence).Find('timestamp');
+    // An eventId is a string, _meta an object, and a poll's cursor is
+    // the result's alone (events.mdx, Event Occurrences).
+    Field := TJSONObject(Occurrence).Find('eventId');
+    if ((Field <> nil) and (Field.JSONType <> jtString)) or
+      (TJSONObject(Occurrence).IndexOfName('cursor') >= 0) then
+      raise EMCPServer.CreateFmt('Event type "%s" returned an occurrence ' +
+        'with a bad eventId or a cursor of its own', [FTypes[AType].Name]);
+    Field := TJSONObject(Occurrence).Find('_meta');
+    if (Field <> nil) and (Field.JSONType <> jtObject) then
+      raise EMCPServer.CreateFmt('Event type "%s" returned an occurrence ' +
+        'whose _meta is no object', [FTypes[AType].Name]);
     if (Data = nil) or (Data.JSONType <> jtObject) or (Timestamp = nil) or
       (Timestamp.JSONType <> jtString) or
       not ValidTimestamp(Timestamp.AsString) then
@@ -518,8 +548,11 @@ begin
     // (events.mdx, Streamable HTTP: Routing Headers).
     AServer.RegisterRoute(METHODS[1], 'name', Catalog.HeaderParameters);
   end;
-  // Settings declared first are kept; {} declares no list changes.
+  // Settings declared first are kept; {} declares no list changes. The
+  // classic initialize offers nothing a classic client could call.
   AServer.EnsureExtension(MCP_EVENTS_EXTENSION);
+  if Fresh then
+    AServer.RestrictExtensionToModern(MCP_EVENTS_EXTENSION);
 end;
 
 procedure RegisterEvent(AServer: TMCPServer; const AName,
@@ -541,9 +574,19 @@ end;
 procedure RegisterEvent(AServer: TMCPServer; const AName,
   ADescription: string; constref AInputSchema, APayloadSchema: TMCPSchema;
   ACheck: TMCPEventCheck; ANextPollMs: Integer);
+var
+  Input, Payload: TJSONObject;
 begin
-  RegisterType(AServer, AName, ADescription, AInputSchema.Build,
-    APayloadSchema.Build, ACheck, nil, ANextPollMs);
+  // One at a time, so a failing second build frees the first.
+  Input := AInputSchema.Build;
+  try
+    Payload := APayloadSchema.Build;
+  except
+    Input.Free;
+    raise;
+  end;
+  RegisterType(AServer, AName, ADescription, Input, Payload, ACheck, nil,
+    ANextPollMs);
 end;
 
 end.

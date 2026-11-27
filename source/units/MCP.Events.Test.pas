@@ -16,6 +16,7 @@ uses
 
   fpjson,
   MCP.Events,
+  MCP.Extensions,
   MCP.JSONRPC,
   MCP.Protocol,
   MCP.Schema,
@@ -54,6 +55,9 @@ type
     procedure TestCheckMistakes;
     procedure TestClassicEra;
     procedure TestGuards;
+    procedure TestListPaging;
+    procedure TestUtf8Occurrence;
+    procedure TestRouteCopy;
   end;
 
 // The upstream: five occurrences at positions 1 to 5. A cursor is the
@@ -97,6 +101,11 @@ end;
 function DerivedCheck(const AQuery: TMCPEventQuery;
   const ACtx: TMCPRequestContext): TMCPEventPoll;
 begin
+  if AQuery.Arguments.Get('order', '') = 'ba' then
+    Exit(MCPEventPoll('1', TJSONArray.Create([MCPEventOccurrence('',
+      '2026-11-27T10:00:00Z', TJSONObject.Create(['b', 2, 'a', 1])),
+      MCPEventOccurrence('', '2026-11-27T10:00:00Z',
+      TJSONObject.Create(['a', 1, 'b', 2]))])));
   Result := MCPEventPoll('1', TJSONArray.Create([MCPEventOccurrence('',
     '2026-11-27T10:00:00Z', TJSONObject.Create(['n', 1]))]));
 end;
@@ -122,11 +131,42 @@ begin
     Result.Events.Add(MCPEventOccurrence('y', '2026-11-27T10:00:00Z',
       TJSONObject.Create(['n', 2])));
   end
+  else if Kind = 'february' then
+    Result.Events.Add(MCPEventOccurrence('x', '2026-02-31T10:00:00Z',
+      TJSONObject.Create(['n', 1])))
+  else if Kind = 'idtype' then
+  begin
+    Result.Events.Add(TJSONObject(MCPParseJSON('{"eventId":7,"timestamp":' +
+      '"2026-11-27T10:00:00Z","data":{"n":1}}')));
+  end
+  else if Kind = 'meta' then
+    Result.Events.Add(TJSONObject(MCPParseJSON('{"timestamp":' +
+      '"2026-11-27T10:00:00Z","data":{"n":1},"_meta":[]}')))
+  else if Kind = 'cursor' then
+    Result.Events.Add(TJSONObject(MCPParseJSON('{"timestamp":' +
+      '"2026-11-27T10:00:00Z","data":{"n":1},"cursor":"c"}')))
+  else if Kind = 'utf8' then
+    Result.Events.Add(MCPEventOccurrence('u', '2026-11-27T10:00:00Z',
+      TJSONObject(MCPParseJSON('{"n":1,"note":"Gr\u00fc\u00dfe"}'))))
   else if Kind = 'refuse' then
   begin
     Result.Events.Free;
     raise EMCPProtocolError.Create(-32024, 'Forbidden',
       TJSONObject.Create(['reason', 'not yours']));
+  end
+  else if (Kind = 'exhausted') or (Kind = 'unsupported') or
+    (Kind = 'callback') then
+  begin
+    Result.Events.Free;
+    if Kind = 'exhausted' then
+      raise EMCPProtocolError.Create(-32025, 'ResourceExhausted',
+        TJSONObject.Create(['limit', 'subscriptions']))
+    else if Kind = 'unsupported' then
+      raise EMCPProtocolError.Create(-32026, 'Unsupported',
+        TJSONObject.Create(['feature', 'deliveryMode', 'value', 'push']))
+    else
+      raise EMCPProtocolError.Create(-32027, 'CallbackEndpointError',
+        TJSONObject.Create(['reason', 'timeout']));
   end;
 end;
 
@@ -142,10 +182,12 @@ begin
   RegisterEvent(FServer, 'no.replay', 'Push-only upstream',
     ObjectSchema, ObjectSchema, NoReplayCheck);
   RegisterEvent(FServer, 'derived.id', 'Ids from the server',
-    ObjectSchema, ObjectSchema.AddInteger('n'), DerivedCheck);
+    TJSONObject(MCPParseJSON('{"type":"object","properties":{"order":' +
+    '{"type":"string"}}}')), ObjectSchema.Build, DerivedCheck);
   RegisterEvent(FServer, 'faulty', 'Mistakes on request',
-    ObjectSchema.AddString('fault'), ObjectSchema.AddInteger('n'),
-    FaultyCheck);
+    ObjectSchema.AddString('fault').Build, TJSONObject(MCPParseJSON(
+    '{"type":"object","properties":{"n":{"type":"integer"},"note":' +
+    '{"type":"string"}},"required":["n"]}')), FaultyCheck);
 end;
 
 procedure TEventsSuite.BeforeEach;
@@ -295,8 +337,19 @@ begin
   RegisterFixture;
   Response := Poll('"name":"derived.id","cursor":"0"');
   try
+    // sha256("derived.id\0" + timestamp + "\0" + canonical data) from
+    // Python's hashlib, the canonical data being {"n":1}.
     Expect<string>(Str(Response, 'result.events[0].eventId'))
-      .ToBe('"evt_5703e76b7fe4a7787e11a833dbf24393"');
+      .ToBe('"evt_181c4d23d529a533a0fa1c744107abf4"');
+  finally
+    Response.Free;
+  end;
+  // Member order does not change the id (#118 review).
+  Response := Poll('"name":"derived.id","cursor":"0","arguments":' +
+    '{"order":"ba"}');
+  try
+    Expect<string>(Str(Response, 'result.events[0].eventId'))
+      .ToBe(Str(Response, 'result.events[1].eventId'));
   finally
     Response.Free;
   end;
@@ -332,10 +385,20 @@ begin
     '-32602 "Invalid params: arguments must be an object" <absent>');
   Expect<Boolean>(Pos('-32602', ErrorOf(Poll('"name":"clock.tick",' +
     '"arguments":{"region":7}'))) = 1).ToBe(True);
-  // A check's own protocol error goes out as written.
+  // A check's own protocol errors go out as written, the SEP-3415 codes
+  // included.
   Expect<string>(ErrorOf(Poll('"name":"faulty","cursor":"0","arguments":' +
     '{"fault":"refuse"}'))).ToBe('-32024 "Forbidden" { "reason" : ' +
     '"not yours" }');
+  Expect<string>(ErrorOf(Poll('"name":"faulty","cursor":"0","arguments":' +
+    '{"fault":"exhausted"}'))).ToBe('-32025 "ResourceExhausted" ' +
+    '{ "limit" : "subscriptions" }');
+  Expect<string>(ErrorOf(Poll('"name":"faulty","cursor":"0","arguments":' +
+    '{"fault":"unsupported"}'))).ToBe('-32026 "Unsupported" ' +
+    '{ "feature" : "deliveryMode", "value" : "push" }');
+  Expect<string>(ErrorOf(Poll('"name":"faulty","cursor":"0","arguments":' +
+    '{"fault":"callback"}'))).ToBe('-32027 "CallbackEndpointError" ' +
+    '{ "reason" : "timeout" }');
 end;
 
 // A check's mistakes are the server's: -32603, nothing sent.
@@ -351,21 +414,98 @@ begin
   // Events on a poll from now.
   Expect<Boolean>(Pos('-32603', ErrorOf(Poll('"name":"faulty",' +
     '"arguments":{"fault":"many"}'))) = 1).ToBe(True);
+  // A date the calendar lacks, an eventId that is no string, a _meta
+  // that is no object, and a cursor of the occurrence's own (#118
+  // review).
+  Expect<Boolean>(Pos('-32603', ErrorOf(Poll('"name":"faulty","cursor":"0",' +
+    '"arguments":{"fault":"february"}'))) = 1).ToBe(True);
+  Expect<Boolean>(Pos('-32603', ErrorOf(Poll('"name":"faulty","cursor":"0",' +
+    '"arguments":{"fault":"idtype"}'))) = 1).ToBe(True);
+  Expect<Boolean>(Pos('-32603', ErrorOf(Poll('"name":"faulty","cursor":"0",' +
+    '"arguments":{"fault":"meta"}'))) = 1).ToBe(True);
+  Expect<Boolean>(Pos('-32603', ErrorOf(Poll('"name":"faulty","cursor":"0",' +
+    '"arguments":{"fault":"cursor"}'))) = 1).ToBe(True);
 end;
 
 // The extension is defined for 2026-07-28: a classic client is told the
 // methods do not exist.
 procedure TEventsSuite.TestClassicEra;
 begin
+  FServer.DeclareExtension('com.example/kept');
   RegisterFixture;
-  Send('{"jsonrpc":"2.0","id":1,"method":"initialize","params":' +
+  // The classic initialize declares the other extensions, not Events
+  // (#118 review); server/discover declares both.
+  Expect<Boolean>(Pos('"extensions" : { "com.example/kept" : {} }',
+    Send('{"jsonrpc":"2.0","id":1,"method":"initialize","params":' +
     '{"protocolVersion":"2025-11-25","capabilities":{},' +
-    '"clientInfo":{"name":"c","version":"1"}}}');
+    '"clientInfo":{"name":"c","version":"1"}}}')) > 0).ToBe(True);
   Send('{"jsonrpc":"2.0","method":"notifications/initialized"}');
   Expect<string>(Send('{"jsonrpc":"2.0","id":2,"method":"events/poll",' +
     '"params":{"name":"clock.tick"}}')).ToBe('{ "jsonrpc" : "2.0", "id" : 2, ' +
     '"error" : { "code" : -32601, "message" : "Method not found: ' +
     'events/poll" } }');
+  FreeAndNil(FSession);
+  Expect<Boolean>(Pos('"extensions" : { "com.example/kept" : {}, ' +
+    '"io.modelcontextprotocol/events" : {} }', Send('{"jsonrpc":"2.0",' +
+    '"id":3,"method":"server/discover","params":{' + META + '}}')) > 0)
+    .ToBe(True);
+end;
+
+// events/list pages with PageSize; the cursor leads to the last page.
+procedure TEventsSuite.TestListPaging;
+var
+  Response: TJSONObject;
+  Cursor: string;
+begin
+  FServer.PageSize := 3;
+  RegisterFixture;
+  if FClient = nil then
+    FClient := TMCPTestClient.Create(FServer);
+  Response := FClient.Request('events/list', '{}');
+  try
+    Expect<Integer>(TJSONArray(Response.FindPath('result.events')).Count)
+      .ToBe(3);
+    Cursor := TJSONData(Response.FindPath('result.nextCursor')).AsString;
+  finally
+    Response.Free;
+  end;
+  Response := FClient.Request('events/list', '{"cursor":"' + Cursor + '"}');
+  try
+    Expect<Integer>(TJSONArray(Response.FindPath('result.events')).Count)
+      .ToBe(1);
+    Expect<string>(Str(Response, 'result.events[0].name')).ToBe('"faulty"');
+    Expect<Boolean>(Response.FindPath('result.nextCursor') = nil).ToBe(True);
+  finally
+    Response.Free;
+  end;
+end;
+
+// An occurrence with non-ASCII data, byte-exact on the wire.
+procedure TEventsSuite.TestUtf8Occurrence;
+begin
+  RegisterFixture;
+  Expect<Boolean>(Pos('"events" : [{ "eventId" : "u", "timestamp" : ' +
+    '"2026-11-27T10:00:00Z", "data" : { "n" : 1, "note" : "' + GRUSSE +
+    '" }, "name" : "faulty" }]', Send('{"jsonrpc":"2.0","id":7,' +
+    '"method":"events/poll","params":{"name":"faulty","cursor":"0",' +
+    '"arguments":{"fault":"utf8"},' + META + '}}')) > 0).ToBe(True);
+end;
+
+// The header parameters a route hands out are a copy (#118 review).
+procedure TEventsSuite.TestRouteCopy;
+var
+  NameParam: string;
+  Lookup: TMCPHeaderLookup;
+  Params: TMCPHeaderParameters;
+begin
+  RegisterFixture;
+  Expect<Boolean>(FServer.MethodRoute('events/poll', NameParam, Lookup))
+    .ToBe(True);
+  Expect<string>(NameParam).ToBe('name');
+  Params := Lookup('clock.tick');
+  Expect<Integer>(Length(Params)).ToBe(1);
+  Params[0].Header := 'Changed';
+  Expect<string>(Lookup('clock.tick')[0].Header).ToBe('Region');
 end;
 
 var
@@ -427,6 +567,9 @@ begin
   Test('a classic client gets -32601', TestClassicEra);
   Test('names, schemas, checks and late registrations are guarded',
     TestGuards);
+  Test('events/list pages to its last page', TestListPaging);
+  Test('a non-ASCII occurrence goes out byte-exact', TestUtf8Occurrence);
+  Test('a route''s header parameters are a copy', TestRouteCopy);
 end;
 
 begin

@@ -158,7 +158,7 @@ type
     function OriginAllowed(const AOrigin: string): Boolean;
     function ParamHeaderFailure(ARequest: TFPHTTPConnectionRequest;
       const AMessage: TJSONRPCMessage; AHeaders: TMCPHeaderLookup;
-      out AFailure: string): Boolean;
+      const ATarget: string; out AFailure: string): Boolean;
     function HeaderFailure(ARequest: TFPHTTPConnectionRequest;
       const AMessage: TJSONRPCMessage; out AFailure: string): Boolean;
     procedure HandleHTTPRequest(ASender: TObject;
@@ -903,7 +903,7 @@ begin
   end;
 
   if ((AMessage.Method = 'tools/call') or (Routed and Assigned(Headers))) and
-    ParamHeaderFailure(ARequest, AMessage, Headers, AFailure) then
+    ParamHeaderFailure(ARequest, AMessage, Headers, BodyName, AFailure) then
     Exit;
 
   Result := False;
@@ -935,7 +935,8 @@ end;
 
 function TMCPHTTPServer.ParamHeaderFailure(
   ARequest: TFPHTTPConnectionRequest; const AMessage: TJSONRPCMessage;
-  AHeaders: TMCPHeaderLookup; out AFailure: string): Boolean;
+  AHeaders: TMCPHeaderLookup; const ATarget: string;
+  out AFailure: string): Boolean;
 var
   Parameters: TMCPHeaderParameters;
   Arguments, Value: TJSONData;
@@ -943,9 +944,10 @@ var
   I, Occurrences: Integer;
 begin
   Result := True;
-  // A routed method's own parameters, or the tool's.
+  // A routed method's own parameters for the target its route names
+  // (#118 review), or the tool's.
   if Assigned(AHeaders) then
-    Parameters := AHeaders(AMessage.Params.Get('name', ''))
+    Parameters := AHeaders(ATarget)
   else
     Parameters := FServer.ToolHeaderParameters(AMessage.Params.Get('name', ''));
   Arguments := AMessage.Params.Find('arguments');

@@ -20,13 +20,21 @@ uses MCP.Events, MCP.Protocol, MCP.Schema, MCP.Server;
 function NewMail(const AQuery: TMCPEventQuery;
   const ACtx: TMCPRequestContext): TMCPEventPoll;
 var
+  Folder: TMailFolder;
+  Page: TMailPage;
   Mail: TMailItem;
 begin
+  Folder := Mailbox.Folder(AQuery.Arguments.Get('folder', 'INBOX'));
   // "Start from now": no events, just the current position.
   if AQuery.FromNow then
-    Exit(MCPEventPoll(Inbox.Position));
-  Result := MCPEventPoll(Inbox.Position, TJSONArray.Create);
-  for Mail in Inbox.Since(AQuery.Cursor, AQuery.MaxEvents) do
+    Exit(MCPEventPoll(Folder.Position));
+  // One page from the cursor, no further back than maxAgeMs, at most
+  // maxEvents long.
+  Page := Folder.ReadFrom(AQuery.Cursor, AQuery.MaxAgeMs, AQuery.MaxEvents);
+  Result := MCPEventPoll(Page.NextPosition, TJSONArray.Create);
+  Result.HasMore := Page.HasMore;      // more mail after this page
+  Result.Truncated := Page.Skipped;    // the cursor was too old
+  for Mail in Page.Items do
     Result.Events.Add(MCPEventOccurrence(Mail.Id, Mail.ReceivedAt,
       TJSONObject.Create(['from', Mail.From, 'subject', Mail.Subject])));
 end;
@@ -54,7 +62,8 @@ It returns a `TMCPEventPoll`, built with `MCPEventPoll(Cursor, Events)`:
   with a time zone. With an empty id, the server derives one from the
   name, timestamp and data, so the same event polled twice keeps its
   id.
-- `Cursor`: the position after these events.
+- `Cursor`: the position after these events, not the upstream's head:
+  with `HasMore`, the client reads on from here and skips nothing.
 - `HasMore`: more events are waiting beyond `MaxEvents`. The client
   polls again at once.
 - `Truncated`: the cursor fell outside what the upstream keeps, and
@@ -81,8 +90,9 @@ serves:
   `-32023` with `data.kind` `"event"`, and bad parameters or arguments
   answer `-32602`.
 
-The extension is defined for the 2026-07-28 revision, so a client on
-the classic handshake gets `-32601`. On Streamable HTTP, `events/poll`
+The extension is defined for the 2026-07-28 revision, so the classic
+`initialize` does not declare it, and a client on the classic handshake
+that calls these methods anyway gets `-32601`. On Streamable HTTP, `events/poll`
 carries the `Mcp-Name` header for the event name and an `Mcp-Param-*`
 header for each argument marked `x-mcp-header`. Both are checked as for
 `tools/call`.
