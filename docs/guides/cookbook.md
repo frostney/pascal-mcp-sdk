@@ -131,11 +131,17 @@ end;
 
 Server.RegisterTool('greet_user',
   'Greet a person; asks who to greet via elicitation (MRTR)',
-  '{"type":"object"}', GreetUserHandler);
+  '{"type":"object"}', GreetUserHandler)
+  .RequiresClientCapability('elicitation');
 ```
 
 The raw `'{"type":"object"}'` schema means "no declared arguments" —
 this tool gets its input by asking, not from the caller.
+`RequiresClientCapability` refuses a client without elicitation before
+the handler runs, on every modern-era call (classic-handshake clients
+get no input requests and are not checked). When only some calls ask,
+or a particular elicitation mode matters, see
+[Tools](tools.md#asking-the-client-for-more-input-mrtr).
 
 ## A prompt with arguments
 

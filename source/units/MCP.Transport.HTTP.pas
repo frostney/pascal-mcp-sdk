@@ -38,8 +38,18 @@ unit MCP.Transport.HTTP;
 //     client sends the full envelope and headers even on its first
 //     server/discover probe (re-checked 2026-11-26 against
 //     @modelcontextprotocol/client 2.0.0, buildProbeRequest).
-//     Mcp-Param-* headers are forwarded-and-ignored: this server
-//     designates no x-mcp-header parameters, so none are recognized;
+//     Mcp-Param-* headers (#90): on tools/call, for every parameter
+//     the tool designates with x-mcp-header (MCP.Server
+//     ToolHeaderParameters), a non-null body value needs exactly one
+//     Mcp-Param-<name> whose value, after strict =?base64?...?=
+//     decoding, matches it by declared type (strings as they are,
+//     integers numerically, booleans lowercase), and an absent or null
+//     one needs none. A missing, repeated, mismatched, badly encoded or
+//     unencoded non-ASCII header, or one sent for an absent or null
+//     value, answers 400 with -32020. Headers for parameters the tool
+//     does not designate are ignored.
+//     Verified 2026-11-26 against .../basic/transports/streamable-http
+//     #server-behavior-for-custom-headers;
 //   - HTTP status mapping: -32601 → 404 (unknown RPC method, and the
 //     legacy-initialize rejection whose diagnostic names the
 //     supported versions); -32700/-32600/-32020/-32021/-32022 → 400;
@@ -50,9 +60,10 @@ unit MCP.Transport.HTTP;
 //     2026-11-26); every other JSON-RPC response — results and in-band
 //     protocol errors alike, other -32602s included — is 200;
 //   - a request that opted into request-scoped notifications
-//     (_meta.progressToken or the logLevel key) on a handler-backed
-//     method (tools/call, resources/read, prompts/get) is answered as
-//     an SSE stream *once a notification actually flows*: the stream
+//     (_meta.progressToken or the logLevel key) is answered as an SSE
+//     stream *once a notification actually flows* (handlers of
+//     tools/call, resources/read, prompts/get and completion/complete
+//     can emit them): the stream
 //     headers (200, text/event-stream, Cache-Control: no-cache,
 //     X-Accel-Buffering: no) are deferred until the first event, the
 //     notifications follow as data: events, and the final response
@@ -65,10 +76,19 @@ unit MCP.Transport.HTTP;
 //     is the stream's final event, not a mapped status (#84). All
 //     other requests get a single application/json object. (The spec
 //     lets the server choose per request; this is the policy.)
-//   - closing the SSE response stream is the cancellation signal:
-//     when a stream write fails, the failure aborts the running
-//     handler, the core converts it into a response the transport can
-//     no longer deliver, and nothing further is sent for that request
+//   - closing the connection is the cancellation signal: the
+//     session's cancellation poll (#93) reports a closed socket (an
+//     orderly close, a reset or another terminal error), checked at
+//     most every 50 ms, whenever the handler asks IsCancelled, so a
+//     handler that never writes stops too. Receive EOF cannot tell a
+//     client that closed only its sending side from one that closed
+//     both, so that client has cancelled too: its request ends and it
+//     gets no JSON-RPC message: an empty 202, or, when its SSE stream
+//     had already opened, the end of that stream without a final
+//     event. And when
+//     a stream write fails, the failure aborts the running handler,
+//     the core converts it into a response the transport can no
+//     longer deliver, and nothing further is sent for that request
 //     — subscriptions/listen streams do not arise because the core
 //     advertises no subscription capability.
 //
@@ -99,6 +119,7 @@ uses
   httpdefs,
   MCP.JSONRPC,
   MCP.Protocol,
+  MCP.Schema,
   MCP.Server;
 
 const
@@ -134,6 +155,8 @@ type
     function GetAddress: string;
     procedure SetAddress(const AValue: string);
     function OriginAllowed(const AOrigin: string): Boolean;
+    function ParamHeaderFailure(ARequest: TFPHTTPConnectionRequest;
+      const AMessage: TJSONRPCMessage; out AFailure: string): Boolean;
     function HeaderFailure(ARequest: TFPHTTPConnectionRequest;
       const AMessage: TJSONRPCMessage; out AFailure: string): Boolean;
     procedure HandleHTTPRequest(ASender: TObject;
@@ -178,7 +201,13 @@ implementation
 
 uses
   base64,
-  {$IFDEF DARWIN}
+  Math,
+  {$IFDEF UNIX}
+  BaseUnix,
+  {$ENDIF}
+  {$IFDEF WINDOWS}
+  winsock2,
+  {$ELSE}
   sockets,
   {$ENDIF}
   ssockets;
@@ -221,29 +250,183 @@ begin
   Result := SameText(Host, 'localhost') or (Host = '127.0.0.1');
 end;
 
-// Undo the =?base64?...?= sentinel encoding the transport spec
-// defines for header values that are not header-safe ASCII. Returns
-// False when the payload is not decodable base64.
-function DecodeHeaderValue(const AValue: string; out ADecoded: string): Boolean;
+// Base64 as the sentinel encoding needs it: the standard alphabet,
+// whole 4-character groups and padding only at the end. fcl-base's
+// decoder skips what it does not understand, so it is checked first:
+// the SEP-2243 test table rejects bad padding and foreign characters.
+function StrictBase64(const APayload: string; out ADecoded: string): Boolean;
+var
+  I, Padding: Integer;
+begin
+  // The empty payload is the empty string's encoding (#90 review).
+  Result := APayload = '';
+  ADecoded := '';
+  if Result or (Length(APayload) mod 4 <> 0) then
+    Exit;
+  Padding := 0;
+  for I := 1 to Length(APayload) do
+    case APayload[I] of
+      'A'..'Z', 'a'..'z', '0'..'9', '+', '/':
+        if Padding > 0 then
+          Exit;
+      '=':
+        Inc(Padding);
+    else
+      Exit;
+    end;
+  if Padding > 2 then
+    Exit;
+  ADecoded := DecodeStringBase64(APayload);
+  Result := True;
+end;
+
+// A plain (unencoded) header value: visible ASCII, space and tab only
+// (RFC 9110 field values, as the transport spec requires of them).
+function IsPlainHeaderValue(const AValue: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := True;
+  for I := 1 to Length(AValue) do
+    if not (AValue[I] in [#9, #32..#126]) then
+      Exit(False);
+end;
+
+// The argument at APath under AArguments, or nil (absent or null).
+// Both are borrowed: the result is a node inside AArguments.
+function ArgumentAt(AArguments: TJSONData;
+  const APath: array of string): TJSONData;
+var
+  I: Integer;
+begin
+  Result := AArguments;
+  for I := 0 to High(APath) do
+  begin
+    if (Result = nil) or (Result.JSONType <> jtObject) then
+      Exit(nil);
+    Result := TJSONObject(Result).Find(APath[I]);
+  end;
+  if (Result <> nil) and (Result.JSONType = jtNull) then
+    Result := nil;
+end;
+
+const
+  // 2^53 - 1: the JavaScript safe-integer bound the spec puts on
+  // integer header values.
+  MAX_SAFE_HEADER_INTEGER = 9007199254740991;
+
+// AText as a decimal integer within the safe range: an optional minus
+// sign and digits, and an all-zero fraction ("42.0"), since the spec
+// compares integers numerically.
+function SafeHeaderInteger(const AText: string; out AValue: Int64): Boolean;
+var
+  I, Start, Stop, Dot: Integer;
+begin
+  Result := False;
+  AValue := 0;
+  Start := 1;
+  if (AText <> '') and (AText[1] = '-') then
+    Start := 2;
+  Stop := Length(AText);
+  Dot := Pos('.', AText);
+  if Dot > 0 then
+  begin
+    if Dot = Length(AText) then
+      Exit;
+    for I := Dot + 1 to Length(AText) do
+      if AText[I] <> '0' then
+        Exit;
+    Stop := Dot - 1;
+  end;
+  if (Start > Stop) or (Stop - Start + 1 > 16) then
+    Exit;
+  for I := Start to Stop do
+  begin
+    if not (AText[I] in ['0'..'9']) then
+      Exit;
+    AValue := AValue * 10 + (Ord(AText[I]) - Ord('0'));
+  end;
+  if Start = 2 then
+    AValue := -AValue;
+  Result := Abs(AValue) <= MAX_SAFE_HEADER_INTEGER;
+end;
+
+// The body argument AValue as the safe integer it holds: an integer
+// node, or a float with no fractional part (42.0), within the range.
+function SafeBodyInteger(AValue: TJSONData; out AInteger: Int64): Boolean;
+var
+  F: Double;
+begin
+  Result := False;
+  AInteger := 0;
+  if AValue.JSONType <> jtNumber then
+    Exit;
+  if TJSONNumber(AValue).NumberType in [ntInteger, ntInt64] then
+  begin
+    AInteger := AValue.AsInt64;
+    Exit(Abs(AInteger) <= MAX_SAFE_HEADER_INTEGER);
+  end;
+  if TJSONNumber(AValue).NumberType <> ntFloat then
+    Exit; // a QWord is past the safe range
+  F := AValue.AsFloat;
+  // Range first, so Trunc never sees a value it could overflow on.
+  if IsNan(F) or (Abs(F) > MAX_SAFE_HEADER_INTEGER) or (Frac(F) <> 0) then
+    Exit;
+  AInteger := Trunc(F);
+  Result := True;
+end;
+
+// Whether the decoded header text matches the body argument for a
+// parameter declared as AType (Value Encoding: strings as they are,
+// integers in decimal compared numerically, booleans lowercase). A
+// value of another type, or a composite, has no header form and never
+// matches (#90 review).
+function HeaderMatches(const AText, AType: string; AValue: TJSONData): Boolean;
+var
+  HeaderInt, BodyInt: Int64;
+begin
+  if AType = 'integer' then
+    Result := SafeHeaderInteger(AText, HeaderInt) and
+      SafeBodyInteger(AValue, BodyInt) and (HeaderInt = BodyInt)
+  else if AType = 'boolean' then
+    Result := (AValue.JSONType = jtBoolean) and
+      (AText = BoolToStr(AValue.AsBoolean, 'true', 'false'))
+  else
+    Result := (AValue.JSONType = jtString) and (AText = AValue.AsString);
+end;
+
+// True when AValue is =?base64?<APayload>?= (markers case-sensitive);
+// only splits, never decodes.
+function SentinelPayload(const AValue: string; out APayload: string): Boolean;
 const
   SENTINEL_PREFIX = '=?base64?';
   SENTINEL_SUFFIX = '?=';
+begin
+  Result := (Length(AValue) >= Length(SENTINEL_PREFIX) +
+    Length(SENTINEL_SUFFIX)) and
+    (Copy(AValue, 1, Length(SENTINEL_PREFIX)) = SENTINEL_PREFIX) and
+    (Copy(AValue, Length(AValue) - Length(SENTINEL_SUFFIX) + 1,
+    Length(SENTINEL_SUFFIX)) = SENTINEL_SUFFIX);
+  if Result then
+    APayload := Copy(AValue, Length(SENTINEL_PREFIX) + 1,
+      Length(AValue) - Length(SENTINEL_PREFIX) - Length(SENTINEL_SUFFIX))
+  else
+    APayload := '';
+end;
+
+// Undo the =?base64?...?= sentinel encoding the transport spec defines
+// for header values that are not header-safe ASCII. False when the
+// payload is not strict base64. Mcp-Name and Mcp-Param values decode
+// alike since #90, so an unpadded Mcp-Name payload, which fcl-base
+// accepted before, is refused (Value Encoding names standard base64).
+function DecodeHeaderValue(const AValue: string; out ADecoded: string): Boolean;
 var
   Payload: string;
 begin
   Result := True;
   ADecoded := AValue;
-  if (Copy(AValue, 1, Length(SENTINEL_PREFIX)) <> SENTINEL_PREFIX) or
-     (Copy(AValue, Length(AValue) - Length(SENTINEL_SUFFIX) + 1,
-       Length(SENTINEL_SUFFIX)) <> SENTINEL_SUFFIX) then
-    Exit;
-  Payload := Copy(AValue, Length(SENTINEL_PREFIX) + 1,
-    Length(AValue) - Length(SENTINEL_PREFIX) - Length(SENTINEL_SUFFIX));
-  try
-    ADecoded := DecodeStringBase64(Payload);
-  except
-    Result := False;
-  end;
+  if SentinelPayload(AValue, Payload) then
+    Result := StrictBase64(Payload, ADecoded);
 end;
 
 // params._meta as an object, or nil.
@@ -278,16 +461,15 @@ begin
     (AMethod = 'resources/read');
 end;
 
-// Whether this request opted into request-scoped notifications and
-// targets a handler-backed method — the streaming policy documented
-// in the unit header.
+// Whether this request opted into request-scoped notifications — the
+// streaming policy documented in the unit header. Which methods emit
+// them is the core's business: a stream opens only once one flows, so
+// an opted-in request whose method notifies nothing gets JSON (#81).
 function WantsStream(const AMessage: TJSONRPCMessage): Boolean;
 var
   Meta: TJSONObject;
 begin
   Result := False;
-  if not NeedsName(AMessage.Method) then
-    Exit;
   Meta := MetaObject(AMessage.Params);
   if Meta = nil then
     Exit;
@@ -391,6 +573,27 @@ type
     property BodyRefused: Boolean read FBodyRefused;
   end;
 
+  // A request that remembers every custom header field it received:
+  // fcl-web keeps only the last value of a repeated field, so a check of
+  // a mirrored header could not otherwise see a conflicting earlier one
+  // (#90 review).
+  TMCPHTTPRequest = class(TFPHTTPConnectionRequest)
+  private
+    // One entry per Mcp-Param-* field name, ASCII-lowercased: its last
+    // value and how many times it arrived. Other fields are not kept.
+    FParamNames: array of string;
+    FParamValues: array of string;
+    FParamCounts: array of Integer;
+    function ParamIndex(const AKey: string): Integer;
+  public
+    procedure SetCustomHeader(const AName, AValue: string); override;
+    // How many times the Mcp-Param-* field AName (any ASCII case)
+    // arrived, and its last value. fcl-web's own lookup compares names
+    // by the locale's rules, so the binding reads these instead.
+    function ParamFieldCount(const AName: string): Integer;
+    function ParamFieldValue(const AName: string): string;
+  end;
+
   // TFPHttpServer publishes Port/Threaded/OnRequest but keeps the
   // bind address protected; surface it for the localhost default.
   TMCPHTTPListener = class(TFPHTTPServer)
@@ -399,6 +602,7 @@ type
   protected
     function CreateConnection(AData: TSocketStream): TFPHTTPConnection;
       override;
+    function CreateRequest: TFPHTTPConnectionRequest; override;
   public
     property Address;
   end;
@@ -408,6 +612,69 @@ const
   // Not declared by the 3.2.2 sockets unit on Darwin.
   MCP_SO_NOSIGPIPE = $1022;
 {$ENDIF}
+
+const
+  PARAM_FIELD_PREFIX = 'mcp-param-';
+
+function TMCPHTTPRequest.ParamIndex(const AKey: string): Integer;
+begin
+  for Result := 0 to High(FParamNames) do
+    if FParamNames[Result] = AKey then
+      Exit;
+  Result := -1;
+end;
+
+procedure TMCPHTTPRequest.SetCustomHeader(const AName, AValue: string);
+var
+  Key: string;
+  Index: Integer;
+begin
+  // LowerCase folds ASCII only, whatever the locale.
+  Key := LowerCase(AName);
+  if Copy(Key, 1, Length(PARAM_FIELD_PREFIX)) = PARAM_FIELD_PREFIX then
+  begin
+    Index := ParamIndex(Key);
+    if Index < 0 then
+    begin
+      Index := Length(FParamNames);
+      SetLength(FParamNames, Index + 1);
+      SetLength(FParamValues, Index + 1);
+      SetLength(FParamCounts, Index + 1);
+      FParamNames[Index] := Key;
+      FParamCounts[Index] := 0;
+    end;
+    FParamValues[Index] := AValue;
+    Inc(FParamCounts[Index]);
+  end;
+  inherited SetCustomHeader(AName, AValue);
+end;
+
+function TMCPHTTPRequest.ParamFieldCount(const AName: string): Integer;
+var
+  Index: Integer;
+begin
+  Index := ParamIndex(LowerCase(AName));
+  if Index < 0 then
+    Result := 0
+  else
+    Result := FParamCounts[Index];
+end;
+
+function TMCPHTTPRequest.ParamFieldValue(const AName: string): string;
+var
+  Index: Integer;
+begin
+  Index := ParamIndex(LowerCase(AName));
+  if Index < 0 then
+    Result := ''
+  else
+    Result := FParamValues[Index];
+end;
+
+function TMCPHTTPListener.CreateRequest: TFPHTTPConnectionRequest;
+begin
+  Result := TMCPHTTPRequest.Create;
+end;
 
 procedure TMCPHTTPConnection.ReadRequestContent(
   ARequest: TFPHTTPConnectionRequest);
@@ -622,6 +889,103 @@ begin
     end;
   end;
 
+  if (AMessage.Method = 'tools/call') and
+    ParamHeaderFailure(ARequest, AMessage, AFailure) then
+    Exit;
+
+  Result := False;
+end;
+
+// Mcp-Param-* validation for tools/call (#90): every parameter the
+// tool designates with x-mcp-header must arrive as a header that,
+// decoded, equals the body value; a header for an absent or null value
+// does not match either. Verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-behavior-for-custom-headers
+// How many times the Mcp-Param field AName arrived on ARequest, and
+// its value: from a TMCPHTTPRequest (the listener makes every request
+// one), else from fcl-web's own storage, which keeps one value and
+// compares names by the locale.
+function ParamField(ARequest: TFPHTTPConnectionRequest; const AName: string;
+  out AValue: string): Integer;
+begin
+  if ARequest is TMCPHTTPRequest then
+  begin
+    AValue := TMCPHTTPRequest(ARequest).ParamFieldValue(AName);
+    Exit(TMCPHTTPRequest(ARequest).ParamFieldCount(AName));
+  end;
+  AValue := ARequest.GetFieldByName(AName);
+  if ARequest.CustomHeaders.IndexOfName(AName) >= 0 then
+    Result := 1
+  else
+    Result := 0;
+end;
+
+function TMCPHTTPServer.ParamHeaderFailure(
+  ARequest: TFPHTTPConnectionRequest; const AMessage: TJSONRPCMessage;
+  out AFailure: string): Boolean;
+var
+  Parameters: TMCPHeaderParameters;
+  Arguments, Value: TJSONData;
+  HeaderName, Raw, Payload, Decoded: string;
+  I, Occurrences: Integer;
+begin
+  Result := True;
+  Parameters := FServer.ToolHeaderParameters(AMessage.Params.Get('name', ''));
+  Arguments := AMessage.Params.Find('arguments');
+  for I := 0 to High(Parameters) do
+  begin
+    HeaderName := 'Mcp-Param-' + Parameters[I].Header;
+    Value := ArgumentAt(Arguments, Parameters[I].Path);
+    // Presence, not value: an empty field is present (the empty string's
+    // header), and a repeated one is refused, since an intermediary may
+    // have routed on another occurrence (#90 review).
+    Occurrences := ParamField(ARequest, HeaderName, Raw);
+    if Occurrences > 1 then
+    begin
+      AFailure := 'Header mismatch: ' + HeaderName + ' header sent more ' +
+        'than once';
+      Exit;
+    end;
+    if Occurrences = 0 then
+    begin
+      if Value = nil then
+        Continue;
+      AFailure := 'Header mismatch: required ' + HeaderName +
+        ' header is missing';
+      Exit;
+    end;
+    if Value = nil then
+    begin
+      AFailure := 'Header mismatch: ' + HeaderName + ' header sent for ' +
+        'an argument the body does not carry';
+      Exit;
+    end;
+    // fcl-web has already trimmed the value's edges; what is left is
+    // checked as the client sent it.
+    if SentinelPayload(Raw, Payload) then
+    begin
+      if not StrictBase64(Payload, Decoded) then
+      begin
+        AFailure := 'Header mismatch: ' + HeaderName + ' header value ' +
+          'is not valid base64';
+        Exit;
+      end;
+    end
+    else if IsPlainHeaderValue(Raw) then
+      Decoded := Raw
+    else
+    begin
+      AFailure := 'Header mismatch: ' + HeaderName + ' header value ' +
+        'has characters a header cannot carry unencoded';
+      Exit;
+    end;
+    if not HeaderMatches(Decoded, Parameters[I].ParamType, Value) then
+    begin
+      AFailure := 'Header mismatch: ' + HeaderName + ' header value does ' +
+        'not match the body argument';
+      Exit;
+    end;
+  end;
   Result := False;
 end;
 
@@ -631,6 +995,107 @@ begin
   AResponse.Code := ACode;
   AResponse.ContentType := 'application/json';
   AResponse.Content := ABody;
+end;
+
+type
+  // The poll state of one POST (#93): its socket and when it was last
+  // checked.
+  THTTPDisconnectPoll = record
+    Socket: THandle;
+    LastCheck: QWord;
+    Closed: Boolean;
+  end;
+  PHTTPDisconnectPoll = ^THTTPDisconnectPoll;
+
+const
+  // How often a polling handler costs a system call.
+  DISCONNECT_POLL_INTERVAL_MS = 50;
+
+const
+  // Bytes one disconnect check discards at most; a client sending more
+  // than this after its request is seen closed on a later check.
+  DISCONNECT_DRAIN_LIMIT = 16 * 1024;
+
+// The client closed the connection: the socket reports a hang-up or an
+// error, or reading it finds the end of the stream (an orderly close)
+// or a terminal error such as a reset. The request body was read in
+// full before dispatch, and the binding serves one request per
+// connection, so bytes still arriving are not a request: they are read
+// and discarded, up to DISCONNECT_DRAIN_LIMIT per check, so an orderly
+// close behind them is still seen (#93 review); a peek would keep
+// finding the first of them. Errors that only say to try again leave
+// the request running. Receive EOF cannot tell a client that closed
+// only its sending side from one that closed both, so either counts as
+// having cancelled: the request ends and nothing more about it is sent.
+function SocketClosedByPeer(ASocket: THandle): Boolean;
+var
+  {$IFDEF WINDOWS}
+  ReadSet: winsock2.TFDSet;
+  Timeout: winsock2.TTimeVal;
+  Failure: Integer;
+  {$ELSE}
+  Fd: pollfd;
+  Failure: cint;
+  {$ENDIF}
+  Buffer: array[0..4095] of Byte;
+  Got, Drained: Integer;
+begin
+  Result := False;
+  Drained := 0;
+  while Drained < DISCONNECT_DRAIN_LIMIT do
+  begin
+    {$IFDEF WINDOWS}
+    // A Windows fd_set lists sockets, so any socket value fits it.
+    winsock2.FD_ZERO(ReadSet);
+    winsock2.FD_SET(ASocket, ReadSet);
+    Timeout.tv_sec := 0;
+    Timeout.tv_usec := 0;
+    if winsock2.select(0, @ReadSet, nil, nil, @Timeout) <= 0 then
+      Exit;
+    Got := winsock2.recv(ASocket, Buffer, SizeOf(Buffer), 0);
+    if Got < 0 then
+    begin
+      Failure := winsock2.WSAGetLastError;
+      Exit((Failure <> WSAEWOULDBLOCK) and (Failure <> WSAEINTR) and
+        (Failure <> WSAEINPROGRESS));
+    end;
+    {$ELSE}
+    // poll, not select: a descriptor above 1023 fits no TFDSet.
+    Fd.fd := ASocket;
+    Fd.events := POLLIN;
+    Fd.revents := 0;
+    if fpPoll(@Fd, 1, 0) <= 0 then
+      Exit;
+    if Fd.revents and (POLLERR or POLLHUP or POLLNVAL) <> 0 then
+      Exit(True);
+    Got := fpRecv(ASocket, @Buffer, SizeOf(Buffer), 0);
+    if Got < 0 then
+    begin
+      Failure := fpgeterrno;
+      Exit((Failure <> ESysEAGAIN) and (Failure <> ESysEINTR));
+    end;
+    {$ENDIF}
+    if Got = 0 then
+      Exit(True);
+    Inc(Drained, Got);
+  end;
+end;
+
+// The session's cancellation poll on HTTP (#93): closing the
+// connection is how a client cancels, so a handler that never writes
+// still learns about it. Checked at most every 50 ms.
+function HTTPDisconnectPoll(ASession: TMCPSession;
+  AUserData: Pointer): Boolean;
+begin
+  with PHTTPDisconnectPoll(AUserData)^ do
+  begin
+    if not Closed and (GetTickCount64 - LastCheck >= DISCONNECT_POLL_INTERVAL_MS) then
+    begin
+      LastCheck := GetTickCount64;
+      Closed := SocketClosedByPeer(Socket);
+    end;
+    Result := Closed;
+  end;
 end;
 
 // Dispatch one request body through the core and answer it — a
@@ -644,9 +1109,14 @@ var
   Stream: TSSEStream;
   ResponseLine: string;
   Produced: Boolean;
+  Poll: THTTPDisconnectPoll;
 begin
   Session := FServer.CreateSession;
   try
+    Poll.Socket := ARequest.Connection.Socket.Handle;
+    Poll.LastCheck := 0;
+    Poll.Closed := False;
+    Session.SetCancellationPoll(HTTPDisconnectPoll, @Poll);
     if AStream then
     begin
       // Nothing is committed up front: the sink opens the stream on

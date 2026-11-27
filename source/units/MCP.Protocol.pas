@@ -114,20 +114,33 @@ type
     // MRTR retry payload (modern era only; spec pattern verified
     // 2026-08-08, see RESULT_TYPE_INPUT_REQUIRED): inputResponses is
     // borrowed from the request tree (nil when this is not a retry);
-    // RequestState is the handler's own opaque state echoed verbatim
-    // by the client ('' when absent). The spec requires servers to
-    // treat requestState as attacker-controlled input — integrity
-    // protection is the handler's contract when the state influences
-    // authorization or business logic.
+    // RequestState is the client's echo as received ('' when absent);
+    // MCP.Server verifies that sealed token and replaces it with the
+    // handler's own state before any handler runs (#89), because the
+    // spec makes requestState attacker-controlled input.
     InputResponses: TJSONObject;
     RequestState: string;
+    // The request's whole params._meta object, borrowed for the handler
+    // call (nil when absent, as a classic-era request may leave it), for
+    // keys the library does not interpret, such as W3C trace context
+    // (#96). Read-only: the server still reads parts of it after the
+    // handler returns, so clone what you keep or change, and never free
+    // it.
+    Meta: TJSONObject;
     // Set by the dispatching server, not by ExtractRequestContext.
     Notifier: TMCPNotifier;
-    // Set by the dispatching server. The serial stdio transport cannot
-    // receive a cancellation while a handler occupies its read-handle-
-    // write loop, so this remains false there during handler execution;
-    // transports with mid-request delivery points can flip it.
+    // Set by the dispatching server. It also consults the transport's
+    // cancellation poll (#93), so a notifications/cancelled waiting on
+    // stdin or a closed HTTP connection turns it true while the handler
+    // runs.
     CancellationProbe: TMCPCancellationProbe;
+    // True when clientCapabilities declare AName. For a 2026-07-28
+    // request, a capability that schema defines counts only in its
+    // shape (an object; sampling's and elicitation's typed members
+    // objects too), so null or false declares nothing; any other name
+    // is the client's own and counts when its key is present, whatever
+    // its value. A classic-handshake client, whose capabilities follow
+    // its own revision's schema, counts by presence alone.
     function HasCapability(const AName: string): Boolean;
     function IsCancelled: Boolean;
   end;
@@ -164,9 +177,10 @@ function ExtractRequestContext(AParams: TJSONObject;
 
 // The {name, version} server identity object. Returns a fresh owned
 // object; the caller transfers it into a result tree or frees it.
-// Lives here because this unit owns response identity — the _meta
-// stamp below and the top-level serverInfo fields on
-// initialize/discover results must stay the same shape.
+// Lives here because this unit owns response identity: the _meta stamp
+// below and the top-level serverInfo of initialize and discover results
+// share these name and version fields (the top-level one may carry the
+// server's other Implementation fields too, #96).
 function BuildServerInfo(const AName, AVersion: string): TJSONObject;
 
 // Stamp the fields the spec expects on every result: resultType
@@ -188,12 +202,26 @@ function IsLegacyProtocolVersion(const AVersion: string): Boolean;
 // {requiredCapabilities: {<ACapability>: {}}}. Fresh, owned by the
 // caller.
 function BuildMissingCapabilityData(const ACapability: string): TJSONObject;
+  overload;
+// The same with every capability in ACapabilities, so a client learns
+// all it lacks from one refusal (#84). ACapabilities must be non-empty
+// and free of repeats, else EArgumentException before anything is
+// allocated: -32021 data names each capability once, at least one.
+function BuildMissingCapabilityData(
+  const ACapabilities: array of string): TJSONObject; overload;
 
 // True when AData is valid -32021 data: an object whose
 // requiredCapabilities is a ClientCapabilities object naming at least
 // one capability, each shaped as the schema types it. AData is
 // borrowed and may be nil.
 function IsMissingCapabilityData(AData: TJSONData): Boolean;
+
+// The requestId of a well-formed notifications/cancelled (borrowed from
+// AMessage), or nil: params present, and a reason absent or a string.
+// A malformed reason invalidates the whole notification. Spec verified
+// 2026-07-21:
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation
+function CancellationRequestId(const AMessage: TJSONRPCMessage): TJSONData;
 
 implementation
 
@@ -207,10 +235,37 @@ begin
   Result := False;
 end;
 
-function TMCPRequestContext.HasCapability(const AName: string): Boolean;
+function IsCapabilityEntry(const AName: string; AValue: TJSONData): Boolean;
+  forward;
+
+// The index of AName's member in AObject, or -1. A linear scan:
+// TJSONObject.IndexOfName misses a member stored as nil, which fpjson
+// writes as null and which is still a present key.
+function MemberPosition(AObject: TJSONObject; const AName: string): Integer;
 begin
-  Result := (ClientCapabilities <> nil) and
-    (ClientCapabilities.Find(AName) <> nil);
+  for Result := 0 to AObject.Count - 1 do
+    if AObject.Names[Result] = AName then
+      Exit;
+  Result := -1;
+end;
+
+// A capability the 2026-07-28 ClientCapabilities schema defines counts
+// as declared only in its shape: "sampling": null or false declares
+// nothing (#84 review). The set is open, so another name counts when its
+// key is present. Classic-handshake capabilities follow older schemas
+// (2025-06-18 has "sampling": {"tools": true}), so there presence alone
+// counts, as before #84.
+function TMCPRequestContext.HasCapability(const AName: string): Boolean;
+var
+  Position: Integer;
+begin
+  if ClientCapabilities = nil then
+    Exit(False);
+  if IsLegacyProtocolVersion(ProtocolVersion) then
+    Exit(ClientCapabilities.Find(AName) <> nil);
+  Position := MemberPosition(ClientCapabilities, AName);
+  Result := (Position >= 0) and
+    IsCapabilityEntry(AName, ClientCapabilities.Items[Position]);
 end;
 
 function TMCPRequestContext.IsCancelled: Boolean;
@@ -330,6 +385,7 @@ begin
   end;
 
   ExtractProgressToken(Meta, ACtx);
+  ACtx.Meta := Meta;
 
   // MRTR retry payload: top-level params fields on the supported
   // client requests (InputResponseRequestParams in the schema anchor).
@@ -412,13 +468,35 @@ end;
 // -32021 data payload: {requiredCapabilities: {<name>: {}}} (schema
 // anchor MissingRequiredClientCapabilityError, verified 2026-08-08).
 function BuildMissingCapabilityData(const ACapability: string): TJSONObject;
+begin
+  Result := BuildMissingCapabilityData([ACapability]);
+end;
+
+function BuildMissingCapabilityData(
+  const ACapabilities: array of string): TJSONObject;
 var
   Capabilities: TJSONObject;
+  Name: string;
+  I, J: Integer;
 begin
-  Capabilities := TJSONObject.Create;
-  Capabilities.Add(ACapability, TJSONObject.Create);
+  if Length(ACapabilities) = 0 then
+    raise EArgumentException.Create(
+      'BuildMissingCapabilityData needs at least one capability');
+  for I := 1 to High(ACapabilities) do
+    for J := 0 to I - 1 do
+      if ACapabilities[I] = ACapabilities[J] then
+        raise EArgumentException.CreateFmt(
+          'BuildMissingCapabilityData names "%s" twice', [ACapabilities[I]]);
   Result := TJSONObject.Create;
-  Result.Add('requiredCapabilities', Capabilities);
+  try
+    Capabilities := TJSONObject.Create;
+    Result.Add('requiredCapabilities', Capabilities);
+    for Name in ACapabilities do
+      Capabilities.Add(Name, TJSONObject.Create);
+  except
+    Result.Free;
+    raise;
+  end;
 end;
 
 function IsJSONObjectValue(AData: TJSONData): Boolean;
@@ -447,12 +525,21 @@ begin
   Result := True;
 end;
 
-// One entry of requiredCapabilities against the ClientCapabilities
-// schema: every capability is an object, and the members the schema
+// One present entry of a ClientCapabilities object against its schema:
+// a capability the schema defines is an object, and the members it
 // types are objects too (sampling.context/tools, elicitation.form/url,
-// each experimental and extensions entry).
+// each experimental and extensions entry). The set is open ("any client
+// can define its own, additional capabilities", schema 2026-07-28,
+// verified 2026-11-27), and the schema leaves such a value
+// unconstrained, so another name is valid with any value, nil (a member
+// stored as nil, written as null) included (#84 review). Callers
+// establish that the key is present.
 function IsCapabilityEntry(const AName: string; AValue: TJSONData): Boolean;
 begin
+  if (AName <> 'sampling') and (AName <> 'elicitation') and
+    (AName <> 'roots') and (AName <> 'experimental') and
+    (AName <> 'extensions') then
+    Exit(True);
   Result := IsJSONObjectValue(AValue);
   if not Result then
     Exit;
@@ -483,6 +570,21 @@ begin
       Required.Items[I]) then
       Exit(False);
   Result := True;
+end;
+
+
+function CancellationRequestId(const AMessage: TJSONRPCMessage): TJSONData;
+var
+  ReasonData: TJSONData;
+begin
+  Result := nil;
+  if (AMessage.Kind <> jrkNotification) or
+    (AMessage.Method <> 'notifications/cancelled') or
+    (AMessage.Params = nil) then
+    Exit;
+  ReasonData := AMessage.Params.Find('reason');
+  if (ReasonData = nil) or (ReasonData.JSONType = jtString) then
+    Result := AMessage.Params.Find('requestId');
 end;
 
 end.

@@ -131,6 +131,9 @@ type
     procedure TestMissingInputSchemaRoot;
     procedure TestWrongInputSchemaRoot;
     procedure TestNonObjectOutputSchema;
+    procedure TestBadHeaderAnnotationRejected;
+    procedure TestHeaderAnnotatedToolValidated;
+    procedure TestHeaderParametersAreCopies;
     procedure TestWrongOutputSchemaRoot;
     procedure TestValidInputAndOutputSchemaRoots;
     procedure TestDuplicateResource;
@@ -225,6 +228,10 @@ type
     procedure TestStringReasonAccepted;
     procedure TestModernUnknownAndMalformedIgnored;
     procedure TestLegacyFinishedAndRepeatedIgnored;
+    procedure TestTransportPollCancels;
+    procedure TestActiveRequestIdMatches;
+    procedure TestOptedOutNotificationsDoNotPoll;
+    procedure TestTransportPollOnlyDuringRequests;
   end;
 
   TPromptDispatch = class(TDispatchSuite)
@@ -310,6 +317,7 @@ type
   TMRTRDispatch = class(TDispatchSuite)
   protected
     procedure BeforeEach; override;
+    function SealedState(const AFirstRound: string): string;
   public
     procedure SetupTests; override;
     procedure TestFirstRoundInputRequired;
@@ -326,6 +334,37 @@ type
     procedure TestLegacyToolGetsInBandError;
     procedure TestPromptRoundTrip;
     procedure TestSamplingAndRootsBuilders;
+  end;
+
+  // requestState sealing (#89): what reaches the client is a token,
+  // the handler sees only its own state, and every token that is
+  // altered, expired, or presented for another tool, other arguments
+  // or another server is answered -32602 before the handler runs.
+  TRequestStateSealing = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestRoundTripNonASCIIState;
+    procedure TestTamperedTokenRejected;
+    procedure TestPlainStateRejected;
+    procedure TestOtherToolRejected;
+    procedure TestOtherArgumentsRejected;
+    procedure TestExpiredRejected;
+    procedure TestSharedKeyAcrossInstances;
+    procedure TestOtherAudienceRejected;
+    procedure TestKeyRotation;
+    procedure TestResourceReadDropsState;
+    procedure TestConfigurationGuards;
+    procedure TestSeededDefaultKeepsTokenValid;
+    procedure TestDefaultKeysPerInstance;
+    procedure TestFirstKeySeals;
+    procedure TestNumberSpellingKeepsTokenValid;
+    procedure TestPromptStateRestored;
+    procedure TestExplicitEmptyStateRejected;
+  protected
+    function Token(const ATool, AArguments: string): string;
+    procedure ExpectRefused(const ALine: string);
   end;
 
   // #23: call-time validation of raw-handler tool arguments against
@@ -382,6 +421,111 @@ type
     procedure TestAllowedCodesAccepted;
     procedure TestCapabilityDataShape;
     procedure TestChangedDataSentAsInternalError;
+  end;
+
+  // #91: any outputSchema root, structured output checked against a
+  // subset output schema before it is sent, and the classic dialect's
+  // object-only structuredContent.
+  TStructuredOutput = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestArrayOutputSent;
+    procedure TestScalarOutputSent;
+    procedure TestMismatchBecomesIsError;
+    procedure TestMissingStructuredContent;
+    procedure TestHandlerIsErrorNotChecked;
+    procedure TestOutOfSubsetOutputNotChecked;
+    procedure TestLegacyDialect;
+    procedure TestLegacyKeepsCustomText;
+    procedure TestErrorWithBadStructuredDropsIt;
+    procedure TestErrorWithGoodStructuredKeepsIt;
+    procedure TestRicherSchemaPublishedUnchanged;
+    procedure TestNonFiniteOutputRefused;
+    procedure TestNonFiniteClassicIsAnError;
+    procedure TestNilSchemaChildListedInBothEras;
+  end;
+
+  // completion/complete (#81): static and callable completions for
+  // prompt arguments and template variables, the 100-value cap,
+  // context arguments, error cases, and capabilities computed from
+  // the registrations.
+  TCompletionDispatch = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestStaticPromptCompletion;
+    procedure TestCallableTemplateCompletion;
+    procedure TestHundredValueCap;
+    procedure TestUnregisteredArgumentIsEmpty;
+    procedure TestErrors;
+    procedure TestRegistrationGuards;
+    procedure TestCapabilities;
+    procedure TestLegacyEra;
+    procedure TestFoldPairs;
+  end;
+
+  TTypedNested = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestNestedArgumentsReachHandler;
+    procedure TestNestedErrorIsInBand;
+  end;
+
+  // .RequiresClientCapability (#84): a declared need is checked before
+  // the handler runs. A request lacking a required client capability
+  // is answered -32021 with data.requiredCapabilities (spec verified
+  // 2026-11-27:
+  // https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta).
+  TDeclaredCapabilities = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestMissingRefusedBeforeHandler;
+    procedure TestEveryMissingCapabilityNamed;
+    procedure TestMalformedDeclarationIsMissing;
+    procedure TestNonASCIIToolName;
+    procedure TestCustomCapabilityByPresence;
+    procedure TestClassicLookupByPresence;
+    procedure TestPresentRuns;
+    procedure TestLegacyEraNotChecked;
+    procedure TestGuards;
+  end;
+
+  // PageSize and cursors on the four list methods (#94).
+  TPagination = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestPagesConcatenateInOrder;
+    procedure TestInvalidCursors;
+    procedure TestNoPagingByDefault;
+    procedure TestOtherListsPage;
+    procedure TestLegacyDialectPages;
+    procedure TestContinuationPageBytes;
+  end;
+
+  // Metadata fields and handler _meta (#96).
+  TMetadataFields = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestServerInfoFields;
+    procedure TestResourceAndPromptFields;
+    procedure TestToolIconAndMeta;
+    procedure TestHandlerMetaOnEveryResult;
+    procedure TestTemplateAndPromptMeta;
+    procedure TestClassicEra;
+    procedure TestHandlerMetaInAndOut;
+    procedure TestReaderTtl;
+    procedure TestGuards;
   end;
 
   // MCPImageResult: the spec's image content block, the raw-bytes
@@ -455,6 +599,23 @@ begin
 end;
 
 type
+  // #95: a typed tool with a nested object and an array.
+  TBatchItem = class(TMCPArgs)
+  private
+    FLabel: string;
+    FWeights: TStringArray;
+  published
+    property label_: string read FLabel write FLabel;
+    property weights: TStringArray read FWeights write FWeights;
+  end;
+
+  TBatchArgs = class(TMCPArgs)
+  private
+    FItem: TBatchItem;
+  published
+    property item: TBatchItem read FItem write FItem;
+  end;
+
   TScaleArgs = class(TMCPArgs)
   private
     FValue: Double;
@@ -1860,6 +2021,85 @@ begin
   end;
 end;
 
+// A client drops a tool whose x-mcp-header breaks a constraint, so the
+// server refuses it at registration; verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
+procedure TRegistrationGuards.TestBadHeaderAnnotationRejected;
+var
+  Server: TMCPServer;
+  Raised: string;
+begin
+  // A client would drop the whole tool, so registration refuses it
+  // (#90).
+  Server := TMCPServer.Create('t', '1');
+  try
+    Raised := '';
+    try
+      Server.RegisterTool('bad', 'Bad', '{"type":"object","properties":' +
+        '{"n":{"type":"number","x-mcp-header":"N"}}}', EchoHandler)
+        .ApplicationValidated;
+    except
+      on E: EMCPServer do
+        Raised := E.Message;
+    end;
+    Expect<string>(Raised).ToBe('Tool "bad" inputSchema: x-mcp-header of ' +
+      '"n" needs type string, integer or boolean, not "number"');
+  finally
+    Server.Free;
+  end;
+end;
+
+// x-mcp-header is inside the enforced subset: a header-routed tool
+// keeps server-side argument validation (#90).
+// ToolHeaderParameters hands out a copy: changing it leaves what the
+// HTTP binding validates against untouched (#90 review).
+procedure TRegistrationGuards.TestHeaderParametersAreCopies;
+var
+  Server: TMCPServer;
+  First, Second: TMCPHeaderParameters;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Server.RegisterTool('routed', 'Routed', '{"type":"object","properties":' +
+      '{"region":{"type":"string","x-mcp-header":"Region"}}}', EchoHandler);
+    Server.CreateSession.Free;
+    First := Server.ToolHeaderParameters('routed');
+    First[0].Path[0] := 'changed';
+    First[0].Header := 'Changed';
+    Second := Server.ToolHeaderParameters('routed');
+    Expect<string>(Second[0].Path[0]).ToBe('region');
+    Expect<string>(Second[0].Header).ToBe('Region');
+  finally
+    Server.Free;
+  end;
+end;
+
+procedure TRegistrationGuards.TestHeaderAnnotatedToolValidated;
+var
+  Server: TMCPServer;
+  Session: TMCPSession;
+  Line: string;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Server.RegisterTool('routed', 'Routed', '{"type":"object","properties":' +
+      '{"region":{"type":"string","x-mcp-header":"Region"}},' +
+      '"required":["region"]}', EchoHandler);
+    Session := Server.CreateSession;
+    try
+      Server.HandleMessage(Session, '{"jsonrpc":"2.0","id":1,"method":' +
+        '"tools/call","params":{"name":"routed","arguments":{"region":7},' +
+        META_MODERN + '}}', Line);
+      Expect<Boolean>(Pos('Argument \"region\" must be a string', Line) > 0)
+        .ToBe(True);
+    finally
+      Session.Free;
+    end;
+  finally
+    Server.Free;
+  end;
+end;
+
 procedure TRegistrationGuards.TestWrongOutputSchemaRoot;
 var
   Definition: TJSONObject;
@@ -1868,10 +2108,13 @@ begin
   Server := TMCPServer.Create('t', '1');
   try
     Definition := TJSONObject.Create;
+    // Any root type is fine since SEP-2106 (#91), verified 2026-11-26
+    // against https://modelcontextprotocol.io/specification/2026-07-28/server/tools#output-schema.
     Definition.Add('name', 'array-output');
     Definition.Add('inputSchema', GetJSON('{"type":"object"}'));
     Definition.Add('outputSchema', GetJSON('{"type":"array"}'));
-    ExpectToolDefinitionRejected(Server, Definition);
+    Server.RegisterTool(Definition, EchoHandler);
+    Expect<Integer>(Server.ToolCount).ToBe(1);
   finally
     Server.Free;
   end;
@@ -2481,9 +2724,16 @@ begin
   Test('non-object definition inputSchema rejected',
     TestNonObjectDefinitionInputSchema);
   Test('inputSchema without root type rejected', TestMissingInputSchemaRoot);
+  Test('invalid x-mcp-header annotation rejected at registration',
+    TestBadHeaderAnnotationRejected);
+  Test('a header-annotated tool keeps server-side argument checks',
+    TestHeaderAnnotatedToolValidated);
+  Test('ToolHeaderParameters returns independent copies',
+    TestHeaderParametersAreCopies);
   Test('inputSchema array root rejected', TestWrongInputSchemaRoot);
   Test('non-object outputSchema rejected', TestNonObjectOutputSchema);
-  Test('outputSchema array root rejected', TestWrongOutputSchemaRoot);
+  Test('outputSchema with an array root accepted',
+    TestWrongOutputSchemaRoot);
   Test('object inputSchema and outputSchema accepted',
     TestValidInputAndOutputSchemaRoots);
   Test('duplicate resource uri rejected', TestDuplicateResource);
@@ -2989,6 +3239,15 @@ end;
 
 { ───────── cooperative cancellation ───────── }
 
+// Reports progress and logs a debug line, never asking IsCancelled.
+function ReporterHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  MCPReportProgress(ACtx, 0.5, 1.0);
+  MCPLogMessage(ACtx, 'debug', 'detail');
+  Result := MCPTextResult('reported');
+end;
+
 procedure TCancellationDispatch.BeforeEach;
 begin
   inherited BeforeEach;
@@ -2998,6 +3257,8 @@ begin
     '{"type":"object"}', SelfCancellingHandler);
   FServer.RegisterTool('notification-cancel', 'Receives cancellation',
     '{"type":"object"}', NotificationCancellingHandler);
+  FServer.RegisterTool('reporter', 'Reports progress and logs',
+    '{"type":"object"}', ReporterHandler);
   FLines := TStringList.Create;
   FLineSink := CaptureSink;
   FLineSinkData := FLines;
@@ -3197,6 +3458,151 @@ begin
   Response.Free;
 end;
 
+var
+  PollCalls: Integer;
+  PollAnswer: Boolean;
+
+// A transport poll (#93) that counts its calls and answers PollAnswer.
+function CountingPoll(ASession: TMCPSession; AUserData: Pointer): Boolean;
+begin
+  Inc(PollCalls);
+  Result := PollAnswer;
+end;
+
+var
+  // What CancelsActiveRequest said, from inside the poll, for each of
+  // CANCEL_PROBES.
+  ActiveAnswers: string;
+
+const
+  CANCEL_PROBES: array[0..6] of string = (
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+      '"params":{"requestId":9}}',
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+      '"params":{"requestId":"9"}}',
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+      '"params":{"requestId":9.0,"reason":"user"}}',
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+      '"params":{"requestId":10}}',
+    // A numeric reason invalidates the notification, as dispatch has it.
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+      '"params":{"requestId":9,"reason":5}}',
+    '{"jsonrpc":"2.0","method":"notifications\/cancelled",' +
+      '"params":{"requestId":9}}',
+    'not json');
+
+function RecordingPoll(ASession: TMCPSession; AUserData: Pointer): Boolean;
+var
+  Probe: string;
+begin
+  ActiveAnswers := '';
+  for Probe in CANCEL_PROBES do
+    if ASession.CancelsActiveRequest(Probe) then
+      ActiveAnswers := ActiveAnswers + 'y'
+    else
+      ActiveAnswers := ActiveAnswers + 'n';
+  Result := False;
+end;
+
+// A transport picks out the cancellation for the running request by
+// the core's own rule: numbers by value, strings apart, a malformed
+// reason refused, the method decoded (#93 review).
+procedure TCancellationDispatch.TestActiveRequestIdMatches;
+var
+  Response: TJSONObject;
+  Target: TJSONData;
+begin
+  FSession.SetCancellationPoll(RecordingPoll, nil);
+  Response := Call('{"jsonrpc":"2.0","id":9,"method":"tools/call",' +
+    '"params":{"name":"cancellation-aware",' + META_MODERN + '}}');
+  Response.Free;
+  Expect<string>(ActiveAnswers).ToBe('ynynnyn');
+  // No request running: nothing is active.
+  Expect<Boolean>(FSession.CancelsActiveRequest(CANCEL_PROBES[0]))
+    .ToBe(False);
+  Expect<Boolean>(FSession.IsActiveRequestId(TJSONData(nil))).ToBe(False);
+  // MCPCancellationTarget: the requestId of an accepted cancellation
+  // only.
+  Target := MCPCancellationTarget(CANCEL_PROBES[2]);
+  try
+    Expect<string>(Target.AsJSON).ToBe('9.0000000000000000E+000');
+  finally
+    Target.Free;
+  end;
+  Expect<Boolean>(MCPCancellationTarget(CANCEL_PROBES[4]) = nil).ToBe(True);
+  Expect<Boolean>(MCPCancellationTarget(CANCEL_PROBES[6]) = nil).ToBe(True);
+end;
+
+// A progress or log call the client did not opt into (no progressToken,
+// a log floor above the level) is a no-op: it does not reach the
+// transport's poll; an eligible one polls once, at emission (#93
+// review).
+procedure TCancellationDispatch.TestOptedOutNotificationsDoNotPoll;
+var
+  ResponseLine: string;
+begin
+  PollCalls := 0;
+  PollAnswer := False;
+  FSession.SetCancellationPoll(CountingPoll, nil);
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":11,"method":"tools/call",' +
+    '"params":{"name":"reporter",' + META_MODERN + '}}', ResponseLine))
+    .ToBe(True);
+  Expect<Integer>(PollCalls).ToBe(0);
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":12,"method":"tools/call",' +
+    '"params":{"name":"reporter","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"io.modelcontextprotocol/logLevel":"error","progressToken":1}}}',
+    ResponseLine)).ToBe(True);
+  Expect<Integer>(PollCalls).ToBe(1);
+end;
+
+// Spec verified 2026-11-27: the receiver SHOULD stop processing a
+// cancelled request and not send a response,
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation.
+procedure TCancellationDispatch.TestTransportPollCancels;
+var
+  ResponseLine: string;
+begin
+  PollCalls := 0;
+  PollAnswer := True;
+  FSession.SetCancellationPoll(CountingPoll, nil);
+  // The handler's IsCancelled consults the poll, which cancels: the
+  // response is withheld like any cancelled request's.
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":5,"method":"tools/call",' +
+    '"params":{"name":"cancellation-aware",' + META_MODERN + '}}',
+    ResponseLine)).ToBe(False);
+  Expect<string>(ResponseLine).ToBe('');
+  Expect<Boolean>(CancellationObserved).ToBe(True);
+  Expect<Boolean>(PollCalls >= 1).ToBe(True);
+end;
+
+procedure TCancellationDispatch.TestTransportPollOnlyDuringRequests;
+var
+  Response: TJSONObject;
+begin
+  PollCalls := 0;
+  PollAnswer := False;
+  FSession.SetCancellationPoll(CountingPoll, nil);
+  Response := Call('{"jsonrpc":"2.0","id":6,"method":"tools/call",' +
+    '"params":{"name":"cancellation-aware",' + META_MODERN + '}}');
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+    .AsString).ToBe('not cancelled');
+  Response.Free;
+  Expect<Integer>(PollCalls).ToBe(1);
+  // A request whose handler never asks does not poll, and nil removes
+  // the poll.
+  Response := Call('{"jsonrpc":"2.0","id":7,"method":"tools/list",' +
+    '"params":{' + META_MODERN + '}}');
+  Response.Free;
+  Expect<Integer>(PollCalls).ToBe(1);
+  FSession.SetCancellationPoll(nil, nil);
+  Response := Call('{"jsonrpc":"2.0","id":8,"method":"tools/call",' +
+    '"params":{"name":"cancellation-aware",' + META_MODERN + '}}');
+  Response.Free;
+  Expect<Integer>(PollCalls).ToBe(1);
+end;
+
 procedure TCancellationDispatch.SetupTests;
 begin
   Test('normal handler probe is present and false',
@@ -3219,6 +3625,14 @@ begin
     TestModernUnknownAndMalformedIgnored);
   Test('legacy finished and repeated cancellations are ignored',
     TestLegacyFinishedAndRepeatedIgnored);
+  Test('a transport poll that reports cancellation cancels the request',
+    TestTransportPollCancels);
+  Test('opted-out progress and log calls do not poll the transport',
+    TestOptedOutNotificationsDoNotPoll);
+  Test('CancelsActiveRequest follows the dispatch rule for cancellations',
+    TestActiveRequestIdMatches);
+  Test('the poll runs only when a handler asks, and nil removes it',
+    TestTransportPollOnlyDuringRequests);
 end;
 
 { ───────── prompts ───────── }
@@ -4079,6 +4493,13 @@ var
 begin
   Server := TMCPServer.Create('wire-server', '1.0');
   try
+    // Capabilities follow the registrations (#81): a tool and a
+    // resource here, no prompts and no completions. Schema
+    // ServerCapabilities ("Present if the server offers ..."), verified
+    // 2026-11-26 against
+    // https://modelcontextprotocol.io/specification/2026-07-28/schema#servercapabilities
+    Server.RegisterTool('echo', 'Echo', '{"type":"object"}', EchoHandler);
+    Server.RegisterTextResource('mem://w', 'w', 'text/plain', 'w');
     Session := Server.CreateSession;
     try
       Expect<Boolean>(Server.HandleMessage(Session,
@@ -4089,7 +4510,7 @@ begin
       Expect<string>(Response).ToBe(
         '{ "jsonrpc" : "2.0", "id" : 2, "result" : { ' +
         '"protocolVersion" : "2025-11-25", "capabilities" : { ' +
-        '"tools" : {}, "resources" : {}, "prompts" : {} }, ' +
+        '"tools" : {}, "resources" : {} }, ' +
         '"serverInfo" : { "name" : "wire-server", ' +
         '"version" : "1.0" } } }');
     finally
@@ -4306,13 +4727,30 @@ begin
   Expect<string>(
     TJSONData(Response.FindPath(
     'result.inputRequests.who.params.mode')).AsString).ToBe('form');
-  Expect<string>(
-    TJSONData(Response.FindPath('result.requestState')).AsString)
-    .ToBe('state-42');
+  // The client receives the handler's state sealed (#89), never plain.
+  Expect<Boolean>(Pos('v1.',
+    TJSONData(Response.FindPath('result.requestState')).AsString) = 1)
+    .ToBe(True);
+  Expect<Boolean>(Pos('state-42',
+    TJSONData(Response.FindPath('result.requestState')).AsString) = 0)
+    .ToBe(True);
   // An interim result still carries the serverInfo stamp.
   Expect<Boolean>(
     Response.FindPath('result._meta') <> nil).ToBe(True);
   Response.Free;
+end;
+
+// The sealed requestState a first round returns, for echoing back.
+function TMRTRDispatch.SealedState(const AFirstRound: string): string;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(AFirstRound);
+  try
+    Result := TJSONData(Response.FindPath('result.requestState')).AsString;
+  finally
+    Response.Free;
+  end;
 end;
 
 procedure TMRTRDispatch.TestRetryCompletes;
@@ -4321,7 +4759,8 @@ var
 begin
   Response := Call(GreetCall(
     '"inputResponses":{"who":{"action":"accept",' +
-    '"content":{"name":"Ada"}}},"requestState":"state-42",'));
+    '"content":{"name":"Ada"}}},"requestState":"' +
+    SealedState(GreetCall('')) + '",'));
   Expect<string>(
     TJSONData(Response.FindPath('result.resultType')).AsString)
     .ToBe('complete');
@@ -4334,6 +4773,7 @@ end;
 procedure TMRTRDispatch.TestStateOnlyRound;
 var
   Response: TJSONObject;
+  State: string;
 begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
     '"params":{"name":"resume",' + META_MRTR + '}}');
@@ -4342,13 +4782,11 @@ begin
     .ToBe('input_required');
   Expect<Boolean>(
     Response.FindPath('result.inputRequests') = nil).ToBe(True);
-  Expect<string>(
-    TJSONData(Response.FindPath('result.requestState')).AsString)
-    .ToBe('opaque-state');
+  State := TJSONData(Response.FindPath('result.requestState')).AsString;
   Response.Free;
 
   Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
-    '"params":{"name":"resume","requestState":"opaque-state",' +
+    '"params":{"name":"resume","requestState":"' + State + '",' +
     META_MRTR + '}}');
   Expect<string>(
     TJSONData(Response.FindPath('result.content[0].text')).AsString)
@@ -4502,21 +4940,20 @@ end;
 procedure TMRTRDispatch.TestPromptRoundTrip;
 var
   Response: TJSONObject;
+  State: string;
 begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"prompts/get",' +
     '"params":{"name":"setup",' + META_MRTR + '}}');
   Expect<string>(
     TJSONData(Response.FindPath('result.resultType')).AsString)
     .ToBe('input_required');
-  Expect<string>(
-    TJSONData(Response.FindPath('result.requestState')).AsString)
-    .ToBe('p-state');
+  State := TJSONData(Response.FindPath('result.requestState')).AsString;
   Response.Free;
 
   Response := Call('{"jsonrpc":"2.0","id":2,"method":"prompts/get",' +
     '"params":{"name":"setup",' +
     '"inputResponses":{"project":{"action":"accept",' +
-    '"content":{"name":"herakles"}}},"requestState":"p-state",' +
+    '"content":{"name":"herakles"}}},"requestState":"' + State + '",' +
     META_MRTR + '}}');
   Expect<string>(
     TJSONData(Response.FindPath('result.resultType')).AsString)
@@ -4684,8 +5121,10 @@ procedure TSubsetValidation.TestOutOfSubsetSchemaFailsFreeze;
 var
   ErrorMessage, Response: string;
 begin
-  FServer.RegisterTool('rich', 'Array-typed input',
-    '{"type":"object","properties":{"data":{"type":"array"}}}',
+  // "format" is outside the enforced subset (#91 added arrays and
+  // nesting, not string formats).
+  FServer.RegisterTool('rich', 'Formatted input',
+    '{"type":"object","properties":{"data":{"type":"string","format":"uri"}}}',
     ArgsMirrorHandler);
   ErrorMessage := '';
   try
@@ -5035,6 +5474,13 @@ begin
   WithNil := TJSONObject.Create;
   WithNil.Add('requiredCapabilities', Capabilities);
   Expect<Boolean>(CapabilityDataRefused(WithNil)).ToBe(True);
+  // A capability of the client's own is valid with any value, a member
+  // stored as nil included: its key is present (#84 review).
+  Capabilities := TJSONObject.Create;
+  Capabilities.Add('com.example/feature', TJSONData(nil));
+  WithNil := TJSONObject.Create;
+  WithNil.Add('requiredCapabilities', Capabilities);
+  Expect<Boolean>(CapabilityDataRefused(WithNil)).ToBe(False);
   EMCPProtocolError.Create(-32021, 'missing', GetJSON(
     '{"requiredCapabilities":{"sampling":{"tools":{}},' +
     '"extensions":{"io.modelcontextprotocol/ui":{}}}}')).Free;
@@ -5070,6 +5516,2329 @@ begin
     TestCapabilityDataShape);
   Test('-32021 data changed after construction is sent as -32603',
     TestChangedDataSentAsInternalError);
+end;
+
+{ ───────── structured output (#91) ───────── }
+
+const
+  USERS_SCHEMA = '{"type":"array","items":{"type":"object","properties":' +
+    '{"id":{"type":"string"},"name":{"type":"string"}},"required":["id"]}}';
+
+function OutputTool(const AName, AOutputSchema: string): TJSONObject;
+begin
+  Result := TJSONObject.Create;
+  Result.Add('name', AName);
+  Result.Add('inputSchema', GetJSON('{"type":"object"}'));
+  Result.Add('outputSchema', GetJSON(AOutputSchema));
+end;
+
+function UsersHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult(GetJSON('[{"id":"1","name":"Ada"}]'));
+end;
+
+function BadUsersHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult(GetJSON('[{"id":"1"},{"name":"no id"}]'));
+end;
+
+function NoStructuredHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPTextResult('forgot the structured part');
+end;
+
+function FailingOutputHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPErrorResult('upstream unavailable');
+end;
+
+function CountHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult(TJSONIntegerNumber.Create(42));
+end;
+
+// Custom text beside non-object output: classic clients get both.
+function LabelledUsersHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult('Found ' + #$C3#$BC + 'sers',
+    GetJSON('[{"id":"1","name":"Ada"}]'));
+end;
+
+function ErrorWithBadStructuredHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult('quota exceeded', GetJSON('"not users"'));
+  Result.IsError := True;
+end;
+
+// NaN has no JSON form; the two-argument builder takes it as given.
+function NaNHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult('nan', TJSONFloatNumber.Create(NaN));
+end;
+
+// A wire number set to NaN after construction: serializing it raises.
+function WireNaNHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Value: TJSONData;
+begin
+  Value := MCPWireNumber(1.5);
+  Value.AsFloat := NaN;
+  Result := MCPStructuredResult('nan', Value);
+end;
+
+function ErrorWithGoodStructuredHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult('partial', GetJSON('[{"id":"1"}]'));
+  Result.IsError := True;
+end;
+
+procedure TStructuredOutput.BeforeEach;
+begin
+  inherited BeforeEach;
+  FServer.RegisterTool(OutputTool('users', USERS_SCHEMA), UsersHandler);
+  FServer.RegisterTool(OutputTool('bad_users', USERS_SCHEMA), BadUsersHandler);
+  FServer.RegisterTool(OutputTool('no_structured', USERS_SCHEMA),
+    NoStructuredHandler);
+  FServer.RegisterTool(OutputTool('failing', USERS_SCHEMA),
+    FailingOutputHandler);
+  FServer.RegisterTool(OutputTool('count', '{"type":"integer"}'), CountHandler);
+  // "format" is outside the subset: the output is the handler's to honour.
+  FServer.RegisterTool(OutputTool('formatted',
+    '{"type":"string","format":"uri"}'), CountHandler);
+  FServer.RegisterTool(OutputTool('labelled', USERS_SCHEMA),
+    LabelledUsersHandler);
+  FServer.RegisterTool(OutputTool('error_bad', USERS_SCHEMA),
+    ErrorWithBadStructuredHandler);
+  FServer.RegisterTool(OutputTool('error_good', USERS_SCHEMA),
+    ErrorWithGoodStructuredHandler);
+  FServer.RegisterTool(OutputTool('nan_number', '{"type":"number"}'),
+    NaNHandler);
+  FServer.RegisterTool('nan_unchecked', 'NaN, no output schema',
+    '{"type":"object"}', WireNaNHandler);
+end;
+
+function OutputCall(const ATool: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{' +
+    '"name":"' + ATool + '",' + META_MODERN + '}}';
+end;
+
+procedure TStructuredOutput.TestArrayOutputSent;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(OutputCall('users'), Response)).ToBe(True);
+  // The text block carries the serialized JSON (SHOULD, SEP-2106),
+  // verified 2026-11-26 against
+  // https://modelcontextprotocol.io/specification/2026-07-28/server/tools#structured-content
+  Expect<Boolean>(Pos('"content" : [{ "type" : "text", "text" : ' +
+    '"[{ \"id\" : \"1\", \"name\" : \"Ada\" }]" }], "isError" : false, ' +
+    '"structuredContent" : [{ "id" : "1", "name" : "Ada" }]', Response) > 0)
+    .ToBe(True);
+end;
+
+procedure TStructuredOutput.TestScalarOutputSent;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(OutputCall('count'));
+  Expect<Integer>(TJSONData(Response.FindPath('result.structuredContent'))
+    .AsInteger).ToBe(42);
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestMismatchBecomesIsError;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(OutputCall('bad_users'));
+  Expect<Boolean>(TJSONData(Response.FindPath('result.isError')).AsBoolean)
+    .ToBe(True);
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Tool "bad_users" produced output that does not match its ' +
+    'outputSchema: Missing required structured output "[1].id"');
+  Expect<Boolean>(Response.FindPath('result.structuredContent') = nil)
+    .ToBe(True);
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestMissingStructuredContent;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(OutputCall('no_structured'));
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Tool "no_structured" produced output that does not match its ' +
+    'outputSchema: no structuredContent was returned');
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestHandlerIsErrorNotChecked;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(OutputCall('failing'));
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('upstream unavailable');
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestOutOfSubsetOutputNotChecked;
+var
+  Response: TJSONObject;
+begin
+  // 42 is not a string, but the schema is outside the subset.
+  Response := Call(OutputCall('formatted'));
+  Expect<Boolean>(TJSONData(Response.FindPath('result.isError')).AsBoolean)
+    .ToBe(False);
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestLegacyDialect;
+var
+  Response: TJSONObject;
+  Tools: TJSONArray;
+  I: Integer;
+  Found: Boolean;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  // The tool stays in the classic listing, without its non-object
+  // outputSchema (2025-11-25 schema, Tool.outputSchema), verified
+  // 2026-11-27 against
+  // https://modelcontextprotocol.io/specification/2025-11-25/schema#tool
+  Found := False;
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}');
+  Tools := TJSONArray(Response.FindPath('result.tools'));
+  for I := 0 to Tools.Count - 1 do
+    if TJSONObject(Tools[I]).Get('name', '') = 'users' then
+    begin
+      Found := True;
+      Expect<Boolean>(TJSONObject(Tools[I]).Find('outputSchema') = nil)
+        .ToBe(True);
+    end;
+  Expect<Boolean>(Found).ToBe(True);
+  Response.Free;
+  // ...and its array output travels in the text block only
+  // (CallToolResult.structuredContent is an object there, same source,
+  // https://modelcontextprotocol.io/specification/2025-11-25/schema#calltoolresult).
+  Response := Call('{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+    '"params":{"name":"users","arguments":{}}}');
+  Expect<Boolean>(Response.FindPath('result.structuredContent') = nil)
+    .ToBe(True);
+  Expect<Boolean>(Pos('Ada', TJSONData(Response.FindPath(
+    'result.content[0].text')).AsString) > 0).ToBe(True);
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestLegacyKeepsCustomText;
+var
+  Response: TJSONObject;
+  Line: string;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+    '"params":{"name":"labelled","arguments":{}}}', Line)).ToBe(True);
+  Expect<Boolean>(Pos('"content" : [{ "type" : "text", "text" : "Found ' +
+    #$C3#$BC + 'sers" }, { "type" : "text", "text" : "[{ \"id\" : \"1\", ' +
+    '\"name\" : \"Ada\" }]" }], "isError" : false }', Line) > 0).ToBe(True);
+end;
+
+procedure TStructuredOutput.TestErrorWithBadStructuredDropsIt;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(OutputCall('error_bad'), Response)).ToBe(True);
+  Expect<Boolean>(Pos('"content" : [{ "type" : "text", "text" : ' +
+    '"quota exceeded" }], "isError" : true', Response) > 0).ToBe(True);
+  Expect<Boolean>(Pos('structuredContent', Response) = 0).ToBe(True);
+end;
+
+procedure TStructuredOutput.TestErrorWithGoodStructuredKeepsIt;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(OutputCall('error_good'));
+  Expect<string>(TJSONData(Response.FindPath('result.structuredContent[0].id'))
+    .AsString).ToBe('1');
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestRicherSchemaPublishedUnchanged;
+var
+  Response: TJSONObject;
+  Tools: TJSONArray;
+  I: Integer;
+  Found: Boolean;
+begin
+  Found := False;
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{' +
+    META_MODERN + '}}');
+  Tools := TJSONArray(Response.FindPath('result.tools'));
+  for I := 0 to Tools.Count - 1 do
+    if TJSONObject(Tools[I]).Get('name', '') = 'formatted' then
+    begin
+      Found := True;
+      Expect<string>(TJSONObject(Tools[I]).Find('outputSchema').AsJSON)
+        .ToBe('{ "type" : "string", "format" : "uri" }');
+    end;
+  Expect<Boolean>(Found).ToBe(True);
+  Response.Free;
+end;
+
+procedure TStructuredOutput.TestNonFiniteOutputRefused;
+var
+  Response: TJSONObject;
+begin
+  // Parseable: the bad value never reaches the wire.
+  Response := Call(OutputCall('nan_number'));
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('Tool "nan_number" produced output that does not match its ' +
+    'outputSchema: Structured output must be a number');
+  Response.Free;
+end;
+
+// The classic text fallback serializes the value; when that raises,
+// the call answers -32603 and frees the result (no leak under heaptrc).
+procedure TStructuredOutput.TestNonFiniteClassicIsAnError;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Response := Call('{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+    '"params":{"name":"nan_unchecked","arguments":{}}}');
+  Expect<Integer>(TJSONData(Response.FindPath('error.code')).AsInteger)
+    .ToBe(-32603);
+  Response.Free;
+end;
+
+// A raw definition whose enum holds a nil item (null on the wire):
+// listing clones every definition, which fpjson cannot do with a nil
+// child, so registration stores a JSON null instead.
+procedure TStructuredOutput.TestNilSchemaChildListedInBothEras;
+var
+  Definition, Schema, Prop, Props: TJSONObject;
+  Enum: TJSONArray;
+  Response: TJSONObject;
+begin
+  Enum := TJSONArray.Create;
+  Enum.Add(TJSONData(nil));
+  Prop := TJSONObject.Create;
+  Prop.Add('type', 'null');
+  Prop.Add('enum', Enum);
+  Props := TJSONObject.Create;
+  Props.Add('n', Prop);
+  Schema := TJSONObject.Create;
+  Schema.Add('type', 'object');
+  Schema.Add('properties', Props);
+  Definition := TJSONObject.Create;
+  Definition.Add('name', 'nil_enum');
+  Definition.Add('inputSchema', Schema);
+  FServer.RegisterTool(Definition, NaNHandler);
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{' +
+    META_MODERN + '}}');
+  Expect<Boolean>(Pos('"enum" : [null]', Response.AsJSON) > 0).ToBe(True);
+  Response.Free;
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Response := Call('{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}');
+  Expect<Boolean>(Response.FindPath('result.tools') <> nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TStructuredOutput.SetupTests;
+begin
+  Test('array output is sent, with its JSON as the text block',
+    TestArrayOutputSent);
+  Test('scalar output is sent', TestScalarOutputSent);
+  Test('output that breaks the schema becomes isError, naming the path',
+    TestMismatchBecomesIsError);
+  Test('missing structuredContent becomes isError',
+    TestMissingStructuredContent);
+  Test('a handler''s own isError may omit structured output',
+    TestHandlerIsErrorNotChecked);
+  Test('an output schema outside the subset is not checked',
+    TestOutOfSubsetOutputNotChecked);
+  Test('classic dialect: no non-object outputSchema or structuredContent',
+    TestLegacyDialect);
+  Test('classic dialect: custom text kept, output JSON added as text',
+    TestLegacyKeepsCustomText);
+  Test('isError with non-conforming structured output drops it',
+    TestErrorWithBadStructuredDropsIt);
+  Test('isError with conforming structured output keeps it',
+    TestErrorWithGoodStructuredKeepsIt);
+  Test('an out-of-subset output schema is listed unchanged',
+    TestRicherSchemaPublishedUnchanged);
+  Test('NaN output under a number schema becomes isError',
+    TestNonFiniteOutputRefused);
+  Test('classic fallback of a NaN value answers -32603',
+    TestNonFiniteClassicIsAnError);
+  Test('a nil schema child is listed as null in both eras',
+    TestNilSchemaChildListedInBothEras);
+end;
+
+{ ───────── requestState sealing (#89) ───────── }
+
+// Expected behavior from the MRTR page, verified 2026-11-26:
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr
+// (requestState is attacker-controlled; integrity MUST be protected and
+// state failing verification MUST be rejected).
+
+const
+  SEAL_KEY_A = 'k-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  SEAL_KEY_B = 'k-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  // 'é😀': a handler's state with two- and four-byte sequences.
+  SEAL_STATE = 'st-' + #$C3#$A9#$F0#$9F#$98#$80;
+
+var
+  SealedHandlerRuns: Integer;
+
+// First round: asks for nothing and mints SEAL_STATE; second round:
+// echoes the state it was handed back.
+function StatefulHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Inc(SealedHandlerRuns);
+  if ACtx.RequestState = '' then
+    Exit(MCPInputRequired(nil, SEAL_STATE));
+  Result := MCPTextResult('got:' + ACtx.RequestState);
+end;
+
+function StatefulPrompt(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPPromptResult;
+begin
+  Inc(SealedHandlerRuns);
+  if ACtx.RequestState = '' then
+    Exit(MCPPromptInputRequired(nil, SEAL_STATE));
+  Result := MCPPromptMessagesResult(MCPMessages([MCPUserMessage(
+    'got:' + ACtx.RequestState)]));
+end;
+
+function PromptCall(const AArguments, AState: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{' +
+    '"name":"stateful_prompt","arguments":' + AArguments + ',';
+  if AState <> '' then
+    Result := Result + '"requestState":"' + AState + '",';
+  Result := Result + META_MODERN + '}}';
+end;
+
+function StateEchoReader(const AUri: string;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPTextContents(AUri, 'text/plain', '[' + ACtx.RequestState + ']');
+end;
+
+procedure TRequestStateSealing.BeforeEach;
+begin
+  inherited BeforeEach;
+  SealedHandlerRuns := 0;
+  FServer.RegisterTool('stateful', 'Stateful', '{"type":"object"}',
+    StatefulHandler);
+  FServer.RegisterTool('stateful2', 'Stateful too', '{"type":"object"}',
+    StatefulHandler);
+  FServer.RegisterResource('mem://state', 'state', 'text/plain',
+    StateEchoReader);
+  FServer.RegisterPrompt('stateful_prompt', 'Stateful prompt',
+    StatefulPrompt);
+  // Validation seeds "mode" into the arguments the handler sees.
+  FServer.RegisterTool('stateful_default', 'Stateful with a default',
+    '{"type":"object","properties":{"mode":{"type":"string",' +
+    '"default":"fast"}}}', StatefulHandler);
+end;
+
+function StatefulCall(const ATool, AArguments, AState: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{' +
+    '"name":"' + ATool + '","arguments":' + AArguments + ',';
+  if AState <> '' then
+    Result := Result + '"requestState":"' + AState + '",';
+  Result := Result + META_MODERN + '}}';
+end;
+
+// The token a first round on AServer hands out.
+function FirstRoundToken(AServer: TMCPServer; ASession: TMCPSession;
+  const ATool, AArguments: string): string;
+var
+  Line: string;
+  Response: TJSONObject;
+begin
+  AServer.HandleMessage(ASession, StatefulCall(ATool, AArguments, ''), Line);
+  Response := TJSONObject(GetJSON(Line));
+  try
+    Result := TJSONData(Response.FindPath('result.requestState')).AsString;
+  finally
+    Response.Free;
+  end;
+end;
+
+function TRequestStateSealing.Token(const ATool, AArguments: string): string;
+begin
+  if FSession = nil then
+    FSession := FServer.CreateSession;
+  Result := FirstRoundToken(FServer, FSession, ATool, AArguments);
+end;
+
+const
+  INVALID_STATE_LINE = '{ "jsonrpc" : "2.0", "id" : 3, "error" : { ' +
+    '"code" : -32602, "message" : "Invalid or expired requestState" } }';
+
+// Asserts the retry is refused before the handler runs.
+procedure TRequestStateSealing.ExpectRefused(const ALine: string);
+var
+  Response: string;
+  RunsBefore: Integer;
+begin
+  RunsBefore := SealedHandlerRuns;
+  Expect<Boolean>(Dispatch(ALine, Response)).ToBe(True);
+  Expect<string>(Response).ToBe(INVALID_STATE_LINE);
+  Expect<Integer>(SealedHandlerRuns).ToBe(RunsBefore);
+end;
+
+procedure TRequestStateSealing.TestRoundTripNonASCIIState;
+var
+  State, Line: string;
+begin
+  State := Token('stateful', '{"q":"' + #$C3#$BC + '"}');
+  Expect<Boolean>(Pos('v1.', State) = 1).ToBe(True);
+  // The wire line itself carries the state's UTF-8 bytes unchanged.
+  Expect<Boolean>(Dispatch(StatefulCall('stateful', '{"q":"' + #$C3#$BC +
+    '"}', State), Line)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "got:st-' + #$C3#$A9#$F0#$9F#$98#$80 + '"',
+    Line) > 0).ToBe(True);
+end;
+
+// The token binds the arguments the client sent, not the ones the
+// handler saw after defaults were seeded.
+procedure TRequestStateSealing.TestSeededDefaultKeepsTokenValid;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(StatefulCall('stateful_default', '{}',
+    Token('stateful_default', '{}')));
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('got:' + SEAL_STATE);
+  Response.Free;
+end;
+
+// A supplied empty requestState is no token we issued; it is refused,
+// never handed to the handler as a fresh call.
+procedure TRequestStateSealing.TestExplicitEmptyStateRejected;
+begin
+  ExpectRefused('{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{' +
+    '"name":"stateful","arguments":{},"requestState":"",' + META_MODERN + '}}');
+end;
+
+procedure TRequestStateSealing.TestTamperedTokenRejected;
+var
+  State: string;
+begin
+  State := Token('stateful', '{}');
+  // Flip one character of the envelope part, then truncate the tag.
+  if State[6] = 'A' then State[6] := 'B' else State[6] := 'A';
+  ExpectRefused(StatefulCall('stateful', '{}', State));
+  State := Token('stateful', '{}');
+  ExpectRefused(StatefulCall('stateful', '{}', Copy(State, 1, Length(State) - 1)));
+end;
+
+procedure TRequestStateSealing.TestPlainStateRejected;
+begin
+  ExpectRefused(StatefulCall('stateful', '{}', 'st-plain'));
+  ExpectRefused(StatefulCall('stateful', '{}', 'v1.e30.'));
+end;
+
+procedure TRequestStateSealing.TestOtherToolRejected;
+begin
+  ExpectRefused(StatefulCall('stateful2', '{}', Token('stateful', '{}')));
+end;
+
+procedure TRequestStateSealing.TestOtherArgumentsRejected;
+var
+  State: string;
+  Response: TJSONObject;
+begin
+  State := Token('stateful', '{"a":1,"b":[true,null]}');
+  ExpectRefused(StatefulCall('stateful', '{"a":2,"b":[true,null]}', State));
+  // Member order does not matter: the digest is over canonical JSON.
+  Response := Call(StatefulCall('stateful', '{"b":[true,null],"a":1}', State));
+  Expect<Boolean>(Response.FindPath('result.content') <> nil).ToBe(True);
+  Response.Free;
+end;
+
+procedure TRequestStateSealing.TestExpiredRejected;
+var
+  State: string;
+begin
+  FServer.RequestStateTtlMs := 1;
+  State := Token('stateful', '{}');
+  Sleep(20);
+  ExpectRefused(StatefulCall('stateful', '{}', State));
+end;
+
+// Builds a second server like the suite's, with AName and AKeys.
+function PeerServer(const AName: string;
+  const AKeys: array of RawByteString): TMCPServer;
+begin
+  Result := TMCPServer.Create(AName, '9.9.9');
+  Result.RegisterTool('stateful', 'Stateful', '{"type":"object"}',
+    StatefulHandler);
+  if Length(AKeys) > 0 then
+    Result.SetRequestStateKeys(AKeys);
+end;
+
+// AToken presented to APeer: True when it completes there.
+function PeerAccepts(APeer: TMCPServer; const AToken: string): Boolean;
+var
+  Session: TMCPSession;
+  Line: string;
+begin
+  Session := APeer.CreateSession;
+  try
+    APeer.HandleMessage(Session, StatefulCall('stateful', '{}', AToken), Line);
+    Result := Pos('"error"', Line) = 0;
+  finally
+    Session.Free;
+  end;
+end;
+
+procedure TRequestStateSealing.TestSharedKeyAcrossInstances;
+var
+  Peer: TMCPServer;
+begin
+  FServer.SetRequestStateKeys([SEAL_KEY_A]);
+  Peer := PeerServer('test-server', [SEAL_KEY_A]);
+  try
+    Expect<Boolean>(PeerAccepts(Peer, Token('stateful', '{}'))).ToBe(True);
+  finally
+    Peer.Free;
+  end;
+end;
+
+// Without configured keys each instance has its own random key, even
+// two instances of the same name in one process.
+procedure TRequestStateSealing.TestDefaultKeysPerInstance;
+var
+  Minter, Peer: TMCPServer;
+  Session: TMCPSession;
+  State: string;
+begin
+  Minter := PeerServer('test-server', []);
+  Peer := PeerServer('test-server', []);
+  try
+    Session := Minter.CreateSession;
+    try
+      State := FirstRoundToken(Minter, Session, 'stateful', '{}');
+    finally
+      Session.Free;
+    end;
+    Expect<Boolean>(PeerAccepts(Minter, State)).ToBe(True);
+    Expect<Boolean>(PeerAccepts(Peer, State)).ToBe(False);
+  finally
+    Peer.Free;
+    Minter.Free;
+  end;
+end;
+
+procedure TRequestStateSealing.TestOtherAudienceRejected;
+var
+  Peer: TMCPServer;
+begin
+  FServer.SetRequestStateKeys([SEAL_KEY_A]);
+  Peer := PeerServer('another-server', [SEAL_KEY_A]);
+  try
+    Expect<Boolean>(PeerAccepts(Peer, Token('stateful', '{}'))).ToBe(False);
+  finally
+    Peer.Free;
+  end;
+end;
+
+procedure TRequestStateSealing.TestKeyRotation;
+var
+  Peer: TMCPServer;
+  State: string;
+begin
+  FServer.SetRequestStateKeys([SEAL_KEY_A]);
+  State := Token('stateful', '{}');
+  // Phase two of a rotation: the new key seals, the old one verifies.
+  Peer := PeerServer('test-server', [SEAL_KEY_B, SEAL_KEY_A]);
+  try
+    Expect<Boolean>(PeerAccepts(Peer, State)).ToBe(True);
+  finally
+    Peer.Free;
+  end;
+  // Old key dropped: its tokens stop verifying.
+  Peer := PeerServer('test-server', [SEAL_KEY_B]);
+  try
+    Expect<Boolean>(PeerAccepts(Peer, State)).ToBe(False);
+  finally
+    Peer.Free;
+  end;
+end;
+
+// The first key seals: a token minted with [New, Old] verifies on an
+// instance that keeps only New.
+procedure TRequestStateSealing.TestFirstKeySeals;
+var
+  Minter, Peer: TMCPServer;
+  Session: TMCPSession;
+  State: string;
+begin
+  Minter := PeerServer('test-server', [SEAL_KEY_B, SEAL_KEY_A]);
+  Peer := PeerServer('test-server', [SEAL_KEY_B]);
+  try
+    Session := Minter.CreateSession;
+    try
+      State := FirstRoundToken(Minter, Session, 'stateful', '{}');
+    finally
+      Session.Free;
+    end;
+    Expect<Boolean>(PeerAccepts(Peer, State)).ToBe(True);
+  finally
+    Peer.Free;
+    Minter.Free;
+  end;
+end;
+
+// A retry that spells an equal number differently still verifies; a
+// changed value does not.
+procedure TRequestStateSealing.TestNumberSpellingKeepsTokenValid;
+var
+  State: string;
+  Response: TJSONObject;
+begin
+  State := Token('stateful', '{"n":1}');
+  Response := Call(StatefulCall('stateful', '{"n":1.0}', State));
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('got:' + SEAL_STATE);
+  Response.Free;
+  ExpectRefused(StatefulCall('stateful', '{"n":1.5}', Token('stateful',
+    '{"n":1}')));
+end;
+
+// prompts/get: the restored state reaches the prompt, and a tampered
+// token is refused before the prompt runs.
+procedure TRequestStateSealing.TestPromptStateRestored;
+var
+  Line, State: string;
+  Response: TJSONObject;
+  RunsBefore: Integer;
+begin
+  Expect<Boolean>(Dispatch(PromptCall('{}', ''), Line)).ToBe(True);
+  Response := TJSONObject(GetJSON(Line));
+  try
+    State := TJSONData(Response.FindPath('result.requestState')).AsString;
+  finally
+    Response.Free;
+  end;
+  Expect<Boolean>(Dispatch(PromptCall('{}', State), Line)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "got:st-' + #$C3#$A9#$F0#$9F#$98#$80 + '"',
+    Line) > 0).ToBe(True);
+  RunsBefore := SealedHandlerRuns;
+  if State[6] = 'A' then State[6] := 'B' else State[6] := 'A';
+  Expect<Boolean>(Dispatch(PromptCall('{}', State), Line)).ToBe(True);
+  Expect<Boolean>(Pos('"code" : -32602', Line) > 0).ToBe(True);
+  Expect<Integer>(SealedHandlerRuns).ToBe(RunsBefore);
+end;
+
+procedure TRequestStateSealing.TestResourceReadDropsState;
+var
+  Response: TJSONObject;
+begin
+  // No resource handler here mints state, so a client-sent value is
+  // never handed to one.
+  Response := Call('{"jsonrpc":"2.0","id":3,"method":"resources/read",' +
+    '"params":{"uri":"mem://state","requestState":"forged",' +
+    META_MODERN + '}}');
+  Expect<string>(TJSONData(Response.FindPath('result.contents[0].text')).AsString)
+    .ToBe('[]');
+  Response.Free;
+end;
+
+procedure TRequestStateSealing.TestConfigurationGuards;
+var
+  Raised: Boolean;
+begin
+  Raised := False;
+  try
+    FServer.SetRequestStateKeys(['too-short']);
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  Raised := False;
+  try
+    FServer.RequestStateTtlMs := 0;
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  FServer.CreateSession.Free;
+  Raised := False;
+  try
+    FServer.SetRequestStateKeys([SEAL_KEY_A]);
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+end;
+
+procedure TRequestStateSealing.SetupTests;
+begin
+  Test('sealed round trip keeps a non-ASCII state byte-exact',
+    TestRoundTripNonASCIIState);
+  Test('altered or truncated token → -32602, handler not run',
+    TestTamperedTokenRejected);
+  Test('plain or forged state → -32602', TestPlainStateRejected);
+  Test('token from another tool → -32602', TestOtherToolRejected);
+  Test('token with other arguments → -32602; member order irrelevant',
+    TestOtherArgumentsRejected);
+  Test('expired token → -32602', TestExpiredRejected);
+  Test('shared key verifies across instances; random keys do not',
+    TestSharedKeyAcrossInstances);
+  Test('token from a server with another name → rejected',
+    TestOtherAudienceRejected);
+  Test('key rotation: old key verifies until dropped', TestKeyRotation);
+  Test('requestState on resources/read never reaches the reader',
+    TestResourceReadDropsState);
+  Test('short keys, a non-positive TTL and post-freeze keys refused',
+    TestConfigurationGuards);
+  Test('a seeded default leaves the token valid on an unchanged retry',
+    TestSeededDefaultKeepsTokenValid);
+  Test('default keys are per instance, even with the same name',
+    TestDefaultKeysPerInstance);
+  Test('the first key seals: [New, Old] tokens verify on [New]',
+    TestFirstKeySeals);
+  Test('an equal number respelled keeps the token valid',
+    TestNumberSpellingKeepsTokenValid);
+  Test('prompts/get: state restored; tampered token refused before the prompt',
+    TestPromptStateRestored);
+  Test('an explicit empty requestState → -32602, handler not run',
+    TestExplicitEmptyStateRejected);
+end;
+
+{ ───────── completion (#81) ───────── }
+
+function LanguagePrompt(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPMessages([MCPUserMessage('code_review')]);
+end;
+
+function TextReader(const AUri: string; AVars: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPTextContents(AUri, 'text/plain', 'x');
+end;
+
+// Completes a city from the country already chosen in the context.
+function CityCompletion(const AArgument, AValue: string; AContext: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPCompletion;
+begin
+  if (AContext <> nil) and (AContext.Get('country', '') = 'de') then
+    Result := MCPCompleteFrom(AValue, ['Berlin', 'Bonn', 'K' + #$C3#$B6 + 'ln'])
+  else
+    Result := MCPCompleteFrom(AValue, ['Paris', 'Pau']);
+end;
+
+// Pre-trimmed to 100 values with the total known: hasMore follows.
+function TrimmedCompletion(const AArgument, AValue: string;
+  AContext: TJSONObject; const ACtx: TMCPRequestContext): TMCPCompletion;
+var
+  I: Integer;
+begin
+  Result := Default(TMCPCompletion);
+  SetLength(Result.Values, 100);
+  for I := 0 to 99 do
+    Result.Values[I] := 'w' + IntToStr(I);
+  Result.Total := 150;
+end;
+
+function ManyCompletion(const AArgument, AValue: string; AContext: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPCompletion;
+var
+  I: Integer;
+begin
+  Result := Default(TMCPCompletion);
+  SetLength(Result.Values, 150);
+  for I := 0 to 149 do
+    Result.Values[I] := 'v' + IntToStr(I);
+  Result.Total := -1;
+end;
+
+procedure TCompletionDispatch.BeforeEach;
+begin
+  inherited BeforeEach;
+  FServer.RegisterPrompt('code_review', 'Review code',
+    PromptArguments.Add('language').Add('style', '', False), LanguagePrompt);
+  FServer.RegisterPromptCompletion('code_review', 'language',
+    ['Pascal', 'Python', 'PHP', 'Go']);
+  FServer.RegisterResourceTemplate('geo://{country}/{city}', 'city',
+    'text/plain', TextReader);
+  FServer.RegisterTemplateCompletion('geo://{country}/{city}', 'city',
+    CityCompletion);
+  FServer.RegisterTemplateCompletion('geo://{country}/{city}', 'country',
+    ManyCompletion);
+  FServer.RegisterResourceTemplate('page://{n}', 'page', 'text/plain',
+    TextReader);
+  FServer.RegisterTemplateCompletion('page://{n}', 'n', TrimmedCompletion);
+end;
+
+function CompleteLine(const ARef, AArgument, AValue: string;
+  const AExtra: string = ''): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":9,"method":"completion/complete",' +
+    '"params":{"ref":' + ARef + ',"argument":{"name":"' + AArgument +
+    '","value":"' + AValue + '"},' + AExtra + META_MODERN + '}}';
+end;
+
+// The JSON at APath of the response to ALine ('' when absent). The
+// response is freed here, whatever an assertion does after.
+function ResponsePath(ASuite: TDispatchSuite; const ALine,
+  APath: string): string;
+var
+  Response: TJSONObject;
+  Data: TJSONData;
+begin
+  Response := ASuite.Call(ALine);
+  try
+    Data := Response.FindPath(APath);
+    if Data = nil then
+      Result := ''
+    else
+      Result := Data.AsJSON;
+  finally
+    Response.Free;
+  end;
+end;
+
+// completion/complete, verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/completion
+// (CompleteRequest, CompleteResult at most 100 values, the completions
+// capability).
+procedure TCompletionDispatch.TestStaticPromptCompletion;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(CompleteLine('{"type":"ref/prompt","name":"code_review"}',
+    'language', 'p'), Response)).ToBe(True);
+  Expect<Boolean>(Pos('"result" : { "completion" : { "values" : ' +
+    '["Pascal", "Python", "PHP"], "total" : 3, "hasMore" : false }, ' +
+    '"resultType" : "complete"', Response) > 0).ToBe(True);
+end;
+
+procedure TCompletionDispatch.TestCallableTemplateCompletion;
+var
+  Line: string;
+begin
+  // A non-ASCII prefix in another case still matches, and the
+  // suggestion goes out byte-exact.
+  Expect<Boolean>(Dispatch(CompleteLine(
+    '{"type":"ref/resource","uri":"geo://{country}/{city}"}', 'city',
+    'k' + #$C3#$96, '"context":{"arguments":{"country":"de"}},'), Line))
+    .ToBe(True);
+  Expect<Boolean>(Pos('"values" : ["K' + #$C3#$B6 + 'ln"]', Line) > 0)
+    .ToBe(True);
+  // An empty context is as good as none.
+  Expect<string>(ResponsePath(Self, CompleteLine(
+    '{"type":"ref/resource","uri":"geo://{country}/{city}"}', 'city', 'pa',
+    '"context":{},'), 'result.completion.values'))
+    .ToBe('["Paris", "Pau"]');
+  Expect<string>(ResponsePath(Self, CompleteLine(
+    '{"type":"ref/resource","uri":"geo://{country}/{city}"}', 'city', 'pa'),
+    'result.completion.values')).ToBe('["Paris", "Pau"]');
+end;
+
+procedure TCompletionDispatch.TestHundredValueCap;
+var
+  Line: string;
+begin
+  Line := CompleteLine(
+    '{"type":"ref/resource","uri":"geo://{country}/{city}"}', 'country', '');
+  // The first 100, in order, and more exist.
+  Expect<string>(ResponsePath(Self, Line, 'result.completion.values[0]'))
+    .ToBe('"v0"');
+  Expect<string>(ResponsePath(Self, Line, 'result.completion.values[99]'))
+    .ToBe('"v99"');
+  Expect<string>(ResponsePath(Self, Line, 'result.completion.values[100]'))
+    .ToBe('');
+  Expect<string>(ResponsePath(Self, Line, 'result.completion.hasMore'))
+    .ToBe('true');
+  // Total unknown (-1): left out.
+  Expect<string>(ResponsePath(Self, Line, 'result.completion.total')).ToBe('');
+  // A handler that trimmed to 100 itself, total 150, HasMore unset:
+  // more exist, so hasMore is true.
+  Line := CompleteLine('{"type":"ref/resource","uri":"page://{n}"}', 'n', '');
+  Expect<string>(ResponsePath(Self, Line, 'result.completion.total'))
+    .ToBe('150');
+  Expect<string>(ResponsePath(Self, Line, 'result.completion.hasMore'))
+    .ToBe('true');
+end;
+
+procedure TCompletionDispatch.TestUnregisteredArgumentIsEmpty;
+begin
+  Expect<string>(ResponsePath(Self, CompleteLine(
+    '{"type":"ref/prompt","name":"code_review"}', 'style', 'x'),
+    'result.completion.values')).ToBe('[]');
+end;
+
+function ErrorCode(ASuite: TDispatchSuite; const ALine: string): Integer;
+var
+  Response: TJSONObject;
+begin
+  Response := ASuite.Call(ALine);
+  try
+    Result := TJSONData(Response.FindPath('error.code')).AsInteger;
+  finally
+    Response.Free;
+  end;
+end;
+
+procedure TCompletionDispatch.TestErrors;
+begin
+  Expect<Integer>(ErrorCode(Self, CompleteLine(
+    '{"type":"ref/prompt","name":"nope"}', 'language', ''))).ToBe(-32602);
+  Expect<Integer>(ErrorCode(Self, CompleteLine(
+    '{"type":"ref/prompt","name":"code_review"}', 'nope', ''))).ToBe(-32602);
+  Expect<Integer>(ErrorCode(Self, CompleteLine(
+    '{"type":"ref/resource","uri":"geo://other"}', 'city', ''))).ToBe(-32602);
+  Expect<Integer>(ErrorCode(Self, CompleteLine(
+    '{"type":"ref/tool","name":"echo"}', 'x', ''))).ToBe(-32602);
+  Expect<Integer>(ErrorCode(Self, '{"jsonrpc":"2.0","id":9,' +
+    '"method":"completion/complete","params":{"ref":' +
+    '{"type":"ref/prompt","name":"code_review"},' + META_MODERN + '}}'))
+    .ToBe(-32602);
+  // A name spanning two variables is no variable of the template.
+  Expect<Integer>(ErrorCode(Self, CompleteLine(
+    '{"type":"ref/resource","uri":"geo://{country}/{city}"}',
+    'country}/{city', ''))).ToBe(-32602);
+  // Supplied context must be an object whose arguments map strings to
+  // strings (CompleteRequestParams.context).
+  Expect<Integer>(ErrorCode(Self, CompleteLine(
+    '{"type":"ref/prompt","name":"code_review"}', 'language', '',
+    '"context":"de",'))).ToBe(-32602);
+  Expect<Integer>(ErrorCode(Self, CompleteLine(
+    '{"type":"ref/prompt","name":"code_review"}', 'language', '',
+    '"context":{"arguments":["de"]},'))).ToBe(-32602);
+  Expect<Integer>(ErrorCode(Self, CompleteLine(
+    '{"type":"ref/prompt","name":"code_review"}', 'language', '',
+    '"context":{"arguments":{"country":1}},'))).ToBe(-32602);
+end;
+
+function RegistrationRefused(AServer: TMCPServer; const APrompt,
+  AArgument: string): Boolean;
+begin
+  Result := False;
+  try
+    AServer.RegisterPromptCompletion(APrompt, AArgument, ['a']);
+  except
+    on E: EMCPServer do
+      Result := True;
+  end;
+end;
+
+procedure TCompletionDispatch.TestRegistrationGuards;
+var
+  Raised: Boolean;
+begin
+  Expect<Boolean>(RegistrationRefused(FServer, 'nope', 'language')).ToBe(True);
+  Expect<Boolean>(RegistrationRefused(FServer, 'code_review', 'nope')).ToBe(True);
+  // Already registered.
+  Expect<Boolean>(RegistrationRefused(FServer, 'code_review', 'language'))
+    .ToBe(True);
+  Raised := False;
+  try
+    FServer.RegisterTemplateCompletion('geo://{country}/{city}', 'street', ['a']);
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  // A name spanning two variables.
+  Raised := False;
+  try
+    FServer.RegisterTemplateCompletion('geo://{country}/{city}',
+      'country}/{city', ['a']);
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  // A nil callable is a mistake, not an empty list; the argument stays
+  // free for a real registration.
+  Raised := False;
+  try
+    FServer.RegisterPromptCompletion('code_review', 'style',
+      TMCPCompletionHandler(nil));
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  FServer.RegisterPromptCompletion('code_review', 'style', ['terse']);
+end;
+
+// What server/discover declares for AServer.
+function DiscoveredCapabilities(AServer: TMCPServer): string;
+var
+  Session: TMCPSession;
+  Line: string;
+  Response: TJSONObject;
+begin
+  Session := AServer.CreateSession;
+  try
+    AServer.HandleMessage(Session, '{"jsonrpc":"2.0","id":1,' +
+      '"method":"server/discover","params":{' + META_MODERN + '}}', Line);
+  finally
+    Session.Free;
+  end;
+  Response := TJSONObject(GetJSON(Line));
+  try
+    Result := Response.FindPath('result.capabilities').AsJSON;
+  finally
+    Response.Free;
+  end;
+end;
+
+// The error code AServer answers completion/complete with for its
+// code_review prompt, in the modern era or (ALegacy) after initialize.
+function CompletionErrorCode(AServer: TMCPServer; ALegacy: Boolean): Integer;
+var
+  Session: TMCPSession;
+  Line: string;
+  Response: TJSONObject;
+begin
+  Session := AServer.CreateSession;
+  try
+    if ALegacy then
+    begin
+      AServer.HandleMessage(Session, '{"jsonrpc":"2.0","id":1,' +
+        '"method":"initialize","params":{"protocolVersion":"2025-11-25",' +
+        '"capabilities":{},"clientInfo":{"name":"c","version":"1"}}}', Line);
+      AServer.HandleMessage(Session,
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}', Line);
+      AServer.HandleMessage(Session, '{"jsonrpc":"2.0","id":2,' +
+        '"method":"completion/complete","params":{"ref":{"type":' +
+        '"ref/prompt","name":"code_review"},"argument":{"name":' +
+        '"language","value":"p"}}}', Line);
+    end
+    else
+      AServer.HandleMessage(Session, CompleteLine(
+        '{"type":"ref/prompt","name":"code_review"}', 'language', 'p'), Line);
+  finally
+    Session.Free;
+  end;
+  Response := TJSONObject(GetJSON(Line));
+  try
+    Result := Response.Get('error', TJSONObject(nil)).Get('code', 0);
+  finally
+    Response.Free;
+  end;
+end;
+
+// Schema ServerCapabilities ("Present if the server offers ..."),
+// verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/schema#servercapabilities
+procedure TCompletionDispatch.TestCapabilities;
+var
+  Other: TMCPServer;
+begin
+  Expect<Boolean>(Pos('"completions" : {}',
+    DiscoveredCapabilities(FServer)) > 0).ToBe(True);
+  // Nothing registered: nothing declared.
+  Other := TMCPServer.Create('bare', '1');
+  try
+    Expect<string>(DiscoveredCapabilities(Other)).ToBe('{}');
+  finally
+    Other.Free;
+  end;
+  // A prompt without a completion: prompts, and no completions.
+  Other := TMCPServer.Create('prompts-only', '1');
+  try
+    Other.RegisterPrompt('code_review', 'Review code',
+      PromptArguments.Add('language'), LanguagePrompt);
+    Expect<string>(DiscoveredCapabilities(Other)).ToBe('{ "prompts" : {} }');
+    // ...and does not support the method: -32601 in both eras
+    // (completion#error-handling, verified 2026-11-27).
+    Expect<Integer>(CompletionErrorCode(Other, False)).ToBe(-32601);
+    Expect<Integer>(CompletionErrorCode(Other, True)).ToBe(-32601);
+  finally
+    Other.Free;
+  end;
+end;
+
+procedure TCompletionDispatch.TestLegacyEra;
+var
+  Line: string;
+begin
+  Expect<Boolean>(ResponsePath(Self, '{"jsonrpc":"2.0","id":1,' +
+    '"method":"initialize","params":{"protocolVersion":"2025-11-25",' +
+    '"capabilities":{},"clientInfo":{"name":"legacy-client",' +
+    '"version":"1.2.3"}}}', 'result.capabilities.completions') <> '')
+    .ToBe(True);
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Line := '{"jsonrpc":"2.0","id":2,"method":"completion/complete",' +
+    '"params":{"ref":{"type":"ref/prompt","name":"code_review"},' +
+    '"argument":{"name":"language","value":"g"}}}';
+  Expect<string>(ResponsePath(Self, Line, 'result.completion.values'))
+    .ToBe('["Go"]');
+  // The classic dialect carries no resultType.
+  Expect<string>(ResponsePath(Self, Line, 'result.resultType')).ToBe('');
+end;
+
+// Unicode simple case folding across the documented blocks (verified
+// 2026-11-27 against https://www.unicode.org/Public/16.0.0/ucd/CaseFolding.txt):
+// long s, Latin-1 y with diaeresis, a Greek capital with tonos, final
+// sigma and Cyrillic ghe with upturn match their pairs; a script outside
+// the blocks compares exactly. Values come back byte-exact.
+procedure TCompletionDispatch.TestFoldPairs;
+var
+  Got: TMCPCompletion;
+begin
+  Got := MCPCompleteFrom('NIKLAU' + #$C5#$BF, ['Niklaus']);
+  Expect<Integer>(Length(Got.Values)).ToBe(1);
+  Got := MCPCompleteFrom(#$C5#$B8, [#$C3#$BF + 'ber']);
+  Expect<Integer>(Length(Got.Values)).ToBe(1);
+  Expect<string>(Got.Values[0]).ToBe(#$C3#$BF + 'ber');
+  Got := MCPCompleteFrom(#$CE#$86, [#$CE#$AC + #$CE#$B8#$CE#$AE#$CE#$BD#$CE#$B1]);
+  Expect<Integer>(Length(Got.Values)).ToBe(1);
+  Got := MCPCompleteFrom(#$CF#$82, [#$CE#$A3]);
+  Expect<Integer>(Length(Got.Values)).ToBe(1);
+  Got := MCPCompleteFrom(#$D2#$90, [#$D2#$91 + #$D0#$B0]);
+  Expect<Integer>(Length(Got.Values)).ToBe(1);
+  // Armenian is outside the blocks: no fold.
+  Got := MCPCompleteFrom(#$D4#$B1, [#$D5#$A1]);
+  Expect<Integer>(Length(Got.Values)).ToBe(0);
+end;
+
+procedure TCompletionDispatch.SetupTests;
+begin
+  Test('the case fold covers its documented blocks, and only those',
+    TestFoldPairs);
+  Test('static prompt completion by case-insensitive prefix',
+    TestStaticPromptCompletion);
+  Test('callable template completion sees context arguments, UTF-8',
+    TestCallableTemplateCompletion);
+  Test('more than 100 values: first 100, hasMore', TestHundredValueCap);
+  Test('argument without a completion answers an empty list',
+    TestUnregisteredArgumentIsEmpty);
+  Test('unknown prompt, argument, template or ref type → -32602',
+    TestErrors);
+  Test('registration refuses unknown targets and duplicates',
+    TestRegistrationGuards);
+  Test('capabilities follow the registrations', TestCapabilities);
+  Test('classic era: capability and completion/complete', TestLegacyEra);
+end;
+
+{ ───────── typed tools with nested arguments (#95) ───────── }
+
+function BatchHandler(AArgs: TMCPArgs;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Batch: TBatchArgs;
+begin
+  Batch := AArgs as TBatchArgs;
+  Result := MCPTextResult(Batch.item.label_ + ':' +
+    IntToStr(Length(Batch.item.weights)) + ':' + Batch.item.weights[0]);
+end;
+
+procedure TTypedNested.BeforeEach;
+begin
+  inherited BeforeEach;
+  FServer.RegisterTool('batch', 'Batch', TBatchArgs, BatchHandler);
+end;
+
+procedure TTypedNested.TestNestedArgumentsReachHandler;
+var
+  Line: string;
+begin
+  // The handler's text carries the nested array's UTF-8 element; the
+  // wire line is asserted as bytes.
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"batch","arguments":{"item":{"label_":"x",' +
+    '"weights":["\u00e9","b"]}},' + META_MODERN + '}}', Line)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "x:2:' + #$C3#$A9 + '"', Line) > 0)
+    .ToBe(True);
+end;
+
+procedure TTypedNested.TestNestedErrorIsInBand;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{' +
+    '"name":"batch","arguments":{"item":{"label_":"x","weights":[1]}},' +
+    META_MODERN + '}}');
+  Expect<Boolean>(TJSONData(Response.FindPath('result.isError')).AsBoolean)
+    .ToBe(True);
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+    .AsString).ToBe('Argument "item.weights[0]" must be a string');
+  Response.Free;
+end;
+
+procedure TTypedNested.SetupTests;
+begin
+  Test('nested object and array arguments reach a typed handler',
+    TestNestedArgumentsReachHandler);
+  Test('a nested binding error is an in-band isError naming the path',
+    TestNestedErrorIsInBand);
+end;
+
+{ ───────── declared client capabilities (#84) ───────── }
+
+var
+  NeedyRuns: Integer;
+
+function NeedyHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Inc(NeedyRuns);
+  Result := MCPTextResult('ran');
+end;
+
+var
+  SawSampling: Boolean;
+
+// Records what HasCapability says about sampling.
+function SamplingProbeHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  SawSampling := ACtx.HasCapability('sampling');
+  Result := MCPTextResult('probed');
+end;
+
+// Undeclared: asks for sampling at run time.
+function AskerHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Requests: TJSONObject;
+begin
+  Inc(NeedyRuns);
+  Requests := TJSONObject.Create;
+  try
+    Requests.Add('s', MCPSamplingTextRequest('Say hi', 10));
+  except
+    Requests.Free;
+    raise;
+  end;
+  Result := MCPInputRequired(Requests);
+end;
+
+procedure TDeclaredCapabilities.BeforeEach;
+begin
+  inherited BeforeEach;
+  NeedyRuns := 0;
+  FServer.RegisterTool('needy', 'Needs two', '{"type":"object"}', NeedyHandler)
+    .RequiresClientCapability('elicitation')
+    .RequiresClientCapability('sampling');
+  FServer.RegisterTool('asker', 'Asks at run time', '{"type":"object"}',
+    AskerHandler);
+  FServer.RegisterTool('sampling_probe', 'Reports HasCapability',
+    '{"type":"object"}', SamplingProbeHandler);
+  FServer.RegisterTool('custom', 'Needs a client capability of its own',
+    '{"type":"object"}', NeedyHandler)
+    .RequiresClientCapability('com.example/feature');
+  FServer.RegisterTool('pr' + #$C3#$BC + 'f' + #$F0#$9F#$98#$80, 'Needs one',
+    '{"type":"object"}', NeedyHandler).RequiresClientCapability('sampling');
+end;
+
+function ToolCall(const ATool, ACapabilities: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{' +
+    '"name":"' + ATool + '","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":' + ACapabilities + '}}}';
+end;
+
+function NeedyCall(const ACapabilities: string): string;
+begin
+  Result := ToolCall('needy', ACapabilities);
+end;
+
+// The exact -32021 line for the needy tool lacking ANames ('"a"' or
+// '"a", "b"') with AData the requiredCapabilities members.
+function NeedyRefusal(const AWord, ANames, AData: string): string;
+begin
+  Result := '{ "jsonrpc" : "2.0", "id" : 4, "error" : ' +
+    '{ "code" : -32021, "message" : "Tool \"needy\" requires the client ' +
+    AWord + ' ' + ANames + '", "data" : { "requiredCapabilities" : ' +
+    '{ ' + AData + ' } } } }';
+end;
+
+procedure TDeclaredCapabilities.TestMissingRefusedBeforeHandler;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(NeedyCall('{"elicitation":{}}'), Response))
+    .ToBe(True);
+  Expect<string>(Response).ToBe(NeedyRefusal('capability', '\"sampling\"',
+    '"sampling" : {}'));
+  // Only the first declared one missing.
+  Expect<Boolean>(Dispatch(NeedyCall('{"sampling":{}}'), Response))
+    .ToBe(True);
+  Expect<string>(Response).ToBe(NeedyRefusal('capability',
+    '\"elicitation\"', '"elicitation" : {}'));
+  Expect<Integer>(NeedyRuns).ToBe(0);
+end;
+
+// Every missing one in one refusal, so the client needs no second try
+// to learn the rest (#84 review).
+procedure TDeclaredCapabilities.TestEveryMissingCapabilityNamed;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(NeedyCall('{}'), Response)).ToBe(True);
+  Expect<string>(Response).ToBe(NeedyRefusal('capabilities',
+    '\"elicitation\", \"sampling\"', '"elicitation" : {}, "sampling" : {}'));
+  Expect<Integer>(NeedyRuns).ToBe(0);
+end;
+
+// null, false, or an entry whose typed members are not objects declares
+// nothing: refused before the handler, and a run-time request for it is
+// refused too (#84 review).
+procedure TDeclaredCapabilities.TestMalformedDeclarationIsMissing;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(NeedyCall('{"elicitation":null,"sampling":false}'),
+    Response)).ToBe(True);
+  Expect<string>(Response).ToBe(NeedyRefusal('capabilities',
+    '\"elicitation\", \"sampling\"', '"elicitation" : {}, "sampling" : {}'));
+  Expect<Boolean>(Dispatch(NeedyCall(
+    '{"elicitation":{},"sampling":{"tools":5}}'), Response)).ToBe(True);
+  Expect<string>(Response).ToBe(NeedyRefusal('capability', '\"sampling\"',
+    '"sampling" : {}'));
+  Expect<Integer>(NeedyRuns).ToBe(0);
+  Expect<Boolean>(Dispatch(ToolCall('asker', '{"sampling":null}'), Response))
+    .ToBe(True);
+  Expect<Boolean>(Pos('"code" : -32021', Response) > 0).ToBe(True);
+  Expect<Integer>(NeedyRuns).ToBe(1);
+end;
+
+// A capability the schema does not define is the client's own, with any
+// value: declared by presence (#84 review).
+procedure TDeclaredCapabilities.TestCustomCapabilityByPresence;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(ToolCall('custom', '{"com.example/feature":true}'),
+    Response)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "ran"', Response) > 0).ToBe(True);
+  Expect<Integer>(NeedyRuns).ToBe(1);
+  Expect<Boolean>(Dispatch(ToolCall('custom', '{}'), Response)).ToBe(True);
+  Expect<Boolean>(Pos('"code" : -32021', Response) > 0).ToBe(True);
+  Expect<Integer>(NeedyRuns).ToBe(1);
+end;
+
+// A classic client's capabilities follow its own revision's schema
+// (2025-06-18 has "sampling": {"tools": true}), so the 2026-07-28 shape
+// check does not apply: presence counts, as before #84 (review).
+procedure TDeclaredCapabilities.TestClassicLookupByPresence;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-06-18","capabilities":' +
+    '{"sampling":{"tools":true}},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification('{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  SawSampling := False;
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"sampling_probe","arguments":{}}}');
+  try
+    Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+      .AsString).ToBe('probed');
+  finally
+    Response.Free;
+  end;
+  Expect<Boolean>(SawSampling).ToBe(True);
+  // The same declaration on a 2026-07-28 request is malformed there.
+  SawSampling := True;
+  Response := Call(ToolCall('sampling_probe', '{"sampling":{"tools":true}}'));
+  Response.Free;
+  Expect<Boolean>(SawSampling).ToBe(False);
+end;
+
+// The tool name goes out byte-exact: two-byte and astral characters.
+procedure TDeclaredCapabilities.TestNonASCIIToolName;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(ToolCall('pr' + #$C3#$BC + 'f' + #$F0#$9F#$98#$80,
+    '{}'), Response)).ToBe(True);
+  Expect<string>(Response).ToBe('{ "jsonrpc" : "2.0", "id" : 4, "error" : ' +
+    '{ "code" : -32021, "message" : "Tool \"pr' + #$C3#$BC + 'f' +
+    #$F0#$9F#$98#$80 + '\" requires the client capability \"sampling\"", ' +
+    '"data" : { "requiredCapabilities" : { "sampling" : {} } } } }');
+end;
+
+procedure TDeclaredCapabilities.TestPresentRuns;
+var
+  Response: TJSONObject;
+begin
+  Response := Call(NeedyCall('{"elicitation":{},"sampling":{}}'));
+  try
+    Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+      .AsString).ToBe('ran');
+  finally
+    Response.Free;
+  end;
+  Expect<Integer>(NeedyRuns).ToBe(1);
+end;
+
+procedure TDeclaredCapabilities.TestLegacyEraNotChecked;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification('{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"needy","arguments":{}}}');
+  try
+    Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+      .AsString).ToBe('ran');
+  finally
+    Response.Free;
+  end;
+end;
+
+procedure TDeclaredCapabilities.TestGuards;
+var
+  Raised: Boolean;
+begin
+  Raised := False;
+  try
+    FServer.RegisterTool('nameless', 'x', '{"type":"object"}', NeedyHandler)
+      .RequiresClientCapability('');
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  // A second declaration of the same capability is a mistake.
+  Raised := False;
+  try
+    FServer.RegisterTool('twice', 'x', '{"type":"object"}', NeedyHandler)
+      .RequiresClientCapability('sampling')
+      .RequiresClientCapability('sampling');
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+end;
+
+procedure TDeclaredCapabilities.SetupTests;
+begin
+  Test('a missing declared capability → -32021 before the handler runs',
+    TestMissingRefusedBeforeHandler);
+  Test('every missing declared capability is named in one refusal',
+    TestEveryMissingCapabilityNamed);
+  Test('a null, false or malformed declaration counts as missing',
+    TestMalformedDeclarationIsMissing);
+  Test('a non-ASCII tool name goes out byte-exact in the refusal',
+    TestNonASCIIToolName);
+  Test('a client capability of its own counts when present',
+    TestCustomCapabilityByPresence);
+  Test('classic clients: HasCapability by presence, as before',
+    TestClassicLookupByPresence);
+  Test('declared capabilities present → the handler runs', TestPresentRuns);
+  Test('classic era: not checked (no MRTR there)', TestLegacyEraNotChecked);
+  Test('an empty or repeated capability name is refused', TestGuards);
+end;
+
+{ ───────── pagination (#94) ───────── }
+
+// Pagination, verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/pagination:
+// list results MAY carry nextCursor, the page size is the server's to
+// choose, cursors are opaque and stable, and an invalid one SHOULD be
+// -32602.
+const
+  // Two-byte and astral characters, adjacent.
+  PAGED_DESCRIPTION = 'Gr' + #$C3#$B6 + #$C3#$9F + 'e ' + #$F0#$9F#$98#$80;
+
+procedure TPagination.BeforeEach;
+var
+  I: Integer;
+  Definition: TJSONObject;
+  Description: string;
+begin
+  inherited BeforeEach;
+  // Every list spans pages of four: eleven tools, and five resources,
+  // templates and prompts. extra1, on the second tools page, has a
+  // non-ASCII description and an array outputSchema, which the classic
+  // dialect drops (#91).
+  // Parsed from JSON text, as a definition read from a file would be.
+  // Through a variable: a constant expression passed straight to an
+  // fpjson UTF8String parameter is converted at compile time, which
+  // would re-encode these bytes before the library sees them.
+  Description := PAGED_DESCRIPTION;
+  Definition := TJSONObject(GetJSON('{"name":"extra1","description":"' +
+    Description + '","inputSchema":{"type":"object"},' +
+    '"outputSchema":{"type":"array"}}'));
+  FServer.RegisterTool(Definition, EchoHandler);
+  for I := 2 to 4 do
+    FServer.RegisterTool('extra' + IntToStr(I), 'Extra', '{"type":"object"}',
+      EchoHandler);
+  for I := 1 to 2 do
+    FServer.RegisterTextResource('mem://extra' + IntToStr(I),
+      'extra' + IntToStr(I), 'text/plain', 'x');
+  for I := 1 to 4 do
+    FServer.RegisterResourceTemplate('mem://t' + IntToStr(I) + '/{a}',
+      't' + IntToStr(I), 'text/plain', PairReader);
+  for I := 1 to 2 do
+    FServer.RegisterPrompt('extra' + IntToStr(I), 'Extra', HelloPromptHandler);
+  FServer.PageSize := 4;
+end;
+
+function ListLine(const AMethod, ACursor: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":3,"method":"' + AMethod + '","params":{';
+  if ACursor <> '' then
+    Result := Result + '"cursor":"' + ACursor + '",';
+  Result := Result + META_MODERN + '}}';
+end;
+
+// Walks AMethod's list page by page; returns the names (AField of each
+// entry, comma-separated) and the page count, and checks each page: at
+// most four entries, both modern cache fields, and a nextCursor on
+// every page but the last.
+function WalkList(ASuite: TDispatchSuite; const AMethod, AKey,
+  AField: string; out APages: Integer; out APagesOk: Boolean): string;
+var
+  Response: TJSONObject;
+  Items: TJSONArray;
+  Cursor: string;
+  I: Integer;
+begin
+  Result := '';
+  Cursor := '';
+  APages := 0;
+  APagesOk := True;
+  repeat
+    Response := ASuite.Call(ListLine(AMethod, Cursor));
+    try
+      Items := TJSONArray(Response.FindPath('result.' + AKey));
+      APagesOk := APagesOk and (Items <> nil) and (Items.Count <= 4) and
+        (Response.FindPath('result.ttlMs') <> nil) and
+        (Response.FindPath('result.cacheScope') <> nil);
+      if Items <> nil then
+        for I := 0 to Items.Count - 1 do
+          Result := Result + TJSONObject(Items[I]).Get(AField, '') + ',';
+      if Response.FindPath('result.nextCursor') <> nil then
+      begin
+        Cursor := TJSONData(Response.FindPath('result.nextCursor')).AsString;
+        APagesOk := APagesOk and (Cursor <> '') and (Items.Count = 4);
+      end
+      else
+        Cursor := '';
+    finally
+      Response.Free;
+    end;
+    Inc(APages);
+  until (Cursor = '') or (APages > 10);
+end;
+
+procedure TPagination.TestPagesConcatenateInOrder;
+var
+  Pages: Integer;
+  PagesOk: Boolean;
+begin
+  Expect<string>(WalkList(Self, 'tools/list', 'tools', 'name', Pages,
+    PagesOk)).ToBe('echo,sum,boom,whoami,scale,repeat,noisy,' +
+    'extra1,extra2,extra3,extra4,');
+  Expect<Integer>(Pages).ToBe(3);
+  Expect<Boolean>(PagesOk).ToBe(True);
+end;
+
+// The other three lists continue the same way (#94 review).
+procedure TPagination.TestOtherListsPage;
+var
+  Pages: Integer;
+  PagesOk: Boolean;
+begin
+  Expect<string>(WalkList(Self, 'resources/list', 'resources', 'uri', Pages,
+    PagesOk)).ToBe('mem://static,mem://clock,mem://pair/one/two,' +
+    'mem://extra1,mem://extra2,');
+  Expect<Integer>(Pages).ToBe(2);
+  Expect<Boolean>(PagesOk).ToBe(True);
+  Expect<string>(WalkList(Self, 'resources/templates/list',
+    'resourceTemplates', 'name', Pages, PagesOk)).ToBe('pair,t1,t2,t3,t4,');
+  Expect<Integer>(Pages).ToBe(2);
+  Expect<Boolean>(PagesOk).ToBe(True);
+  Expect<string>(WalkList(Self, 'prompts/list', 'prompts', 'name', Pages,
+    PagesOk)).ToBe('review,hello,promptboom,extra1,extra2,');
+  Expect<Integer>(Pages).ToBe(2);
+  Expect<Boolean>(PagesOk).ToBe(True);
+end;
+
+// The cursor tools/list hands out for its second page.
+function FirstToolsCursor(ASuite: TDispatchSuite): string;
+var
+  Response: TJSONObject;
+begin
+  Response := ASuite.Call(ListLine('tools/list', ''));
+  try
+    Result := TJSONData(Response.FindPath('result.nextCursor')).AsString;
+  finally
+    Response.Free;
+  end;
+end;
+
+procedure TPagination.TestInvalidCursors;
+var
+  ToolsCursor: string;
+begin
+  ToolsCursor := FirstToolsCursor(Self);
+  Expect<Integer>(ErrorCode(Self, ListLine('tools/list', 'not-ours')))
+    .ToBe(-32602);
+  // A cursor names its list: tools/list's offset 4 would be a page
+  // boundary of resources/list too, yet it is refused there.
+  Expect<Integer>(ErrorCode(Self, ListLine('resources/list', ToolsCursor)))
+    .ToBe(-32602);
+  // Offsets that are no page of the list: a page boundary past the end
+  // ("tools/list:12"), and one inside a page ("tools/list:1") (#94
+  // review).
+  Expect<Integer>(ErrorCode(Self, ListLine('tools/list',
+    'dG9vbHMvbGlzdDoxMg=='))).ToBe(-32602);
+  Expect<Integer>(ErrorCode(Self, ListLine('tools/list',
+    'dG9vbHMvbGlzdDox'))).ToBe(-32602);
+  // A different spelling of a real cursor ("tools/list:04").
+  Expect<Integer>(ErrorCode(Self, ListLine('tools/list',
+    'dG9vbHMvbGlzdDowNA=='))).ToBe(-32602);
+  Expect<Integer>(ErrorCode(Self, '{"jsonrpc":"2.0","id":3,' +
+    '"method":"tools/list","params":{"cursor":7,' + META_MODERN + '}}'))
+    .ToBe(-32602);
+end;
+
+procedure TPagination.TestNoPagingByDefault;
+var
+  Bare: TMCPServer;
+  Session: TMCPSession;
+  Line: string;
+begin
+  Bare := TMCPServer.Create('bare', '1');
+  try
+    Bare.RegisterTool('a', 'A', '{"type":"object"}', EchoHandler);
+    Bare.RegisterTool('b', 'B', '{"type":"object"}', EchoHandler);
+    Session := Bare.CreateSession;
+    try
+      Bare.HandleMessage(Session, ListLine('tools/list', ''), Line);
+      Expect<Boolean>(Pos('nextCursor', Line) = 0).ToBe(True);
+      Expect<Boolean>(Pos('"name" : "b"', Line) > 0).ToBe(True);
+      // With paging off no cursor was handed out, so none is valid,
+      // not even one that would point into the list ("tools/list:1").
+      Bare.HandleMessage(Session, ListLine('tools/list', 'dG9vbHMvbGlzdDox'),
+        Line);
+      Expect<Boolean>(Pos('"code" : -32602', Line) > 0).ToBe(True);
+    finally
+      Session.Free;
+    end;
+  finally
+    Bare.Free;
+  end;
+end;
+
+// The comma-separated names of a list result's tools.
+function PageNames(AResponse: TJSONObject): string;
+var
+  Tools: TJSONArray;
+  I: Integer;
+begin
+  Result := '';
+  Tools := TJSONArray(AResponse.FindPath('result.tools'));
+  if Tools <> nil then
+    for I := 0 to Tools.Count - 1 do
+      Result := Result + TJSONObject(Tools[I]).Get('name', '') + ',';
+end;
+
+procedure TPagination.TestLegacyDialectPages;
+var
+  Response: TJSONObject;
+  Cursor, Line: string;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification('{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}');
+  try
+    Cursor := TJSONData(Response.FindPath('result.nextCursor')).AsString;
+    Expect<Boolean>(Response.FindPath('result.ttlMs') = nil).ToBe(True);
+  finally
+    Response.Free;
+  end;
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":3,"method":"tools/list",' +
+    '"params":{"cursor":"' + Cursor + '"}}', Line)).ToBe(True);
+  Response := TJSONObject(GetJSON(Line));
+  try
+    Expect<string>(PageNames(Response)).ToBe('scale,repeat,noisy,extra1,');
+    Expect<Boolean>(Response.FindPath('result.ttlMs') = nil).ToBe(True);
+    Expect<Boolean>(Response.FindPath('result.cacheScope') = nil).ToBe(True);
+    // extra1 stays listed; its array outputSchema is dropped (#91).
+    Expect<Boolean>(Response.FindPath('result.tools[3].outputSchema') = nil)
+      .ToBe(True);
+  finally
+    Response.Free;
+  end;
+  // The description goes out byte-exact.
+  Expect<Boolean>(Pos('"description" : "' + PAGED_DESCRIPTION + '"', Line) > 0)
+    .ToBe(True);
+end;
+
+// The second modern page carries extra1 whole: its array outputSchema
+// and its description, byte-exact.
+procedure TPagination.TestContinuationPageBytes;
+var
+  Line: string;
+begin
+  Expect<Boolean>(Dispatch(ListLine('tools/list', FirstToolsCursor(Self)),
+    Line)).ToBe(True);
+  Expect<Boolean>(Pos('"description" : "' + PAGED_DESCRIPTION + '"', Line) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Pos('"outputSchema" : { "type" : "array" }', Line) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Pos('"name" : "extra1"', Line) > 0).ToBe(True);
+end;
+
+procedure TPagination.SetupTests;
+begin
+  Test('pages concatenate to the whole list in registration order',
+    TestPagesConcatenateInOrder);
+  Test('foreign, garbled, misplaced and non-string cursors → -32602',
+    TestInvalidCursors);
+  Test('PageSize 0 lists everything and accepts no cursor',
+    TestNoPagingByDefault);
+  Test('resources, templates and prompts lists page too', TestOtherListsPage);
+  Test('classic dialect pages without caching fields',
+    TestLegacyDialectPages);
+  Test('a continuation page carries its entries byte-exact',
+    TestContinuationPageBytes);
+end;
+
+{ ───────── metadata fields (#96) ───────── }
+
+// Spec verified 2026-11-26 against the 2026-07-28 schema
+// (https://modelcontextprotocol.io/specification/2026-07-28/schema):
+// Implementation (title, description, websiteUrl, icons), Icon,
+// Resource, ResourceTemplate, Prompt and Tool (title, icons, _meta;
+// resources also annotations and size), _meta on every result
+// (https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta),
+// and ttlMs on reads
+// (https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/caching).
+
+// Returns no structuredContent although its outputSchema needs one,
+// with its own _meta.
+function BadOutputHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPTextResult('no structure');
+  Result.Meta := TJSONObject(GetJSON('{"com.example/kept":true}'));
+end;
+
+// Asks for elicitation, with its own _meta.
+function InterimMetaHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPInputRequired(TJSONObject.Create(['who',
+    MCPElicitFormRequest('Who?', ObjectSchema.AddString('name', 'Name'))]));
+  Result.Meta := TJSONObject(GetJSON('{"com.example/round":1}'));
+end;
+
+// Tries to set the reserved serverInfo key itself.
+function StampForgerHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPTextResult('forged');
+  Result.Meta := TJSONObject(GetJSON('{"io.modelcontextprotocol/serverInfo":' +
+    'null,"com.example/own":2}'));
+end;
+
+// An input-request map whose one entry is stored as nil.
+function NilEntryHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Requests: TJSONObject;
+begin
+  Requests := TJSONObject.Create;
+  Requests.Add('x', TJSONData(nil));
+  Result := MCPInputRequired(Requests);
+  Result.Meta := TJSONObject(GetJSON('{"com.example/lost":false}'));
+end;
+
+function NilChildMeta: TJSONObject;
+begin
+  Result := TJSONObject.Create;
+  Result.Add('empty', TJSONData(nil));
+end;
+
+function MetaEchoHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  // nil when the request has no _meta, as a classic call may.
+  if ACtx.Meta <> nil then
+    Result := MCPTextResult(ACtx.Meta.Get('traceparent', 'none'))
+  else
+    Result := MCPTextResult('none');
+  Result.Meta := TJSONObject(GetJSON('{"com.example/elapsedMs":12}'));
+end;
+
+function FreshReader(const AUri: string;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPTextContents(AUri, 'text/plain', 'fresh');
+end;
+
+function PlainPrompt(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPMessages([MCPUserMessage('p')]);
+end;
+
+procedure TMetadataFields.BeforeEach;
+begin
+  inherited BeforeEach;
+  FServer.Title := 'Test ' + #$C3#$9C + 'ber Server';
+  FServer.Description := 'Serves tests';
+  FServer.WebsiteUrl := 'https://example.com';
+  FServer.AddIcon('https://example.com/i.png', 'image/png', '48x48 96x96', 'dark');
+  FServer.RegisterTextResource('mem://titled', 'titled', 'text/plain', 'x')
+    .Title('Betitelt ' + #$E2#$9C#$93).Icon('data:image/png;base64,AA==')
+    .Annotations(['user', 'assistant'], 0.25, '2026-11-26T00:00:00Z')
+    .Size(1)
+    .Meta('com.example/tag', TJSONString.Create('t'));
+  FServer.RegisterResource('mem://fresh', 'fresh', 'text/plain', FreshReader)
+    .CacheTtlMs(60000);
+  FServer.RegisterPrompt('titled_prompt', 'A prompt', PlainPrompt)
+    .Title('Prompt ' + #$C3#$A9).Icon('https://example.com/p.svg');
+  FServer.RegisterTool('meta_echo', 'Echoes trace', '{"type":"object"}',
+    MetaEchoHandler).Icon('https://example.com/t.png')
+    .Meta('com.example/x', TJSONIntegerNumber.Create(1));
+  FServer.RegisterResourceTemplate('mem://doc/{id}', 'doc', 'text/plain',
+    PairReader).Title('Dok ' + #$C3#$BC).Icon('https://example.com/d.png')
+    .Meta('com.example/kind', TJSONString.Create('doc'));
+  FServer.RegisterPrompt('meta_prompt', 'Has _meta', PlainPrompt)
+    .Meta('com.example/p', NilChildMeta);
+  FServer.RegisterTool(TJSONObject(GetJSON('{"name":"bad_out",' +
+    '"inputSchema":{"type":"object"},"outputSchema":{"type":"object",' +
+    '"properties":{"n":{"type":"integer"}},"required":["n"]}}')),
+    BadOutputHandler);
+  FServer.RegisterTool('interim_meta', 'Asks', '{"type":"object"}',
+    InterimMetaHandler);
+  FServer.RegisterTool('stamp_forger', 'Forges', '{"type":"object"}',
+    StampForgerHandler);
+  FServer.RegisterTool('nil_entry', 'Malformed input request',
+    '{"type":"object"}', NilEntryHandler);
+end;
+
+const
+  // The complete stamp every modern result carries.
+  FULL_STAMP = '"io.modelcontextprotocol/serverInfo" : { "name" : ' +
+    '"test-server", "version" : "9.9.9" }';
+  META_ELICIT = '"_meta":{"io.modelcontextprotocol/protocolVersion":' +
+    '"2026-07-28","io.modelcontextprotocol/clientCapabilities":' +
+    '{"elicitation":{}}}';
+
+procedure TMetadataFields.TestServerInfoFields;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"server/discover",' +
+    '"params":{' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"serverInfo" : { "name" : "test-server", "version" : ' +
+    '"9.9.9", "title" : "Test ' + #$C3#$9C + 'ber Server", "description" : ' +
+    '"Serves tests", "websiteUrl" : "https://example.com", "icons" : [{ "src" : ' +
+    '"https://example.com/i.png", "mimeType" : "image/png", "sizes" : ["48x48", ' +
+    '"96x96"], "theme" : "dark" }] }', Response) > 0).ToBe(True);
+end;
+
+procedure TMetadataFields.TestResourceAndPromptFields;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"resources/list",' +
+    '"params":{' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"uri" : "mem://titled", "name" : "titled", "mimeType" : ' +
+    '"text/plain", "title" : "Betitelt ' + #$E2#$9C#$93 + '", "icons" : [{ "src" : ' +
+    '"data:image/png;base64,AA==" }], "annotations" : { "audience" : ["user", ' +
+    '"assistant"], "priority" : 0.25, "lastModified" : "2026-11-26T00:00:00Z" }, ' +
+    '"size" : 1, "_meta" : { "com.example/tag" : "t" }', Response) > 0).ToBe(True);
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":2,"method":"prompts/list",' +
+    '"params":{' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"title" : "Prompt ' + #$C3#$A9 + '", "icons" : [{ "src" : ' +
+    '"https://example.com/p.svg" }]', Response) > 0).ToBe(True);
+end;
+
+procedure TMetadataFields.TestToolIconAndMeta;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"tools/list",' +
+    '"params":{' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"icons" : [{ "src" : "https://example.com/t.png" }], ' +
+    '"_meta" : { "com.example/x" : 1 }', Response) > 0).ToBe(True);
+end;
+
+procedure TMetadataFields.TestHandlerMetaInAndOut;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"meta_echo","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"traceparent":"00-abc-def-01"}}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "00-abc-def-01"', Response) > 0).ToBe(True);
+  // Handler keys first, then the whole serverInfo stamp, in one _meta.
+  Expect<Boolean>(Pos('"_meta" : { "com.example/elapsedMs" : 12, ' +
+    FULL_STAMP + ' }', Response) > 0).ToBe(True);
+end;
+
+// The handler's _meta survives the error that replaces a result whose
+// structured output is missing, and rides on an interim input_required
+// result; the reserved stamp stays the server's (#96 review).
+procedure TMetadataFields.TestHandlerMetaOnEveryResult;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"bad_out",' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"isError" : true', Response) > 0).ToBe(True);
+  Expect<Boolean>(Pos('"_meta" : { "com.example/kept" : true, ' + FULL_STAMP,
+    Response) > 0).ToBe(True);
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+    '"params":{"name":"interim_meta",' + META_ELICIT + '}}', Response))
+    .ToBe(True);
+  Expect<Boolean>(Pos('"resultType" : "input_required"', Response) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Pos('"_meta" : { "com.example/round" : 1, ' + FULL_STAMP,
+    Response) > 0).ToBe(True);
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":4,"method":"tools/call",' +
+    '"params":{"name":"stamp_forger",' + META_MODERN + '}}', Response))
+    .ToBe(True);
+  Expect<Boolean>(Pos('"_meta" : { "com.example/own" : 2, ' + FULL_STAMP +
+    ' }', Response) > 0).ToBe(True);
+  // An input-request entry stored as nil is malformed: -32603, not a
+  // crash, and both trees are released (#96 review).
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":5,"method":"tools/call",' +
+    '"params":{"name":"nil_entry",' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"code" : -32603', Response) > 0).ToBe(True);
+  Expect<Boolean>(Pos('unsupported input request kind', Response) > 0)
+    .ToBe(True);
+end;
+
+// Templates and prompts carry their metadata; a nil child in a fluent
+// _meta value is a JSON null and the list still clones (#96 review).
+procedure TMetadataFields.TestTemplateAndPromptMeta;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,' +
+    '"method":"resources/templates/list","params":{' + META_MODERN + '}}',
+    Response)).ToBe(True);
+  Expect<Boolean>(Pos('"uriTemplate" : "mem://doc/{id}", "name" : "doc", ' +
+    '"mimeType" : "text/plain", "title" : "Dok ' + #$C3#$BC + '", "icons" : ' +
+    '[{ "src" : "https://example.com/d.png" }], "_meta" : { ' +
+    '"com.example/kind" : "doc" }', Response) > 0).ToBe(True);
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":2,"method":"prompts/list",' +
+    '"params":{' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"_meta" : { "com.example/p" : { "empty" : null } }',
+    Response) > 0).ToBe(True);
+end;
+
+// The classic handshake carries the server's fields in initialize, and
+// a classic call keeps the handler's _meta without the modern stamp.
+procedure TMetadataFields.TestClassicEra;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}', Response))
+    .ToBe(True);
+  Expect<Boolean>(Pos('"serverInfo" : { "name" : "test-server", "version" : ' +
+    '"9.9.9", "title" : "Test ' + #$C3#$9C + 'ber Server", "description" : ' +
+    '"Serves tests", "websiteUrl" : "https://example.com", "icons" : [{ "src" : ' +
+    '"https://example.com/i.png", "mimeType" : "image/png", "sizes" : ["48x48", ' +
+    '"96x96"], "theme" : "dark" }] }', Response) > 0).ToBe(True);
+  SendNotification('{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":2,"method":"tools/call",' +
+    '"params":{"name":"meta_echo","arguments":{}}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"_meta" : { "com.example/elapsedMs" : 12 }', Response) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Pos('serverInfo', Response) = 0).ToBe(True);
+  // A classic request's own _meta reaches the handler (#96 review).
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":3,"method":"tools/call",' +
+    '"params":{"name":"meta_echo","arguments":{},' +
+    '"_meta":{"traceparent":"00-classic-01"}}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "00-classic-01"', Response) > 0).ToBe(True);
+  // The classic fallback for input_required keeps the handler's _meta.
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":4,"method":"tools/call",' +
+    '"params":{"name":"interim_meta","arguments":{}}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"isError" : true', Response) > 0).ToBe(True);
+  Expect<Boolean>(Pos('"_meta" : { "com.example/round" : 1 }', Response) > 0)
+    .ToBe(True);
+  // Classic lists carry the same definition metadata.
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":5,"method":"tools/list",' +
+    '"params":{}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"icons" : [{ "src" : "https://example.com/t.png" }], ' +
+    '"_meta" : { "com.example/x" : 1 }', Response) > 0).ToBe(True);
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":6,"method":"resources/list",' +
+    '"params":{}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"title" : "Betitelt ' + #$E2#$9C#$93 + '"', Response) > 0)
+    .ToBe(True);
+  // A classic read carries no caching hints, a reader's TTL included.
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":7,"method":"resources/read",' +
+    '"params":{"uri":"mem://fresh"}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "fresh"', Response) > 0).ToBe(True);
+  Expect<Boolean>(Pos('ttlMs', Response) = 0).ToBe(True);
+end;
+
+procedure TMetadataFields.TestReaderTtl;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"resources/read",' +
+    '"params":{"uri":"mem://fresh",' + META_MODERN + '}}');
+  Expect<Integer>(TJSONData(Response.FindPath('result.ttlMs')).AsInteger)
+    .ToBe(60000);
+  Response.Free;
+end;
+
+function RefusedBy(AProc: TProcedure): Boolean;
+begin
+  Result := False;
+  try
+    AProc();
+  except
+    on E: EMCPServer do
+      Result := True;
+  end;
+end;
+
+var
+  GuardServer: TMCPServer;
+
+procedure BadIcon;
+begin
+  GuardServer.AddIcon('http://example.com/i.png');
+end;
+
+procedure BadTheme;
+begin
+  GuardServer.AddIcon('https://example.com/i.png', '', '', 'sepia');
+end;
+
+procedure PromptSize;
+begin
+  GuardServer.RegisterPrompt('p2', 'x', PlainPrompt).Size(3);
+end;
+
+procedure HostlessIcon;
+begin
+  GuardServer.AddIcon('https:///i.png');
+end;
+
+procedure CommalessDataIcon;
+begin
+  GuardServer.AddIcon('data:image/png');
+end;
+
+procedure IconOnNullIcons;
+begin
+  GuardServer.RegisterTool(TJSONObject(GetJSON('{"name":"null_icons",' +
+    '"inputSchema":{"type":"object"},"icons":null}')), EchoHandler)
+    .Icon('https://example.com/x.png');
+end;
+
+procedure MetaOnArrayMeta;
+begin
+  GuardServer.RegisterTool(TJSONObject(GetJSON('{"name":"array_meta",' +
+    '"inputSchema":{"type":"object"},"_meta":[]}')), EchoHandler)
+    .Meta('k', TJSONString.Create('v'));
+end;
+
+procedure IconWithBadPort;
+begin
+  GuardServer.AddIcon('https://example.com:abc/i.png');
+end;
+
+procedure IconWithSpace;
+begin
+  GuardServer.AddIcon('https://bad host/i.png');
+end;
+
+procedure IconBadBase64;
+begin
+  GuardServer.AddIcon('data:image/png;base64,not-base64');
+end;
+
+procedure IconShortBase64;
+begin
+  GuardServer.AddIcon('data:image/png;base64,AAA');
+end;
+
+procedure GoodIcons;
+begin
+  GuardServer.AddIcon('https://user@example.com:8443/i.png');
+  GuardServer.AddIcon('https://[::1]/i.png');
+  GuardServer.AddIcon('https://[2001:db8::7]:443/i.png');
+  GuardServer.AddIcon('https://[::ffff:192.0.2.1]/i.png');
+  GuardServer.AddIcon('https://%65xample.com/i.png');
+  GuardServer.AddIcon('data:image/svg+xml,%3Csvg%3E');
+end;
+
+procedure IconNotIPv6;
+begin
+  GuardServer.AddIcon('https://[abcd]/i.png');
+end;
+
+procedure IconTwoCompressions;
+begin
+  GuardServer.AddIcon('https://[1::2::3]/i.png');
+end;
+
+procedure IconNineGroups;
+begin
+  GuardServer.AddIcon('https://[1:2:3:4:5:6:7:8:9]/i.png');
+end;
+
+procedure IconBadEscape;
+begin
+  GuardServer.AddIcon('https://%zzample.com/i.png');
+end;
+
+procedure LastModifiedWords;
+begin
+  GuardServer.RegisterTextResource('mem://lm1', 'l', 'text/plain', 'l')
+    .Annotations([], -1, 'yesterday');
+end;
+
+procedure LastModifiedNoZone;
+begin
+  GuardServer.RegisterTextResource('mem://lm2', 'l', 'text/plain', 'l')
+    .Annotations([], -1, '2026-11-26T00:00:00');
+end;
+
+procedure LastModifiedBadMonth;
+begin
+  GuardServer.RegisterTextResource('mem://lm3', 'l', 'text/plain', 'l')
+    .Annotations([], -1, '2026-13-01T00:00:00Z');
+end;
+
+procedure LastModifiedGood;
+begin
+  GuardServer.RegisterTextResource('mem://lm4', 'l', 'text/plain', 'l')
+    .Annotations([], -1, '2026-11-26T00:00:00Z');
+  GuardServer.RegisterTextResource('mem://lm5', 'l', 'text/plain', 'l')
+    .Annotations([], -1, '2026-11-26T08:30:00.25+01:00');
+  GuardServer.RegisterTextResource('mem://lm6', 'l', 'text/plain', 'l')
+    .Annotations([], -1, '2026-11-26T08:30:00-05:00');
+end;
+
+procedure StaticTtl;
+begin
+  GuardServer.RegisterTextResource('mem://static-ttl', 's', 'text/plain', 's')
+    .CacheTtlMs(10);
+end;
+
+procedure BadAudience;
+begin
+  GuardServer.RegisterTextResource('mem://a', 'a', 'text/plain', 'a')
+    .Annotations(['robot']);
+end;
+
+procedure TMetadataFields.TestGuards;
+begin
+  GuardServer := FServer;
+  Expect<Boolean>(RefusedBy(BadIcon)).ToBe(True);
+  Expect<Boolean>(RefusedBy(BadTheme)).ToBe(True);
+  Expect<Boolean>(RefusedBy(PromptSize)).ToBe(True);
+  Expect<Boolean>(RefusedBy(BadAudience)).ToBe(True);
+  // An https: URI needs a host, a data: URI its comma (#96 review).
+  Expect<Boolean>(RefusedBy(HostlessIcon)).ToBe(True);
+  Expect<Boolean>(RefusedBy(CommalessDataIcon)).ToBe(True);
+  // Inside an allowed scheme, the URI must still be well formed.
+  Expect<Boolean>(RefusedBy(IconWithBadPort)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconWithSpace)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconBadBase64)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconShortBase64)).ToBe(True);
+  Expect<Boolean>(RefusedBy(GoodIcons)).ToBe(False);
+  // IPv6 syntax and %XX escapes in hosts (#96 review).
+  Expect<Boolean>(RefusedBy(IconNotIPv6)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconTwoCompressions)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconNineGroups)).ToBe(True);
+  Expect<Boolean>(RefusedBy(IconBadEscape)).ToBe(True);
+  // lastModified is a date-time with a time zone, as clients check it
+  // (#96 review).
+  Expect<Boolean>(RefusedBy(LastModifiedWords)).ToBe(True);
+  Expect<Boolean>(RefusedBy(LastModifiedNoZone)).ToBe(True);
+  Expect<Boolean>(RefusedBy(LastModifiedBadMonth)).ToBe(True);
+  Expect<Boolean>(RefusedBy(LastModifiedGood)).ToBe(False);
+  // A raw definition's icons or _meta of the wrong type is refused, not
+  // cast (#96 review).
+  Expect<Boolean>(RefusedBy(IconOnNullIcons)).ToBe(True);
+  Expect<Boolean>(RefusedBy(MetaOnArrayMeta)).ToBe(True);
+  // Static text is served with the server's TTL, so a per-resource one
+  // is refused (#96 review).
+  Expect<Boolean>(RefusedBy(StaticTtl)).ToBe(True);
+  GuardServer := nil;
+end;
+
+procedure TMetadataFields.SetupTests;
+begin
+  Test('serverInfo carries title, description, websiteUrl and icons',
+    TestServerInfoFields);
+  Test('resources and prompts carry title, icons, annotations, size, _meta',
+    TestResourceAndPromptFields);
+  Test('tools carry icons and _meta', TestToolIconAndMeta);
+  Test('handlers read request _meta and add result _meta',
+    TestHandlerMetaInAndOut);
+  Test('a reader''s declared TTL is advertised', TestReaderTtl);
+  Test('handler _meta on error and interim results; the stamp is the server''s',
+    TestHandlerMetaOnEveryResult);
+  Test('templates and prompts carry title, icons and _meta',
+    TestTemplateAndPromptMeta);
+  Test('classic era: initialize serverInfo fields, handler _meta unstamped',
+    TestClassicEra);
+  Test('bad icon URIs, themes, audiences and misapplied options refused',
+    TestGuards);
 end;
 
 { ───────── image results ───────── }
@@ -5410,9 +8179,21 @@ begin
     TMRTRDispatch.Create('Server: MRTR input_required'));
   TestRunnerProgram.AddSuite(
     TImageResults.Create('Server: image tool results'));
+  TestRunnerProgram.AddSuite(TMetadataFields.Create('Server: metadata fields'));
+  TestRunnerProgram.AddSuite(TPagination.Create('Server: pagination'));
+  TestRunnerProgram.AddSuite(
+    TTypedNested.Create('Server: typed tools with nested arguments'));
+  TestRunnerProgram.AddSuite(
+    TDeclaredCapabilities.Create('Server: declared client capabilities'));
   TestRunnerProgram.AddSuite(
     TContentResults.Create('Server: content tool results and prompt messages'));
   TestRunnerProgram.AddSuite(
+    TCompletionDispatch.Create('Server: completion/complete'));
+  TestRunnerProgram.AddSuite(
+    TStructuredOutput.Create('Server: structured output'));
+  TestRunnerProgram.AddSuite(
     THandlerProtocolErrors.Create('Server: handler-raised protocol errors'));
+  TestRunnerProgram.AddSuite(
+    TRequestStateSealing.Create('Server: requestState sealing'));
   TestRunnerProgram.Run;
 end.

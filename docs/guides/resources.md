@@ -47,10 +47,18 @@ The reader returns a `TJSONArray` of contents entries:
 Both return a single-entry array; concatenate entries for multi-part
 reads. A reader exception becomes a JSON-RPC error on
 `resources/read`. Because the library cannot know how fresh a
-callback's data stays, reads served by a dynamic reader always
-advertise `ttlMs: 0` (revalidate) in their caching hints — static
-text advertises the server-wide TTL (see
-[Configuration](configuration.md#cachettlms-and-cachescope)).
+callback's data stays, reads served by a dynamic reader advertise
+`ttlMs: 0` (revalidate) in their caching hints unless the registration
+says otherwise — static text advertises the server-wide TTL (see
+[Configuration](configuration.md#cachettlms-and-cachescope)):
+
+```pascal
+Server.RegisterResource('mem://rates', 'rates', 'application/json',
+  RatesReader).CacheTtlMs(60000);   // fresh for a minute
+```
+
+`.CacheTtlMs` applies to resources with a reader only; on static text it
+raises `EMCPServer`.
 
 Method-pointer overloads (`of object`) exist for both `RegisterResource`
 and `RegisterResourceTemplate`, mirroring tools and prompts.
@@ -85,6 +93,20 @@ expressions):
 - Captured values are passed to readers exactly as encoded in the URI
   — percent-decoding is not performed. Decode in the reader if your
   variables can carry encoded characters.
+
+### Suggesting variable values
+
+`RegisterTemplateCompletion` suggests values for a template variable
+while the user types it, from a list or a handler that also sees the
+variables already filled in:
+
+```pascal
+// After the RegisterResourceTemplate call above:
+Server.RegisterTemplateCompletion('mcp://my-server/shout/{text}', 'text',
+  ['hello', 'help', 'world']);
+```
+
+See [Argument completion](../reference/server.md#argument-completion).
 
 ## Errors
 

@@ -12,8 +12,10 @@ unit MCP.JSONRPC;
 // modelcontextprotocol.io/specification/2025-03-26/basic
 //
 // MCP transports carry UTF-8 JSON. This bottom serialization unit links
-// the platform RTL widestring manager so fpjson conversions preserve
-// UTF-8 bytes for every consumer, including sans-I/O embeddings. Its
+// the platform RTL widestring manager and pins the conversion code page
+// to UTF-8 on every platform, so fpjson conversions preserve UTF-8 bytes
+// for every consumer, including sans-I/O embeddings, under any locale
+// (#102). Its
 // inbound parser also normalizes non-ASCII Unicode escapes before the
 // FPC 3.2.2 scanner sees them, avoiding its adjacent-escape corruption.
 // UTF-8 transport requirement verified 2026-07-20:
@@ -101,7 +103,26 @@ function BuildErrorResponse(AId: TJSONData; ACode: Integer;
 // which is what keeps the stdio framing invariant).
 function SerializeCompact(AData: TJSONData): string;
 
+// One diagnostic line on stderr, for every library logger: written and
+// flushed under one lock, so threads cannot splice lines. The line goes
+// out as UTF-8 unless stderr is a Windows console, which keeps the code
+// page the RTL chose for it; the file's code page is restored exactly
+// afterwards, so a host's own writes are not affected (#102). I/O
+// errors propagate.
+procedure MCPWriteStderrLine(const AText: string);
+
+// Whether two request ids name the same request, as
+// notifications/cancelled matches them: strings by decoded value,
+// integers by value, other numbers by float value; a string never
+// matches a number, and nil matches nothing. Both are borrowed.
+function SameRequestId(ALeft, ARight: TJSONData): Boolean;
+
 implementation
+
+{$IFDEF WINDOWS}
+uses
+  Windows;
+{$ENDIF}
 
 function HexDigitValue(AChar: Char): Integer;
 begin
@@ -216,10 +237,59 @@ begin
   SetLength(Result, OutputIndex);
 end;
 
+// The 1-based offset of the first byte that is not well-formed UTF-8
+// (RFC 3629: no overlong forms, no surrogates, nothing past U+10FFFF),
+// 0 when the whole text is.
+function InvalidUTF8Offset(const AText: RawByteString): Integer;
+var
+  I, Need, K: Integer;
+  B, Lo, Hi: Byte;
+begin
+  I := 1;
+  while I <= Length(AText) do
+  begin
+    B := Byte(AText[I]);
+    Lo := $80;
+    Hi := $BF;
+    case B of
+      $00..$7F: Need := 0;
+      $C2..$DF: Need := 1;
+      $E0: begin Need := 2; Lo := $A0; end;
+      $E1..$EC, $EE, $EF: Need := 2;
+      $ED: begin Need := 2; Hi := $9F; end;
+      $F0: begin Need := 3; Lo := $90; end;
+      $F1..$F3: Need := 3;
+      $F4: begin Need := 3; Hi := $8F; end;
+    else
+      Exit(I);
+    end;
+    if I + Need > Length(AText) then
+      Exit(I);
+    for K := 1 to Need do
+    begin
+      B := Byte(AText[I + K]);
+      if (B < Lo) or (B > Hi) then
+        Exit(I);
+      Lo := $80;
+      Hi := $BF;
+    end;
+    Inc(I, Need + 1);
+  end;
+  Result := 0;
+end;
+
 function ParseJson(const ALine: string): TJSONData;
 var
   Parser: TJSONParser;
+  Offset: Integer;
 begin
+  // JSON-RPC messages MUST be UTF-8 on every transport (verified
+  // 2026-11-27 against
+  // https://modelcontextprotocol.io/specification/2026-07-28/basic/transports#messages):
+  // a line that is not is a parse error, never text to echo (#102).
+  Offset := InvalidUTF8Offset(ALine);
+  if Offset > 0 then
+    raise EJSONParser.CreateFmt('invalid UTF-8 at byte %d', [Offset]);
   Parser := TJSONParser.Create(DecodeNonASCIIUnicodeEscapes(ALine),
     [joUTF8, joStrict]);
   try
@@ -375,9 +445,81 @@ begin
   Result := AData.AsJSON;
 end;
 
+var
+  StderrWriteLock: TRTLCriticalSection;
+
+// True when the handle ErrOutput really writes to is a Windows console
+// (GetConsoleMode succeeds only for one); never on other platforms.
+function StderrIsConsole: Boolean;
 {$IFDEF WINDOWS}
+var
+  Mode: DWORD;
+{$ENDIF}
+begin
+  {$IFDEF WINDOWS}
+  Result := GetConsoleMode(TextRec(ErrOutput).Handle, Mode);
+  {$ELSE}
+  Result := False;
+  {$ENDIF}
+end;
+
+procedure MCPWriteStderrLine(const AText: string);
+var
+  Saved: TSystemCodePage;
+begin
+  System.EnterCriticalSection(StderrWriteLock);
+  try
+    // The raw field, not GetTextCodePage: SetTextCodePage would turn a
+    // saved 0 into DefaultSystemCodePage.
+    Saved := TextRec(ErrOutput).CodePage;
+    try
+      if not StderrIsConsole then
+        SetTextCodePage(ErrOutput, CP_UTF8);
+      Write(ErrOutput, AText, #10);
+      Flush(ErrOutput);
+    finally
+      TextRec(ErrOutput).CodePage := Saved;
+    end;
+  finally
+    System.LeaveCriticalSection(StderrWriteLock);
+  end;
+end;
+
+function IsIntegralJSONNumber(AValue: TJSONData): Boolean;
+begin
+  Result := (AValue <> nil) and (AValue.JSONType = jtNumber) and
+    not (AValue is TJSONFloatNumber);
+end;
+
+function SameRequestId(ALeft, ARight: TJSONData): Boolean;
+begin
+  Result := False;
+  if (ALeft = nil) or (ARight = nil) then
+    Exit;
+  if (ALeft.JSONType = jtString) and (ARight.JSONType = jtString) then
+    Exit(ALeft.AsString = ARight.AsString);
+  if (ALeft.JSONType <> jtNumber) or (ARight.JSONType <> jtNumber) then
+    Exit;
+  if IsIntegralJSONNumber(ALeft) and IsIntegralJSONNumber(ARight) then
+    Result := ALeft.AsInt64 = ARight.AsInt64
+  else
+    Result := ALeft.AsFloat = ARight.AsFloat;
+end;
+
+// Every platform: strings are UTF-8 in a program built with this
+// library, whatever the locale. On Unix cwstring would otherwise take
+// the code page from the locale, and under a non-UTF-8 one (LC_ALL=C)
+// each non-ASCII character would become '?' (#102). The file-system
+// code pages follow, so a UTF-8 path (from the environment, say) still
+// reaches the OS as the same bytes. This is what Lazarus's UTF-8 RTL
+// mode (LazUTF8) sets too.
 initialization
   SetMultiByteConversionCodePage(CP_UTF8);
-{$ENDIF}
+  DefaultFileSystemCodePage := CP_UTF8;
+  DefaultRTLFileSystemCodePage := CP_UTF8;
+  InitCriticalSection(StderrWriteLock);
+
+finalization
+  DoneCriticalSection(StderrWriteLock);
 
 end.

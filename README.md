@@ -132,18 +132,20 @@ Server.RegisterTool('add', 'Add two numbers', TAddArgs, Add);
 
 Published properties map to JSON Schema types (string kinds →
 `string`, floats → `number`, integer kinds → `integer`, `Boolean` →
-`boolean`, enums → `string` with the enum names as allowed values).
+`boolean`, enums → `string` with the enum names as allowed values;
+field-backed dynamic arrays → `array`, and `TMCPArgs` properties →
+nested objects).
 Optionality uses the standard property directives: `default 3` makes
 an ordinal property optional with that schema default (seeded into
 the instance when the argument is omitted), and `stored False` makes
 any property optional without one.
 Classes rather than records because FPC 3.2.2 RTTI only exposes field
-names for published class properties. For richer schemas ($ref,
-nested objects, title/annotations, per-property descriptions) the
-fluent builder, JSON-string, and definition-object registration
-overloads remain available, validated at registration (schemas beyond
-the server-enforced subset are marked `.ApplicationValidated`, handing
-argument validation to your handler).
+names for published class properties. Per-property descriptions come
+from the fluent builder. For richer schemas ($ref, composition, formats
+and other annotations), register the JSON itself through the
+JSON-string or definition-object overloads, validated at registration
+(schemas beyond the server-enforced subset are marked
+`.ApplicationValidated`, handing argument validation to your handler).
 
 Results are built with `MCPTextResult` / `MCPErrorResult` /
 `MCPStructuredResult` / `MCPImageResult`; handler exceptions become
@@ -180,7 +182,8 @@ walkthrough lives in [docs/guides/quick-start.md](docs/guides/quick-start.md).
 ## Protocol coverage
 
 Implemented: tools, resources (including RFC 6570 templates),
-prompts, MRTR, progress/log notifications, caching hints, both
+prompts, argument completion, MRTR, progress/log notifications,
+caching hints, both
 transports, and the classic `initialize` era. Deliberately out:
 `subscriptions/listen` and list-changed notifications — registries
 are static after startup. The authoritative surface-by-surface table,

@@ -70,6 +70,9 @@ type
     function Exchange(const AMethod, APath, ABody: string;
       const AHeaders: array of THeaderPair; out AResponseBody: string;
       out AContentType: string): Integer;
+    // A tools/call of 'routed' (#90) with AArguments and extra headers.
+    function PostRouted(const AArguments: string;
+      const AHeaders: array of THeaderPair; out ABody: string): Integer;
     // POST to the endpoint with the standard modern headers for
     // AMcpMethod/AMcpName; '' skips a header entirely.
     function Post(const ABody, AMcpMethod, AMcpName: string;
@@ -86,6 +89,11 @@ type
     // the reset lands first). With nothing unsent the close is a
     // clean FIN, so the response is always readable — and reaching
     // EOF is itself the connection-close assertion.
+    // A tools/call of 'routed' with AArguments and AExtraHeaderLines
+    // (raw "Name: value" lines, CRLF-joined), sent over a raw socket so
+    // a field can repeat; returns the status.
+    function PostRoutedRaw(const AArguments, AExtraHeaderLines: string;
+      out ABody: string): Integer;
     function PostWithUnsentBody(ADeclaredLength: Integer;
       out AResponseBody: string): Integer;
   protected
@@ -111,6 +119,15 @@ type
     procedure TestUnsupportedVersion;
     procedure TestMissingMcpName;
     procedure TestSentinelEncodedMcpName;
+    procedure TestParamHeadersMatch;
+    procedure TestParamHeaderMissing;
+    procedure TestParamHeaderMismatch;
+    procedure TestParamHeaderBadBase64;
+    procedure TestParamHeaderUnencodedNonASCII;
+    procedure TestParamHeaderWithoutValue;
+    procedure TestParamHeaderEmptyAndRepeated;
+    procedure TestParamHeaderIntegers;
+    procedure TestMcpNameStrictBase64;
     procedure TestUnknownMethod404;
     procedure TestInitializeRejected404;
     procedure TestLegacyGetRefused;
@@ -125,7 +142,15 @@ type
     procedure TestNonWebSchemeOriginRejected;
     procedure TestSessionHeaderIgnored;
     procedure TestOversizedBody;
+    procedure TestDeclaredCapabilityRefusedBeforeStreaming;
+    procedure TestUndeclaredCapabilityStillEndsTheStream;
+    function AbandonWaiter(AReset: Boolean; const AExtra: string;
+      out ASawOpen, AResetSet: Boolean): string;
+    procedure TestBytesBeforeCloseStillCancel;
+    procedure TestDisconnectCancelsSilentHandler;
+    procedure TestResetCancelsSilentHandler;
     procedure TestSSEStream;
+    procedure TestCompletionStreams;
     procedure TestStreamingProtocolErrorIsJSON;
     procedure TestStreamingWithoutNotificationsIsJSON;
     procedure TestStopBeforeRunReturns;
@@ -148,8 +173,108 @@ begin
   Result := MCPTextResult(AArguments.Get('message', ''));
 end;
 
+// A completion callback that reports progress: completion/complete
+// runs a handler too, so an opted-in HTTP request streams (#81).
+function NoisyCompletion(const AArgument, AValue: string;
+  AContext: TJSONObject; const ACtx: TMCPRequestContext): TMCPCompletion;
+begin
+  MCPReportProgress(ACtx, 1, 1, 'looked up');
+  Result := MCPCompleteFrom(AValue, ['alpha', 'beta']);
+end;
+
+function HintPrompt(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPMessages([MCPUserMessage('hint')]);
+end;
+
+// Reports progress, then asks for sampling (#84).
+function ProgressThenSamplingHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Requests: TJSONObject;
+begin
+  MCPReportProgress(ACtx, 0.5, 1.0, 'halfway');
+  Requests := TJSONObject.Create;
+  try
+    Requests.Add('s', MCPSamplingTextRequest('Say hi', 10));
+  except
+    Requests.Free;
+    raise;
+  end;
+  Result := MCPInputRequired(Requests);
+end;
+
+// Splits an SSE body into its events' data. False unless every event
+// is one "data: " line ended by a blank line, with nothing left over.
+function SplitSSEEvents(ABody: string; out AEvents: TStringArray): Boolean;
+var
+  Cut: Integer;
+begin
+  AEvents := nil;
+  while ABody <> '' do
+  begin
+    Cut := Pos(#10#10, ABody);
+    if (Cut = 0) or (Copy(ABody, 1, 6) <> 'data: ') or
+      (Pos(#10, Copy(ABody, 1, Cut - 1)) > 0) then
+      Exit(False);
+    AEvents := Concat(AEvents, [Copy(ABody, 7, Cut - 7)]);
+    Delete(ABody, 1, Cut + 1);
+  end;
+  Result := True;
+end;
+
+// An SSE body of well-formed events: progress first, and the -32021
+// error alone as the last event.
+function ProgressThenFinalRefusal(const ABody: string): Boolean;
+var
+  Events: TStringArray;
+begin
+  Result := SplitSSEEvents(ABody, Events) and (Length(Events) >= 2) and
+    (Pos('notifications/progress', Events[0]) > 0) and
+    (Pos('-32021', Events[0]) = 0) and
+    (Pos('"code" : -32021', Events[High(Events)]) > 0) and
+    (Pos('notifications/progress', Events[High(Events)]) = 0);
+end;
+
 // Emits nothing while it runs: a streaming-opted call to this tool
 // must still come back as a single JSON object.
+var
+  // How the polling handler ended: 'cancelled' or 'finished'. Written
+  // on the connection thread before WaiterDone is set, read after it.
+  WaiterOutcome: string;
+  // Set once the handler's first poll found the connection open, and
+  // once it has ended.
+  WaiterEntered, WaiterDone: PRTLEvent;
+  // The first poll found the connection open.
+  WaiterSawOpen: Boolean;
+
+// Polls IsCancelled for up to three seconds without writing anything:
+// only the binding's disconnect poll can cancel it (#93).
+function WaiterHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  I: Integer;
+begin
+  WaiterOutcome := 'finished';
+  for I := 1 to 300 do
+  begin
+    if ACtx.IsCancelled then
+    begin
+      WaiterOutcome := 'cancelled';
+      Break;
+    end;
+    if I = 1 then
+    begin
+      WaiterSawOpen := True;
+      RTLEventSetEvent(WaiterEntered);
+    end;
+    Sleep(10);
+  end;
+  Result := MCPTextResult(WaiterOutcome);
+  RTLEventSetEvent(WaiterDone);
+end;
+
 function QuietHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
@@ -239,10 +364,28 @@ begin
   FServer.RegisterTool('echo', 'Echo',
     ObjectSchema.AddString('message', 'Text to echo'), NoisyEchoHandler);
   FServer.RegisterTool('quiet', 'Quiet', '{"type":"object"}', QuietHandler);
+  FServer.RegisterPrompt('hint', 'Hint', PromptArguments.Add('topic'),
+    HintPrompt);
+  FServer.RegisterPromptCompletion('hint', 'topic', NoisyCompletion);
   FServer.RegisterTool('needs_sampling', 'Needs sampling', '{"type":"object"}',
     NeedsSamplingHandler);
   FServer.RegisterTool('late_refusal', 'Refuses late', '{"type":"object"}',
     ProgressThenRefuseHandler);
+  // The same handler, with and without its need declared (#84).
+  FServer.RegisterTool('sampler', 'Samples', '{"type":"object"}',
+    ProgressThenSamplingHandler).RequiresClientCapability('sampling');
+  FServer.RegisterTool('sampler_undeclared', 'Samples', '{"type":"object"}',
+    ProgressThenSamplingHandler);
+  // Mirrors region (string), opts.limit (integer) and opts.dry
+  // (boolean) into Mcp-Param-* headers (#90).
+  FServer.RegisterTool('routed', 'Routed',
+    '{"type":"object","properties":{' +
+    '"region":{"type":"string","x-mcp-header":"Region"},' +
+    '"opts":{"type":"object","properties":{' +
+    '"limit":{"type":"integer","x-mcp-header":"Limit"},' +
+    '"dry":{"type":"boolean","x-mcp-header":"Dry"}}}}}',
+    QuietHandler).ApplicationValidated;
+  FServer.RegisterTool('waiter', 'Waits', '{"type":"object"}', WaiterHandler);
   FTransport := TMCPHTTPServer.Create(FServer);
   FTransport.Port := FindFreePort;
   FBaseUrl := 'http://127.0.0.1:' + IntToStr(FTransport.Port);
@@ -317,24 +460,21 @@ begin
   end;
 end;
 
-function THTTPBinding.PostWithUnsentBody(ADeclaredLength: Integer;
-  out AResponseBody: string): Integer;
+// Sends ARequest as raw bytes to the loopback port and reads to EOF;
+// the status code, and the body in ABody. A 5 s socket timeout fails a
+// test instead of hanging it.
+function RawExchange(APort: Word; const ARequest: string;
+  out ABody: string): Integer;
 var
   Sock: TInetSocket;
-  Request, Response: string;
+  Response: string;
   Buf: array[0..4095] of Byte;
   Got, HeaderEnd: Integer;
 begin
-  Request := 'POST /mcp HTTP/1.1'#13#10 +
-    'Host: 127.0.0.1:' + IntToStr(FTransport.Port) + #13#10 +
-    'Content-Type: application/json'#13#10 +
-    'Content-Length: ' + IntToStr(ADeclaredLength) + #13#10#13#10;
-  Sock := TInetSocket.Create('127.0.0.1', FTransport.Port);
+  Sock := TInetSocket.Create('127.0.0.1', APort);
   try
-    // A hang here would be a close-contract regression; fail the test
-    // via the timeout instead of wedging the suite.
     Sock.IOTimeout := 5000;
-    Sock.WriteBuffer(Request[1], Length(Request));
+    Sock.WriteBuffer(ARequest[1], Length(ARequest));
     Response := '';
     repeat
       Got := Sock.Read(Buf[0], SizeOf(Buf));
@@ -351,9 +491,40 @@ begin
   Result := StrToIntDef(Copy(Response, 10, 3), -1);
   HeaderEnd := Pos(#13#10#13#10, Response);
   if HeaderEnd > 0 then
-    AResponseBody := Copy(Response, HeaderEnd + 4, MaxInt)
+    ABody := Copy(Response, HeaderEnd + 4, MaxInt)
   else
-    AResponseBody := '';
+    ABody := '';
+end;
+
+function THTTPBinding.PostRoutedRaw(const AArguments,
+  AExtraHeaderLines: string; out ABody: string): Integer;
+var
+  Payload, Request: string;
+begin
+  Payload := '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{' +
+    '"name":"routed","arguments":' + AArguments + ',' + META_MODERN + '}}';
+  Request := 'POST /mcp HTTP/1.1'#13#10 +
+    'Host: 127.0.0.1:' + IntToStr(FTransport.Port) + #13#10 +
+    'Content-Type: application/json'#13#10 +
+    'Accept: application/json, text/event-stream'#13#10 +
+    'MCP-Protocol-Version: ' + MCP_PROTOCOL_VERSION + #13#10 +
+    'Mcp-Method: tools/call'#13#10 + 'Mcp-Name: routed'#13#10 +
+    AExtraHeaderLines + #13#10 +
+    'Connection: close'#13#10 +
+    'Content-Length: ' + IntToStr(Length(Payload)) + #13#10#13#10 + Payload;
+  Result := RawExchange(FTransport.Port, Request, ABody);
+end;
+
+function THTTPBinding.PostWithUnsentBody(ADeclaredLength: Integer;
+  out AResponseBody: string): Integer;
+begin
+  // A hang here would be a close-contract regression; RawExchange's
+  // socket timeout fails the test instead of wedging the suite.
+  Result := RawExchange(FTransport.Port, 'POST /mcp HTTP/1.1'#13#10 +
+    'Host: 127.0.0.1:' + IntToStr(FTransport.Port) + #13#10 +
+    'Content-Type: application/json'#13#10 +
+    'Content-Length: ' + IntToStr(ADeclaredLength) + #13#10#13#10,
+    AResponseBody);
 end;
 
 function HeaderPair(const AName, AValue: string): THeaderPair;
@@ -447,13 +618,7 @@ begin
   Expect<string>(ContentType).ToBe('text/event-stream');
   // Ordered frames: the progress event, then the error as the final,
   // terminated event.
-  Expect<Boolean>(Pos('notifications/progress', Body) > 0).ToBe(True);
-  Expect<Boolean>(Pos('notifications/progress', Body) <
-    Pos('"code" : -32021', Body)).ToBe(True);
-  Expect<string>(Copy(Body, Length(Body) - 1, 2)).ToBe(#10#10);
-  Expect<Boolean>(Pos('"code" : -32021', Copy(Body,
-    LastDelimiter(#10, Copy(Body, 1, Length(Body) - 2)) + 1, MaxInt)) > 0)
-    .ToBe(True);
+  Expect<Boolean>(ProgressThenFinalRefusal(Body)).ToBe(True);
 end;
 
 procedure THTTPBinding.TestBareDiscoverProbe;
@@ -664,6 +829,180 @@ begin
   Expect<Boolean>(Pos('pong', Body) > 0).ToBe(True);
 end;
 
+// A tools/call of 'routed' with AArguments and the extra headers. The
+// Mcp-Param tests below follow "Custom Headers from Tool Parameters"
+// and "Server Validation", verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#custom-headers-from-tool-parameters
+function THTTPBinding.PostRouted(const AArguments: string;
+  const AHeaders: array of THeaderPair; out ABody: string): Integer;
+var
+  Headers: array of THeaderPair;
+  ContentType: string;
+  I: Integer;
+begin
+  Headers := [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+    HeaderPair('Mcp-Method', 'tools/call'), HeaderPair('Mcp-Name', 'routed')];
+  for I := 0 to High(AHeaders) do
+    Headers := Concat(Headers, [AHeaders[I]]);
+  Result := Exchange('POST', '/mcp', '{"jsonrpc":"2.0","id":4,' +
+    '"method":"tools/call","params":{"name":"routed","arguments":' +
+    AArguments + ',' + META_MODERN + '}}', Headers, ABody, ContentType);
+end;
+
+procedure THTTPBinding.TestParamHeadersMatch;
+var
+  Body: string;
+begin
+  // Plain values, nested properties, all three types.
+  Expect<Integer>(PostRouted('{"region":"us-west1","opts":{"limit":42,' +
+    '"dry":true}}', [HeaderPair('Mcp-Param-Region', 'us-west1'),
+    HeaderPair('Mcp-Param-Limit', '42'), HeaderPair('Mcp-Param-Dry', 'true')],
+    Body)).ToBe(200);
+  Expect<Boolean>(Pos('quiet', Body) > 0).ToBe(True);
+  // Header names compare case-insensitively; a non-ASCII value travels
+  // base64-encoded ('Hello, 世界', the spec's own example).
+  Expect<Integer>(PostRouted('{"region":"Hello, ' + #$E4#$B8#$96#$E7#$95#$8C +
+    '"}', [HeaderPair('mcp-param-region', '=?base64?SGVsbG8sIOS4lueVjA==?=')],
+    Body)).ToBe(200);
+end;
+
+procedure THTTPBinding.TestParamHeaderMissing;
+var
+  Body: string;
+begin
+  Expect<Integer>(PostRouted('{"region":"eu"}', [], Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  Expect<Boolean>(Pos('Mcp-Param-Region header is missing', Body) > 0)
+    .ToBe(True);
+end;
+
+procedure THTTPBinding.TestParamHeaderMismatch;
+var
+  Body: string;
+begin
+  Expect<Integer>(PostRouted('{"region":"eu"}',
+    [HeaderPair('Mcp-Param-Region', 'us')], Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  Expect<Integer>(PostRouted('{"opts":{"dry":false}}',
+    [HeaderPair('Mcp-Param-Dry', 'False')], Body)).ToBe(400);
+  // A base64 value that decodes to something else.
+  Expect<Integer>(PostRouted('{"region":"eu"}',
+    [HeaderPair('Mcp-Param-Region', '=?base64?dXM=?=')], Body)).ToBe(400);
+end;
+
+procedure THTTPBinding.TestParamHeaderBadBase64;
+var
+  Body: string;
+begin
+  // Missing padding and a character outside the alphabet: both
+  // rejected (SEP-2243 test table), not decoded leniently.
+  Expect<Integer>(PostRouted('{"region":"Hello"}',
+    [HeaderPair('Mcp-Param-Region', '=?base64?SGVsbG8?=')], Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  // A foreign character in a payload of whole 4-character groups, which
+  // a lenient decoder would skip to "Hello": only the alphabet check
+  // refuses it.
+  Expect<Integer>(PostRouted('{"region":"Hello"}',
+    [HeaderPair('Mcp-Param-Region', '=?base64?SGVsbG8!?=')], Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  Expect<Boolean>(Pos('is not valid base64', Body) > 0).ToBe(True);
+  // Without the full sentinel the value is literal.
+  Expect<Integer>(PostRouted('{"region":"SGVsbG8="}',
+    [HeaderPair('Mcp-Param-Region', 'SGVsbG8=')], Body)).ToBe(200);
+end;
+
+procedure THTTPBinding.TestParamHeaderUnencodedNonASCII;
+var
+  Body: string;
+begin
+  Expect<Integer>(PostRouted('{"region":"' + #$C3#$A9 + '"}',
+    [HeaderPair('Mcp-Param-Region', #$C3#$A9)], Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+end;
+
+// Presence, not value (#90 review): an empty field is the empty
+// string's header, the empty base64 payload decodes to it, an empty
+// field for an absent argument is a mismatch, and a repeated field is
+// refused. Verified 2026-11-27 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-validation
+procedure THTTPBinding.TestParamHeaderEmptyAndRepeated;
+var
+  Body: string;
+begin
+  Expect<Integer>(PostRouted('{"region":""}',
+    [HeaderPair('Mcp-Param-Region', '')], Body)).ToBe(200);
+  Expect<Integer>(PostRouted('{"region":""}',
+    [HeaderPair('Mcp-Param-Region', '=?base64??=')], Body)).ToBe(200);
+  Expect<Integer>(PostRouted('{}', [HeaderPair('Mcp-Param-Region', '')],
+    Body)).ToBe(400);
+  Expect<Integer>(PostRoutedRaw('{"region":"eu"}',
+    'Mcp-Param-Region: us'#13#10'Mcp-Param-Region: eu', Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  Expect<Boolean>(Pos('sent more than once', Body) > 0).ToBe(True);
+  Expect<Integer>(PostRoutedRaw('{"region":"eu"}', 'Mcp-Param-Region: eu',
+    Body)).ToBe(200);
+  // Names match in ASCII case for presence and value alike (an I/i pair
+  // compares by the locale in fcl-web's own lookup, e.g. under tr_TR).
+  Expect<Integer>(PostRoutedRaw('{"opts":{"limit":3}}',
+    'MCP-PARAM-LIMIT: 3', Body)).ToBe(200);
+  Expect<Integer>(PostRoutedRaw('{"opts":{"limit":3}}',
+    'mcp-param-limit: 3'#13#10'MCP-PARAM-LIMIT: 3', Body)).ToBe(400);
+end;
+
+// Integers compare numerically within the JavaScript safe range;
+// composites and values of another type have no header form.
+procedure THTTPBinding.TestParamHeaderIntegers;
+var
+  Body: string;
+begin
+  Expect<Integer>(PostRouted('{"opts":{"limit":42.0}}',
+    [HeaderPair('Mcp-Param-Limit', '42')], Body)).ToBe(200);
+  Expect<Integer>(PostRouted('{"opts":{"limit":42}}',
+    [HeaderPair('Mcp-Param-Limit', '42.0')], Body)).ToBe(200);
+  Expect<Integer>(PostRouted('{"opts":{"limit":-7}}',
+    [HeaderPair('Mcp-Param-Limit', '-7')], Body)).ToBe(200);
+  Expect<Integer>(PostRouted('{"opts":{"limit":42}}',
+    [HeaderPair('Mcp-Param-Limit', '+42')], Body)).ToBe(400);
+  Expect<Integer>(PostRouted('{"opts":{"limit":9007199254740992}}',
+    [HeaderPair('Mcp-Param-Limit', '9007199254740992')], Body)).ToBe(400);
+  Expect<Integer>(PostRouted('{"opts":{"limit":"42"}}',
+    [HeaderPair('Mcp-Param-Limit', '42')], Body)).ToBe(400);
+  Expect<Integer>(PostRouted('{"region":["eu"]}',
+    [HeaderPair('Mcp-Param-Region', '["eu"]')], Body)).ToBe(400);
+end;
+
+// Mcp-Name decodes strictly too since #90: an unpadded payload, which
+// the lenient decoder used to take, is refused.
+procedure THTTPBinding.TestMcpNameStrictBase64;
+var
+  Body, ContentType: string;
+  Line: string;
+begin
+  Line := '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{' +
+    '"name":"quiet",' + META_MODERN + '}}';
+  Expect<Integer>(Exchange('POST', '/mcp', Line,
+    [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+    HeaderPair('Mcp-Method', 'tools/call'),
+    HeaderPair('Mcp-Name', '=?base64?cXVpZXQ=?=')], Body, ContentType))
+    .ToBe(200);
+  Expect<Integer>(Exchange('POST', '/mcp', Line,
+    [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+    HeaderPair('Mcp-Method', 'tools/call'),
+    HeaderPair('Mcp-Name', '=?base64?cXVpZXQ?=')], Body, ContentType))
+    .ToBe(400);
+end;
+
+procedure THTTPBinding.TestParamHeaderWithoutValue;
+var
+  Body: string;
+begin
+  // Absent or null in the body: no header expected...
+  Expect<Integer>(PostRouted('{"region":null}', [], Body)).ToBe(200);
+  // ...and one that is sent anyway does not match.
+  Expect<Integer>(PostRouted('{}', [HeaderPair('Mcp-Param-Region', 'eu')],
+    Body)).ToBe(400);
+end;
+
 procedure THTTPBinding.TestUnknownMethod404;
 var
   Body: string;
@@ -809,11 +1148,31 @@ begin
   Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32700);
 end;
 
+// completion/complete has no Mcp-Name, yet its callback can notify: an
+// opted-in request streams like the handler-backed methods. Header and
+// SSE rules verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http
+procedure THTTPBinding.TestCompletionStreams;
+var
+  Body, ContentType: string;
+begin
+  Expect<Integer>(Exchange('POST', '/mcp',
+    '{"jsonrpc":"2.0","id":5,"method":"completion/complete","params":{' +
+    '"ref":{"type":"ref/prompt","name":"hint"},"argument":{"name":"topic",' +
+    '"value":"a"},' + META_MODERN_STREAMING + '}}',
+    [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+     HeaderPair('Mcp-Method', 'completion/complete')], Body, ContentType))
+    .ToBe(200);
+  Expect<string>(ContentType).ToBe('text/event-stream');
+  Expect<Boolean>(Pos('notifications/progress', Body) > 0).ToBe(True);
+  Expect<Boolean>(Pos('"values" : ["alpha"]', Body) > 0).ToBe(True);
+end;
+
 procedure THTTPBinding.TestSSEStream;
 var
   Body, ContentType, LastEvent: string;
-  Status, EventCount, Cut: Integer;
-  Events: array of string;
+  Status, EventCount: Integer;
+  Events: TStringArray;
 begin
   Status := Exchange('POST', '/mcp',
     CallLine(3, 'echo', META_MODERN_STREAMING),
@@ -824,16 +1183,7 @@ begin
   Expect<string>(ContentType).ToBe('text/event-stream');
 
   // Split the stream into data: events.
-  Events := [];
-  while Body <> '' do
-  begin
-    Cut := Pos(#10#10, Body);
-    if Cut = 0 then
-      Break;
-    Expect<string>(Copy(Body, 1, 6)).ToBe('data: ');
-    Events := Concat(Events, [Copy(Body, 7, Cut - 7)]);
-    Delete(Body, 1, Cut + 1);
-  end;
+  Expect<Boolean>(SplitSSEEvents(Body, Events)).ToBe(True);
   EventCount := Length(Events);
   // progress(0.5) + log message + final response, in stream order.
   Expect<Integer>(EventCount).ToBe(3);
@@ -967,8 +1317,142 @@ begin
   end;
 end;
 
+procedure THTTPBinding.TestDeclaredCapabilityRefusedBeforeStreaming;
+var
+  Body, ContentType: string;
+  Status: Integer;
+begin
+  // Progress opted in, sampling not declared: the declared need is
+  // checked before the handler runs, so the answer is a plain 400
+  // (spec verified 2026-11-26:
+  // https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta).
+  Status := Exchange('POST', '/mcp',
+    CallLine(3, 'sampler', META_MODERN_STREAMING),
+    [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+     HeaderPair('Mcp-Method', 'tools/call'),
+     HeaderPair('Mcp-Name', 'sampler')], Body, ContentType);
+  Expect<Integer>(Status).ToBe(400);
+  Expect<string>(ContentType).ToBe('application/json');
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32021);
+  Expect<Boolean>(Pos('"requiredCapabilities" : { "sampling" : {} }', Body) > 0)
+    .ToBe(True);
+end;
+
+procedure THTTPBinding.TestUndeclaredCapabilityStillEndsTheStream;
+var
+  Body, ContentType: string;
+  Status: Integer;
+begin
+  // Without the declaration the need shows only after progress went
+  // out: the error can only be the stream's last event. This is the
+  // case the declaration exists for.
+  Status := Exchange('POST', '/mcp',
+    CallLine(3, 'sampler_undeclared', META_MODERN_STREAMING),
+    [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+     HeaderPair('Mcp-Method', 'tools/call'),
+     HeaderPair('Mcp-Name', 'sampler_undeclared')], Body, ContentType);
+  Expect<Integer>(Status).ToBe(200);
+  Expect<string>(ContentType).ToBe('text/event-stream');
+  Expect<Boolean>(ProgressThenFinalRefusal(Body)).ToBe(True);
+end;
+
+// Sends a waiter call, waits until the handler's first poll found the
+// connection open, then gives up on it: an orderly close, or with
+// AReset a reset (SO_LINGER 0). Returns how the handler ended.
+function THTTPBinding.AbandonWaiter(AReset: Boolean; const AExtra: string;
+  out ASawOpen, AResetSet: Boolean): string;
+type
+  {$IFDEF WINDOWS}
+  TResetLinger = record
+    OnOff, Seconds: Word;
+  end;
+  {$ELSE}
+  TResetLinger = record
+    OnOff, Seconds: LongInt;
+  end;
+  {$ENDIF}
+var
+  Sock: TInetSocket;
+  Body, Request: string;
+  Linger: TResetLinger;
+begin
+  RTLEventResetEvent(WaiterEntered);
+  RTLEventResetEvent(WaiterDone);
+  WaiterOutcome := '';
+  WaiterSawOpen := False;
+  AResetSet := False;
+  Body := CallLine(1, 'waiter');
+  Request := 'POST /mcp HTTP/1.1'#13#10 +
+    'Host: 127.0.0.1:' + IntToStr(FTransport.Port) + #13#10 +
+    'Content-Type: application/json'#13#10 +
+    'Accept: application/json, text/event-stream'#13#10 +
+    'MCP-Protocol-Version: ' + MCP_PROTOCOL_VERSION + #13#10 +
+    'Mcp-Method: tools/call'#13#10 + 'Mcp-Name: waiter'#13#10 +
+    'Content-Length: ' + IntToStr(Length(Body)) + #13#10#13#10 + Body;
+  Sock := TInetSocket.Create('127.0.0.1', FTransport.Port);
+  try
+    Sock.WriteBuffer(Request[1], Length(Request));
+    RTLEventWaitFor(WaiterEntered, 5000);
+    // Bytes after the request, sent once the handler is running, then
+    // the close behind them.
+    if AExtra <> '' then
+      Sock.WriteBuffer(AExtra[1], Length(AExtra));
+    if AReset then
+    begin
+      Linger.OnOff := 1;
+      Linger.Seconds := 0;
+      AResetSet := fpsetsockopt(Sock.Handle, SOL_SOCKET, SO_LINGER, @Linger,
+        SizeOf(Linger)) = 0;
+    end;
+  finally
+    // The client gives up: closing the connection is the cancellation.
+    Sock.Free;
+  end;
+  RTLEventWaitFor(WaiterDone, 5000);
+  // Read after the handler's last write, which WaiterDone orders.
+  ASawOpen := WaiterSawOpen;
+  Result := WaiterOutcome;
+end;
+
+// Closing the connection cancels the request (spec verified 2026-11-27:
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#cancellation),
+// and the handler learns it while it runs, though it never writes.
+procedure THTTPBinding.TestDisconnectCancelsSilentHandler;
+var
+  SawOpen, ResetSet: Boolean;
+begin
+  // The handler first saw the connection open, then cancelled: the
+  // close caused it.
+  Expect<string>(AbandonWaiter(False, '', SawOpen, ResetSet))
+    .ToBe('cancelled');
+  Expect<Boolean>(SawOpen).ToBe(True);
+end;
+
+// Bytes the client sends after its request do not hide the close
+// behind them (#93 review).
+procedure THTTPBinding.TestBytesBeforeCloseStillCancel;
+var
+  SawOpen, ResetSet: Boolean;
+begin
+  Expect<string>(AbandonWaiter(False, 'extra bytes', SawOpen, ResetSet))
+    .ToBe('cancelled');
+  Expect<Boolean>(SawOpen).ToBe(True);
+end;
+
+// A reset is a closed connection too (#93 review).
+procedure THTTPBinding.TestResetCancelsSilentHandler;
+var
+  SawOpen, ResetSet: Boolean;
+begin
+  Expect<string>(AbandonWaiter(True, '', SawOpen, ResetSet)).ToBe('cancelled');
+  Expect<Boolean>(SawOpen).ToBe(True);
+  Expect<Boolean>(ResetSet).ToBe(True);
+end;
+
 procedure THTTPBinding.SetupTests;
 begin
+  Test('completion/complete streams when its callback notifies',
+    TestCompletionStreams);
   Test('request → single application/json response',
     TestSingleJSONResponse);
   Test('bare server/discover probe → 400, -32602 (not -32020)',
@@ -999,6 +1483,19 @@ begin
     TestMissingMcpName);
   Test('sentinel-encoded Mcp-Name decoded and matched',
     TestSentinelEncodedMcpName);
+  Test('Mcp-Param headers: plain, nested, typed and base64 values match',
+    TestParamHeadersMatch);
+  Test('Mcp-Param header missing → 400, -32020', TestParamHeaderMissing);
+  Test('Mcp-Param header mismatched → 400, -32020', TestParamHeaderMismatch);
+  Test('Mcp-Param base64 with bad padding or characters → 400',
+    TestParamHeaderBadBase64);
+  Test('Mcp-Param unencoded non-ASCII → 400', TestParamHeaderUnencodedNonASCII);
+  Test('Mcp-Param empty and repeated fields', TestParamHeaderEmptyAndRepeated);
+  Test('Mcp-Param integers compare numerically in the safe range',
+    TestParamHeaderIntegers);
+  Test('Mcp-Name base64 decodes strictly', TestMcpNameStrictBase64);
+  Test('Mcp-Param for an absent value: none expected, one sent → 400',
+    TestParamHeaderWithoutValue);
   Test('unknown method → 404, -32601', TestUnknownMethod404);
   Test('legacy initialize → 404, versions named',
     TestInitializeRejected404);
@@ -1019,6 +1516,16 @@ begin
   Test('legacy session/resume headers ignored',
     TestSessionHeaderIgnored);
   Test('oversized body → 413', TestOversizedBody);
+  Test('declared capability missing → 400 before any notification',
+    TestDeclaredCapabilityRefusedBeforeStreaming);
+  Test('undeclared capability after progress → error ends the stream',
+    TestUndeclaredCapabilityStillEndsTheStream);
+  Test('client disconnect cancels a handler that never writes',
+    TestDisconnectCancelsSilentHandler);
+  Test('a reset connection cancels a handler that never writes',
+    TestResetCancelsSilentHandler);
+  Test('bytes sent before an orderly close do not hide it',
+    TestBytesBeforeCloseStillCancel);
   Test('notification-opted request → SSE stream, response last',
     TestSSEStream);
   Test('notification-opted protocol error → 400 JSON, -32022',
@@ -1032,6 +1539,10 @@ begin
 end;
 
 begin
+  WaiterEntered := RTLEventCreate;
+  WaiterDone := RTLEventCreate;
   TestRunnerProgram.AddSuite(THTTPBinding.Create('Transport.HTTP: binding'));
   TestRunnerProgram.Run;
+  RTLEventDestroy(WaiterDone);
+  RTLEventDestroy(WaiterEntered);
 end.

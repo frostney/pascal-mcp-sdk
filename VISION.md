@@ -39,8 +39,10 @@ lantaarn is its first named consumer, mirroring duetto → lantaarn.
   support stays a thin dialect layer over the one modern core and
   sunsets when the ecosystem's clients finish migrating — see
   [ADR-0002](docs/adr/0002-dual-era-legacy-as-thin-dialect.md).
-- **No general JSON-Schema validation engine.** The subset the
-  library emits is server-enforced; `.ApplicationValidated` hands
+- **No general JSON-Schema validation engine.** A documented subset,
+  covering everything the library emits, is server-enforced on
+  arguments and on structured output whose schema fits it; for input,
+  `.ApplicationValidated` hands
   deeper validation back to the handler — see
   [ADR-0004](docs/adr/0004-schema-validation-boundary.md).
 - **No framework ambitions.** pascal-mcp-sdk registers tools and moves

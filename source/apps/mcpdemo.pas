@@ -1,15 +1,17 @@
 program mcpdemo;
 
 // Example MCP server: the smallest complete pascal-mcp-sdk program.
-// Exposes four tools showing every registration style — echo via the
+// Exposes tools showing every registration style — echo via the
 // fluent schema builder, add via a typed argument class (the class
 // expands into the schema, and the handler receives a populated,
 // validated instance), greet_user via a raw schema string, and pixel
-// returning binary image content — plus a static resource, a resource
+// returning binary image content, countdown stopping early when the
+// client cancels — plus a static resource, a resource
 // template, and a prompt. By default it
 // serves newline-delimited JSON-RPC on stdin/stdout until the client
 // closes stdin; with `--http <port>` the same registrations are
-// served over Streamable HTTP on 127.0.0.1 instead (modern era only).
+// served over Streamable HTTP on 127.0.0.1 instead (modern era only),
+// and with `--page-size <n>` stdio hands its lists out in pages of n.
 //
 // Try it by hand (all on one line; _meta is required on every request):
 //   ./build/mcpdemo <<'EOF'
@@ -50,6 +52,29 @@ begin
   MCPLogMessage(ACtx, 'info', 'echo invoked');
   Result := MCPTextResult(MessageData.AsString);
   MCPReportProgress(ACtx, 1.0, 1.0);
+end;
+
+// Counts down, reporting progress, and stops as soon as the client
+// cancels: ACtx.IsCancelled sees a notifications/cancelled on stdio or a
+// closed connection on HTTP while the handler runs.
+function CountdownHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Seconds, Tick: Integer;
+begin
+  Seconds := AArguments.Get('seconds', 3);
+  // A bound on the duration: stdio serves one request at a time.
+  if (Seconds < 1) or (Seconds > 60) then
+    Exit(MCPErrorResult('seconds must be between 1 and 60'));
+  for Tick := 1 to Seconds * 10 do
+  begin
+    if ACtx.IsCancelled then
+      Exit(MCPTextResult('cancelled'));
+    if Tick mod 10 = 0 then
+      MCPReportProgress(ACtx, Tick div 10, Seconds);
+    Sleep(100);
+  end;
+  Result := MCPTextResult('liftoff');
 end;
 
 type
@@ -163,6 +188,15 @@ begin
     Plural(AServer.PromptCount, 'prompt') + ')';
 end;
 
+// `--page-size <n>` serves stdio with its lists in pages of n (#94).
+function PageSizeFromArgs(out ASize: Integer): Boolean;
+begin
+  Result := (ParamCount = 2) and (ParamStr(1) = '--page-size') and
+    TryStrToInt(ParamStr(2), ASize) and (ASize > 0);
+  if not Result then
+    ASize := 0;
+end;
+
 // `--http <port>` selects the Streamable HTTP binding; anything else
 // (including no arguments) serves stdio.
 function HTTPPortFromArgs(out APort: Word): Boolean;
@@ -182,10 +216,14 @@ var
   Server: TMCPServer;
   Transport: TMCPHTTPServer;
   HTTPPort: Word;
+  PageSize: Integer;
 
 begin
   Server := TMCPServer.Create('pascal-mcp-sdk-demo', '0.1.0');
   try
+    // Display metadata clients show for the server (serverInfo).
+    Server.Title := 'pascal-mcp-sdk demo';
+    Server.WebsiteUrl := 'https://frostney.github.io/pascal-mcp-sdk/';
     Server.Instructions :=
       'Demo server for the pascal-mcp-sdk library. Use "echo" to mirror a ' +
       'message, "add" to add two numbers, "pixel" for a sample image; ' +
@@ -201,7 +239,15 @@ begin
 
     Server.RegisterTool('greet_user',
       'Greet a person; asks who to greet via elicitation (MRTR)',
-      '{"type":"object"}', GreetUserHandler);
+      '{"type":"object"}', GreetUserHandler)
+      // Refused up front for a client without elicitation, instead of
+      // after the handler ran.
+      .RequiresClientCapability('elicitation');
+
+    Server.RegisterTool('countdown',
+      'Count down the given seconds; stops early when cancelled',
+      ObjectSchema.AddInteger('seconds', 'Seconds to count down, 1 to 60'),
+      CountdownHandler);
 
     Server.RegisterTool('pixel',
       'Return a 1x1 transparent PNG as image content',
@@ -209,13 +255,19 @@ begin
 
     Server.RegisterPrompt('greet', 'Compose a friendly greeting',
       PromptArguments.Add('name', 'Who to greet'), GreetPromptHandler);
+    // Suggestions while the user types the name (completion/complete).
+    Server.RegisterPromptCompletion('greet', 'name',
+      ['Ada', 'Alan', 'Grace', 'Niklaus']);
 
     Server.RegisterTextResource('mcp://pascal-mcp-sdk/greeting', 'greeting',
       'text/plain', 'Hello from pascal-mcp-sdk, a FreePascal MCP server.',
-      'A static greeting resource');
+      'A static greeting resource').Title('Greeting');
 
     Server.RegisterResourceTemplate('mcp://pascal-mcp-sdk/shout/{text}',
       'shout', 'text/plain', ShoutReader, 'Uppercase echo of {text}');
+
+    if PageSizeFromArgs(PageSize) then
+      Server.PageSize := PageSize;
 
     if HTTPPortFromArgs(HTTPPort) then
     begin
