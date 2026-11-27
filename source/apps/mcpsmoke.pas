@@ -498,10 +498,21 @@ begin
   end;
 end;
 
+// "sha256:" and the lowercase hex of ADigest, as Skills entries write it.
+function HexDigest(const ADigest: TSHA256Digest): string;
+var
+  I: Integer;
+begin
+  Result := 'sha256:';
+  for I := Low(ADigest) to High(ADigest) do
+    Result := Result + LowerCase(IntToHex(ADigest[I], 2));
+end;
+
 var
   Demo: TProcess;
   Response: TJSONObject;
-  ResponseLine, SealedState: string;
+  ResponseLine, SealedState, SkillDigest, SkillText: string;
+  SkillSize: Integer;
   ServerInfo: TJSONData;
   StartedAt: QWord;
   WaitedMs: Integer;
@@ -761,6 +772,47 @@ begin
     Check((PathInt(Response, 'error.code') = -32021) and
       (FindPath(Response, 'error.data.requiredCapabilities.elicitation.form')
       <> nil), 'MRTR URL-only client: -32021 names elicitation.form');
+    Response.Free;
+
+    // Skills (#115): the entry's digest and size match the bytes
+    // resources/read returns (skills.mdx, Integrity and Verification,
+    // verified 2026-11-27).
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":37,"method":"skills/list","params":{' +
+      META_MODERN + '}}');
+    SkillDigest := PathString(Response, 'result.skills[0].resources[0].digest');
+    SkillSize := PathInt(Response, 'result.skills[0].resources[0].size');
+    Check((PathString(Response, 'result.skills[0].uri') =
+      'skill://pascal-mcp-sdk/echo-usage/SKILL.md') and
+      (PathString(Response, 'result.skills[0].frontmatter.name') =
+      'echo-usage') and (FindPath(Response, 'result.ttlMs') <> nil),
+      'skills/list: the demo skill with its frontmatter and cache fields');
+    Response.Free;
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":38,"method":"resources/read","params":{' +
+      '"uri":"skill://pascal-mcp-sdk/echo-usage/SKILL.md",' + META_MODERN +
+      '}}');
+    SkillText := PathString(Response, 'result.contents[0].text');
+    Check((Length(SkillText) = SkillSize) and
+      (HexDigest(SHA256(SkillText)) = SkillDigest) and
+      (Pos('name: "echo-usage"', SkillText) > 0),
+      'skills: SKILL.md read back matches its listed digest and size');
+    Response.Free;
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":40,"method":"skills/get","params":{' +
+      '"uri":"skill://pascal-mcp-sdk/echo-usage/SKILL.md",' + META_MODERN +
+      '}}');
+    Check((PathString(Response, 'result.skill.resources[0].digest') =
+      SkillDigest) and (PathString(Response, 'result.skill.frontmatter.license')
+      = 'MIT'), 'skills/get: the demo skill''s entry, with the listed digest');
+    Response.Free;
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":39,"method":"resources/directory/read",' +
+      '"params":{"uri":"skill://pascal-mcp-sdk/echo-usage",' + META_MODERN +
+      '}}');
+    Check(PathString(Response, 'result.resources[1].mimeType') =
+      'inode/directory', 'resources/directory/read: the skill root lists ' +
+      'its examples directory');
     Response.Free;
 
     // The MCP Apps card is an ordinary resources/read (#98).

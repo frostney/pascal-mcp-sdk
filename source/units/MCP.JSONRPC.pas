@@ -124,6 +124,11 @@ procedure MCPWriteStderrLine(const AText: string);
 // matches a number, and nil matches nothing. Both are borrowed.
 function SameRequestId(ALeft, ARight: TJSONData): Boolean;
 
+// The 1-based offset of the first byte of AText that is not
+// well-formed UTF-8, 0 when all of it is (MCP.Skills serves such bytes
+// as text, anything else as a blob).
+function InvalidUTF8Offset(const AText: RawByteString): Integer;
+
 implementation
 
 {$IFDEF WINDOWS}

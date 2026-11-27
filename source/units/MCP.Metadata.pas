@@ -60,6 +60,14 @@ procedure NilChildrenToNull(AData: TJSONData);
 function MetaPathString(ADefinition: TJSONObject; const APath: string;
   out AValue: string): Boolean;
 
+// Why ADefinition (borrowed) is no valid tool definition, or '': it must
+// exist, carry a name (in AToolName, '' when absent), an object
+// inputSchema of root type "object", an object outputSchema when
+// present, and x-mcp-header annotations a client accepts. Whether the
+// name is taken is the registry's to check.
+function ToolDefinitionProblem(ADefinition: TJSONObject;
+  out AToolName: string): string;
+
 // Sets the string member AName of ADefinition (borrowed), replacing an
 // earlier value.
 procedure SetStringMember(ADefinition: TJSONObject; const AName,
@@ -385,6 +393,46 @@ begin
   Result := (Node <> nil) and (Node.JSONType = jtString);
   if Result then
     AValue := Node.AsString;
+end;
+
+function ToolDefinitionProblem(ADefinition: TJSONObject;
+  out AToolName: string): string;
+var
+  InputSchema, OutputSchema, SchemaType: TJSONData;
+  HeaderParams: TMCPHeaderParameters;
+  Violation: string;
+begin
+  AToolName := '';
+  if ADefinition = nil then
+    Exit('Tool definition must not be nil');
+  AToolName := ADefinition.Get('name', '');
+  if AToolName = '' then
+    Exit('Tool definition must carry a non-empty name');
+  // Tool.inputSchema is a required JSON Schema object:
+  // https://modelcontextprotocol.io/specification/2026-07-28/server/tools
+  // https://modelcontextprotocol.io/specification/2026-07-28/schema
+  // (verified 2026-07-21).
+  InputSchema := ADefinition.Find('inputSchema');
+  if (InputSchema = nil) or (InputSchema.JSONType <> jtObject) then
+    Exit(Format('Tool "%s" definition must carry an object-valued ' +
+      'inputSchema', [AToolName]));
+  SchemaType := TJSONObject(InputSchema).Find('type');
+  if (SchemaType = nil) or (SchemaType.JSONType <> jtString) or
+    (SchemaType.AsString <> 'object') then
+    Exit(Format('Tool "%s" inputSchema must have root type "object"',
+      [AToolName]));
+  // Any root type since SEP-2106 (tools#structured-content, verified
+  // 2026-11-26); the schema itself is still a JSON object.
+  OutputSchema := ADefinition.Find('outputSchema');
+  if (OutputSchema <> nil) and (OutputSchema.JSONType <> jtObject) then
+    Exit(Format('Tool "%s" definition must carry an object-valued ' +
+      'outputSchema', [AToolName]));
+  // x-mcp-header annotations a client would reject make it drop the
+  // whole tool, so they fail here instead (#90).
+  Violation := MCPHeaderParameters(TJSONObject(InputSchema), HeaderParams);
+  if Violation <> '' then
+    Exit(Format('Tool "%s" inputSchema: %s', [AToolName, Violation]));
+  Result := '';
 end;
 
 procedure SetStringMember(ADefinition: TJSONObject; const AName,

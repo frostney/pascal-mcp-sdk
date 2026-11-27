@@ -103,6 +103,7 @@ uses
   jsonparser,
   jsonscanner,
   MCP.Completion,
+  MCP.Extensions,
   MCP.JSONRPC,
   MCP.Metadata,
   MCP.Pagination,
@@ -474,6 +475,7 @@ type
     FWebsiteUrl: string;
     FIdentity: TJSONObject; // owned: holds the server's icons (#96)
     FExtensions: TJSONObject; // owned: capabilities.extensions (#98)
+    FHooks: TMCPExtensionHooks; // owned: extension methods (#115)
     // Resources that must be registered at startup, and who needs each.
     // Tool links startup checks (TMCPToolOptions.RequireLinkedResource).
     FRequiredResources: array of record
@@ -583,6 +585,11 @@ type
     function DispatchLegacyRequest(ASession: TMCPSession;
       ASink: TMCPLineSink; ASinkData: Pointer;
       const AMessage: TJSONRPCMessage): string;
+    function DispatchMethod(const AMessage: TJSONRPCMessage;
+      const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
+    function HookResponse(const AMessage: TJSONRPCMessage;
+      const ACtx: TMCPRequestContext; ALegacy: Boolean;
+      AHandler: TMCPMethodHandler; ACacheable: Boolean): string;
     function HandleInitialize(ASession: TMCPSession;
       const AMessage: TJSONRPCMessage): string;
     function HandleDiscover(const AMessage: TJSONRPCMessage): string;
@@ -645,11 +652,43 @@ type
     procedure DeclareExtension(const AId: string; ASettings: TJSONObject = nil);
     // Declares AId with {} unless it is declared already, so a helper
     // that opts in never replaces settings set with DeclareExtension
-    // (#98 review).
-    procedure EnsureExtension(const AId: string);
+    // (#98 review); the second form declares ASettings (owned; nil =
+    // {}) instead, and frees them when AId is declared already.
+    procedure EnsureExtension(const AId: string); overload;
+    procedure EnsureExtension(const AId: string; ASettings: TJSONObject);
+      overload;
     // Static text read contents for resource AUri carry AMeta (owned)
     // as their _meta (MCP.Apps puts _meta.ui there).
     procedure SetResourceContentMeta(const AUri: string; AMeta: TJSONObject);
+    // Extension hooks (#115; MCP.Extensions has the handler types).
+    // RegisterMethod answers requests for AMethod, in both eras, after
+    // the server's own methods; ACacheable adds the registry's ttlMs and
+    // cacheScope to a 2026-07-28 result, each one it lacks. A core method,
+    // one already registered, an empty name or a nil handler raises
+    // EMCPServer.
+    procedure RegisterMethod(const AMethod: string;
+      AHandler: TMCPMethodHandler; ACacheable: Boolean = False);
+    // resources/read for URIs that start with AUriPrefix, after the
+    // registered resources and before the templates; such resources are
+    // not listed. Its reads carry the registry's ttlMs. A resolver makes
+    // the server declare the resources capability. An empty prefix, a
+    // nil resolver or a prefix overlapping another raises EMCPServer.
+    procedure RegisterResourceResolver(const AUriPrefix: string;
+      AResolver: TMCPResourceResolver);
+    // Why RegisterMethod would refuse one of AMethods, or
+    // RegisterResourceResolver AUriPrefix ('' for none), the server
+    // having started included; '' when all would succeed. Nothing
+    // changes, so an extension checks before it registers anything.
+    function HookProblem(const AMethods: array of string;
+      const AUriPrefix: string): string;
+    // AObject (owned from here) is freed with the server, after its
+    // handlers, so an extension's state outlives every request; adopting
+    // it again changes nothing. After the server started it raises
+    // EMCPServer and frees AObject, unless the server owns it already,
+    // which then lives on until the server is freed. Adopted returns the first adopted
+    // object of class AClass, or nil.
+    procedure Adopt(AObject: TObject);
+    function Adopted(AClass: TClass): TObject;
 
     // CacheableResult fields (SEP-2549), required on discover/list/read
     // results. Registries are fixed after startup, so registry metadata
@@ -2141,6 +2180,7 @@ begin
   FVersion := AVersion;
   FIdentity := TJSONObject.Create;
   FExtensions := TJSONObject.Create;
+  FHooks := TMCPExtensionHooks.Create;
   FCacheTtlMs := 300000;
   FCacheScope := CACHE_SCOPE_PRIVATE;
   FRedactErrorDetails := False;
@@ -2332,6 +2372,18 @@ begin
   // Before anything is allocated, so a failed start can be fixed and
   // retried (#98 review).
   CheckRequiredResources;
+  // A registered resource under a resolver's prefix would shadow what
+  // the extension serves there (#115 review).
+  for I := 0 to High(FResources) do
+    if FHooks.Covers(FResources[I].Definition.Get('uri', '')) then
+      raise EMCPServer.CreateFmt('Resource "%s" lies under a URI prefix an ' +
+        'extension serves', [FResources[I].Definition.Get('uri', '')]);
+  // So would a template whose every expansion lies under one: its reads
+  // never reach it.
+  for I := 0 to High(FTemplates) do
+    if FHooks.Covers(TemplateLiteralPrefix(FTemplates[I].UriTemplate)) then
+      raise EMCPServer.CreateFmt('Resource template "%s" lies under a URI ' +
+        'prefix an extension serves', [FTemplates[I].UriTemplate]);
   FSealer := CreateSealer(FName, FRequestStateKeys, FRequestStateTtlMs);
   // Structured output is checked whenever the output schema is inside
   // the subset (#91); a richer one is the handler's to honour.
@@ -2447,19 +2499,13 @@ var
   Items: TJSONArray;
   ListResult: TJSONObject;
 begin
-  First := 0;
   CursorData := nil;
   if AMessage.Params <> nil then
     CursorData := AMessage.Params.Find('cursor');
-  if (CursorData <> nil) and ((CursorData.JSONType <> jtString) or
-    not TryCursorOffset(CursorData.AsString, AMessage.Method, ACount,
-    FPageSize, First)) then
+  if not PageBounds(CursorData, AMessage.Method, ACount, FPageSize, First,
+    Last) then
     Exit(BuildErrorResponse(AMessage.Id, JSONRPC_INVALID_PARAMS,
       'Invalid params: unknown cursor'));
-  Last := ACount - 1;
-  // Compared before adding, so a huge PageSize cannot overflow.
-  if (FPageSize > 0) and (FPageSize < ACount - First) then
-    Last := First + FPageSize - 1;
   // Registration order: the deterministic ordering the spec asks for.
   ListResult := TJSONObject.Create;
   try
@@ -2537,6 +2583,7 @@ begin
   FSealer.Free;
   FIdentity.Free;
   FExtensions.Free;
+  FHooks.Free;
   inherited Destroy;
 end;
 
@@ -2554,7 +2601,8 @@ begin
   try
     if Length(FTools) > 0 then
       Result.Add('tools', TJSONObject.Create);
-    if (Length(FResources) > 0) or (Length(FTemplates) > 0) then
+    if (Length(FResources) > 0) or (Length(FTemplates) > 0) or
+      FHooks.HasResolvers then
       Result.Add('resources', TJSONObject.Create);
     if Length(FPrompts) > 0 then
       Result.Add('prompts', TJSONObject.Create);
@@ -2589,9 +2637,63 @@ end;
 
 procedure TMCPServer.EnsureExtension(const AId: string);
 begin
-  EnsureMutable;
+  EnsureExtension(AId, nil);
+end;
+
+procedure TMCPServer.EnsureExtension(const AId: string;
+  ASettings: TJSONObject);
+begin
   if FExtensions.Find(AId) = nil then
-    DeclareExtension(AId);
+    DeclareExtension(AId, ASettings)
+  else
+  begin
+    ASettings.Free;
+    EnsureMutable;
+  end;
+end;
+
+procedure TMCPServer.RegisterMethod(const AMethod: string;
+  AHandler: TMCPMethodHandler; ACacheable: Boolean);
+var
+  Problem: string;
+begin
+  EnsureMutable;
+  Problem := FHooks.AddMethod(AMethod, AHandler, ACacheable);
+  if Problem <> '' then
+    raise EMCPServer.Create(Problem);
+end;
+
+procedure TMCPServer.RegisterResourceResolver(const AUriPrefix: string;
+  AResolver: TMCPResourceResolver);
+var
+  Problem: string;
+begin
+  EnsureMutable;
+  Problem := FHooks.AddResolver(AUriPrefix, AResolver);
+  if Problem <> '' then
+    raise EMCPServer.Create(Problem);
+end;
+
+procedure TMCPServer.Adopt(AObject: TObject);
+begin
+  // A refused object is freed, unless the server owns it already.
+  if FFrozen and not FHooks.Owns(AObject) then
+    AObject.Free;
+  EnsureMutable;
+  FHooks.Adopt(AObject);
+end;
+
+function TMCPServer.HookProblem(const AMethods: array of string;
+  const AUriPrefix: string): string;
+begin
+  if FFrozen then
+    Exit('Server configuration is frozen after session creation');
+  Result := FHooks.Preflight(AMethods, AUriPrefix);
+end;
+
+function TMCPServer.Adopted(AClass: TClass): TObject;
+begin
+  Result := FHooks.Adopted(AClass);
 end;
 
 procedure TMCPServer.SetResourceContentMeta(const AUri: string;
@@ -2857,45 +2959,13 @@ end;
 procedure TMCPServer.ValidateToolDefinition(ADefinition: TJSONObject;
   out AToolName: string);
 var
-  InputSchema, OutputSchema, SchemaType: TJSONData;
-  HeaderParams: TMCPHeaderParameters;
-  Violation: string;
+  Problem: string;
 begin
-  if ADefinition = nil then
-    raise EMCPServer.Create('Tool definition must not be nil');
-  AToolName := ADefinition.Get('name', '');
-  if AToolName = '' then
-    raise EMCPServer.Create('Tool definition must carry a non-empty name');
-  // Tool.inputSchema is a required JSON Schema object:
-  // https://modelcontextprotocol.io/specification/2026-07-28/server/tools
-  // https://modelcontextprotocol.io/specification/2026-07-28/schema
-  // (verified 2026-07-21).
-  InputSchema := ADefinition.Find('inputSchema');
-  if (InputSchema = nil) or (InputSchema.JSONType <> jtObject) then
-    raise EMCPServer.CreateFmt(
-      'Tool "%s" definition must carry an object-valued inputSchema',
-      [AToolName]);
-  SchemaType := TJSONObject(InputSchema).Find('type');
-  if (SchemaType = nil) or (SchemaType.JSONType <> jtString) or
-    (SchemaType.AsString <> 'object') then
-    raise EMCPServer.CreateFmt(
-      'Tool "%s" inputSchema must have root type "object"', [AToolName]);
-  OutputSchema := ADefinition.Find('outputSchema');
-  if OutputSchema <> nil then
-  begin
-    // Any root type since SEP-2106 (tools#structured-content, verified
-    // 2026-11-26); the schema itself is still a JSON object.
-    if OutputSchema.JSONType <> jtObject then
-      raise EMCPServer.CreateFmt(
-        'Tool "%s" definition must carry an object-valued outputSchema',
-        [AToolName]);
-  end;
-  // x-mcp-header annotations a client would reject make it drop the
-  // whole tool, so they fail here instead (#90).
-  Violation := MCPHeaderParameters(TJSONObject(InputSchema), HeaderParams);
-  if Violation <> '' then
-    raise EMCPServer.CreateFmt('Tool "%s" inputSchema: %s',
-      [AToolName, Violation]);
+  // The checks that need no registry live in MCP.Metadata (#115, for
+  // this unit's size).
+  Problem := ToolDefinitionProblem(ADefinition, AToolName);
+  if Problem <> '' then
+    raise EMCPServer.Create(Problem);
   if FindTool(AToolName) >= 0 then
     raise EMCPServer.CreateFmt(
       'Tool "%s" is already registered', [AToolName]);
@@ -3663,28 +3733,61 @@ begin
 
     if AMessage.Method = 'server/discover' then
       Exit(HandleDiscover(AMessage));
-    if AMessage.Method = 'tools/list' then
-      Exit(HandleToolsList(AMessage, False));
-    if AMessage.Method = 'tools/call' then
-      Exit(HandleToolsCall(AMessage, Ctx, False));
-    if AMessage.Method = 'resources/list' then
-      Exit(HandleResourcesList(AMessage, False));
-    if AMessage.Method = 'resources/read' then
-      Exit(HandleResourcesRead(AMessage, Ctx, False));
-    if AMessage.Method = 'resources/templates/list' then
-      Exit(HandleTemplatesList(AMessage, False));
-    if AMessage.Method = 'prompts/list' then
-      Exit(HandlePromptsList(AMessage, False));
-    if AMessage.Method = 'prompts/get' then
-      Exit(HandlePromptsGet(AMessage, Ctx, False));
-    if AMessage.Method = 'completion/complete' then
-      Exit(HandleComplete(AMessage, Ctx, False));
-
-    Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
-      'Method not found: ' + AMessage.Method);
+    Result := DispatchMethod(AMessage, Ctx, False);
   finally
     Dispatch.Free;
   end;
+end;
+
+// The methods both eras answer, then the extensions' (#115).
+// Core methods are selected through MCP.Extensions' TMCPCoreMethod, so
+// every one dispatched here is one no extension can take (#115 review).
+function TMCPServer.DispatchMethod(const AMessage: TJSONRPCMessage;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
+var
+  Handler: TMCPMethodHandler;
+  Cacheable: Boolean;
+  Core: TMCPCoreMethod;
+begin
+  if FindCoreMethod(AMessage.Method, Core) then
+    case Core of
+      cmToolsList:
+        Exit(HandleToolsList(AMessage, ALegacy));
+      cmToolsCall:
+        Exit(HandleToolsCall(AMessage, ACtx, ALegacy));
+      cmResourcesList:
+        Exit(HandleResourcesList(AMessage, ALegacy));
+      cmResourcesRead:
+        Exit(HandleResourcesRead(AMessage, ACtx, ALegacy));
+      cmResourcesTemplatesList:
+        Exit(HandleTemplatesList(AMessage, ALegacy));
+      cmPromptsList:
+        Exit(HandlePromptsList(AMessage, ALegacy));
+      cmPromptsGet:
+        Exit(HandlePromptsGet(AMessage, ACtx, ALegacy));
+      cmCompletionComplete:
+        Exit(HandleComplete(AMessage, ACtx, ALegacy));
+    end
+  else if FHooks.FindMethod(AMessage.Method, Handler, Cacheable) then
+    Exit(HookResponse(AMessage, ACtx, ALegacy, Handler, Cacheable));
+  Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
+    'Method not found: ' + AMessage.Method);
+end;
+
+function TMCPServer.HookResponse(const AMessage: TJSONRPCMessage;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean;
+  AHandler: TMCPMethodHandler; ACacheable: Boolean): string;
+var
+  HookResult: TJSONObject;
+begin
+  HookResult := AHandler(AMessage.Params, ACtx, ALegacy);
+  if HookResult = nil then
+    raise EMCPServer.CreateFmt('The handler for "%s" returned no result',
+      [AMessage.Method]);
+  // Each cache field the handler left out, from the registry.
+  if ACacheable and not ALegacy then
+    AddMissingCacheFields(HookResult, FCacheTtlMs, FCacheScope);
+  Result := ResultResponse(AMessage, HookResult, ALegacy);
 end;
 
 function TMCPServer.DispatchLegacyRequest(ASession: TMCPSession;
@@ -3723,25 +3826,7 @@ begin
       Ctx.Notifier := Dispatch.EmitNotification;
     Ctx.CancellationProbe := Dispatch.IsCancelled;
 
-    if AMessage.Method = 'tools/list' then
-      Exit(HandleToolsList(AMessage, True));
-    if AMessage.Method = 'tools/call' then
-      Exit(HandleToolsCall(AMessage, Ctx, True));
-    if AMessage.Method = 'resources/list' then
-      Exit(HandleResourcesList(AMessage, True));
-    if AMessage.Method = 'resources/read' then
-      Exit(HandleResourcesRead(AMessage, Ctx, True));
-    if AMessage.Method = 'resources/templates/list' then
-      Exit(HandleTemplatesList(AMessage, True));
-    if AMessage.Method = 'prompts/list' then
-      Exit(HandlePromptsList(AMessage, True));
-    if AMessage.Method = 'prompts/get' then
-      Exit(HandlePromptsGet(AMessage, Ctx, True));
-    if AMessage.Method = 'completion/complete' then
-      Exit(HandleComplete(AMessage, Ctx, True));
-
-    Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
-      'Method not found: ' + AMessage.Method);
+    Result := DispatchMethod(AMessage, Ctx, True);
   finally
     Dispatch.Free;
   end;
@@ -4248,6 +4333,13 @@ begin
   Contents := nil;
   ReadTtlMs := 0;
   Index := FindResource(Uri);
+  if Index < 0 then
+  begin
+    // An extension's unlisted resources (#115), at the registry ttl.
+    Contents := FHooks.Resolve(Uri, ACtx);
+    if Contents <> nil then
+      ReadTtlMs := FCacheTtlMs;
+  end;
   if Index >= 0 then
   begin
     // Dynamic readers advertise ttl 0 (always revalidate) unless the
@@ -4274,10 +4366,13 @@ begin
       ReadTtlMs := FCacheTtlMs;
     end;
   end
-  else
+  // A URI under a resolver's prefix is the extension's alone: templates
+  // never serve one it does not know (#115 review).
+  else if Contents = nil then
   begin
-    for Index := 0 to High(FTemplates) do
-      if MatchUriTemplate(FTemplates[Index].UriTemplate, Uri, Vars) then
+    if not FHooks.Covers(Uri) then
+      for Index := 0 to High(FTemplates) do
+        if MatchUriTemplate(FTemplates[Index].UriTemplate, Uri, Vars) then
       begin
         try
           if Assigned(FTemplates[Index].Method) then

@@ -93,7 +93,10 @@ Streamable HTTP binding forces this mode — HTTP clients speak
 
 `0` by default: every list method returns the whole registry. Set it to
 hand lists out in pages (useful once a server registers hundreds of
-tools):
+tools). It pages `tools/list`, `resources/list`,
+`resources/templates/list` and `prompts/list`, and `skills/list` and
+`resources/directory/read` when the server serves
+[Skills](skills.md):
 
 ```pascal
 Server.PageSize := 50;

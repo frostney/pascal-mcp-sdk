@@ -24,7 +24,7 @@ is created, and later mutation raises `EMCPServer`.
 | `CacheScope` | `string` | `'private'` | SEP-2549 `cacheScope`; `'private'` or `'public'` |
 | `RedactErrorDetails` | `Boolean` | `False` | `True` replaces escaped exception detail with a correlation reference, logging the full error to stderr; deliberate errors (`MCPErrorResult`, `EMCPProtocolError`) are sent as written |
 | `DualEra` | `Boolean` | `True` | Answer the classic `initialize` handshake alongside stateless 2026-07-28 requests |
-| `PageSize` | `Integer` | `0` | Entries per page of `tools/list`, `resources/list`, `resources/templates/list` and `prompts/list`, with a `nextCursor` while more remain; `0` lists everything at once |
+| `PageSize` | `Integer` | `0` | Entries per page of `tools/list`, `resources/list`, `resources/templates/list` and `prompts/list`, and of `skills/list` and `resources/directory/read` from `MCP.Skills`, with a `nextCursor` while more remain; `0` lists everything at once |
 | `RequestStateTtlMs` | `Integer` | `600000` | Lifetime of a sealed `requestState` token; must be > 0 |
 | `SetRequestStateKeys(Keys)` | method | random per server instance | HMAC keys for `requestState` sealing, each ≥ 32 bytes; the first seals, all verify |
 | `Name`, `Version` | `string` | — | Read-only, from `Create` |
@@ -279,8 +279,9 @@ methods.
 
 `server/discover` and the classic `initialize` declare a capability
 for each kind of thing registered: `tools` when there is a tool,
-`resources` when there is a resource or template, `prompts` when there
-is a prompt, `completions` when there is a completion.
+`resources` when there is a resource, template or resource resolver
+(such as the one `MCP.Skills` adds), `prompts` when there is a prompt,
+`completions` when there is a completion.
 
 ### x-mcp-header parameters
 
@@ -298,8 +299,18 @@ to validate the headers; a custom transport can too. See
 
 ```pascal
 procedure DeclareExtension(const AId: string; ASettings: TJSONObject = nil);
-procedure EnsureExtension(const AId: string);
+procedure EnsureExtension(const AId: string); overload;
+procedure EnsureExtension(const AId: string; ASettings: TJSONObject);
+  overload;
 procedure SetResourceContentMeta(const AUri: string; AMeta: TJSONObject);
+procedure RegisterMethod(const AMethod: string; AHandler: TMCPMethodHandler;
+  ACacheable: Boolean = False);
+procedure RegisterResourceResolver(const AUriPrefix: string;
+  AResolver: TMCPResourceResolver);
+function HookProblem(const AMethods: array of string;
+  const AUriPrefix: string): string;
+procedure Adopt(AObject: TObject);
+function Adopted(AClass: TClass): TObject;
 // on TMCPToolOptions:
 function RequireLinkedResource(const AMetaPaths: array of string;
   const AMimeType: string = ''; const AUriPrefix: string = ''): TMCPToolOptions;
@@ -311,9 +322,9 @@ gives `{}`). Identifiers need a prefix (`io.modelcontextprotocol/ui`);
 anything else raises `EMCPServer`. Extensions are opt-in
 ([extension negotiation](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning#extension-negotiation),
 verified 2026-11-26), so nothing is declared until this is called.
-Declaring again replaces the settings; `EnsureExtension` declares `{}`
-only when the extension is not declared yet, which is how helpers opt
-in. A tool's `RequireLinkedResource` makes startup (the first
+Declaring again replaces the settings; `EnsureExtension` declares
+`ASettings` (owned; `nil` gives `{}`) only when the extension is not
+declared yet and frees them otherwise, which is how helpers opt in. A tool's `RequireLinkedResource` makes startup (the first
 `CreateSession`) raise `EMCPServer`, naming the tool, unless each of
 `AMetaPaths` (`.`-separated keys under the tool's `_meta`) holds the
 same string, the URI of a registered resource declared with media type
@@ -324,6 +335,44 @@ second call replaces the first.
 `SetResourceContentMeta` gives a static text resource's read contents a
 `_meta` object (owned). Settings and content `_meta` with children
 stored as nil keep JSON nulls there.
+
+An extension unit adds the requests and resources it serves through
+three hooks, whose handler types are in `MCP.Extensions`:
+
+```pascal
+TMCPMethodHandler = function(AParams: TJSONObject;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject of object;
+TMCPResourceResolver = function(const AUri: string;
+  const ACtx: TMCPRequestContext): TJSONArray of object;
+```
+
+`RegisterMethod` answers requests for `AMethod` in both eras, after
+the server's own methods. The handler gets the request's `params`
+(borrowed; `nil` when absent) and returns a new result object, which
+the server stamps for the request's era and sends. `ACacheable` adds
+the registry's `ttlMs` and `cacheScope` to a 2026-07-28 result, each
+one the handler left out. An `EMCPProtocolError` it raises is answered as written, and
+any other exception as `-32603`. A core method, one already
+registered, an empty name or a nil handler raises `EMCPServer`.
+`RegisterResourceResolver` serves `resources/read` for URIs that start
+with `AUriPrefix`, after the registered resources and before the
+templates. A URI under the prefix that the resolver does not know is
+not found: templates are not consulted for it. Its resources are not
+listed, its reads carry the registry's `ttlMs`, and it makes the
+server declare the `resources` capability. A resolver returns new contents, or `nil` for a URI that
+is none of its resources. Prefixes may not overlap, and a registered
+resource under a resolver's prefix fails startup, since it would hide
+what the extension serves there; so does a resource template whose
+text before its first variable lies under the prefix. `Adopt` hands the
+server an object to free after its handlers are gone, such as the
+state those handlers read, and `Adopted` finds the first adopted
+object of a class; adopting the same object again changes nothing.
+`HookProblem` says why registering `AMethods` or `AUriPrefix` would
+fail, or `''`, without changing anything, so an extension can check
+everything before it registers its first hook. Registering or adopting
+after the server started raises `EMCPServer`; a refused `Adopt` frees
+the object then, unless the server owns it already, in which case it
+is freed with the server as before.
 
 From `MCP.Apps`, MCP Apps on top of these
 ([Interactive UIs](../guides/mcp-apps.md)):
@@ -356,6 +405,35 @@ function AppResource(const AUri: string;
 | `MCPAppContents` | A reader's contents: the HTML as text with the app media type, and `AUiMeta` (owned) as `_meta.ui`; the array is the caller's to return |
 | `MCPClientRendersApps` | Whether the request's client declared the extension with the app media type in its `mimeTypes` |
 | `.AppResource` | Links the tool to `AUri`: `_meta.ui` with `resourceUri` and `visibility` (`'model'`, `'app'`; `[]` for both), and the older flat `ui/resourceUri` key. Through `RequireLinkedResource`, startup requires both keys to name the same `ui://` resource, registered with the app media type; the extension is declared unless it is already. Linking the tool again replaces the earlier link |
+
+From `MCP.Skills`, the Skills extension on these hooks
+([Skills](../guides/skills.md)):
+
+```pascal
+const MCP_SKILLS_EXTENSION = 'io.modelcontextprotocol/skills';
+const MCP_SKILL_MAX_FILES = 512;
+const MCP_SKILL_MAX_BYTES = 16777216;
+
+type TMCPSkillFile = record
+  Path: string;
+  Content: RawByteString;
+  MimeType: string;
+end;
+
+function MCPSkillFile(const APath: string; const AContent: RawByteString;
+  const AMimeType: string = ''): TMCPSkillFile;
+procedure RegisterSkill(AServer: TMCPServer; const ASkillPath: string;
+  AFrontmatter: TJSONObject; const ABody: string;
+  const AFiles: array of TMCPSkillFile);
+function MCPSkillMarkdown(AFrontmatter: TJSONObject;
+  const ABody: string): string;
+```
+
+| Member | Meaning |
+| --- | --- |
+| `MCPSkillFile` | A supporting file: its path relative to the skill root, its raw bytes (`RawByteString`, so no code page conversion touches them), and a media type (`''` picks one from the extension, or `text/plain` for other UTF-8 text and `application/octet-stream` otherwise) |
+| `RegisterSkill` | The skill at `skill://ASkillPath/SKILL.md`, written from `AFrontmatter` (owned, also on failure) and `ABody`, with `AFiles`. The frontmatter's `name` must equal the path's last segment, and the Agent Skills fields are checked. A bad name, path or field, files that clash (the same URI, one under another, or a file with the directory media type), a URI already served, or a skill over `MCP_SKILL_MAX_FILES` or `MCP_SKILL_MAX_BYTES` with its nested skills' files raises `EMCPServer`, as does a call after the server started, and the server is left as it was. The first call declares the extension with `directoryRead` unless it is declared already, and serves `skills/list`, `skills/get`, `resources/directory/read` and the files |
+| `MCPSkillMarkdown` | The `SKILL.md` text `RegisterSkill` writes: a YAML frontmatter block for `AFrontmatter` (borrowed), then `ABody`. Strings are double-quoted with escapes YAML 1.1 and 1.2 share; a fractional number, a key written longer than the 1024 characters YAML parsers read, or text that is not UTF-8 raises `EMCPServer` |
 
 ### The request context
 

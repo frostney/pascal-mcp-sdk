@@ -82,7 +82,11 @@ Server.RegisterResourceTemplate('mcp://my-server/shout/{text}',
 
 Templates are listed via `resources/templates/list`; a
 `resources/read` whose URI matches no exact resource is matched
-against the templates.
+against the templates. Between the two come the URI prefixes an
+extension serves without listing them, such as `skill://` for
+[Skills](skills.md): the extension alone answers URIs under its
+prefix, and a resource or a template registered under it fails
+startup.
 
 Matching is intentionally limited to RFC 6570 **level 1** (`{var}`
 expressions):

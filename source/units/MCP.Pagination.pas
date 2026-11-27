@@ -12,6 +12,9 @@ unit MCP.Pagination;
 
 interface
 
+uses
+  fpjson;
+
 // Cursor for the page of AMethod's list starting at AOffset: opaque to
 // the client (pagination#pagination-model), base64 of "method:offset".
 function ListCursor(const AMethod: string; AOffset: Integer): string;
@@ -23,6 +26,13 @@ function ListCursor(const AMethod: string; AOffset: Integer): string;
 // ListCursor gives (#94 review).
 function TryCursorOffset(const ACursor, AMethod: string;
   ACount, APageSize: Integer; out AOffset: Integer): Boolean;
+
+// The page a request's cursor (ACursor, borrowed; nil when absent)
+// selects from AMethod's list of ACount entries: AFirst..ALast, the
+// whole list without a cursor when APageSize is 0. False for a cursor
+// that is no string or not one of that list's (answered -32602).
+function PageBounds(ACursor: TJSONData; const AMethod: string;
+  ACount, APageSize: Integer; out AFirst, ALast: Integer): Boolean;
 
 implementation
 
@@ -55,6 +65,21 @@ begin
   Result := TryStrToInt(Copy(Decoded, Length(AMethod) + 2, MaxInt), AOffset) and
     (AOffset > 0) and (AOffset < ACount) and (AOffset mod APageSize = 0) and
     (ListCursor(AMethod, AOffset) = ACursor);
+end;
+
+function PageBounds(ACursor: TJSONData; const AMethod: string;
+  ACount, APageSize: Integer; out AFirst, ALast: Integer): Boolean;
+begin
+  AFirst := 0;
+  ALast := ACount - 1;
+  if (ACursor <> nil) and ((ACursor.JSONType <> jtString) or
+    not TryCursorOffset(ACursor.AsString, AMethod, ACount, APageSize,
+    AFirst)) then
+    Exit(False);
+  // Compared before adding, so a huge APageSize cannot overflow.
+  if (APageSize > 0) and (APageSize < ACount - AFirst) then
+    ALast := AFirst + APageSize - 1;
+  Result := True;
 end;
 
 end.
