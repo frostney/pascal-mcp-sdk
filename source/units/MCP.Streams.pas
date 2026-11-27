@@ -120,11 +120,11 @@ uses
   MCP.JSONRPC;
 
 {$IFDEF DARWIN}
-// FPC's GetTickCount64 reads CLOCK_MONOTONIC only on Linux and FreeBSD
-// and falls back to wall time elsewhere, so on macOS a clock stepped
-// back would hold every stream's timer for as long (#134). The Mach
-// clock is monotonic, exists on every macOS, and like Linux's
-// CLOCK_MONOTONIC stops while the machine sleeps.
+// FPC's Unix GetTickCount64 reads CLOCK_MONOTONIC only on Linux and
+// FreeBSD and falls back to wall time on the other Unixes, macOS among
+// them, where a clock stepped back would hold every stream's timer for
+// as long (#134). The Mach clock is monotonic, exists on every macOS,
+// and like Linux's CLOCK_MONOTONIC stops while the machine sleeps.
 type
   TMachTimebaseInfo = record
     Numer, Denom: Cardinal;

@@ -43,13 +43,20 @@ end;
 
 procedure TStreamClock.TestAdvancesAcrossASleep;
 var
-  Started: Int64;
+  Started, Elapsed, TickStarted, TickElapsed: Int64;
 begin
+  // GetTickCount64's span encloses MCPNowMs's, so a slow runner adds
+  // to both.
+  TickStarted := Int64(GetTickCount64);
   Started := MCPNowMs;
   Sleep(100);
-  // Milliseconds, not seconds or microseconds: a sleep never ends
-  // early, and a slow runner only adds to it.
-  Expect<Boolean>(MCPNowMs - Started >= 90).ToBe(True);
+  Elapsed := MCPNowMs - Started;
+  TickElapsed := Int64(GetTickCount64) - TickStarted;
+  // Not slower than milliseconds: a sleep never ends early.
+  Expect<Boolean>(Elapsed >= 90).ToBe(True);
+  // Not faster either: in microseconds it would read about 100000
+  // (#134 review).
+  Expect<Boolean>(Elapsed <= TickElapsed + 50).ToBe(True);
 end;
 
 {$IFDEF DARWIN}
