@@ -230,6 +230,17 @@ begin
     ASize := 0;
 end;
 
+// `--skills-dir <dir>` also serves the skills under <dir> (#117), at
+// skill://disk/...; mcpsmoke uses it to check skills loaded from disk.
+function SkillsDirFromArgs(out ADir: string): Boolean;
+begin
+  Result := (ParamCount = 2) and (ParamStr(1) = '--skills-dir');
+  if Result then
+    ADir := ParamStr(2)
+  else
+    ADir := '';
+end;
+
 // `--http <port>` selects the Streamable HTTP binding; anything else
 // (including no arguments) serves stdio.
 function HTTPPortFromArgs(out APort: Word): Boolean;
@@ -246,6 +257,7 @@ begin
 end;
 
 var
+  SkillsDir: string;
   Server: TMCPServer;
   Transport: TMCPHTTPServer;
   HTTPPort: Word;
@@ -317,6 +329,8 @@ begin
 
     if PageSizeFromArgs(PageSize) then
       Server.PageSize := PageSize;
+    if SkillsDirFromArgs(SkillsDir) then
+      RegisterSkillDirectory(Server, SkillsDir, 'disk');
 
     if HTTPPortFromArgs(HTTPPort) then
     begin

@@ -425,6 +425,8 @@ function MCPSkillFile(const APath: string; const AContent: RawByteString;
 procedure RegisterSkill(AServer: TMCPServer; const ASkillPath: string;
   AFrontmatter: TJSONObject; const ABody: string;
   const AFiles: array of TMCPSkillFile);
+procedure RegisterSkillDirectory(AServer: TMCPServer; const ARoot: string;
+  const APrefix: string = '');
 function MCPSkillMarkdown(AFrontmatter: TJSONObject;
   const ABody: string): string;
 ```
@@ -433,6 +435,7 @@ function MCPSkillMarkdown(AFrontmatter: TJSONObject;
 | --- | --- |
 | `MCPSkillFile` | A supporting file: its path relative to the skill root, its raw bytes (`RawByteString`, so no code page conversion touches them), and a media type (`''` picks one from the extension, or `text/plain` for other UTF-8 text and `application/octet-stream` otherwise) |
 | `RegisterSkill` | The skill at `skill://ASkillPath/SKILL.md`, written from `AFrontmatter` (owned, also on failure) and `ABody`, with `AFiles`. The frontmatter's `name` must equal the path's last segment, and the Agent Skills fields are checked. A bad name, path or field, files that clash (the same URI, one under another, or a file with the directory media type), a URI already served, or a skill over `MCP_SKILL_MAX_FILES` or `MCP_SKILL_MAX_BYTES` with its nested skills' files raises `EMCPServer`, as does a call after the server started, and the server is left as it was. The first call declares the extension with `directoryRead` unless it is declared already, and serves `skills/list`, `skills/get`, `resources/directory/read` and the files |
+| `RegisterSkillDirectory` | Every skill under `ARoot`: each directory holding a `SKILL.md`, at `skill://APrefix/<its path below ARoot>`, its `SKILL.md` and files served as the bytes on disk. Its frontmatter is read with `MCP.Frontmatter`'s YAML subset, and the checks of `RegisterSkill` apply. Directories are listed by directory reads even when empty. Names starting with `.` are left out, and so are files outside any skill. A symbolic link (`ARoot` included), anything but a directory or regular file, a directory that cannot be read, a skill over the limits (checked from the listed sizes before reading, nested skills' files and any registered skill the tree lies below counted), a `SKILL.md` in `ARoot` itself, or frontmatter outside the subset (named with its file and line) raises `EMCPServer`, and then none of the tree's skills is registered. The tree is trusted and must not change while it is read |
 | `MCPSkillMarkdown` | The `SKILL.md` text `RegisterSkill` writes: a YAML frontmatter block for `AFrontmatter` (borrowed), then `ABody`. Strings are double-quoted with escapes YAML 1.1 and 1.2 share; a fractional number, a key written longer than the 1024 characters YAML parsers read, or text that is not UTF-8 raises `EMCPServer` |
 
 ### The request context

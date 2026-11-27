@@ -59,6 +59,21 @@ procedure RegisterSkill(AServer: TMCPServer; const ASkillPath: string;
   AFrontmatter: TJSONObject; const ABody: string;
   const AFiles: array of TMCPSkillFile);
 
+// Registers every skill under the directory ARoot, before the server
+// starts (#117): each directory below it holding a SKILL.md is a skill
+// at skill://APrefix/<its path below ARoot> (no prefix when APrefix is
+// ''), served as the exact bytes on disk. Its frontmatter is read with
+// MCP.Frontmatter's YAML subset, and its files are every file in its
+// directory but those of skills nested in it. Names starting with "."
+// are left out; files outside any skill are not served. A symbolic
+// link, a SKILL.md in ARoot itself, frontmatter outside the subset
+// (named with its file and line), or anything RegisterSkill refuses
+// raises EMCPServer, and then no skill of the directory is registered.
+// The tree is trusted and must not change while it is read: an entry is
+// checked, then opened by its name again.
+procedure RegisterSkillDirectory(AServer: TMCPServer; const ARoot: string;
+  const APrefix: string = '');
+
 // The SKILL.md RegisterSkill writes: a YAML frontmatter block for
 // AFrontmatter (borrowed), then ABody. Strings are double-quoted with
 // only the escapes YAML 1.1 and 1.2 share, so any YAML parser reads the
@@ -70,9 +85,15 @@ function MCPSkillMarkdown(AFrontmatter: TJSONObject;
 implementation
 
 uses
+  Classes,
+  {$IFDEF UNIX}
+  BaseUnix,
+  {$ENDIF}
+
   MCP.Content,
   MCP.Crypto,
   MCP.Extensions,
+  MCP.Frontmatter,
   MCP.JSONRPC,
   MCP.Metadata,
   MCP.Pagination,
@@ -95,6 +116,7 @@ type
       Content: RawByteString;
       Skill: Integer; // the skill whose SKILL.md this is, or -1
     end;
+    FDirs: array of string; // directory URIs a skill was given
     function FileIndex(const AUri: string): Integer;
     function IsDirectory(const AUri: string): Boolean;
     function SkillEntry(ASkill: Integer): TJSONObject;
@@ -111,8 +133,22 @@ type
   public
     constructor Create(AServer: TMCPServer);
     destructor Destroy; override;
+    // The skill at ASkillPath, its SKILL.md being ASkillMd, whose
+    // frontmatter is AFrontmatter (owned, also on failure).
+    // ADirs are directories below the skill root (relative), listed by
+    // directory reads even when they hold no file.
     procedure Add(const ASkillPath: string; AFrontmatter: TJSONObject;
-      const ABody: string; const AFiles: array of TMCPSkillFile);
+      const ASkillMd: RawByteString; const AFiles: array of TMCPSkillFile;
+      const ADirs: array of string);
+    // Forgets every skill, file and directory after the first ASkills,
+    // AFiles and ADirs, undoing the Add calls of a batch that failed.
+    procedure Truncate(ASkills, AFiles, ADirs: Integer);
+    function SkillCount: Integer;
+    function FileCount: Integer;
+    function DirCount: Integer;
+    // Skill ASkill's root and the files and bytes its manifest lists.
+    procedure SkillTotals(ASkill: Integer; out ARoot: string;
+      out AFiles: Integer; out ABytes: Int64);
   end;
 
 function MCPSkillFile(const APath: string; const AContent: RawByteString;
@@ -452,6 +488,48 @@ begin
   Result := Copy(AUri, 1, Length(ABase) + 1) = ABase + '/';
 end;
 
+procedure TSkillCatalog.Truncate(ASkills, AFiles, ADirs: Integer);
+var
+  I: Integer;
+begin
+  for I := ASkills to High(FSkills) do
+    FSkills[I].Frontmatter.Free;
+  SetLength(FSkills, ASkills);
+  SetLength(FFiles, AFiles);
+  SetLength(FDirs, ADirs);
+end;
+
+function TSkillCatalog.DirCount: Integer;
+begin
+  Result := Length(FDirs);
+end;
+
+procedure TSkillCatalog.SkillTotals(ASkill: Integer; out ARoot: string;
+  out AFiles: Integer; out ABytes: Int64);
+var
+  I: Integer;
+begin
+  ARoot := FSkills[ASkill].Root;
+  AFiles := 0;
+  ABytes := 0;
+  for I := 0 to High(FFiles) do
+    if IsUnder(FFiles[I].Uri, ARoot) then
+    begin
+      Inc(AFiles);
+      Inc(ABytes, Length(FFiles[I].Content));
+    end;
+end;
+
+function TSkillCatalog.SkillCount: Integer;
+begin
+  Result := Length(FSkills);
+end;
+
+function TSkillCatalog.FileCount: Integer;
+begin
+  Result := Length(FFiles);
+end;
+
 function TSkillCatalog.FileIndex(const AUri: string): Integer;
 begin
   for Result := 0 to High(FFiles) do
@@ -473,12 +551,15 @@ begin
   for I := 0 to High(FFiles) do
     if IsUnder(FFiles[I].Uri, AUri) then
       Exit(True);
+  for I := 0 to High(FDirs) do
+    if (FDirs[I] = AUri) or IsUnder(FDirs[I], AUri) then
+      Exit(True);
   Result := False;
 end;
 
 procedure TSkillCatalog.Add(const ASkillPath: string;
-  AFrontmatter: TJSONObject; const ABody: string;
-  const AFiles: array of TMCPSkillFile);
+  AFrontmatter: TJSONObject; const ASkillMd: RawByteString;
+  const AFiles: array of TMCPSkillFile; const ADirs: array of string);
 var
   Root, Problem: string;
   Normalized: TJSONObject;
@@ -506,13 +587,17 @@ begin
     SetLength(Uris, Length(AFiles) + 1);
     SetLength(Contents, Length(AFiles) + 1);
     Uris[0] := Root + '/SKILL.md';
-    Contents[0] := MCPSkillMarkdown(AFrontmatter, ABody);
+    // Hosts parse SKILL.md as text.
+    if InvalidUTF8Offset(ASkillMd) <> 0 then
+      raise EMCPServer.CreateFmt('Skill "%s": SKILL.md must be UTF-8 text',
+        [ASkillPath]);
+    Contents[0] := ASkillMd;
     for I := 0 to High(AFiles) do
     begin
       if not IsPlainPath(AFiles[I].Path) or (AFiles[I].Path = 'SKILL.md') then
         raise EMCPServer.CreateFmt('Skill "%s": file path "%s" needs ' +
           '"/"-separated segments of letters, digits, "-", ".", "_" and ' +
-          '"~", and SKILL.md is written from the frontmatter',
+          '"~", and SKILL.md is given apart',
           [ASkillPath, AFiles[I].Path]);
       if AFiles[I].MimeType = DIRECTORY_MIME_TYPE then
         raise EMCPServer.CreateFmt('Skill file "%s" cannot have the ' +
@@ -537,6 +622,22 @@ begin
           raise EMCPServer.CreateFmt('Skill file "%s" lies under the file ' +
             '"%s"', [Uris[I], FFiles[J].Uri]);
     end;
+    // A directory is no file, served or given here.
+    for I := 0 to High(ADirs) do
+    begin
+      if not IsPlainPath(ADirs[I]) then
+        raise EMCPServer.CreateFmt('Skill "%s": directory "%s" needs ' +
+          '"/"-separated segments of letters, digits, "-", ".", "_" and "~"',
+          [ASkillPath, ADirs[I]]);
+      for J := 0 to High(Uris) do
+        if (Uris[J] = Root + '/' + ADirs[I]) or
+          IsUnder(Root + '/' + ADirs[I], Uris[J]) then
+          raise EMCPServer.CreateFmt('Skill directory "%s" clashes with ' +
+            'the file "%s"', [ADirs[I], Uris[J]]);
+      if FileIndex(Root + '/' + ADirs[I]) >= 0 then
+        raise EMCPServer.CreateFmt('Skill directory "%s" is a file already ' +
+          'served', [Root + '/' + ADirs[I]]);
+    end;
     // The limits before any hashing, then the digests while the skill
     // is still staged, so a failure leaves the catalog as it was (#115
     // review).
@@ -547,6 +648,11 @@ begin
   except
     AFrontmatter.Free;
     raise;
+  end;
+  for I := 0 to High(ADirs) do
+  begin
+    SetLength(FDirs, Length(FDirs) + 1);
+    FDirs[High(FDirs)] := Root + '/' + ADirs[I];
   end;
   Skill := Length(FSkills);
   SetLength(FSkills, Skill + 1);
@@ -722,6 +828,53 @@ begin
   end;
 end;
 
+// Sorts AItems by byte order and drops repeats.
+procedure SortUnique(var AItems: TStringArray);
+
+  procedure QuickSort(ALow, AHigh: Integer);
+  var
+    I, J: Integer;
+    Pivot, Swap: string;
+  begin
+    I := ALow;
+    J := AHigh;
+    Pivot := AItems[(ALow + AHigh) div 2];
+    repeat
+      while AItems[I] < Pivot do
+        Inc(I);
+      while AItems[J] > Pivot do
+        Dec(J);
+      if I <= J then
+      begin
+        Swap := AItems[I];
+        AItems[I] := AItems[J];
+        AItems[J] := Swap;
+        Inc(I);
+        Dec(J);
+      end;
+    until I > J;
+    if ALow < J then
+      QuickSort(ALow, J);
+    if I < AHigh then
+      QuickSort(I, AHigh);
+  end;
+
+var
+  I, Kept: Integer;
+begin
+  if Length(AItems) < 2 then
+    Exit;
+  QuickSort(0, High(AItems));
+  Kept := 1;
+  for I := 1 to High(AItems) do
+    if AItems[I] <> AItems[Kept - 1] then
+    begin
+      AItems[Kept] := AItems[I];
+      Inc(Kept);
+    end;
+  SetLength(AItems, Kept);
+end;
+
 // The Resource a directory read lists for file AFile: SKILL.md named
 // and described from its frontmatter (skills.mdx, Resource Metadata).
 function ChildFile(const AUri, AMimeType: string;
@@ -744,32 +897,41 @@ end;
 function TSkillCatalog.DirectoryRead(AParams: TJSONObject;
   const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
 var
-  Uri, Child: string;
-  Children: array of string;
-  I, J, First, Last, Slash, Index: Integer;
+  Uri: string;
+  Children: TStringArray;
+  I, First, Last, Index: Integer;
   Resources: TJSONArray;
   Frontmatter: TJSONObject;
+
+  // Collects the child of Uri that ADescendant lies under; sorted and
+  // made unique once, afterwards (#117 review).
+  procedure AddChild(const ADescendant: string);
+  var
+    Child: string;
+    Slash: Integer;
+  begin
+    if not IsUnder(ADescendant, Uri) then
+      Exit;
+    Child := Copy(ADescendant, Length(Uri) + 2, MaxInt);
+    Slash := Pos('/', Child);
+    if Slash > 0 then
+      Child := Copy(Child, 1, Slash - 1);
+    SetLength(Children, Length(Children) + 1);
+    Children[High(Children)] := Uri + '/' + Child;
+  end;
+
 begin
   Uri := UriParam(AParams);
   if not IsDirectory(Uri) then
     raise NotFound('Directory', Uri);
-  // Direct children, each once, sorted by URI.
+  // Direct children, from the files and the directories given, which
+  // may hold no file (#117 review).
   Children := nil;
   for I := 0 to High(FFiles) do
-    if Copy(FFiles[I].Uri, 1, Length(Uri) + 1) = Uri + '/' then
-    begin
-      Child := Copy(FFiles[I].Uri, Length(Uri) + 2, MaxInt);
-      Slash := Pos('/', Child);
-      if Slash > 0 then
-        Child := Copy(Child, 1, Slash - 1);
-      Child := Uri + '/' + Child;
-      J := 0;
-      while (J < Length(Children)) and (Children[J] < Child) do
-        Inc(J);
-      if (J < Length(Children)) and (Children[J] = Child) then
-        Continue;
-      Insert(Child, Children, J);
-    end;
+    AddChild(FFiles[I].Uri);
+  for I := 0 to High(FDirs) do
+    AddChild(FDirs[I]);
+  SortUnique(Children);
   SelectPage(AParams, 'resources/directory/read ' + Uri, Length(Children),
     FServer.PageSize, First, Last);
   Result := TJSONObject.Create;
@@ -827,9 +989,34 @@ begin
   Result := MCPBlobContents(AUri, FFiles[Index].MimeType, MCPBase64(Bytes));
 end;
 
-procedure RegisterSkill(AServer: TMCPServer; const ASkillPath: string;
-  AFrontmatter: TJSONObject; const ABody: string;
-  const AFiles: array of TMCPSkillFile);
+type
+  TFlagArray = array of Boolean;
+  TSkillFileArray = array of TMCPSkillFile;
+  // A skill read or built and not yet in the catalog.
+  TStagedSkill = record
+    Path: string;
+    Frontmatter: TJSONObject; // owned until handed to the catalog
+    SkillMd: RawByteString;
+    Files: TSkillFileArray;
+    Dirs: TStringArray; // directories below the root, files or not
+    // While a tree is read: the staged skill this one is nested in (-1
+    // for none), and the files and bytes listed for it so far, nested
+    // skills' included.
+    Enclosing: Integer;
+    FileTotal: Integer;
+    ByteTotal: Int64;
+    // A skill registered already, standing in while a tree is read so
+    // its totals are charged too (#117 review); never registered again.
+    Registered: Boolean;
+  end;
+  TStagedSkillArray = array of TStagedSkill;
+
+// Adds ASkills to AServer's catalog, all of them or none: every check
+// comes before the server changes, so a refused call leaves no
+// half-installed extension or half-added batch behind (#115 review).
+// The frontmatter objects are consumed, also on failure.
+procedure RegisterStaged(AServer: TMCPServer;
+  var ASkills: array of TStagedSkill);
 const
   METHODS: array[0..2] of string = ('skills/list', 'skills/get',
     'resources/directory/read');
@@ -837,13 +1024,12 @@ var
   Catalog: TSkillCatalog;
   Fresh: Boolean;
   Problem: string;
+  I, Skills, Files, Dirs: Integer;
 begin
-  // Every check comes before the server changes, so a refused first
-  // call leaves no half-installed extension behind (#115 review).
-  Fresh := False;
+  I := 0;
   try
     if AServer = nil then
-      raise EMCPServer.Create('RegisterSkill needs a server');
+      raise EMCPServer.Create('Registering skills needs a server');
     Catalog := TSkillCatalog(AServer.Adopted(TSkillCatalog));
     Fresh := Catalog = nil;
     if Fresh then
@@ -852,17 +1038,29 @@ begin
       Problem := AServer.HookProblem([], '');
     if Problem <> '' then
       raise EMCPServer.Create(Problem);
-  except
-    AFrontmatter.Free;
-    raise;
-  end;
-  if Fresh then
-    Catalog := TSkillCatalog.Create(AServer);
-  try
-    Catalog.Add(ASkillPath, AFrontmatter, ABody, AFiles);
-  except
     if Fresh then
-      Catalog.Free;
+      Catalog := TSkillCatalog.Create(AServer);
+    Skills := Catalog.SkillCount;
+    Files := Catalog.FileCount;
+    Dirs := Catalog.DirCount;
+    try
+      while I <= High(ASkills) do
+      begin
+        // Add owns the frontmatter from here, also when it raises.
+        Inc(I);
+        Catalog.Add(ASkills[I - 1].Path, ASkills[I - 1].Frontmatter,
+          ASkills[I - 1].SkillMd, ASkills[I - 1].Files, ASkills[I - 1].Dirs);
+      end;
+    except
+      if Fresh then
+        Catalog.Free
+      else
+        Catalog.Truncate(Skills, Files, Dirs);
+      raise;
+    end;
+  except
+    for I := I to High(ASkills) do
+      ASkills[I].Frontmatter.Free;
     raise;
   end;
   if Fresh then
@@ -876,6 +1074,336 @@ begin
   // Settings declared first are kept.
   AServer.EnsureExtension(MCP_SKILLS_EXTENSION,
     TJSONObject.Create(['directoryRead', True]));
+end;
+
+procedure RegisterSkill(AServer: TMCPServer; const ASkillPath: string;
+  AFrontmatter: TJSONObject; const ABody: string;
+  const AFiles: array of TMCPSkillFile);
+var
+  Staged: TStagedSkillArray;
+  I: Integer;
+begin
+  SetLength(Staged, 1);
+  Staged[0].Path := ASkillPath;
+  Staged[0].Frontmatter := AFrontmatter;
+  Staged[0].Dirs := nil;
+  try
+    Staged[0].SkillMd := MCPSkillMarkdown(AFrontmatter, ABody);
+  except
+    AFrontmatter.Free;
+    raise;
+  end;
+  SetLength(Staged[0].Files, Length(AFiles));
+  for I := 0 to High(AFiles) do
+    Staged[0].Files[I] := AFiles[I];
+  RegisterStaged(AServer, Staged);
+end;
+
+{ ───────── skills from a directory (#117) ───────── }
+
+type
+  TDirEntry = record
+    Name: string;
+    IsDir: Boolean;
+    Size: Int64;
+  end;
+  TDirEntries = array of TDirEntry;
+
+function JoinPath(const ADir, AName: string): string;
+begin
+  Result := IncludeTrailingPathDelimiter(ADir) + AName;
+end;
+
+// The bytes of the regular file APath.
+function ReadBytes(const APath: string): RawByteString;
+var
+  Stream: TFileStream;
+begin
+  Stream := TFileStream.Create(APath, fmOpenRead or fmShareDenyWrite);
+  try
+    SetLength(Result, Stream.Size);
+    if Length(Result) > 0 then
+      Stream.ReadBuffer(Result[1], Length(Result));
+  finally
+    Stream.Free;
+  end;
+end;
+
+// Whether APath, found by FindFirst without following links, is a
+// regular file and not a device, socket or pipe, which could block a
+// read.
+function IsRegularFile(const APath: string): Boolean;
+{$IFDEF UNIX}
+var
+  Info: Stat;
+begin
+  Result := (fpLstat(APath, Info) = 0) and fpS_ISREG(Info.st_mode);
+end;
+{$ELSE}
+begin
+  Result := True;
+end;
+{$ENDIF}
+
+// The entries of directory ADir, sorted by name, without "." and ".."
+// and names starting with ".". A directory that cannot be read, a
+// symbolic link (it could lead outside the tree) and anything but a
+// directory or a regular file raise, so no part of a tree goes missing
+// unnoticed (#117 review).
+function ReadDirectory(const ADir: string): TDirEntries;
+var
+  Search: TSearchRec;
+  J: Integer;
+  Entry: TDirEntry;
+begin
+  Result := nil;
+  // Every readable directory lists "." at least.
+  if FindFirst(JoinPath(ADir, '*'), faAnyFile or faDirectory or faSymLink,
+    Search) <> 0 then
+    raise EMCPServer.CreateFmt('Skill directory "%s" cannot be read', [ADir]);
+  try
+    repeat
+      Entry.Name := Search.Name;
+      if (Entry.Name = '') or (Entry.Name[1] = '.') then
+        Continue;
+      if (Search.Attr and faSymLink) <> 0 then
+        raise EMCPServer.CreateFmt('Skill directory entry "%s" is a ' +
+          'symbolic link', [JoinPath(ADir, Entry.Name)]);
+      Entry.IsDir := (Search.Attr and faDirectory) <> 0;
+      Entry.Size := Search.Size;
+      if not Entry.IsDir and not IsRegularFile(JoinPath(ADir, Entry.Name)) then
+        raise EMCPServer.CreateFmt('Skill directory entry "%s" is no ' +
+          'regular file', [JoinPath(ADir, Entry.Name)]);
+      // Sorted insertion by name, byte order.
+      J := Length(Result);
+      SetLength(Result, J + 1);
+      while (J > 0) and (Result[J - 1].Name > Entry.Name) do
+      begin
+        Result[J] := Result[J - 1];
+        Dec(J);
+      end;
+      Result[J] := Entry;
+    until FindNext(Search) <> 0;
+  finally
+    FindClose(Search);
+  end;
+end;
+
+// The index of the file named exactly SKILL.md in AEntries (not
+// skill.md, which a case-insensitive file system would also open), or
+// -1.
+function SkillMdEntry(const AEntries: TDirEntries): Integer;
+begin
+  for Result := 0 to High(AEntries) do
+    if (AEntries[Result].Name = 'SKILL.md') and not AEntries[Result].IsDir then
+      Exit;
+  Result := -1;
+end;
+
+// Charges one file of ASize bytes to the staged skill ASkill and every
+// staged skill enclosing it, raising before anything is read when one
+// would go over the limits (#117 review): nested skills count in their
+// enclosing skills' manifests.
+procedure Charge(var ASkills: TStagedSkillArray; ASkill: Integer;
+  ASize: Int64; const APath: string);
+begin
+  while ASkill >= 0 do
+  begin
+    Inc(ASkills[ASkill].FileTotal);
+    Inc(ASkills[ASkill].ByteTotal, ASize);
+    if (ASkills[ASkill].FileTotal > MCP_SKILL_MAX_FILES) or
+      (ASkills[ASkill].ByteTotal > MCP_SKILL_MAX_BYTES) then
+      raise EMCPServer.CreateFmt('Skill "%s" goes over %d files or %d ' +
+        'bytes at "%s"', [ASkills[ASkill].Path, MCP_SKILL_MAX_FILES,
+        MCP_SKILL_MAX_BYTES, APath]);
+    ASkill := ASkills[ASkill].Enclosing;
+  end;
+end;
+
+// The staged or registered skill whose path is the longest one that
+// ASkillPath lies under, or -1.
+function DeepestAncestor(const ASkills: TStagedSkillArray;
+  const ASkillPath: string): Integer;
+var
+  I: Integer;
+begin
+  Result := -1;
+  for I := 0 to High(ASkills) do
+    if IsUnder(ASkillPath, ASkills[I].Path) and ((Result < 0) or
+      (Length(ASkills[I].Path) > Length(ASkills[Result].Path))) then
+      Result := I;
+end;
+
+// The skills AServer serves already, as stand-ins with their totals, so
+// a tree below one of them is charged against its limits before reading.
+procedure AddRegistered(AServer: TMCPServer; var ASkills: TStagedSkillArray);
+var
+  Catalog: TSkillCatalog;
+  I, Slot: Integer;
+  Root: string;
+begin
+  if AServer = nil then
+    Exit;
+  Catalog := TSkillCatalog(AServer.Adopted(TSkillCatalog));
+  if Catalog = nil then
+    Exit;
+  for I := 0 to Catalog.SkillCount - 1 do
+  begin
+    Slot := Length(ASkills);
+    SetLength(ASkills, Slot + 1);
+    Catalog.SkillTotals(I, Root, ASkills[Slot].FileTotal,
+      ASkills[Slot].ByteTotal);
+    ASkills[Slot].Path := Copy(Root, Length(SKILL_SCHEME) + 1, MaxInt);
+    ASkills[Slot].Frontmatter := nil;
+    ASkills[Slot].Registered := True;
+  end;
+  for I := 0 to High(ASkills) do
+  begin
+    ASkills[I].Enclosing := -1;
+    ASkills[I].Enclosing := DeepestAncestor(ASkills, ASkills[I].Path);
+  end;
+end;
+
+// Stages the skill whose directory ADir lists AEntries, at ASkillPath,
+// inside the staged skill AEnclosing (-1 for none); its index.
+function StageSkill(const ADir, ASkillPath: string; const AEntries: TDirEntries;
+  AEnclosing: Integer; var ASkills: TStagedSkillArray): Integer;
+var
+  SkillFile, Text, Problem: string;
+  Frontmatter: TJSONObject;
+begin
+  SkillFile := JoinPath(ADir, 'SKILL.md');
+  if AEnclosing < 0 then
+    AEnclosing := DeepestAncestor(ASkills, ASkillPath);
+  Result := Length(ASkills);
+  SetLength(ASkills, Result + 1);
+  ASkills[Result].Path := ASkillPath;
+  ASkills[Result].Frontmatter := nil;
+  ASkills[Result].Enclosing := AEnclosing;
+  ASkills[Result].FileTotal := 0;
+  ASkills[Result].ByteTotal := 0;
+  ASkills[Result].Registered := False;
+  Charge(ASkills, Result, AEntries[SkillMdEntry(AEntries)].Size, SkillFile);
+  ASkills[Result].SkillMd := ReadBytes(SkillFile);
+  SetLength(Text, Length(ASkills[Result].SkillMd));
+  if Length(Text) > 0 then
+    Move(ASkills[Result].SkillMd[1], Text[1], Length(Text));
+  if not ParseFrontmatter(Text, Frontmatter, Problem) then
+    raise EMCPServer.CreateFmt('Skill file "%s": %s', [SkillFile, Problem]);
+  ASkills[Result].Frontmatter := Frontmatter;
+end;
+
+// One walk over the tree, each directory listed once (#117 review):
+// ADir lists AEntries; ASkill is the staged skill it lies in (-1 above
+// every skill), ARelative its path below that skill's root, and
+// ASkillPath its skill path. A directory holding a SKILL.md starts a
+// skill, nested in ASkill; files outside every skill are not served.
+procedure Walk(const ADir, ASkillPath, ARelative: string;
+  const AEntries: TDirEntries; ASkill: Integer;
+  var ASkills: TStagedSkillArray);
+var
+  I, Nested: Integer;
+  Below: TDirEntries;
+  Path, Relative, SkillPath: string;
+begin
+  for I := 0 to High(AEntries) do
+  begin
+    Path := JoinPath(ADir, AEntries[I].Name);
+    if ARelative = '' then
+      Relative := AEntries[I].Name
+    else
+      Relative := ARelative + '/' + AEntries[I].Name;
+    if ASkillPath = '' then
+      SkillPath := AEntries[I].Name
+    else
+      SkillPath := ASkillPath + '/' + AEntries[I].Name;
+    if AEntries[I].IsDir then
+    begin
+      Below := ReadDirectory(Path);
+      if SkillMdEntry(Below) >= 0 then
+      begin
+        Nested := StageSkill(Path, SkillPath, Below, ASkill, ASkills);
+        Walk(Path, SkillPath, '', Below, Nested, ASkills);
+      end
+      else
+      begin
+        if ASkill >= 0 then
+        begin
+          SetLength(ASkills[ASkill].Dirs, Length(ASkills[ASkill].Dirs) + 1);
+          ASkills[ASkill].Dirs[High(ASkills[ASkill].Dirs)] := Relative;
+        end;
+        Walk(Path, SkillPath, Relative, Below, ASkill, ASkills);
+      end;
+    end
+    else if (ASkill >= 0) and (Relative <> 'SKILL.md') then
+    begin
+      Charge(ASkills, ASkill, AEntries[I].Size, Path);
+      SetLength(ASkills[ASkill].Files, Length(ASkills[ASkill].Files) + 1);
+      ASkills[ASkill].Files[High(ASkills[ASkill].Files)] :=
+        MCPSkillFile(Relative, ReadBytes(Path));
+    end;
+  end;
+end;
+
+// Whether APath is a directory itself, not a link to one. On Unix the
+// literal path is checked with lstat, as FindFirst would read "*" or "?"
+// in a name as wildcards (#117 review); Windows names cannot hold them.
+function IsPlainDirectory(const APath: string): Boolean;
+{$IFDEF UNIX}
+var
+  Info: Stat;
+begin
+  Result := (fpLstat(ExcludeTrailingPathDelimiter(APath), Info) = 0) and
+    fpS_ISDIR(Info.st_mode);
+end;
+{$ELSE}
+var
+  Search: TSearchRec;
+begin
+  Result := FindFirst(ExcludeTrailingPathDelimiter(APath), faAnyFile or
+    faDirectory or faSymLink, Search) = 0;
+  if Result then
+  begin
+    Result := ((Search.Attr and faDirectory) <> 0) and
+      ((Search.Attr and faSymLink) = 0);
+    FindClose(Search);
+  end;
+end;
+{$ENDIF}
+
+procedure RegisterSkillDirectory(AServer: TMCPServer; const ARoot: string;
+  const APrefix: string);
+var
+  Staged: TStagedSkillArray;
+  Entries: TDirEntries;
+  I, Registered: Integer;
+begin
+  Staged := nil;
+  try
+    // The root itself is checked without following links too.
+    if not IsPlainDirectory(ARoot) then
+      raise EMCPServer.CreateFmt('Skill directory "%s" does not exist or is ' +
+        'a symbolic link', [ARoot]);
+    Entries := ReadDirectory(ARoot);
+    if SkillMdEntry(Entries) >= 0 then
+      raise EMCPServer.CreateFmt('"%s" holds a SKILL.md: give the directory ' +
+        'that holds the skill directories', [ARoot]);
+    if (APrefix <> '') and not IsPlainPath(APrefix) then
+      raise EMCPServer.CreateFmt('Skill path prefix "%s" needs "/"-separated ' +
+        'segments of letters, digits, "-", ".", "_" and "~"', [APrefix]);
+    AddRegistered(AServer, Staged);
+    Walk(ARoot, APrefix, '', Entries, -1, Staged);
+    // The stand-ins come first; only the skills read are registered.
+    Registered := 0;
+    while (Registered < Length(Staged)) and Staged[Registered].Registered do
+      Inc(Registered);
+    Staged := Copy(Staged, Registered, MaxInt);
+  except
+    for I := 0 to High(Staged) do
+      Staged[I].Frontmatter.Free;
+    raise;
+  end;
+  RegisterStaged(AServer, Staged);
 end;
 
 end.

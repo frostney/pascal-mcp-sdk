@@ -90,15 +90,59 @@ result fields.
 To point the model at a skill, name its URI in the server's
 instructions, for example `skill://git-workflow/SKILL.md`.
 
+## Load a skills directory
+
+Skills usually live on disk, one directory per skill.
+`RegisterSkillDirectory` serves a whole tree of them:
+
+```pascal
+RegisterSkillDirectory(Server, 'skills', 'acme');
+```
+
+Each directory below `skills` that holds a `SKILL.md` is a skill, at
+`skill://acme/<its path below skills>/SKILL.md`; without a prefix the
+path below the root is the whole skill path. Folders without a
+`SKILL.md`, such as `billing` in `skills/billing/refunds`, become part
+of the path. Every file in a skill's directory is served as its exact
+bytes on disk, except those of a skill nested in it, which is
+registered on its own, as above. Directories are listed by directory
+reads even when empty. Names starting with `.` are left out, as are
+files outside any skill. A symbolic link, the root included, is
+refused, since it could lead outside the tree, and so is anything but a
+directory or a regular file, or a directory that cannot be read. A
+skill over the limits, its nested skills' files counted, is refused
+from the sizes listed, before its files are read; a tree below a skill
+the server serves already counts against that skill's limits too. The tree is trusted
+and must not change while it is read: each entry is checked, then
+opened again by its name.
+
+The frontmatter is read with a YAML subset on which YAML 1.1 and 1.2
+parsers agree, since a host compares what it parses with the listing:
+
+- mappings and lists in block style;
+- quoted strings on one line;
+- `|` and `>` block scalars, with `-` or `+`;
+- plain strings, also over several lines;
+- `true`, `false`, `null` and whole numbers.
+
+A plain value the two YAML versions read differently, such as `yes`,
+`on`, `1.0`, `012` or a date, must be quoted: `version: "1.0"`. So
+must any plain value starting with a digit, a sign or a dot, even one
+both read as text, such as `3d-printing`: telling numbers, dates and
+times apart is not worth the risk. So must
+a value with a colon followed by a space, or a space followed by `#`, in it. Flow collections like `[a, b]`,
+anchors and tags are not read, and neither are raw tabs, control
+characters, U+2028 or U+2029: write those as escapes (`\t`, `\u2028`)
+in a double-quoted string. Each of these raises `EMCPServer` naming the file
+and line; the checks `RegisterSkill` makes name the skill instead.
+Either way no skill of the tree is registered.
+
 ## Settings
 
 `RegisterSkill` keeps extension settings you declared first with
 `DeclareExtension(MCP_SKILLS_EXTENSION, Settings)`. The Skills
 extension has one setting, `directoryRead`, and the library serves
 directory reads either way.
-
-Loading skills from a directory on disk is not available yet: define
-them in code.
 
 ## Related pages
 

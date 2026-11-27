@@ -13,9 +13,14 @@ program MCP.Skills.Test;
 
 uses
   SysUtils,
+  Classes,
+  {$IFDEF UNIX}
+  BaseUnix,
+  {$ENDIF}
 
   fpjson,
   jsonparser,
+  MCP.Frontmatter,
   MCP.JSONRPC,
   MCP.Protocol,
   MCP.Server,
@@ -35,6 +40,8 @@ const
   DIGEST_REFUNDS = 'sha256:9e1f9c19d7482d24e367227fbb5dc2fe9f289c386424bf0c75926be8e10977d8';
   DIGEST_COMMITS = 'sha256:ec6c670d5c3de3539ccc588c99ff9d82575ef9eadefe21b2fbe17e4467be5fa2';
   DIGEST_LOGO = 'sha256:d44c4eee8f72efac76c1f294e7260408825c8dad42adaaf6e9bee7e7ef4c7de3';
+  // From Python's hashlib over the disk fixture's refunds SKILL.md.
+  DIGEST_DISK_REFUNDS = 'sha256:11944996133ecad727d9276ce69d345fa9477f4e6330565f0954946ede1594cd';
   DIGEST_EMAIL = 'sha256:7b7c2be2390a57bc8874adae23a60940ac18fa1fdadca60de307406f50d1aee8';
 
 type
@@ -71,6 +78,13 @@ type
     procedure TestRawBytes;
     procedure TestTemplateCannotAddFiles;
     procedure TestNilFrontmatterMember;
+    procedure TestDirectory;
+    procedure TestDirectoryRefused;
+    procedure TestDirectoryEnclosingLimit;
+    procedure TestDirectoryUnderRegistered;
+    {$IFDEF UNIX}
+    procedure TestDirectorySymlink;
+    {$ENDIF}
   end;
 
   // A handler that takes skills/get first.
@@ -481,8 +495,8 @@ end;
 // "\/"), keys YAML 1.1 would resolve quoted, nested maps and lists.
 procedure TSkillsSuite.TestMarkdownWriter;
 var
-  Frontmatter: TJSONObject;
-  Text: string;
+  Frontmatter, Parsed: TJSONObject;
+  Text, Problem: string;
 begin
   Text := 'a/b "q" \ ' + #9 + #10 + #$7F + #$C2#$85 + #$C3#$A9;
   Frontmatter := TJSONObject.Create(['name', 'x', 'description', Text,
@@ -510,6 +524,14 @@ begin
       '  -' + #10 + '    - 1' + #10 + '    - 2' + #10 +
       'odd: "\uFFFE\u2028  x"' + #10 +
       '---' + #10 + 'Body');
+    // What the writer writes, the reader reads back (#117).
+    Expect<Boolean>(ParseFrontmatter(MCPSkillMarkdown(Frontmatter, 'Body'),
+      Parsed, Problem)).ToBe(True);
+    try
+      Expect<string>(Parsed.AsJSON).ToBe(Frontmatter.AsJSON);
+    finally
+      Parsed.Free;
+    end;
   finally
     Frontmatter.Free;
   end;
@@ -776,6 +798,368 @@ begin
   Expect<Boolean>(Raised).ToBe(True);
 end;
 
+{ ───────── skills from a directory (#117) ───────── }
+
+// Writes ABytes to APath, creating its directories.
+procedure WriteFile(const APath: string; const ABytes: RawByteString);
+var
+  Stream: TFileStream;
+begin
+  ForceDirectories(ExtractFileDir(APath));
+  Stream := TFileStream.Create(APath, fmCreate);
+  try
+    if Length(ABytes) > 0 then
+      Stream.WriteBuffer(ABytes[1], Length(ABytes));
+  finally
+    Stream.Free;
+  end;
+end;
+
+procedure RemoveTree(const ADir: string);
+var
+  Search: TSearchRec;
+  Path: string;
+begin
+  if FindFirst(IncludeTrailingPathDelimiter(ADir) + '*', faAnyFile or
+    faDirectory or faSymLink, Search) = 0 then
+  try
+    repeat
+      if (Search.Name = '.') or (Search.Name = '..') then
+        Continue;
+      Path := IncludeTrailingPathDelimiter(ADir) + Search.Name;
+      if ((Search.Attr and faDirectory) <> 0) and
+        ((Search.Attr and faSymLink) = 0) then
+        RemoveTree(Path)
+      else
+        DeleteFile(Path);
+    until FindNext(Search) <> 0;
+  finally
+    FindClose(Search);
+  end;
+  RemoveDir(ADir);
+end;
+
+// A new directory of the test's own: created, never reused, so cleanup
+// only ever removes what the test made (#117 review).
+function FreshDir(const AName: string): string;
+var
+  Attempt: Integer;
+begin
+  for Attempt := 1 to 100 do
+  begin
+    Result := IncludeTrailingPathDelimiter(GetTempDir(False)) + 'mcp-skills-' +
+      AName + '-' + IntToStr(GetProcessID) + '-' + IntToStr(Random(1000000));
+    if CreateDir(Result) then
+      Exit;
+  end;
+  raise Exception.Create('No fresh test directory');
+end;
+
+function DirectoryProblemAt(AServer: TMCPServer; const ARoot,
+  APrefix: string): string;
+begin
+  Result := '';
+  try
+    RegisterSkillDirectory(AServer, ARoot, APrefix);
+  except
+    on E: EMCPServer do
+      Result := E.Message;
+  end;
+end;
+
+function DirectoryProblem(AServer: TMCPServer; const ARoot: string): string;
+begin
+  Result := DirectoryProblemAt(AServer, ARoot, '');
+end;
+
+// A tree below a skill registered already is charged against that
+// skill's limits before it is read (#117 review): 9 MiB registered and
+// 9 MiB more below it are refused, naming the registered skill.
+procedure TSkillsSuite.TestDirectoryUnderRegistered;
+var
+  Root: string;
+begin
+  RegisterSkill(FServer, 'team', TJSONObject.Create(['name', 'team',
+    'description', 'd']), 'Body', [MCPSkillFile('big.bin', StringOfChar('x',
+    9 * 1024 * 1024))]);
+  Root := FreshDir('under');
+  try
+    WriteFile(Root + '/child/SKILL.md', '---' + #10 + 'name: child' + #10 +
+      'description: d' + #10 + '---' + #10);
+    WriteFile(Root + '/child/big.bin', StringOfChar('y', 9 * 1024 * 1024));
+    Expect<Boolean>(Pos('Skill "team" goes over', DirectoryProblemAt(FServer,
+      Root, 'team')) = 1).ToBe(True);
+  finally
+    RemoveTree(Root);
+  end;
+end;
+
+// An enclosing skill's limit counts its nested skills' files, before
+// they are read (#117 review): 9 MiB here and 9 MiB nested is refused.
+procedure TSkillsSuite.TestDirectoryEnclosingLimit;
+var
+  Root: string;
+begin
+  Root := FreshDir('limit');
+  try
+    WriteFile(Root + '/outer/SKILL.md', '---' + #10 + 'name: outer' + #10 +
+      'description: d' + #10 + '---' + #10);
+    WriteFile(Root + '/outer/big.bin', StringOfChar('x', 9 * 1024 * 1024));
+    WriteFile(Root + '/outer/inner/SKILL.md', '---' + #10 + 'name: inner' +
+      #10 + 'description: d' + #10 + '---' + #10);
+    WriteFile(Root + '/outer/inner/big.bin', StringOfChar('y',
+      9 * 1024 * 1024));
+    Expect<Boolean>(Pos('Skill "outer" goes over', DirectoryProblem(FServer,
+      Root)) = 1).ToBe(True);
+  finally
+    RemoveTree(Root);
+  end;
+end;
+
+// The fixture tree: a skill with a folded description, metadata, a
+// binary and a hidden file; a skill nested in it with CRLF lines; a
+// skill under two folders that are no skills; a stray README outside
+// any skill. Digests and sizes from Python's hashlib over these bytes.
+function WriteFixtureTree: string;
+var
+  Bin: RawByteString;
+begin
+  Result := FreshDir('tree');
+  WriteFile(Result + '/git-workflow/SKILL.md', '---' + #10 +
+    'name: git-workflow' + #10 + 'description: >-' + #10 +
+    '  Follow the team''s Git' + #10 + '  conventions' + #10 + 'metadata:' +
+    #10 + '  owner: platform' + #10 + '---' + #10 + '# Git' + #10);
+  WriteFile(Result + '/git-workflow/references/commits.md',
+    'Use feat: and fix:' + #10);
+  Bin := 'xxxx';
+  Bin[1] := #0;
+  Bin[2] := #1;
+  Bin[3] := #2;
+  Bin[4] := Chr($FF);
+  WriteFile(Result + '/git-workflow/assets/data.bin', Bin);
+  WriteFile(Result + '/git-workflow/.hidden', 'not served');
+  WriteFile(Result + '/git-workflow/rebase/SKILL.md', '---' + #13#10 +
+    'name: rebase' + #13#10 + 'description: Rebase safely' + #13#10 + '---' +
+    #13#10 + 'Never force-push.' + #13#10);
+  // Literal UTF-8 in a plain value: the bytes go to the wire unchanged.
+  WriteFile(Result + '/acme/billing/refunds/SKILL.md', '---' + #10 +
+    'name: refunds' + #10 + 'description: Process refunds, ' + GRUSSE + #10 +
+    '---' + #10 + 'Check the order.' + #10);
+  // An empty directory, listed by directory reads (#117 review).
+  ForceDirectories(Result + '/git-workflow/templates');
+  WriteFile(Result + '/README.md', 'Not part of any skill.' + #10);
+end;
+
+// Every skill in the tree at its path, its SKILL.md served as on disk,
+// its frontmatter read, nested files in the enclosing manifest, hidden
+// and stray files left out.
+procedure TSkillsSuite.TestDirectory;
+var
+  Root, Line: string;
+  Response: TJSONObject;
+begin
+  Root := WriteFixtureTree;
+  try
+    RegisterSkillDirectory(FServer, Root, 'team');
+    Response := Call('skills/list', '');
+    try
+      Expect<Integer>(TJSONArray(Response.FindPath('result.skills')).Count)
+        .ToBe(3);
+      Expect<string>(Str(Response, 'result.skills[0].uri'))
+        .ToBe('skill://team/acme/billing/refunds/SKILL.md');
+      Expect<string>(Str(Response, 'result.skills[0].frontmatter.description'))
+        .ToBe('Process refunds, gr' + #$C3#$BC#$C3#$9F + 'e');
+      Expect<string>(Str(Response, 'result.skills[0].resources[0].digest'))
+        .ToBe(DIGEST_DISK_REFUNDS);
+      Expect<Integer>(TJSONData(Response.FindPath(
+        'result.skills[0].resources[0].size')).AsInteger).ToBe(77);
+      Expect<string>(Str(Response, 'result.skills[1].uri'))
+        .ToBe('skill://team/git-workflow/SKILL.md');
+      Expect<string>(Str(Response, 'result.skills[1].frontmatter.description'))
+        .ToBe('Follow the team''s Git conventions');
+      Expect<string>(Str(Response, 'result.skills[1].frontmatter.metadata.owner'))
+        .ToBe('platform');
+      // SKILL.md, assets/data.bin, references/commits.md and the nested
+      // skill's SKILL.md; not .hidden.
+      Expect<Integer>(TJSONArray(Response.FindPath(
+        'result.skills[1].resources')).Count).ToBe(4);
+      Expect<string>(Str(Response, 'result.skills[1].resources[0].digest'))
+        .ToBe('sha256:63c51021abfdfc5e1bf1d8a3fae0b915e2be877e378295fc4e4df8b0364a4875');
+      Expect<string>(Str(Response, 'result.skills[1].resources[1].uri'))
+        .ToBe('skill://team/git-workflow/assets/data.bin');
+      Expect<string>(Str(Response, 'result.skills[1].resources[1].digest'))
+        .ToBe('sha256:3d1f57c984978ef98a18378c8166c1cb8ede02c03eeb6aee7e2f121dfeee3e56');
+      Expect<string>(Str(Response, 'result.skills[1].resources[2].digest'))
+        .ToBe('sha256:ec6c670d5c3de3539ccc588c99ff9d82575ef9eadefe21b2fbe17e4467be5fa2');
+      Expect<string>(Str(Response, 'result.skills[1].resources[3].digest'))
+        .ToBe('sha256:fc310b9f6a905e0d10cc20a2d111c26478855ea56a184147a71a17d74e47bfc8');
+      Expect<string>(Str(Response, 'result.skills[2].uri'))
+        .ToBe('skill://team/git-workflow/rebase/SKILL.md');
+    finally
+      Response.Free;
+    end;
+    // The bytes on disk, CRLF and all.
+    Response := Call('resources/read',
+      '"uri":"skill://team/git-workflow/rebase/SKILL.md"');
+    try
+      Expect<string>(Str(Response, 'result.contents[0].text')).ToBe('---' +
+        #13#10 + 'name: rebase' + #13#10 + 'description: Rebase safely' +
+        #13#10 + '---' + #13#10 + 'Never force-push.' + #13#10);
+    finally
+      Response.Free;
+    end;
+    // The raw UTF-8 on the wire, and the advertised size.
+    Line := Send('{"jsonrpc":"2.0","id":9,"method":"skills/get","params":' +
+      '{"uri":"skill://team/acme/billing/refunds/SKILL.md",' + META + '}}');
+    Expect<Boolean>(Pos('"description" : "Process refunds, ' + GRUSSE + '"',
+      Line) > 0).ToBe(True);
+    Response := Call('resources/directory/read',
+      '"uri":"skill://team/git-workflow"');
+    try
+      Expect<string>(Str(Response, 'result.resources[4].uri'))
+        .ToBe('skill://team/git-workflow/templates');
+      Expect<string>(Str(Response, 'result.resources[4].mimeType'))
+        .ToBe('inode/directory');
+    finally
+      Response.Free;
+    end;
+    Response := Call('resources/directory/read',
+      '"uri":"skill://team/git-workflow/templates"');
+    try
+      Expect<Integer>(TJSONArray(Response.FindPath('result.resources')).Count)
+        .ToBe(0);
+    finally
+      Response.Free;
+    end;
+    Response := Call('resources/read', '"uri":"skill://team/README.md"');
+    try
+      Expect<Integer>(TJSONData(Response.FindPath('error.code')).AsInteger)
+        .ToBe(-32602);
+    finally
+      Response.Free;
+    end;
+  finally
+    RemoveTree(Root);
+  end;
+end;
+
+// A refused tree names its file and line, and registers none of its
+// skills: skills from an earlier call stay as they were.
+procedure TSkillsSuite.TestDirectoryRefused;
+var
+  Root, Message: string;
+  Response: TJSONObject;
+begin
+  RegisterSkill(FServer, 'kept', TJSONObject.Create(['name', 'kept',
+    'description', 'd']), 'Body', []);
+  Root := FreshDir('bad');
+  try
+    WriteFile(Root + '/aaa/SKILL.md', '---' + #10 + 'name: aaa' + #10 +
+      'description: fine' + #10 + '---' + #10);
+    WriteFile(Root + '/aaa/notes.md', 'notes');
+    ForceDirectories(Root + '/aaa/empty');
+    WriteFile(Root + '/bad/SKILL.md', '---' + #10 + 'name: bad' + #10 +
+      'description: yes' + #10 + '---' + #10);
+    Message := DirectoryProblem(FServer, Root);
+    Expect<string>(Message).ToBe('Skill file "' + Root + PathDelim + 'bad' +
+      PathDelim + 'SKILL.md": line 3: "yes" is not a string in every YAML ' +
+      'version; quote it');
+    // The name must match the directory.
+    WriteFile(Root + '/bad/SKILL.md', '---' + #10 + 'name: other' + #10 +
+      'description: fine' + #10 + '---' + #10);
+    Expect<Boolean>(Pos('must equal the last segment',
+      DirectoryProblem(FServer, Root)) > 0).ToBe(True);
+    Response := Call('skills/list', '');
+    try
+      Expect<Integer>(TJSONArray(Response.FindPath('result.skills')).Count)
+        .ToBe(1);
+      Expect<string>(Str(Response, 'result.skills[0].frontmatter.name'))
+        .ToBe('kept');
+    finally
+      Response.Free;
+    end;
+    // Its files and directories went with it (#117 review).
+    Response := Call('resources/read', '"uri":"skill://aaa/notes.md"');
+    try
+      Expect<Integer>(TJSONData(Response.FindPath('error.code')).AsInteger)
+        .ToBe(-32602);
+    finally
+      Response.Free;
+    end;
+    Response := Call('resources/directory/read', '"uri":"skill://aaa/empty"');
+    try
+      Expect<Integer>(TJSONData(Response.FindPath('error.code')).AsInteger)
+        .ToBe(-32602);
+    finally
+      Response.Free;
+    end;
+    // A SKILL.md in the root itself.
+    WriteFile(Root + '/SKILL.md', 'x');
+    Expect<Boolean>(Pos('holds a SKILL.md', DirectoryProblem(FServer, Root)) >
+      0).ToBe(True);
+    Expect<Boolean>(Pos('does not exist', DirectoryProblem(FServer,
+      Root + '/none')) > 0).ToBe(True);
+  finally
+    RemoveTree(Root);
+  end;
+end;
+
+{$IFDEF UNIX}
+// A symbolic link could lead outside the tree: refused.
+procedure TSkillsSuite.TestDirectorySymlink;
+var
+  Root: string;
+  I: Integer;
+begin
+  Root := FreshDir('link');
+  try
+    WriteFile(Root + '/s/SKILL.md', '---' + #10 + 'name: s' + #10 +
+      'description: d' + #10 + '---' + #10);
+    fpSymlink(PChar('/etc/hostname'), PChar(Root + '/s/leak'));
+    Expect<Boolean>(Pos('is a symbolic link', DirectoryProblem(FServer,
+      Root)) > 0).ToBe(True);
+    DeleteFile(Root + '/s/leak');
+    // A root that is a link is refused before anything is read.
+    fpSymlink(PChar(Root + '/s'), PChar(Root + '/linked'));
+    Expect<Boolean>(Pos('is a symbolic link', DirectoryProblem(FServer,
+      Root + '/linked')) > 0).ToBe(True);
+    DeleteFile(Root + '/linked');
+    // A root whose name holds a wildcard is checked as written: a link
+    // named so is refused, the directory itself accepted.
+    CreateDir(Root + '/sk*lls');
+    WriteFile(Root + '/sk*lls/w/SKILL.md', '---' + #10 + 'name: w' + #10 +
+      'description: d' + #10 + '---' + #10);
+    fpSymlink(PChar(Root + '/sk*lls'), PChar(Root + '/l*nk'));
+    // Real directories the pattern l*nk would also match: a check that
+    // reads the name as a pattern finds one of them first, nearly always.
+    for I := 0 to 49 do
+      CreateDir(Root + '/l' + IntToStr(I) + 'nk');
+    Expect<Boolean>(Pos('is a symbolic link', DirectoryProblem(FServer,
+      Root + '/l*nk')) > 0).ToBe(True);
+    Expect<string>(DirectoryProblemAt(FServer, Root + '/sk*lls', 'wild'))
+      .ToBe('');
+    DeleteFile(Root + '/l*nk');
+    // A pipe would block a read: refused.
+    fpMkFifo(PChar(Root + '/s/pipe'), &600);
+    Expect<Boolean>(Pos('is no regular file', DirectoryProblem(FServer,
+      Root)) > 0).ToBe(True);
+    DeleteFile(Root + '/s/pipe');
+    // A directory that cannot be read fails the batch (not as root,
+    // who reads it anyway).
+    if fpGetUID <> 0 then
+    begin
+      ForceDirectories(Root + '/s/locked');
+      fpChmod(Root + '/s/locked', &000);
+      Expect<Boolean>(Pos('cannot be read', DirectoryProblem(FServer,
+        Root)) > 0).ToBe(True);
+      fpChmod(Root + '/s/locked', &700);
+    end;
+  finally
+    RemoveTree(Root);
+  end;
+end;
+{$ENDIF}
+
 // Settings declared first survive the opt-in, as for MCP Apps.
 procedure TSkillsSuite.TestExplicitSettingsKept;
 begin
@@ -818,6 +1202,18 @@ begin
     TestTemplateCannotAddFiles);
   Test('a frontmatter member stored as nil is checked as null',
     TestNilFrontmatterMember);
+  Test('a skills directory: paths, bytes, frontmatter, nested files',
+    TestDirectory);
+  Test('a refused directory names its file and line and adds nothing',
+    TestDirectoryRefused);
+  Test('an enclosing skill''s limit counts nested skills before reading',
+    TestDirectoryEnclosingLimit);
+  Test('a tree below a registered skill counts against its limits',
+    TestDirectoryUnderRegistered);
+  {$IFDEF UNIX}
+  Test('a symbolic link in a skills directory is refused',
+    TestDirectorySymlink);
+  {$ENDIF}
 end;
 
 begin
