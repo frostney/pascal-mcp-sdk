@@ -38,14 +38,16 @@ unit MCP.Transport.HTTP;
 //     client sends the full envelope and headers even on its first
 //     server/discover probe (re-checked 2026-11-26 against
 //     @modelcontextprotocol/client 2.0.0, buildProbeRequest).
-//     Mcp-Param-* headers (#90): on tools/call, every parameter the
-//     tool designates with x-mcp-header (MCP.Server
-//     ToolHeaderParameters) must arrive as Mcp-Param-<name> whose
-//     value, after strict =?base64?...?= decoding, equals the body
-//     value in its wire encoding (strings as they are, integers in
-//     decimal, booleans lowercase); a missing, extra, mismatched,
-//     badly encoded or unencoded non-ASCII header answers 400 with
-//     -32020. Headers for parameters no tool designates are ignored.
+//     Mcp-Param-* headers (#90): on tools/call, for every parameter
+//     the tool designates with x-mcp-header (MCP.Server
+//     ToolHeaderParameters), a non-null body value needs exactly one
+//     Mcp-Param-<name> whose value, after strict =?base64?...?=
+//     decoding, matches it by declared type (strings as they are,
+//     integers numerically, booleans lowercase), and an absent or null
+//     one needs none. A missing, repeated, mismatched, badly encoded or
+//     unencoded non-ASCII header, or one sent for an absent or null
+//     value, answers 400 with -32020. Headers for parameters the tool
+//     does not designate are ignored.
 //     Verified 2026-11-26 against .../basic/transports/streamable-http
 //     #server-behavior-for-custom-headers;
 //   - HTTP status mapping: -32601 → 404 (unknown RPC method, and the
@@ -563,13 +565,19 @@ type
   // (#90 review).
   TMCPHTTPRequest = class(TFPHTTPConnectionRequest)
   private
-    FFieldNames: TStringList;
+    // One entry per Mcp-Param-* field name, ASCII-lowercased: its last
+    // value and how many times it arrived. Other fields are not kept.
+    FParamNames: array of string;
+    FParamValues: array of string;
+    FParamCounts: array of Integer;
+    function ParamIndex(const AKey: string): Integer;
   public
-    constructor Create; override;
-    destructor Destroy; override;
     procedure SetCustomHeader(const AName, AValue: string); override;
-    // How many times a field named AName (any case) arrived.
-    function FieldCount(const AName: string): Integer;
+    // How many times the Mcp-Param-* field AName (any ASCII case)
+    // arrived, and its last value. fcl-web's own lookup compares names
+    // by the locale's rules, so the binding reads these instead.
+    function ParamFieldCount(const AName: string): Integer;
+    function ParamFieldValue(const AName: string): string;
   end;
 
   // TFPHttpServer publishes Port/Threaded/OnRequest but keeps the
@@ -591,34 +599,62 @@ const
   MCP_SO_NOSIGPIPE = $1022;
 {$ENDIF}
 
-constructor TMCPHTTPRequest.Create;
-begin
-  inherited Create;
-  FFieldNames := TStringList.Create;
-end;
+const
+  PARAM_FIELD_PREFIX = 'mcp-param-';
 
-destructor TMCPHTTPRequest.Destroy;
+function TMCPHTTPRequest.ParamIndex(const AKey: string): Integer;
 begin
-  FFieldNames.Free;
-  inherited Destroy;
+  for Result := 0 to High(FParamNames) do
+    if FParamNames[Result] = AKey then
+      Exit;
+  Result := -1;
 end;
 
 procedure TMCPHTTPRequest.SetCustomHeader(const AName, AValue: string);
+var
+  Key: string;
+  Index: Integer;
 begin
-  FFieldNames.Add(LowerCase(AName));
+  // LowerCase folds ASCII only, whatever the locale.
+  Key := LowerCase(AName);
+  if Copy(Key, 1, Length(PARAM_FIELD_PREFIX)) = PARAM_FIELD_PREFIX then
+  begin
+    Index := ParamIndex(Key);
+    if Index < 0 then
+    begin
+      Index := Length(FParamNames);
+      SetLength(FParamNames, Index + 1);
+      SetLength(FParamValues, Index + 1);
+      SetLength(FParamCounts, Index + 1);
+      FParamNames[Index] := Key;
+      FParamCounts[Index] := 0;
+    end;
+    FParamValues[Index] := AValue;
+    Inc(FParamCounts[Index]);
+  end;
   inherited SetCustomHeader(AName, AValue);
 end;
 
-function TMCPHTTPRequest.FieldCount(const AName: string): Integer;
+function TMCPHTTPRequest.ParamFieldCount(const AName: string): Integer;
 var
-  I: Integer;
-  Wanted: string;
+  Index: Integer;
 begin
-  Result := 0;
-  Wanted := LowerCase(AName);
-  for I := 0 to FFieldNames.Count - 1 do
-    if FFieldNames[I] = Wanted then
-      Inc(Result);
+  Index := ParamIndex(LowerCase(AName));
+  if Index < 0 then
+    Result := 0
+  else
+    Result := FParamCounts[Index];
+end;
+
+function TMCPHTTPRequest.ParamFieldValue(const AName: string): string;
+var
+  Index: Integer;
+begin
+  Index := ParamIndex(LowerCase(AName));
+  if Index < 0 then
+    Result := ''
+  else
+    Result := FParamValues[Index];
 end;
 
 function TMCPHTTPListener.CreateRequest: TFPHTTPConnectionRequest;
@@ -851,14 +887,19 @@ end;
 // decoded, equals the body value; a header for an absent or null value
 // does not match either. Verified 2026-11-26 against
 // https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-behavior-for-custom-headers
-// How many times the field AName arrived on ARequest: counted by a
-// TMCPHTTPRequest, else 1 when fcl-web kept it (an empty value counts)
-// and 0 when not.
-function HeaderOccurrences(ARequest: TFPHTTPConnectionRequest;
-  const AName: string): Integer;
+// How many times the Mcp-Param field AName arrived on ARequest, and
+// its value: from a TMCPHTTPRequest (the listener makes every request
+// one), else from fcl-web's own storage, which keeps one value and
+// compares names by the locale.
+function ParamField(ARequest: TFPHTTPConnectionRequest; const AName: string;
+  out AValue: string): Integer;
 begin
   if ARequest is TMCPHTTPRequest then
-    Exit(TMCPHTTPRequest(ARequest).FieldCount(AName));
+  begin
+    AValue := TMCPHTTPRequest(ARequest).ParamFieldValue(AName);
+    Exit(TMCPHTTPRequest(ARequest).ParamFieldCount(AName));
+  end;
+  AValue := ARequest.GetFieldByName(AName);
   if ARequest.CustomHeaders.IndexOfName(AName) >= 0 then
     Result := 1
   else
@@ -884,7 +925,7 @@ begin
     // Presence, not value: an empty field is present (the empty string's
     // header), and a repeated one is refused, since an intermediary may
     // have routed on another occurrence (#90 review).
-    Occurrences := HeaderOccurrences(ARequest, HeaderName);
+    Occurrences := ParamField(ARequest, HeaderName, Raw);
     if Occurrences > 1 then
     begin
       AFailure := 'Header mismatch: ' + HeaderName + ' header sent more ' +
@@ -907,7 +948,6 @@ begin
     end;
     // fcl-web has already trimmed the value's edges; what is left is
     // checked as the client sent it.
-    Raw := ARequest.GetFieldByName(HeaderName);
     if SentinelPayload(Raw, Payload) then
     begin
       if not StrictBase64(Payload, Decoded) then

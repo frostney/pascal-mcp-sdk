@@ -141,11 +141,13 @@ validates the arguments.
 
 Over Streamable HTTP the client then sends `Mcp-Param-Region:
 us-west1` with the call, and the server checks that the header matches
-the body. For each header the called tool designates, the call is
-refused with HTTP 400 and `-32020` when the header is missing, sent
-more than once, different from the body, or sent while the argument
-is absent or `null`; `Mcp-Param-*` headers the tool does not designate
-are ignored, as the spec asks. An empty header is the empty string's,
+the body. For each header the called tool designates: an argument with
+a non-null value needs its header exactly once, and an absent or
+`null` argument needs none. The call is refused with HTTP 400 and
+`-32020` when a needed header is missing, sent more than once or
+different from the body, or when a header comes for an absent or
+`null` argument. `Mcp-Param-*` headers the tool does not designate are
+ignored, as the spec asks. Header names match in any ASCII case. An empty header is the empty string's,
 and integers compare as numbers within the JavaScript safe range, so a
 body `42.0` matches a header `42`. The comparison goes by the declared
 type: a body value of another type, or an array or object, never

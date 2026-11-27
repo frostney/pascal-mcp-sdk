@@ -830,6 +830,12 @@ begin
   Expect<Boolean>(Pos('sent more than once', Body) > 0).ToBe(True);
   Expect<Integer>(PostRoutedRaw('{"region":"eu"}', 'Mcp-Param-Region: eu',
     Body)).ToBe(200);
+  // Names match in ASCII case for presence and value alike (an I/i pair
+  // compares by the locale in fcl-web's own lookup, e.g. under tr_TR).
+  Expect<Integer>(PostRoutedRaw('{"opts":{"limit":3}}',
+    'MCP-PARAM-LIMIT: 3', Body)).ToBe(200);
+  Expect<Integer>(PostRoutedRaw('{"opts":{"limit":3}}',
+    'mcp-param-limit: 3'#13#10'MCP-PARAM-LIMIT: 3', Body)).ToBe(400);
 end;
 
 // Integers compare numerically within the JavaScript safe range;
