@@ -359,6 +359,7 @@ type
     procedure TestElicitationUndeclared;
     procedure TestToolEnabledSampling;
     procedure TestUnknownModes;
+    procedure TestUtf8MemberRefusal;
   end;
 
   // requestState sealing (#89): what reaches the client is a token,
@@ -5034,6 +5035,10 @@ end;
 
 { ───────── input request members (#108) ───────── }
 
+const
+  // "fråga", raw UTF-8 bytes.
+  ASK_UTF8 = 'fr' + #$C3#$A5 + 'ga';
+
 // One input request per call, picked by the "kind" argument.
 function AskHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
@@ -5081,6 +5086,8 @@ begin
   inherited BeforeEach;
   FServer.RegisterTool('ask', 'Asks one kind of input',
     '{"type":"object","properties":{"kind":{"type":"string"}}}', AskHandler);
+  FServer.RegisterTool(ASK_UTF8, 'Asks, under a non-ASCII name',
+    '{"type":"object","properties":{"kind":{"type":"string"}}}', AskHandler);
 end;
 
 function TInputMembers.Ask(const AKind, ACapabilities: string): string;
@@ -5092,10 +5099,36 @@ begin
     Result);
 end;
 
+// Sent as the handler built it: the interim result carries the entry.
 procedure TInputMembers.ExpectSent(const AKind, ACapabilities: string);
+var
+  Response: TJSONObject;
+  Method: string;
 begin
-  Expect<Boolean>(Pos('"resultType" : "input_required"',
-    Ask(AKind, ACapabilities)) > 0).ToBe(True);
+  Response := TJSONObject(GetJSON(Ask(AKind, ACapabilities)));
+  try
+    Expect<string>(TJSONData(Response.FindPath('result.resultType')).AsString)
+      .ToBe('input_required');
+    if (AKind = 'form') or (AKind = 'bare') or (AKind = 'url') then
+      Method := 'elicitation/create'
+    else
+      Method := 'sampling/createMessage';
+    Expect<string>(TJSONData(Response.FindPath('result.inputRequests.q.method'))
+      .AsString).ToBe(Method);
+    if AKind = 'url' then
+      Expect<string>(TJSONData(Response.FindPath(
+        'result.inputRequests.q.params.url')).AsString)
+        .ToBe('https://example.com/sign-in');
+    if AKind = 'tools' then
+      Expect<string>(TJSONData(Response.FindPath(
+        'result.inputRequests.q.params.tools[0].name')).AsString).ToBe('t');
+    if AKind = 'choice' then
+      Expect<string>(TJSONData(Response.FindPath(
+        'result.inputRequests.q.params.toolChoice.mode')).AsString)
+        .ToBe('none');
+  finally
+    Response.Free;
+  end;
 end;
 
 // The exact -32021 error member: AName in the message, AData as the
@@ -5130,6 +5163,22 @@ begin
   ExpectRefused('url', EMPTY, 'elicitation.url', NEEDS_URL);
   ExpectSent('form', BOTH);
   ExpectSent('url', BOTH);
+end;
+
+// The member refusal keeps a non-ASCII subject name byte-exact.
+procedure TInputMembers.TestUtf8MemberRefusal;
+var
+  Line: string;
+begin
+  Dispatch('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{' +
+    '"name":"' + ASK_UTF8 + '","arguments":{"kind":"url"},"_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":' +
+    '{"elicitation":{"form":{}}}}}}', Line);
+  Expect<string>(Line).ToBe('{ "jsonrpc" : "2.0", "id" : 1, "error" : ' +
+    '{ "code" : -32021, "message" : "Tool \"' + ASK_UTF8 + '\" requires ' +
+    'the client capability \"elicitation.url\"", "data" : ' +
+    '{ "requiredCapabilities" : { "elicitation" : { "url" : {} } } } } }');
 end;
 
 // Without elicitation at all, a form request needs just the capability
@@ -5183,6 +5232,8 @@ begin
     TestToolEnabledSampling);
   Test('an elicitation mode other than form or url → -32603',
     TestUnknownModes);
+  Test('a member refusal keeps a non-ASCII tool name byte-exact',
+    TestUtf8MemberRefusal);
 end;
 
 { ───────── subset validation (#23) ───────── }

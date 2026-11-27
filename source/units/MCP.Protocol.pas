@@ -251,15 +251,18 @@ function IsExtensionId(const AId: string): Boolean;
 // capability an input request needs, the ones a request lacks, and the
 // automatic -32021 for them.
 
-// AInputRequests is borrowed.
-// '' when every inputRequests entry names a kind the client declared,
-// with the member of that capability it needs; otherwise the first
-// missing capability, and in AMissingMember the member it lacks, or ''
-// when the capability alone is missing and enough. AUnknownKind carries the
-// method of an entry that is not an MRTR kind at all, and stays
-// non-empty for a malformed entry too — one that is not an object, or
-// carries no string "method" — so callers can keep testing it with a
-// single `<> ''` guard and never emit such a map on the wire.
+// AInputRequests is borrowed. Entries are checked in order and the
+// first problem wins. '' when every entry names a kind the client
+// declared, with the member of that capability it needs (an
+// elicitation mode, sampling.tools for a request with tools or
+// toolChoice); otherwise the first missing capability, and in
+// AMissingMember the member it lacks, or '' when the capability alone
+// is missing and enough. AUnknownKind carries the method of an entry
+// that is not an MRTR kind at all, and stays non-empty for a malformed
+// entry too — one that is not an object, carries no string "method",
+// or asks for an elicitation mode other than form or url — so callers
+// can keep testing it with a single `<> ''` guard and never emit such
+// a map on the wire.
 function MissingInputCapability(AInputRequests: TJSONObject;
   const ACtx: TMCPRequestContext; out AUnknownKind,
   AMissingMember: string): string;
@@ -626,7 +629,7 @@ end;
 function MembersAreObjects(AObject: TJSONObject;
   const AFields: array of string): Boolean;
 var
-  I: Integer;
+  I, Position: Integer;
 begin
   if Length(AFields) = 0 then
   begin
@@ -635,10 +638,14 @@ begin
         Exit(False);
     Exit(True);
   end;
+  // By key, so a typed member stored as nil (written as null) fails the
+  // shape, as a parsed null does (#108 review).
   for I := 0 to High(AFields) do
-    if (AObject.IndexOfName(AFields[I]) >= 0) and
-      not IsJSONObjectValue(AObject.Elements[AFields[I]]) then
+  begin
+    Position := MemberPosition(AObject, AFields[I]);
+    if (Position >= 0) and not IsJSONObjectValue(AObject.Items[Position]) then
       Exit(False);
+  end;
   Result := True;
 end;
 
@@ -795,13 +802,7 @@ begin
     AMember := 'tools';
 end;
 
-// '' when every inputRequests entry names a kind the client declared;
-// otherwise the first missing capability. AUnknownKind carries the
-// method of an entry that is not an MRTR kind at all, and stays
-// non-empty for a malformed entry too — one that is not an object,
-// carries no string "method", or asks for an elicitation mode that
-// does not exist — so callers can keep testing it with a single `<> ''`
-// guard and never emit such a map on the wire.
+// The contract is at the declaration.
 function MissingInputCapability(AInputRequests: TJSONObject;
   const ACtx: TMCPRequestContext; out AUnknownKind,
   AMissingMember: string): string;

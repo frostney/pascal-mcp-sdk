@@ -378,6 +378,19 @@ begin
   // neither it nor sampling.
   Expect<string>(Members('2026-07-28', '{"sampling":{"tools":true}}'))
     .ToBe('fut');
+  // A typed member stored as nil goes out as null, which the schema
+  // refuses, so it declares neither the member nor the capability.
+  Ctx := Default(TMCPRequestContext);
+  Ctx.ProtocolVersion := '2026-07-28';
+  Ctx.ClientCapabilities := ParseObj('{"sampling":{}}');
+  try
+    TJSONObject(Ctx.ClientCapabilities.Find('sampling')).Add('tools',
+      TJSONData(nil));
+    Expect<Boolean>(Ctx.HasSubCapability('sampling', 'tools')).ToBe(False);
+    Expect<Boolean>(Ctx.HasCapability('sampling')).ToBe(False);
+  finally
+    Ctx.ClientCapabilities.Free;
+  end;
   // Classic clients count by presence, but false declares no mode.
   Expect<string>(Members('2025-11-25', '{"elicitation":false}')).ToBe('fut');
   Expect<string>(Members('2025-11-25', '{"elicitation":{}}')).ToBe('Fut');

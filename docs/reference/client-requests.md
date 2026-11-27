@@ -77,7 +77,8 @@ The refusal names what is missing, as in
 request to a client without elicitation names just `elicitation`,
 since its empty object would do. An elicitation `mode` other than
 `form` or `url` is the handler's mistake and answers `-32603`, as an
-unknown request kind does. To pick a mode before asking, a handler
+unknown request kind does. Entries are checked in order, and the first
+problem decides the answer. To pick a mode before asking, a handler
 checks `ACtx.HasSubCapability('elicitation', 'url')`.
 
 ## Reading the responses on re-entry
