@@ -91,6 +91,18 @@ type
     property tags: TStringArray read GetTags write FTags;
   end;
 
+  // Two properties holding one object its constructor made.
+  TProbeShared = class(TMCPArgs)
+  private
+    FFirst: TCountedLimits;
+    FSecond: TCountedLimits;
+  public
+    constructor Create; override;
+  published
+    property first: TCountedLimits read FFirst write FFirst;
+    property second: TCountedLimits read FSecond write FSecond stored False;
+  end;
+
   // A class property that is no TMCPArgs.
   TProbeForeignObject = class(TMCPArgs)
   private
@@ -1366,6 +1378,13 @@ begin
   FOpts := TCountedLimits.Create;
 end;
 
+constructor TProbeShared.Create;
+begin
+  inherited Create;
+  FFirst := TCountedLimits.Create;
+  FSecond := FFirst;
+end;
+
 procedure TProbeRefusingSetter.SetOpts(AValue: TCountedLimits);
 begin
   raise EMCPSchema.Create('setter refuses');
@@ -1376,16 +1395,6 @@ begin
   Result := Copy(FTags);
 end;
 
-function SchemaRaises(ASchema: TMCPSchema): Boolean;
-begin
-  Result := False;
-  try
-    ASchema.Build.Free;
-  except
-    on E: EMCPSchema do
-      Result := True;
-  end;
-end;
 
 procedure TNestedSchemas.TestBuilderGuards;
 var
@@ -1580,6 +1589,26 @@ begin
   Instance.Free;
 end;
 
+procedure SerializeForeignObject;
+var
+  Probe: TProbeForeignObject;
+begin
+  Probe := TProbeForeignObject.Create;
+  try
+    MCPSerialize(Probe).Free;
+  finally
+    Probe.Free;
+  end;
+end;
+
+procedure BindSetterBacked;
+var
+  Instance: TMCPArgs;
+begin
+  BindJson(TProbeRefusingSetter, '{"opts":{"limit":2,"tags":[]}}', Instance);
+  Instance.Free;
+end;
+
 procedure BindForeignObject;
 var
   Instance: TMCPArgs;
@@ -1598,6 +1627,10 @@ begin
   Expect<Boolean>(Raises(SerializeBadArray)).ToBe(True);
   Expect<Boolean>(Raises(BindBadArray)).ToBe(True);
   Expect<Boolean>(Raises(BindForeignObject)).ToBe(True);
+  // Serialization checks the class too, instead of leaving it out.
+  Expect<Boolean>(Raises(SerializeForeignObject)).ToBe(True);
+  // A nested object behind a setter method is refused like an array.
+  Expect<Boolean>(Raises(BindSetterBacked)).ToBe(True);
 end;
 
 // The bound child replaces the one the constructor made, which is
@@ -1614,14 +1647,59 @@ begin
   Expect<Integer>(TProbeOwned(Instance).opts.limit).ToBe(2);
   Instance.Free;
   Expect<Integer>(CountedLive).ToBe(Before);
-  try
-    BindJson(TProbeRefusingSetter, '{"opts":{"limit":2,"tags":[]}}',
-      Instance);
-  except
-    on E: EMCPSchema do
-      ;
-  end;
+  // A child two properties hold: kept while the other holds it, and
+  // freed once at the end.
+  Expect<string>(BindJson(TProbeShared, '{"first":{"limit":3,"tags":[]}}',
+    Instance)).ToBe('');
+  Expect<Integer>(TProbeShared(Instance).first.limit).ToBe(3);
+  Expect<Integer>(TProbeShared(Instance).second.limit).ToBe(0);
+  Instance.Free;
   Expect<Integer>(CountedLive).ToBe(Before);
+end;
+
+// Binds AArguments (consumed) to AClass; '' on success, else the error.
+function BindBuilt(AClass: TMCPArgsClass; AArguments: TJSONObject): string;
+var
+  Instance: TMCPArgs;
+begin
+  try
+    if MCPBindArguments(AClass, AArguments, Instance, Result) then
+    begin
+      Result := '';
+      Instance.Free;
+    end;
+  finally
+    AArguments.Free;
+  end;
+end;
+
+function BuiltNested: TJSONObject;
+begin
+  Result := TJSONObject(GetJSON('{"name":"n","scores":[],"flags":[],' +
+    '"counts":[],"opts":{"limit":1,"tags":[]}}'));
+end;
+
+function BuiltWithNilExtra: TJSONObject;
+begin
+  Result := BuiltNested;
+  Result.Add('extra', TJSONData(nil));
+end;
+
+function BuiltWithNilTag: TJSONObject;
+var
+  Tags: TJSONArray;
+begin
+  Tags := TJSONArray.Create;
+  Tags.Add(TJSONData(nil));
+  Result := TJSONObject.Create;
+  Result.Add('limit', 1);
+  Result.Add('tags', Tags);
+end;
+
+function BuiltWithNaNScore: TJSONObject;
+begin
+  Result := BuiltNested;
+  TJSONArray(Result.Find('scores')).Add(TJSONFloatNumber.Create(NaN));
 end;
 
 procedure TNestedSchemas.TestNullNestedAndIntegralFloats;
@@ -1643,6 +1721,14 @@ begin
     Instance)).ToBe('');
   Expect<Integer>(TProbeLimits(Instance).limit).ToBe(7);
   Instance.Free;
+  // Built values: a member and an item stored as nil are nulls, and a
+  // NaN is no number; each fails with its path instead of slipping by.
+  Expect<string>(BindBuilt(TProbeNested, BuiltWithNilExtra))
+    .ToBe('Argument "extra" must be an object');
+  Expect<string>(BindBuilt(TProbeLimits, BuiltWithNilTag))
+    .ToBe('Argument "tags[0]" must be a string');
+  Expect<string>(BindBuilt(TProbeNested, BuiltWithNaNScore))
+    .ToBe('Argument "scores[0]" must be a number');
 end;
 
 procedure DefaultOnArray;

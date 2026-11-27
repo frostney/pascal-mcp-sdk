@@ -3,10 +3,10 @@
 ## Executive Summary
 
 Tool schemas are written in Pascal, not JSON. The fluent builder
-(`ObjectSchema.AddString(...)`) covers the flat object schemas most
-tools need; **argument classes** (`TMCPArgs` descendants) go further —
-the class *is* the schema, expanded via RTTI, and your handler
-receives a populated, validated instance. Richer schemas use the raw
+(`ObjectSchema.AddString(...)`) covers scalars, enums, defaults,
+arrays and nested objects; **argument classes** (`TMCPArgs`
+descendants) go further — the class *is* the schema, expanded via
+RTTI, and your handler receives a populated, validated instance. Richer schemas use the raw
 JSON-string or definition-object overloads, validated at registration
 against the subset the server can enforce.
 
@@ -124,13 +124,16 @@ type
   end;
 ```
 
-The instance owns its nested objects and frees them; binding replaces
-one your constructor made, freeing it, and an optional one the client
-left out is `nil` (an explicit `null` is refused, as the schema says
-`object`). Array properties must read and write a field (`read FTags
-write FTags`), not a method. Integer properties and elements accept a
-number with no fractional part (`2.0`), as the schema subset does.
-Classes nest at most 16 levels. Binding errors name the path, such as
+The instance owns its nested objects and frees them. Array and nested
+object properties must read and write a field (`read FTags write
+FTags`), not a method. Binding replaces a nested object your
+constructor made, freeing it unless another property still holds it;
+an optional nested property the client left out keeps what your
+constructor put there, which is `nil` unless it made one. An explicit
+`null` is refused, as the schema says `object`. Integer properties and
+elements accept a number with no fractional part (`2.0`), as the
+schema subset does. `SchemaFrom`, binding and `MCPSerialize` all stop
+at 16 levels of nesting. Binding errors name the path, such as
 `Argument "page.size" must be an integer`.
 
 **Optionality** uses the standard property directives:
