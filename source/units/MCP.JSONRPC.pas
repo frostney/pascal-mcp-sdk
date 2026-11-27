@@ -99,6 +99,13 @@ function BuildNotification(const AMethod: string;
 function BuildErrorResponse(AId: TJSONData; ACode: Integer;
   const AMessage: string; AData: TJSONData = nil): string;
 
+// Parses JSON text exactly as HandleMessage does: refuses text that is
+// not UTF-8 and decodes non-ASCII \u escapes before fpjson sees them
+// (its FPC 3.2.2 scanner mishandles adjacent ones). Raises EJSONParser
+// on malformed text; the result is the caller's. For code that builds
+// requests for the core, such as MCP.Testing (#97 review).
+function MCPParseJSON(const AText: string): TJSONData;
+
 // Compact single-line serialization (fpjson escapes embedded newlines,
 // which is what keeps the stdio framing invariant).
 function SerializeCompact(AData: TJSONData): string;
@@ -297,6 +304,11 @@ begin
   finally
     Parser.Free;
   end;
+end;
+
+function MCPParseJSON(const AText: string): TJSONData;
+begin
+  Result := ParseJson(AText);
 end;
 
 function Invalid(var AMessage: TJSONRPCMessage; ACode: Integer;

@@ -343,8 +343,10 @@ function OversizedLineResponse(AMaxLineLength: Integer): string;
 ```
 
 `CreateSession` / `HandleMessage` are the line-in/line-out core the
-transports wrap — only custom transport authors call these directly
-(see [Architecture](../internals/architecture.md#the-sans-io-core)).
+transports wrap — custom transport authors call these directly
+(see [Architecture](../internals/architecture.md#the-sans-io-core)), and
+so does a test that hand-writes a line; for everything else in a test,
+the [test client](test-client.md) builds the requests.
 
 A transport that can learn of a cancellation while a handler runs
 installs a poll on the session (#93):
