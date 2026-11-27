@@ -31,7 +31,8 @@ function MCPContentResult(const ABlocks: array of TJSONObject): TMCPToolResult;
 - `MCPErrorResult` — the same shape with `isError: true`: the in-band
   error channel a model reads and corrects against. Use it for
   everything the *caller* did wrong; reserve exceptions for what went
-  wrong *in the server* (they become `isError` results too, with
+  wrong *in the server* (they become `isError` results too, except an
+  `EMCPProtocolError`, which answers with its JSON-RPC error; with
   messages subject to
   [redaction](../guides/configuration.md#redacterrordetails)).
 - `MCPStructuredResult` — text plus `structuredContent`, which can be

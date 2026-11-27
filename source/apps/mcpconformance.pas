@@ -136,6 +136,16 @@ begin
       'text/plain', 'Caf' + #$C3#$A9 + ' ' + #$F0#$9F#$98#$80)]);
 end;
 
+// Not in the reference fixture: a deliberate JSON-RPC error raised by
+// a handler (EMCPProtocolError), with an application code and data.
+function FixtureProtocolError(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := Default(TMCPToolResult);
+  raise EMCPProtocolError.Create(4290, 'Quota exhausted: ' + #$E2#$82#$AC + '0 left',
+    JSONObjectOf('{"retryAfterSeconds":60}'));
+end;
+
 // Non-object structured output (#91, not a suite scenario): an array
 // of UTF-8 strings, sent with its JSON as the text block.
 function FixtureArrayOutput(AArguments: TJSONObject;
@@ -555,7 +565,7 @@ type
 
 const
   // Every tool without arguments, under the reference fixture's names.
-  ARGUMENTLESS_TOOLS: array[0..19] of TArgumentlessTool = (
+  ARGUMENTLESS_TOOLS: array[0..20] of TArgumentlessTool = (
     (Name: 'test_simple_text';
      Description: 'Tests simple text content response'; Handler: SimpleText),
     (Name: 'test_image_content';
@@ -568,6 +578,9 @@ const
     (Name: 'fixture_resource_link';
      Description: 'Returns text and a resource link (not a suite scenario)';
      Handler: FixtureResourceLink),
+    (Name: 'fixture_protocol_error';
+     Description: 'Refuses with a JSON-RPC error of its own (not a suite scenario)';
+     Handler: FixtureProtocolError),
     (Name: 'test_multiple_content_types';
      Description: 'Tests response with multiple content types (text, image, resource)';
      Handler: MultipleContentTypes),

@@ -314,6 +314,18 @@ begin
       'content: prompt message with an embedded resource and its MIME type');
     Response.Free;
 
+    // A handler's deliberate JSON-RPC error (#88) reaches stdout with its
+    // code, message and data.
+    Response := RoundTripWithLine(Fixture,
+      '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{' +
+      '"name":"fixture_protocol_error",' + META_MODERN + '}}', ResponseLine);
+    Check((PathInt(Response, 'error.code') = 4290) and
+      (Pos('"message" : "Quota exhausted: ' + #$E2#$82#$AC + '0 left"',
+      ResponseLine) > 0) and
+      (PathInt(Response, 'error.data.retryAfterSeconds') = 60),
+      'content: handler-raised protocol error, code, message and data');
+    Response.Free;
+
     // The fixture's ApplicationValidated tools check their own arguments.
     Response := RoundTrip(Fixture,
       '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{' +
