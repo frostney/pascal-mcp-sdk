@@ -50,15 +50,23 @@ RegisterSkill(Server, 'git-workflow',
   blob, and the digest always covers the raw bytes.
 
 Paths use letters, digits, `-`, `.`, `_` and `~` in `/`-separated
-segments. A path or field the specifications refuse, a URI that is
-already served, and a skill over the limits hosts accept (512 files
-or 16 MiB, counting the files of skills nested in it) raise
-`EMCPServer` at registration.
+segments. These raise `EMCPServer` at registration and leave the
+server as it was:
+
+- a path or field the specifications refuse;
+- files that clash: the same URI twice, or one file under another;
+- a URI that is already served;
+- a skill over the limits hosts accept: 512 files or 16 MiB, counting
+  its `SKILL.md` and the files of skills nested in it.
+
+A resource you register yourself under `skill://` fails startup, since
+it would hide a skill file.
 
 ## What the server serves
 
 The first `RegisterSkill` call declares the extension with
-`directoryRead` and the `resources` capability. It then serves:
+`directoryRead`, unless you declared it first (see
+[Settings](#settings)), and the `resources` capability. It then serves:
 
 - `skills/list`: every skill's entry, its frontmatter and the
   `uri`, `digest` and `size` of each of its files, paged with

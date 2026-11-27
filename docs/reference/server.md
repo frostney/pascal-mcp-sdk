@@ -24,7 +24,7 @@ is created, and later mutation raises `EMCPServer`.
 | `CacheScope` | `string` | `'private'` | SEP-2549 `cacheScope`; `'private'` or `'public'` |
 | `RedactErrorDetails` | `Boolean` | `False` | `True` replaces escaped exception detail with a correlation reference, logging the full error to stderr; deliberate errors (`MCPErrorResult`, `EMCPProtocolError`) are sent as written |
 | `DualEra` | `Boolean` | `True` | Answer the classic `initialize` handshake alongside stateless 2026-07-28 requests |
-| `PageSize` | `Integer` | `0` | Entries per page of `tools/list`, `resources/list`, `resources/templates/list` and `prompts/list`, with a `nextCursor` while more remain; `0` lists everything at once |
+| `PageSize` | `Integer` | `0` | Entries per page of `tools/list`, `resources/list`, `resources/templates/list` and `prompts/list`, and of `skills/list` and `resources/directory/read` from `MCP.Skills`, with a `nextCursor` while more remain; `0` lists everything at once |
 | `RequestStateTtlMs` | `Integer` | `600000` | Lifetime of a sealed `requestState` token; must be > 0 |
 | `SetRequestStateKeys(Keys)` | method | random per server instance | HMAC keys for `requestState` sealing, each ≥ 32 bytes; the first seals, all verify |
 | `Name`, `Version` | `string` | — | Read-only, from `Create` |
@@ -279,8 +279,9 @@ methods.
 
 `server/discover` and the classic `initialize` declare a capability
 for each kind of thing registered: `tools` when there is a tool,
-`resources` when there is a resource or template, `prompts` when there
-is a prompt, `completions` when there is a completion.
+`resources` when there is a resource, template or resource resolver
+(such as the one `MCP.Skills` adds), `prompts` when there is a prompt,
+`completions` when there is a completion.
 
 ### x-mcp-header parameters
 
@@ -298,12 +299,16 @@ to validate the headers; a custom transport can too. See
 
 ```pascal
 procedure DeclareExtension(const AId: string; ASettings: TJSONObject = nil);
-procedure EnsureExtension(const AId: string; ASettings: TJSONObject = nil);
+procedure EnsureExtension(const AId: string); overload;
+procedure EnsureExtension(const AId: string; ASettings: TJSONObject);
+  overload;
 procedure SetResourceContentMeta(const AUri: string; AMeta: TJSONObject);
 procedure RegisterMethod(const AMethod: string; AHandler: TMCPMethodHandler;
   ACacheable: Boolean = False);
 procedure RegisterResourceResolver(const AUriPrefix: string;
   AResolver: TMCPResourceResolver);
+function HookProblem(const AMethods: array of string;
+  const AUriPrefix: string): string;
 procedure Adopt(AObject: TObject);
 function Adopted(AClass: TClass): TObject;
 // on TMCPToolOptions:
@@ -354,11 +359,17 @@ with `AUriPrefix`, after the registered resources and before the
 templates. Its resources are not listed, its reads carry the
 registry's `ttlMs`, and it makes the server declare the `resources`
 capability. A resolver returns new contents, or `nil` for a URI that
-is none of its resources. Prefixes may not overlap. `Adopt` hands the
+is none of its resources. Prefixes may not overlap, and a registered
+resource under a resolver's prefix fails startup, since it would hide
+what the extension serves there. `Adopt` hands the
 server an object to free after its handlers are gone, such as the
 state those handlers read, and `Adopted` finds the first adopted
-object of a class. Registering after the server started raises
-`EMCPServer`.
+object of a class; adopting the same object again changes nothing.
+`HookProblem` says why registering `AMethods` or `AUriPrefix` would
+fail, or `''`, without changing anything, so an extension can check
+everything before it registers its first hook. Registering or adopting
+after the server started raises `EMCPServer`; a refused `Adopt` frees
+the object.
 
 From `MCP.Apps`, MCP Apps on top of these
 ([Interactive UIs](../guides/mcp-apps.md)):
@@ -416,8 +427,8 @@ function MCPSkillMarkdown(AFrontmatter: TJSONObject;
 | Member | Meaning |
 | --- | --- |
 | `MCPSkillFile` | A supporting file: its path relative to the skill root, its raw bytes, and a media type (`''` picks one from the extension, or `text/plain` for other UTF-8 text and `application/octet-stream` otherwise) |
-| `RegisterSkill` | The skill at `skill://ASkillPath/SKILL.md`, written from `AFrontmatter` (owned, also on failure) and `ABody`, with `AFiles`. The frontmatter's `name` must equal the path's last segment, and the Agent Skills fields are checked. A bad name, path or field, a URI already served, or a skill over `MCP_SKILL_MAX_FILES` or `MCP_SKILL_MAX_BYTES` with its nested skills' files raises `EMCPServer`, as does a call after the server started. The first call declares the extension with `directoryRead` unless it is declared already, and serves `skills/list`, `skills/get`, `resources/directory/read` and the files |
-| `MCPSkillMarkdown` | The `SKILL.md` text `RegisterSkill` writes: a YAML frontmatter block for `AFrontmatter` (borrowed), then `ABody`. Strings are double-quoted with escapes YAML 1.1 and 1.2 share; a fractional number, or a list that holds a list or an object, raises `EMCPServer` |
+| `RegisterSkill` | The skill at `skill://ASkillPath/SKILL.md`, written from `AFrontmatter` (owned, also on failure) and `ABody`, with `AFiles`. The frontmatter's `name` must equal the path's last segment, and the Agent Skills fields are checked. A bad name, path or field, files that clash (the same URI, one under another, or a file with the directory media type), a URI already served, or a skill over `MCP_SKILL_MAX_FILES` or `MCP_SKILL_MAX_BYTES` with its nested skills' files raises `EMCPServer`, as does a call after the server started, and the server is left as it was. The first call declares the extension with `directoryRead` unless it is declared already, and serves `skills/list`, `skills/get`, `resources/directory/read` and the files |
+| `MCPSkillMarkdown` | The `SKILL.md` text `RegisterSkill` writes: a YAML frontmatter block for `AFrontmatter` (borrowed), then `ABody`. Strings are double-quoted with escapes YAML 1.1 and 1.2 share; a fractional number, a key written longer than the 1024 characters YAML parsers read, or text that is not UTF-8 raises `EMCPServer` |
 
 ### The request context
 

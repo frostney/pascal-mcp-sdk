@@ -212,12 +212,16 @@ export default async function HomePage() {
           <Link href="/docs/reference/protocol-coverage" className="underline">
             protocol coverage
           </Link>
-          . Extension negotiation, MCP Apps interactive UIs and Skills are
-          checked
+          . Extension negotiation and MCP Apps interactive UIs are checked
           by the library&apos;s own unit and stdio tests of the wire data
           and the served page, not by a rendering host:{' '}
           <Link href="/docs/guides/mcp-apps" className="underline">
             Interactive UIs →
+          </Link>{' '}
+          Skills are checked the same way, and the demo&apos;s SKILL.md is
+          read back over stdio against its listed digest:{' '}
+          <Link href="/docs/guides/skills" className="underline">
+            Skills →
           </Link>
         </p>
       </section>

@@ -16,6 +16,8 @@ uses
 
   fpjson,
   jsonparser,
+  MCP.JSONRPC,
+  MCP.Protocol,
   MCP.Server,
   MCP.Skills,
   TestingPascalLibrary;
@@ -59,6 +61,16 @@ type
     procedure TestRegistrationGuards;
     procedure TestLimits;
     procedure TestExplicitSettingsKept;
+    procedure TestByteLimit;
+    procedure TestAtomicFirstCall;
+    procedure TestShadowingResource;
+  end;
+
+  // A handler that takes skills/get first.
+  TGuardHandler = class
+  public
+    function Answer(AParams: TJSONObject; const ACtx: TMCPRequestContext;
+      ALegacy: Boolean): TJSONObject;
   end;
 
 function Body(const AText: string): string;
@@ -190,6 +202,19 @@ var
   Response: TJSONObject;
 begin
   RegisterFixture;
+  Expect<string>(Send('{"jsonrpc":"2.0","id":5,"method":"skills/get",' +
+    '"params":{"uri":"skill://acme/billing/refunds/SKILL.md",' + META + '}}'))
+    .ToBe('{ "jsonrpc" : "2.0", "id" : 5, "result" : { "skill" : ' +
+    '{ "uri" : "skill://acme/billing/refunds/SKILL.md", "frontmatter" : ' +
+    '{ "name" : "refunds", "description" : "Process refunds", "license" : ' +
+    '"Apache-2.0" }, "resources" : [' +
+    '{ "uri" : "skill://acme/billing/refunds/SKILL.md", "digest" : "' +
+    DIGEST_REFUNDS + '", "size" : 100 }, ' +
+    '{ "uri" : "skill://acme/billing/refunds/examples/email.md", ' +
+    '"digest" : "' + DIGEST_EMAIL + '", "size" : 15 }] }, ' +
+    '"ttlMs" : 300000, "cacheScope" : "private", "resultType" : "complete", ' +
+    '"_meta" : { "io.modelcontextprotocol/serverInfo" : { "name" : "skills", ' +
+    '"version" : "1.0" } } } }');
   Response := Call('skills/get', '"uri":"skill://acme/billing/refunds/SKILL.md"');
   try
     Expect<string>(Str(Response, 'result.skill.frontmatter.license'))
@@ -342,6 +367,18 @@ begin
   finally
     Response.Free;
   end;
+  Response := Call('resources/directory/read', '"uri":"skill:"');
+  try
+    Expect<string>(Str(Response, 'error.message')).ToBe('Directory not found');
+  finally
+    Response.Free;
+  end;
+  Response := Call('resources/directory/read', '"uri":"skill:/"');
+  try
+    Expect<string>(Str(Response, 'error.message')).ToBe('Directory not found');
+  finally
+    Response.Free;
+  end;
   Response := Call('resources/directory/read', '"uri":"skill://git"');
   try
     Expect<Integer>(TJSONData(Response.FindPath('error.code')).AsInteger)
@@ -435,10 +472,13 @@ begin
   Frontmatter := TJSONObject.Create(['name', 'x', 'description', Text,
     'on', True, 'with space', 3, 'metadata', TJSONObject.Create(['k', 'v']),
     'tags', TJSONArray.Create(['a', 'b']), 'empty', TJSONObject.Create,
-    'none', TJSONNull.Create]);
+    'none', TJSONNull.Create, 'license', '',
+    'examples', TJSONArray.Create([TJSONObject.Create(['title', 's']),
+    TJSONArray.Create([1, 2])])]);
   try
-    // U+FFFE from JSON: a Pascal constant would be converted on the way.
-    Frontmatter.Add('odd', GetJSON('"\uFFFE"'));
+    // U+FFFE and U+2028 from JSON, parsed as the server parses requests:
+    // a Pascal constant or plain GetJSON would convert them on the way.
+    Frontmatter.Add('odd', MCPParseJSON('"\uFFFE\u2028  x"'));
     Expect<string>(MCPSkillMarkdown(Frontmatter, 'Body')).ToBe('---' + #10 +
       'name: "x"' + #10 +
       'description: "a/b \"q\" \\ \u0009\n\u007F\u0085' + #$C3#$A9 + '"' +
@@ -449,7 +489,10 @@ begin
       'tags:' + #10 + '  - "a"' + #10 + '  - "b"' + #10 +
       'empty: {}' + #10 +
       'none: null' + #10 +
-      'odd: "\uFFFE"' + #10 +
+      'license: ""' + #10 +
+      'examples:' + #10 + '  -' + #10 + '    title: "s"' + #10 +
+      '  -' + #10 + '    - 1' + #10 + '    - 2' + #10 +
+      'odd: "\uFFFE\u2028  x"' + #10 +
       '---' + #10 + 'Body');
   finally
     Frontmatter.Free;
@@ -458,6 +501,16 @@ end;
 
 var
   GuardServer: TMCPServer;
+  GuardHandler: TGuardHandler;
+
+function TGuardHandler.Answer(AParams: TJSONObject;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+begin
+  Result := TJSONObject.Create;
+end;
+
+var
+  GuardBody: string = 'Body';
 
 function Refused(const APath, AFrontmatter: string;
   const AFiles: array of TMCPSkillFile): Boolean;
@@ -465,7 +518,7 @@ begin
   Result := False;
   try
     RegisterSkill(GuardServer, APath, TJSONObject(GetJSON(AFrontmatter)),
-      'Body', AFiles);
+      GuardBody, AFiles);
   except
     on E: EMCPServer do
       Result := True;
@@ -497,8 +550,24 @@ begin
       '"metadata":{"n":1}}', [])).ToBe(True);
     Expect<Boolean>(Refused('ok', '{"name":"ok","description":"d",' +
       '"score":1.5}', [])).ToBe(True);
-    Expect<Boolean>(Refused('ok', '{"name":"ok","description":"d",' +
-      '"list":[{"a":1}]}', [])).ToBe(True);
+    // fpjson keeps keys to 255 characters, but escapes write each control
+    // character as six: 200 of them pass the 1024 YAML parsers read.
+    Expect<Boolean>(Refused('ok', '{"name":"ok","description":"d","' +
+      StringReplace(StringOfChar('!', 200), '!', '\u0001', [rfReplaceAll]) +
+      '":"v"}', [])).ToBe(True);
+    // Files that clash among themselves or claim the directory type.
+    Expect<Boolean>(Refused('ok', OK, [MCPSkillFile('refs', 'x'),
+      MCPSkillFile('refs/guide.md', 'y')])).ToBe(True);
+    Expect<Boolean>(Refused('ok', OK, [MCPSkillFile('SKILL.md/guide.md',
+      'y')])).ToBe(True);
+    Expect<Boolean>(Refused('ok', OK, [MCPSkillFile('d', 'x',
+      'inode/directory')])).ToBe(True);
+    // SKILL.md is text a host parses.
+    // A lone $FF byte, set at run time: a constant would be converted.
+    GuardBody := 'Bad x';
+    GuardBody[5] := Chr($FF);
+    Expect<Boolean>(Refused('ok', OK, [])).ToBe(True);
+    GuardBody := 'Body';
     Expect<Boolean>(Refused('a b/ok', OK, [])).ToBe(True);
     Expect<Boolean>(Refused('../ok', OK, [])).ToBe(True);
     Expect<Boolean>(Refused('ok', OK, [MCPSkillFile('../x.md', 'x')]))
@@ -551,6 +620,76 @@ begin
   Expect<Boolean>(Pos('Skill not found', Line) > 0).ToBe(True);
 end;
 
+// 16 MiB, the generated SKILL.md counted: one byte over is refused.
+procedure TSkillsSuite.TestByteLimit;
+const
+  // '---\nname: "big"\ndescription: "d"\n---\nBody'
+  SKILL_MD_BYTES = 41;
+begin
+  RegisterSkill(FServer, 'big', TJSONObject.Create(['name', 'big',
+    'description', 'd']), 'Body', [MCPSkillFile('blob.bin',
+    StringOfChar('x', MCP_SKILL_MAX_BYTES - SKILL_MD_BYTES))]);
+  GuardServer := FServer;
+  try
+    Expect<Boolean>(Refused('big2', '{"name":"big2","description":"d"}',
+      [MCPSkillFile('blob.bin', StringOfChar('x', MCP_SKILL_MAX_BYTES -
+      SKILL_MD_BYTES + 1))])).ToBe(True);
+  finally
+    GuardServer := nil;
+  end;
+end;
+
+// A refused first call installs nothing, and a later valid one works.
+procedure TSkillsSuite.TestAtomicFirstCall;
+var
+  Line: string;
+begin
+  GuardServer := FServer;
+  try
+    Expect<Boolean>(Refused('Bad', '{"name":"Bad","description":"d"}', []))
+      .ToBe(True);
+    Line := Send('{"jsonrpc":"2.0","id":1,"method":"server/discover",' +
+      '"params":{' + META + '}}');
+    Expect<Boolean>(Pos(MCP_SKILLS_EXTENSION, Line) = 0).ToBe(True);
+    FreeAndNil(FSession);
+    FreeAndNil(FServer);
+    // A method the hooks already serve blocks the whole setup.
+    FServer := TMCPServer.Create('skills', '1.0');
+    GuardServer := FServer;
+    FServer.RegisterMethod('skills/get', GuardHandler.Answer);
+    Expect<Boolean>(Refused('ok', '{"name":"ok","description":"d"}', []))
+      .ToBe(True);
+    Line := Send('{"jsonrpc":"2.0","id":2,"method":"skills/list",' +
+      '"params":{' + META + '}}');
+    Expect<Boolean>(Pos('"code" : -32601', Line) > 0).ToBe(True);
+    Expect<Boolean>(Pos(MCP_SKILLS_EXTENSION, Send('{"jsonrpc":"2.0","id":3,' +
+      '"method":"server/discover","params":{' + META + '}}')) = 0).ToBe(True);
+  finally
+    GuardServer := nil;
+  end;
+end;
+
+// A registered resource under skill:// would shadow a skill file:
+// startup fails, whichever was registered first.
+procedure TSkillsSuite.TestShadowingResource;
+var
+  Message: string;
+begin
+  FServer.RegisterTextResource('skill://x/SKILL.md', 'x', 'text/markdown',
+    'shadow');
+  RegisterSkill(FServer, 'x', TJSONObject.Create(['name', 'x',
+    'description', 'd']), 'Body', []);
+  Message := '';
+  try
+    FServer.CreateSession.Free;
+  except
+    on E: EMCPServer do
+      Message := E.Message;
+  end;
+  Expect<string>(Message).ToBe('Resource "skill://x/SKILL.md" lies under a ' +
+    'URI prefix an extension serves');
+end;
+
 // Settings declared first survive the opt-in, as for MCP Apps.
 procedure TSkillsSuite.TestExplicitSettingsKept;
 begin
@@ -584,9 +723,14 @@ begin
   Test('the file limit counts nested skills', TestLimits);
   Test('explicit extension settings survive the opt-in',
     TestExplicitSettingsKept);
+  Test('the byte limit counts SKILL.md, refusing one byte over',
+    TestByteLimit);
+  Test('a refused first call installs nothing', TestAtomicFirstCall);
+  Test('a resource under skill:// fails startup', TestShadowingResource);
 end;
 
 begin
+  GuardHandler := TGuardHandler.Create;
   TestRunnerProgram.AddSuite(TSkillsSuite.Create('Skills: Skills extension'));
   TestRunnerProgram.Run;
 end.

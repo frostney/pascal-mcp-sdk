@@ -64,6 +64,7 @@ type
     procedure TestResolver;
     procedure TestAdopt;
     procedure TestGuards;
+    procedure TestPreflight;
   end;
 
 var
@@ -230,10 +231,24 @@ begin
   FreedProbes := 0;
   Probe := TFreeProbe.Create;
   FServer.Adopt(Probe);
+  // Adopting again changes nothing: one free.
+  FServer.Adopt(Probe);
   Expect<Boolean>(FServer.Adopted(TFreeProbe) = Probe).ToBe(True);
   Expect<Boolean>(FServer.Adopted(THookFixture) = nil).ToBe(True);
   FreeAndNil(FServer);
   Expect<Integer>(FreedProbes).ToBe(1);
+  // After the server started, adoption is refused and the object freed.
+  FServer := TMCPServer.Create('hooks', '1.0');
+  Send('{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{' +
+    META + '}}');
+  try
+    FServer.Adopt(TFreeProbe.Create);
+  except
+    on E: EMCPServer do
+      ;
+  end;
+  Expect<Integer>(FreedProbes).ToBe(2);
+  Expect<Boolean>(FServer.Adopted(TFreeProbe) = nil).ToBe(True);
 end;
 
 var
@@ -286,6 +301,27 @@ begin
   end;
 end;
 
+// HookProblem names what would be refused, and changes nothing.
+procedure THooksSuite.TestPreflight;
+begin
+  FServer.RegisterResourceResolver('memo://a/', FFixture.Read);
+  Expect<string>(FServer.HookProblem(['example/a', 'example/b'], 'memo://b/'))
+    .ToBe('');
+  Expect<string>(FServer.HookProblem(['example/a', 'example/a'], ''))
+    .ToBe('Method "example/a" is given twice');
+  Expect<string>(FServer.HookProblem(['prompts/get'], ''))
+    .ToBe('"prompts/get" is a core method');
+  Expect<string>(FServer.HookProblem([], 'memo://')).ToBe('URI prefix ' +
+    '"memo://" overlaps "memo://a/"');
+  FServer.RegisterMethod('example/a', FFixture.Echo);
+  Expect<string>(FServer.HookProblem(['example/a'], ''))
+    .ToBe('Method "example/a" is already registered');
+  Send('{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{' +
+    META + '}}');
+  Expect<string>(FServer.HookProblem([], '')).ToBe('Server configuration is ' +
+    'frozen after session creation');
+end;
+
 procedure THooksSuite.TestGuards;
 begin
   GuardServer := FServer;
@@ -322,6 +358,8 @@ begin
   Test('adopted objects are found and freed with the server', TestAdopt);
   Test('core methods, repeats, nil handlers and overlaps are refused',
     TestGuards);
+  Test('HookProblem names a refusal without changing anything',
+    TestPreflight);
 end;
 
 begin

@@ -62,8 +62,8 @@ procedure RegisterSkill(AServer: TMCPServer; const ASkillPath: string;
 // The SKILL.md RegisterSkill writes: a YAML frontmatter block for
 // AFrontmatter (borrowed), then ABody. Strings are double-quoted with
 // only the escapes YAML 1.1 and 1.2 share, so any YAML parser reads the
-// object back; a float, or a list holding a list or an object, raises
-// EMCPServer.
+// object back; a float, a key longer than 1024 characters, or text that
+// is not UTF-8 raises EMCPServer.
 function MCPSkillMarkdown(AFrontmatter: TJSONObject;
   const ABody: string): string;
 
@@ -97,7 +97,7 @@ type
     function FileIndex(const AUri: string): Integer;
     function IsDirectory(const AUri: string): Boolean;
     function SkillEntry(ASkill: Integer): TJSONObject;
-    procedure CheckLimits;
+    procedure CheckLimits(const ARoot: string);
     function SkillsList(AParams: TJSONObject; const ACtx: TMCPRequestContext;
       ALegacy: Boolean): TJSONObject;
     function SkillsGet(AParams: TJSONObject; const ACtx: TMCPRequestContext;
@@ -235,7 +235,8 @@ begin
   if Field.JSONType <> jtString then
     Exit(Format('frontmatter "%s" must be a string', [AName]));
   AValue := Field.AsString;
-  if (AValue = '') or ((AMaxPoints > 0) and
+  // Only the fields with bounds have a length to check.
+  if (AMaxPoints > 0) and ((AValue = '') or
     (CodePoints(AValue) > AMaxPoints)) then
     Result := Format('frontmatter "%s" must be 1 to %d characters',
       [AName, AMaxPoints]);
@@ -279,8 +280,8 @@ begin
 end;
 
 // A YAML double-quoted scalar both YAML 1.1 and 1.2 read back as AText:
-// '"' and '\' escaped, C0 controls, DEL, C1 controls, U+FFFE and U+FFFF
-// as \uXXXX. Checked 2026-11-27 with PyYAML 6.0.1 (YAML 1.1), js-yaml
+// '"' and '\' escaped, C0 controls, DEL, C1 controls, U+2028, U+2029,
+// U+FFFE and U+FFFF as \uXXXX. Checked 2026-11-27 with PyYAML 6.0.1 (YAML 1.1), js-yaml
 // 4.1.0 and yaml 2.6.1 (YAML 1.2).
 // JSON's "\/" is left out, as YAML 1.1 has no such escape.
 function YamlQuoted(const AText: string): string;
@@ -304,6 +305,14 @@ begin
     begin
       Inc(I);
       Result := Result + '\u' + IntToHex(Ord(AText[I]), 4);
+    end
+    // U+2028 and U+2029, which YAML 1.1 reads as line breaks, folding
+    // the indentation after them away (#115 review).
+    else if (C = $E2) and (I + 2 <= Length(AText)) and
+      (Ord(AText[I + 1]) = $80) and (Ord(AText[I + 2]) in [$A8, $A9]) then
+    begin
+      Result := Result + '\u202' + Chr(Ord('8') + Ord(AText[I + 2]) - $A8);
+      Inc(I, 2);
     end
     // U+FFFE and U+FFFF, which YAML does not count as printable either.
     else if (C = $EF) and (I + 2 <= Length(AText)) and
@@ -366,21 +375,31 @@ begin
   end;
 end;
 
+// YAML parsers read an implicit key of at most 1024 characters
+// (YAML 1.2 7.4.2, PyYAML's simple-key limit).
+const
+  MAX_KEY_POINTS = 1024;
+
 procedure WriteYaml(AValue: TJSONData; const AIndent: string;
   var AOut: string);
 var
   I: Integer;
   Item: TJSONData;
+  Key: string;
 begin
   for I := 0 to AValue.Count - 1 do
   begin
     Item := AValue.Items[I];
     if AValue.JSONType = jtObject then
-      AOut := AOut + AIndent + YamlKey(TJSONObject(AValue).Names[I]) + ':'
-    else if (Item.JSONType in [jtObject, jtArray]) and (Item.Count > 0) then
-      raise EMCPServer.Create('Skill frontmatter cannot hold a list of ' +
-        'lists or objects')
+    begin
+      Key := YamlKey(TJSONObject(AValue).Names[I]);
+      if CodePoints(Key) > MAX_KEY_POINTS then
+        raise EMCPServer.CreateFmt('Skill frontmatter key "%s..." is longer ' +
+          'than YAML parsers read', [Copy(Key, 1, 40)]);
+      AOut := AOut + AIndent + Key + ':';
+    end
     else
+      // A list item that is a collection goes below its dash.
       AOut := AOut + AIndent + '-';
     if (Item.JSONType in [jtObject, jtArray]) and (Item.Count > 0) then
     begin
@@ -401,6 +420,10 @@ begin
   Result := '---' + #10;
   WriteYaml(AFrontmatter, '', Result);
   Result := Result + '---' + #10 + ABody;
+  // Hosts parse SKILL.md as text, so it must be UTF-8 (#115 review).
+  if InvalidUTF8Offset(Result) <> 0 then
+    raise EMCPServer.Create('A skill''s frontmatter and body must be UTF-8 ' +
+      'text');
 end;
 
 { ───────── catalog ───────── }
@@ -420,6 +443,12 @@ begin
   inherited Destroy;
 end;
 
+// Whether AUri lies under the directory or file ABase.
+function IsUnder(const AUri, ABase: string): Boolean;
+begin
+  Result := Copy(AUri, 1, Length(ABase) + 1) = ABase + '/';
+end;
+
 function TSkillCatalog.FileIndex(const AUri: string): Integer;
 begin
   for Result := 0 to High(FFiles) do
@@ -429,12 +458,17 @@ begin
 end;
 
 // A directory is any path some file lies under, at a segment boundary.
+// Only a skill:// URI with an authority: "skill:" or "skill:/" would
+// otherwise prefix every file (#115 review).
 function TSkillCatalog.IsDirectory(const AUri: string): Boolean;
 var
   I: Integer;
 begin
+  if (Copy(AUri, 1, Length(SKILL_SCHEME)) <> SKILL_SCHEME) or
+    (Length(AUri) = Length(SKILL_SCHEME)) then
+    Exit(False);
   for I := 0 to High(FFiles) do
-    if Copy(FFiles[I].Uri, 1, Length(AUri) + 1) = AUri + '/' then
+    if IsUnder(FFiles[I].Uri, AUri) then
       Exit(True);
   Result := False;
 end;
@@ -469,22 +503,26 @@ begin
           '"/"-separated segments of letters, digits, "-", ".", "_" and ' +
           '"~", and SKILL.md is written from the frontmatter',
           [ASkillPath, AFiles[I].Path]);
+      if AFiles[I].MimeType = DIRECTORY_MIME_TYPE then
+        raise EMCPServer.CreateFmt('Skill file "%s" cannot have the ' +
+          'directory media type', [AFiles[I].Path]);
       Uris[I + 1] := Root + '/' + AFiles[I].Path;
       Contents[I + 1] := AFiles[I].Content;
     end;
-    // A URI is served once, and none is both a file and a directory.
+    // A URI is served once, and none is both a file and a directory,
+    // among this skill's files as against those served already.
     for I := 0 to High(Uris) do
     begin
       for J := 0 to I - 1 do
-        if Uris[J] = Uris[I] then
-          raise EMCPServer.CreateFmt('Skill file "%s" is given twice',
-            [Uris[I]]);
+        if (Uris[J] = Uris[I]) or IsUnder(Uris[J], Uris[I]) or
+          IsUnder(Uris[I], Uris[J]) then
+          raise EMCPServer.CreateFmt('Skill files "%s" and "%s" clash: the ' +
+            'same file, or one under the other', [Uris[J], Uris[I]]);
       if (FileIndex(Uris[I]) >= 0) or IsDirectory(Uris[I]) then
         raise EMCPServer.CreateFmt('Skill URI "%s" is already served',
           [Uris[I]]);
       for J := 0 to High(FFiles) do
-        if Copy(Uris[I], 1, Length(FFiles[J].Uri) + 1) =
-          FFiles[J].Uri + '/' then
+        if IsUnder(Uris[I], FFiles[J].Uri) then
           raise EMCPServer.CreateFmt('Skill file "%s" lies under the file ' +
             '"%s"', [Uris[I], FFiles[J].Uri]);
     end;
@@ -516,7 +554,7 @@ begin
         Contents[I]);
   end;
   try
-    CheckLimits;
+    CheckLimits(Root);
   except
     // Leave the catalog as it was before this skill.
     SetLength(FFiles, Length(FFiles) - Length(Uris));
@@ -526,15 +564,18 @@ begin
   end;
 end;
 
-// Every skill, its nested skills' files included (skills.mdx,
+// The skill at ARoot and the skills it is nested in, the only totals a
+// new skill changes, its nested skills' files included (skills.mdx,
 // Resources: "Completeness extends to nested skills").
-procedure TSkillCatalog.CheckLimits;
+procedure TSkillCatalog.CheckLimits(const ARoot: string);
 var
   I, J, Count: Integer;
   Bytes: Int64;
 begin
   for I := 0 to High(FSkills) do
   begin
+    if (FSkills[I].Root <> ARoot) and not IsUnder(ARoot, FSkills[I].Root) then
+      Continue;
     Count := 0;
     Bytes := 0;
     for J := 0 to High(FFiles) do
@@ -603,28 +644,19 @@ begin
     ' not found', Data);
 end;
 
-// The offset AParams' cursor points at in a list of ACount entries
-// under AKey, 0 without one; -32602 for any other cursor.
-function PageStart(AParams: TJSONObject; const AKey: string;
-  ACount, APageSize: Integer): Integer;
+// The page AParams' cursor selects from a list of ACount entries under
+// AKey (MCP.Pagination); -32602 for a cursor that is not one of its.
+procedure SelectPage(AParams: TJSONObject; const AKey: string;
+  ACount, APageSize: Integer; out AFirst, ALast: Integer);
 var
   Cursor: TJSONData;
 begin
-  Result := 0;
   Cursor := nil;
   if AParams <> nil then
     Cursor := AParams.Find('cursor');
-  if (Cursor <> nil) and ((Cursor.JSONType <> jtString) or
-    not TryCursorOffset(Cursor.AsString, AKey, ACount, APageSize, Result)) then
+  if not PageBounds(Cursor, AKey, ACount, APageSize, AFirst, ALast) then
     raise EMCPProtocolError.Create(JSONRPC_INVALID_PARAMS,
       'Invalid params: unknown cursor');
-end;
-
-function PageEnd(AFirst, ACount, APageSize: Integer): Integer;
-begin
-  Result := ACount - 1;
-  if (APageSize > 0) and (APageSize < ACount - AFirst) then
-    Result := AFirst + APageSize - 1;
 end;
 
 // skills.mdx, Listing Skills: paginated, "An entry is atomic, and a
@@ -635,9 +667,8 @@ var
   Skills: TJSONArray;
   First, Last, I: Integer;
 begin
-  First := PageStart(AParams, 'skills/list', Length(FSkills),
-    FServer.PageSize);
-  Last := PageEnd(First, Length(FSkills), FServer.PageSize);
+  SelectPage(AParams, 'skills/list', Length(FSkills), FServer.PageSize, First,
+    Last);
   Result := TJSONObject.Create;
   try
     Skills := TJSONArray.Create;
@@ -721,9 +752,8 @@ begin
         Continue;
       Insert(Child, Children, J);
     end;
-  First := PageStart(AParams, 'resources/directory/read ' + Uri,
-    Length(Children), FServer.PageSize);
-  Last := PageEnd(First, Length(Children), FServer.PageSize);
+  SelectPage(AParams, 'resources/directory/read ' + Uri, Length(Children),
+    FServer.PageSize, First, Last);
   Result := TJSONObject.Create;
   try
     Resources := TJSONArray.Create;
@@ -774,32 +804,52 @@ end;
 procedure RegisterSkill(AServer: TMCPServer; const ASkillPath: string;
   AFrontmatter: TJSONObject; const ABody: string;
   const AFiles: array of TMCPSkillFile);
+const
+  METHODS: array[0..2] of string = ('skills/list', 'skills/get',
+    'resources/directory/read');
 var
   Catalog: TSkillCatalog;
+  Fresh: Boolean;
+  Problem: string;
 begin
+  // Every check comes before the server changes, so a refused first
+  // call leaves no half-installed extension behind (#115 review).
+  Fresh := False;
   try
     if AServer = nil then
       raise EMCPServer.Create('RegisterSkill needs a server');
-    // Raises once the server has started, before anything changes;
-    // settings declared first are kept.
-    AServer.EnsureExtension(MCP_SKILLS_EXTENSION,
-      TJSONObject.Create(['directoryRead', True]));
     Catalog := TSkillCatalog(AServer.Adopted(TSkillCatalog));
-    if Catalog = nil then
-    begin
-      Catalog := TSkillCatalog.Create(AServer);
-      AServer.Adopt(Catalog);
-      AServer.RegisterMethod('skills/list', Catalog.SkillsList, True);
-      AServer.RegisterMethod('skills/get', Catalog.SkillsGet, True);
-      AServer.RegisterMethod('resources/directory/read',
-        Catalog.DirectoryRead, True);
-      AServer.RegisterResourceResolver(SKILL_SCHEME, Catalog.ReadFile);
-    end;
+    Fresh := Catalog = nil;
+    if Fresh then
+      Problem := AServer.HookProblem(METHODS, SKILL_SCHEME)
+    else
+      Problem := AServer.HookProblem([], '');
+    if Problem <> '' then
+      raise EMCPServer.Create(Problem);
   except
     AFrontmatter.Free;
     raise;
   end;
-  Catalog.Add(ASkillPath, AFrontmatter, ABody, AFiles);
+  if Fresh then
+    Catalog := TSkillCatalog.Create(AServer);
+  try
+    Catalog.Add(ASkillPath, AFrontmatter, ABody, AFiles);
+  except
+    if Fresh then
+      Catalog.Free;
+    raise;
+  end;
+  if Fresh then
+  begin
+    AServer.Adopt(Catalog);
+    AServer.RegisterMethod(METHODS[0], Catalog.SkillsList, True);
+    AServer.RegisterMethod(METHODS[1], Catalog.SkillsGet, True);
+    AServer.RegisterMethod(METHODS[2], Catalog.DirectoryRead, True);
+    AServer.RegisterResourceResolver(SKILL_SCHEME, Catalog.ReadFile);
+  end;
+  // Settings declared first are kept.
+  AServer.EnsureExtension(MCP_SKILLS_EXTENSION,
+    TJSONObject.Create(['directoryRead', True]));
 end;
 
 end.
