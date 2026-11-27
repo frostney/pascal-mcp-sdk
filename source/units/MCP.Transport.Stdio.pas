@@ -11,7 +11,8 @@ unit MCP.Transport.Stdio;
 // verified 2026-07-21):
 //   - one UTF-8 JSON-RPC message per line, no embedded newlines
 //     (fpjson escapes newlines inside strings, so serialized responses
-//     are single-line by construction); UTF-8 setup lives in MCP.JSONRPC;
+//     are single-line by construction); UTF-8 setup lives in MCP.JSONRPC,
+//     and the loop sets its Text files to UTF-8 (#102);
 //   - stdout carries nothing but MCP messages — diagnostics belong on
 //     stderr (MCPLogToStderr);
 //   - responses are terminated with a bare LF on every platform (a
@@ -130,6 +131,12 @@ var
   Overflow: Boolean;
   Session: TMCPSession;
 begin
+  // The wire is UTF-8 whatever the locale: a Text file converts what
+  // it writes to its own code page, which the RTL took from the locale
+  // at startup (US-ASCII under LC_ALL=C, turning every non-ASCII byte
+  // into '?').
+  SetTextCodePage(AInput, CP_UTF8);
+  SetTextCodePage(AOutput, CP_UTF8);
   Session := AServer.CreateSession;
   try
     while ReadBoundedLine(AInput, AMaxLineLength, Line, Overflow) do
@@ -165,6 +172,7 @@ end;
 
 procedure MCPLogToStderr(const AMessage: string);
 begin
+  SetTextCodePage(ErrOutput, CP_UTF8); // log lines are UTF-8 too (#102)
   Write(ErrOutput, AMessage, #10);
   Flush(ErrOutput);
 end;

@@ -12,8 +12,10 @@ unit MCP.JSONRPC;
 // modelcontextprotocol.io/specification/2025-03-26/basic
 //
 // MCP transports carry UTF-8 JSON. This bottom serialization unit links
-// the platform RTL widestring manager so fpjson conversions preserve
-// UTF-8 bytes for every consumer, including sans-I/O embeddings. Its
+// the platform RTL widestring manager and pins the conversion code page
+// to UTF-8 on every platform, so fpjson conversions preserve UTF-8 bytes
+// for every consumer, including sans-I/O embeddings, under any locale
+// (#102). Its
 // inbound parser also normalizes non-ASCII Unicode escapes before the
 // FPC 3.2.2 scanner sees them, avoiding its adjacent-escape corruption.
 // UTF-8 transport requirement verified 2026-07-20:
@@ -375,9 +377,10 @@ begin
   Result := AData.AsJSON;
 end;
 
-{$IFDEF WINDOWS}
+// Every platform: on Unix cwstring would otherwise take the conversion
+// code page from the locale, and under a non-UTF-8 one (LC_ALL=C) each
+// non-ASCII character would become '?' (#102).
 initialization
   SetMultiByteConversionCodePage(CP_UTF8);
-{$ENDIF}
 
 end.
