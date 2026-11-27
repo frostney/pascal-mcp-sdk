@@ -346,7 +346,7 @@ type
     FDualEra: Boolean;
     FFrozen: Boolean;
     // requestState sealing (#89): the configured key ring (empty means
-    // a random per-process key), the token lifetime, and the sealer
+    // a random key for this instance), the token lifetime, and the sealer
     // built from them at freeze (a TMCPRequestStateSealer, owned).
     FRequestStateKeys: array of RawByteString;
     FRequestStateTtlMs: Integer;

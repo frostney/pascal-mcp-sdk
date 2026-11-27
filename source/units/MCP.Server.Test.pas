@@ -350,6 +350,10 @@ type
     procedure TestResourceReadDropsState;
     procedure TestConfigurationGuards;
     procedure TestSeededDefaultKeepsTokenValid;
+    procedure TestDefaultKeysPerInstance;
+    procedure TestFirstKeySeals;
+    procedure TestNumberSpellingKeepsTokenValid;
+    procedure TestPromptStateRestored;
     procedure TestExplicitEmptyStateRejected;
   protected
     function Token(const ATool, AArguments: string): string;
@@ -5535,6 +5539,11 @@ end;
 
 { ───────── requestState sealing (#89) ───────── }
 
+// Expected behavior from the MRTR page, verified 2026-11-26:
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr
+// (requestState is attacker-controlled; integrity MUST be protected and
+// state failing verification MUST be rejected).
+
 const
   SEAL_KEY_A = 'k-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
   SEAL_KEY_B = 'k-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
@@ -5555,6 +5564,25 @@ begin
   Result := MCPTextResult('got:' + ACtx.RequestState);
 end;
 
+function StatefulPrompt(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPPromptResult;
+begin
+  Inc(SealedHandlerRuns);
+  if ACtx.RequestState = '' then
+    Exit(MCPPromptInputRequired(nil, SEAL_STATE));
+  Result := MCPPromptMessagesResult(MCPMessages([MCPUserMessage(
+    'got:' + ACtx.RequestState)]));
+end;
+
+function PromptCall(const AArguments, AState: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{' +
+    '"name":"stateful_prompt","arguments":' + AArguments + ',';
+  if AState <> '' then
+    Result := Result + '"requestState":"' + AState + '",';
+  Result := Result + META_MODERN + '}}';
+end;
+
 function StateEchoReader(const AUri: string;
   const ACtx: TMCPRequestContext): TJSONArray;
 begin
@@ -5571,6 +5599,8 @@ begin
     StatefulHandler);
   FServer.RegisterResource('mem://state', 'state', 'text/plain',
     StateEchoReader);
+  FServer.RegisterPrompt('stateful_prompt', 'Stateful prompt',
+    StatefulPrompt);
   // Validation seeds "mode" into the arguments the handler sees.
   FServer.RegisterTool('stateful_default', 'Stateful with a default',
     '{"type":"object","properties":{"mode":{"type":"string",' +
@@ -5742,12 +5772,30 @@ begin
   finally
     Peer.Free;
   end;
-  // Without a configured key each process has its own random one.
+end;
+
+// Without configured keys each instance has its own random key, even
+// two instances of the same name in one process.
+procedure TRequestStateSealing.TestDefaultKeysPerInstance;
+var
+  Minter, Peer: TMCPServer;
+  Session: TMCPSession;
+  State: string;
+begin
+  Minter := PeerServer('test-server', []);
   Peer := PeerServer('test-server', []);
   try
-    Expect<Boolean>(PeerAccepts(Peer, Token('stateful', '{}'))).ToBe(False);
+    Session := Minter.CreateSession;
+    try
+      State := FirstRoundToken(Minter, Session, 'stateful', '{}');
+    finally
+      Session.Free;
+    end;
+    Expect<Boolean>(PeerAccepts(Minter, State)).ToBe(True);
+    Expect<Boolean>(PeerAccepts(Peer, State)).ToBe(False);
   finally
     Peer.Free;
+    Minter.Free;
   end;
 end;
 
@@ -5785,6 +5833,71 @@ begin
   finally
     Peer.Free;
   end;
+end;
+
+// The first key seals: a token minted with [New, Old] verifies on an
+// instance that keeps only New.
+procedure TRequestStateSealing.TestFirstKeySeals;
+var
+  Minter, Peer: TMCPServer;
+  Session: TMCPSession;
+  State: string;
+begin
+  Minter := PeerServer('test-server', [SEAL_KEY_B, SEAL_KEY_A]);
+  Peer := PeerServer('test-server', [SEAL_KEY_B]);
+  try
+    Session := Minter.CreateSession;
+    try
+      State := FirstRoundToken(Minter, Session, 'stateful', '{}');
+    finally
+      Session.Free;
+    end;
+    Expect<Boolean>(PeerAccepts(Peer, State)).ToBe(True);
+  finally
+    Peer.Free;
+    Minter.Free;
+  end;
+end;
+
+// A retry that spells an equal number differently still verifies; a
+// changed value does not.
+procedure TRequestStateSealing.TestNumberSpellingKeepsTokenValid;
+var
+  State: string;
+  Response: TJSONObject;
+begin
+  State := Token('stateful', '{"n":1}');
+  Response := Call(StatefulCall('stateful', '{"n":1.0}', State));
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text')).AsString)
+    .ToBe('got:' + SEAL_STATE);
+  Response.Free;
+  ExpectRefused(StatefulCall('stateful', '{"n":1.5}', Token('stateful',
+    '{"n":1}')));
+end;
+
+// prompts/get: the restored state reaches the prompt, and a tampered
+// token is refused before the prompt runs.
+procedure TRequestStateSealing.TestPromptStateRestored;
+var
+  Line, State: string;
+  Response: TJSONObject;
+  RunsBefore: Integer;
+begin
+  Expect<Boolean>(Dispatch(PromptCall('{}', ''), Line)).ToBe(True);
+  Response := TJSONObject(GetJSON(Line));
+  try
+    State := TJSONData(Response.FindPath('result.requestState')).AsString;
+  finally
+    Response.Free;
+  end;
+  Expect<Boolean>(Dispatch(PromptCall('{}', State), Line)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "got:st-' + #$C3#$A9#$F0#$9F#$98#$80 + '"',
+    Line) > 0).ToBe(True);
+  RunsBefore := SealedHandlerRuns;
+  if State[6] = 'A' then State[6] := 'B' else State[6] := 'A';
+  Expect<Boolean>(Dispatch(PromptCall('{}', State), Line)).ToBe(True);
+  Expect<Boolean>(Pos('"code" : -32602', Line) > 0).ToBe(True);
+  Expect<Integer>(SealedHandlerRuns).ToBe(RunsBefore);
 end;
 
 procedure TRequestStateSealing.TestResourceReadDropsState;
@@ -5854,6 +5967,14 @@ begin
     TestConfigurationGuards);
   Test('a seeded default leaves the token valid on an unchanged retry',
     TestSeededDefaultKeepsTokenValid);
+  Test('default keys are per instance, even with the same name',
+    TestDefaultKeysPerInstance);
+  Test('the first key seals: [New, Old] tokens verify on [New]',
+    TestFirstKeySeals);
+  Test('an equal number respelled keeps the token valid',
+    TestNumberSpellingKeepsTokenValid);
+  Test('prompts/get: state restored; tampered token refused before the prompt',
+    TestPromptStateRestored);
   Test('an explicit empty requestState → -32602, handler not run',
     TestExplicitEmptyStateRejected);
 end;

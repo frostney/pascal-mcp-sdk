@@ -48,18 +48,21 @@ type
     constructor Create(const AAudience: string;
       const AKeys: array of RawByteString; ATtlMs: Int64);
     // The token for AState, bound to the request (method, target name,
-    // arguments; AArguments may be nil for none).
+    // arguments; AArguments is borrowed and may be nil for none).
     function Seal(const AMethod, ATarget: string; AArguments: TJSONObject;
       const AState: string): string;
     // True with the handler's AState when AToken verifies for this
-    // request; False with a log-only AReason otherwise.
+    // request; False with a log-only AReason otherwise. AArguments is
+    // borrowed and may be nil.
     function Unseal(const AMethod, ATarget: string; AArguments: TJSONObject;
       const AToken: string; out AState, AReason: string): Boolean;
   end;
 
-// JSON with object members sorted by name (byte order) and no
-// insignificant whitespace, so equal values digest equally.
-function CanonicalJSON(AData: TJSONData): string;
+// JSON with object members sorted by name (UTF-8 byte order), no
+// insignificant whitespace, strings as their UTF-8 bytes and equal
+// numbers spelled alike, so equal values digest equally on any host
+// code page. AData is borrowed.
+function CanonicalJSON(AData: TJSONData): UTF8String;
 
 // Milliseconds since the Unix epoch, UTC.
 function UnixTimeMs: Int64;
@@ -72,11 +75,13 @@ implementation
 // would come back in the system code page.
 uses
   DateUtils,
+  Math,
 
   jsonparser,
   jsonscanner,
   MCP.Crypto,
-  MCP.JSONRPC;
+  MCP.JSONRPC,
+  MCP.Schema;
 
 const
   TOKEN_VERSION = 'v1';
@@ -91,13 +96,30 @@ begin
 end;
 
 type
-  TNameArray = array of string;
+  TIndexArray = array of Integer;
 
-// Merge sort by byte order (CompareStr): O(n log n) in the worst case,
-// since the names come from client arguments of any width.
-procedure SortNames(var ANames: TNameArray);
+// Byte order of two UTF-8 strings, without any code page conversion
+// (CompareStr would convert to the system code page first).
+function CompareBytes(const A, B: UTF8String): Integer;
 var
-  Buffer: TNameArray;
+  I, Count: Integer;
+begin
+  Count := Length(A);
+  if Length(B) < Count then
+    Count := Length(B);
+  for I := 1 to Count do
+    if A[I] <> B[I] then
+      Exit(Ord(A[I]) - Ord(B[I]));
+  Result := Length(A) - Length(B);
+end;
+
+// Member indices of AObject ordered by name bytes. Merge sort: O(n log
+// n) in the worst case, since the names come from client arguments of
+// any width.
+function SortedMembers(AObject: TJSONObject): TIndexArray;
+var
+  Names: array of UTF8String;
+  Buffer: TIndexArray;
 
   procedure Merge(ALow, AHigh: Integer);
   var
@@ -111,44 +133,123 @@ var
     I := ALow;
     J := Mid + 1;
     K := ALow;
-    while (I <= Mid) and (J <= AHigh) do
+    while (I <= Mid) or (J <= AHigh) do
     begin
-      if CompareStr(ANames[I], ANames[J]) <= 0 then
+      if (J > AHigh) or ((I <= Mid) and
+        (CompareBytes(Names[Result[I]], Names[Result[J]]) <= 0)) then
       begin
-        Buffer[K] := ANames[I];
+        Buffer[K] := Result[I];
         Inc(I);
       end
       else
       begin
-        Buffer[K] := ANames[J];
+        Buffer[K] := Result[J];
         Inc(J);
       end;
       Inc(K);
     end;
-    while I <= Mid do
-    begin
-      Buffer[K] := ANames[I];
-      Inc(I);
-      Inc(K);
-    end;
-    while J <= AHigh do
-    begin
-      Buffer[K] := ANames[J];
-      Inc(J);
-      Inc(K);
-    end;
     for K := ALow to AHigh do
-      ANames[K] := Buffer[K];
+      Result[K] := Buffer[K];
   end;
 
+var
+  I: Integer;
 begin
-  SetLength(Buffer, Length(ANames));
-  Merge(0, High(ANames));
+  SetLength(Names, AObject.Count);
+  SetLength(Result, AObject.Count);
+  SetLength(Buffer, AObject.Count);
+  for I := 0 to AObject.Count - 1 do
+  begin
+    Names[I] := AObject.Names[I];
+    Result[I] := I;
+  end;
+  Merge(0, AObject.Count - 1);
 end;
 
-function CanonicalJSON(AData: TJSONData): string;
+// A JSON string literal of the UTF-8 bytes in AValue: quote, backslash
+// and control characters escaped, every other byte as it is. Explicit,
+// so neither the system code page nor fpjson's process-wide escaping
+// settings change a digest.
+function QuotedUTF8(const AValue: UTF8String): UTF8String;
+const
+  HEX: array[0..15] of AnsiChar = '0123456789abcdef';
 var
-  Names: TNameArray;
+  I: Integer;
+  C: AnsiChar;
+begin
+  Result := '"';
+  for I := 1 to Length(AValue) do
+  begin
+    C := AValue[I];
+    if C = '"' then
+      Result := Result + '\"'
+    else if C = '\' then
+      Result := Result + '\\'
+    else if Ord(C) < $20 then
+      Result := Result + '\u00' + HEX[Ord(C) shr 4] + HEX[Ord(C) and 15]
+    else
+      Result := Result + C;
+  end;
+  Result := Result + '"';
+end;
+
+// The decimal digits of an integral double of magnitude below 2^64,
+// read from its bits: no float-to-integer conversion, which can trap
+// on AArch64. False when the magnitude is 2^64 or more.
+function IntegralDoubleDigits(AValue: Double; out ADigits: UTF8String): Boolean;
+var
+  Bits, Mantissa, Magnitude: QWord;
+  Exponent: Integer;
+begin
+  Move(AValue, Bits, SizeOf(Bits));
+  Exponent := Integer((Bits shr 52) and $7FF) - 1075;
+  Mantissa := (Bits and $FFFFFFFFFFFFF) or (QWord(1) shl 52);
+  if (Bits and $7FFFFFFFFFFFFFFF) = 0 then
+    Magnitude := 0
+  else if Exponent >= 0 then
+  begin
+    if Exponent > 11 then
+      Exit(False);
+    Magnitude := Mantissa shl Exponent;
+  end
+  else
+    Magnitude := Mantissa shr (-Exponent);
+  ADigits := UTF8String(IntToStr(Magnitude));
+  if (Magnitude <> 0) and (AValue < 0) then
+    ADigits := '-' + ADigits;
+  Result := True;
+end;
+
+// Equal numbers spell the same: an integral value as its exact
+// integer digits (2, 2.0 and 2e0 alike, and 1e16 as the integer
+// 10000000000000000), any other as JavaScript writes it (MCPWireNumber).
+function CanonicalNumber(AValue: TJSONData): UTF8String;
+var
+  F: Double;
+  Wire: TJSONData;
+begin
+  case TJSONNumber(AValue).NumberType of
+    ntInteger, ntInt64:
+      Exit(UTF8String(IntToStr(AValue.AsInt64)));
+    ntQWord:
+      Exit(UTF8String(IntToStr(AValue.AsQWord)));
+  end;
+  F := AValue.AsFloat;
+  if not IsNan(F) and not IsInfinite(F) and
+    ((Abs(F) >= 4503599627370496.0) or (Frac(F) = 0)) and
+    IntegralDoubleDigits(F, Result) then
+    Exit;
+  Wire := MCPWireNumber(F);
+  try
+    Result := UTF8String(Wire.AsJSON);
+  finally
+    Wire.Free;
+  end;
+end;
+
+function CanonicalJSON(AData: TJSONData): UTF8String;
+var
+  Order: TIndexArray;
   I: Integer;
   Obj: TJSONObject;
 begin
@@ -156,17 +257,14 @@ begin
     jtObject:
       begin
         Obj := TJSONObject(AData);
-        SetLength(Names, Obj.Count);
-        for I := 0 to Obj.Count - 1 do
-          Names[I] := Obj.Names[I];
-        SortNames(Names);
+        Order := SortedMembers(Obj);
         Result := '{';
-        for I := 0 to High(Names) do
+        for I := 0 to High(Order) do
         begin
           if I > 0 then
             Result := Result + ',';
-          Result := Result + '"' + StringToJSONString(Names[I]) + '":' +
-            CanonicalJSON(Obj.Elements[Names[I]]);
+          Result := Result + QuotedUTF8(Obj.Names[Order[I]]) + ':' +
+            CanonicalJSON(Obj.Items[Order[I]]);
         end;
         Result := Result + '}';
       end;
@@ -181,18 +279,26 @@ begin
         end;
         Result := Result + ']';
       end;
+    jtString:
+      Result := QuotedUTF8(TJSONString(AData).AsString);
+    jtNumber:
+      Result := CanonicalNumber(AData);
   else
-    Result := AData.AsJSON;
+    Result := UTF8String(AData.AsJSON);
   end;
 end;
 
+// The canonical bytes go straight to SHA-256, never through a `string`
+// in the system code page. The result is base64url, plain ASCII.
 function ArgumentsDigest(AArguments: TJSONObject): string;
+var
+  Canonical: UTF8String;
 begin
   if AArguments = nil then
-    Result := '{}'
+    Canonical := '{}'
   else
-    Result := CanonicalJSON(AArguments);
-  Result := Base64UrlEncode(DigestBytes(SHA256(Result)));
+    Canonical := CanonicalJSON(AArguments);
+  Result := Base64UrlEncode(DigestBytes(SHA256(Canonical)));
 end;
 
 constructor TMCPRequestStateSealer.Create(const AAudience: string;

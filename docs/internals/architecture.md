@@ -190,7 +190,12 @@ server-initiated requests:
   returns `MCPInputRequired(...)` / `MCPPromptInputRequired(...)` — an
   `input_required` result carrying an `inputRequests` map (entry
   builders for elicitation form/url, `sampling/createMessage`,
-  `roots/list`) and the handler's opaque `requestState`.
+  `roots/list`) and the handler's opaque `requestState`, which leaves
+  the server sealed: a `v1` token whose HMAC-SHA-256 covers the state,
+  an expiry, the method, the tool or prompt name, a digest of the
+  canonical arguments and the server's name (`MCP.RequestState`, #89).
+  The retry is verified before the handler runs again; a token that
+  fails is answered `-32602`.
 - The client retries the original request with `inputResponses` plus
   the echoed state, and the library re-enters the *same handler* with
   both exposed on `TMCPRequestContext` — each round is one ordinary

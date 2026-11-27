@@ -506,7 +506,10 @@ begin
       'MRTR round 1: resultType input_required');
     Check(PathString(Response, 'result.inputRequests.who.method') =
       'elicitation/create', 'MRTR round 1: elicitation request present');
-    // The handler's state leaves sealed (#89), never as plain text.
+    // The handler's state leaves sealed (#89), never as plain text: the
+    // MRTR page makes requestState attacker-controlled input whose
+    // integrity a server MUST protect (verified 2026-11-26,
+    // https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr).
     SealedState := PathString(Response, 'result.requestState');
     Check((Pos('v1.', SealedState) = 1) and
       (Pos('greet-round-1', SealedState) = 0),

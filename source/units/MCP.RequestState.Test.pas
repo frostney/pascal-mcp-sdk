@@ -24,6 +24,8 @@ type
     procedure SetupTests; override;
     procedure TestSortsMembersRecursively;
     procedure TestScalarsAndArrays;
+    procedure TestUTF8IndependentOfCodePage;
+    procedure TestEqualNumbersSpellAlike;
   end;
 
   TSealing = class(TTestSuite)
@@ -48,6 +50,16 @@ type
 function ParseObject(const AJson: string): TJSONObject;
 begin
   Result := TJSONObject(GetJSON(AJson));
+end;
+
+// The bytes of AText as hex, so a comparison involves no code page.
+function Hex(const AText: RawByteString): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 1 to Length(AText) do
+    Result := Result + IntToHex(Ord(AText[I]), 2);
 end;
 
 function Canonical(const AJson: string): string;
@@ -78,12 +90,51 @@ begin
   Expect<string>(Canonical('{"q":"a\"b"}')).ToBe('{"q":"a\"b"}');
 end;
 
+// Replicas on different locales must digest equal arguments equally
+// (#89 review): the canonical form is UTF-8 bytes on any code page.
+procedure TCanonical.TestUTF8IndependentOfCodePage;
+var
+  Data: TJSONData;
+  Saved: TSystemCodePage;
+  Utf8Host, AsciiHost: UTF8String;
+begin
+  // \u escapes keep the source ASCII; the parser stores UTF-8.
+  Data := GetJSON('{"\u00c4":1,"city":"Z\u00fcrich"}');
+  Saved := DefaultSystemCodePage;
+  try
+    DefaultSystemCodePage := CP_UTF8;
+    Utf8Host := CanonicalJSON(Data);
+    DefaultSystemCodePage := 20127; // US-ASCII, as under LC_ALL=C
+    AsciiHost := CanonicalJSON(Data);
+  finally
+    DefaultSystemCodePage := Saved;
+    Data.Free;
+  end;
+  Expect<string>(Hex(AsciiHost)).ToBe(Hex(Utf8Host));
+  // "city" (0x63) sorts before "\u00c4" (0xC3 0x84) by bytes.
+  Expect<string>(Hex(Utf8Host)).ToBe(Hex('{"city":"Z' + #$C3#$BC +
+    'rich","' + #$C3#$84 + '":1}'));
+end;
+
+// A client may respell an equal number between rounds (#89 review).
+procedure TCanonical.TestEqualNumbersSpellAlike;
+begin
+  Expect<string>(Canonical('[1.0,2e0,-0.0,1e16,1.5,1e21]'))
+    .ToBe('[1,2,0,10000000000000000,1.5,1e+21]');
+  Expect<string>(Canonical('[18446744073709549568.0,18446744073709551615]'))
+    .ToBe('[18446744073709549568,18446744073709551615]');
+  Expect<Boolean>(Canonical('{"n":2}') = Canonical('{"n":2.5}')).ToBe(False);
+end;
+
 procedure TCanonical.SetupTests;
 begin
   Test('object members sorted by name at every depth',
     TestSortsMembersRecursively);
   Test('arrays keep their order; scalars and escapes as JSON',
     TestScalarsAndArrays);
+  Test('UTF-8 bytes on any system code page', TestUTF8IndependentOfCodePage);
+  Test('equal numbers spell alike; different ones do not',
+    TestEqualNumbersSpellAlike);
 end;
 
 procedure TSealing.BeforeEach;

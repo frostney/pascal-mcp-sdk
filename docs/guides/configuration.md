@@ -98,14 +98,18 @@ Server.RequestStateTtlMs := 120000;                      // two minutes
   source then; with keys set, nothing is read). The key lives as long
   as that instance: a token from an instance you replace, or from
   another process serving the same endpoint behind a load balancer,
-  is refused. Give every instance the same key to keep continuations
-  working across them.
+  is refused. Give every instance the same key, and the same server
+  `Name` (the token names its server), to keep continuations working
+  across them. Make the key from a cryptographically secure random
+  source, 32 bytes or more, and keep it with your other secrets.
 - **Rotation:** the first key seals and every key verifies. Change keys
   in three steps, each on every instance before the next:
   1. `[Old, New]`: every instance can verify the new key, still
      sealing with the old one.
   2. `[New, Old]`: seal with the new key.
-  3. `[New]`, once one TTL has passed since the last instance switched.
+  3. `[New]`, once the longest `RequestStateTtlMs` any old-key signer
+     used has passed since the last instance switched, plus an
+     allowance for clock differences between instances.
 - **Replay:** a token is bound to its method, tool or prompt, arguments
   and server, and expires after `RequestStateTtlMs`. Within that window
   the same retry can be sent again and verifies each time. If a retry
