@@ -72,8 +72,9 @@ end;
 client name/version and capabilities, the progress token and log level
 (see [Progress and logging](progress-and-logging.md)), the MRTR retry
 payload (below), and `IsCancelled` for cooperative cancellation.
-Handlers are synchronous — under stdio the loop is read-handle-write,
-so keep them short.
+Handlers are synchronous — under stdio the loop serves one request at
+a time, so keep them short, and have a long one poll `IsCancelled`
+(see [Cancellation](#cancellation)).
 
 Results are built with the helpers in
 [Results and content](../reference/results.md):

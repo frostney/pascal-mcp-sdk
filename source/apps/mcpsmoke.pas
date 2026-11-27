@@ -771,9 +771,9 @@ begin
       'legacy: tools/call result unstamped');
     Response.Free;
 
-    // Serial stdio observes cancellation only after the target has
-    // finished. The notification is accepted silently and does not
-    // disturb the next request on the same session.
+    // A cancellation for a request that has already finished is
+    // accepted silently and does not disturb the next request on the
+    // same session.
     SendLine(Demo,
       '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
       '"params":{"requestId":13,"reason":"finished already"}}');
