@@ -390,8 +390,8 @@ begin
   Result := MCPInputRequired(Requests, 'multiple-inputs');
 end;
 
-// The state only names the round: the library passes the client's echo
-// through unverified until #89, so nothing from it reaches the result.
+// The state names the round; the library verifies it before this
+// handler sees it again (#89).
 function IRMultiRound(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
@@ -410,21 +410,17 @@ begin
 end;
 
 // The suite sends this state back modified and expects a JSON-RPC
-// error. The handler compares the echo with what it minted; a mismatch
-// can only raise, which tools/call reports as an isError result, so the
-// scenario fails until the library verifies requestState itself (#89).
+// error. The handler does no checking of its own: the library seals
+// every requestState and answers a tampered one -32602 before any
+// handler runs (#89).
 function IRTamperedState(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 const
   MINTED = 'tamper-test';
 begin
-  if ACtx.RequestState <> '' then
-  begin
-    if ACtx.RequestState <> MINTED then
-      raise Exception.Create('requestState integrity check failed');
-    if MCPInputResponse(ACtx, 'confirm') <> nil then
-      Exit(MCPTextResult('integrity-ok: state verified'));
-  end;
+  if (ACtx.RequestState = MINTED) and
+    (MCPInputResponse(ACtx, 'confirm') <> nil) then
+    Exit(MCPTextResult('integrity-ok: state verified'));
   Result := MCPInputRequired(OneRequest('confirm',
     MCPElicitFormRequest('Please confirm', JSONObjectOf(CONFIRM_SCHEMA))),
     MINTED);
