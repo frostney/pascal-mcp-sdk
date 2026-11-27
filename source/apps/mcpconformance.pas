@@ -146,6 +146,38 @@ begin
     JSONObjectOf('{"retryAfterSeconds":60}'));
 end;
 
+// Non-object structured output (#91, not a suite scenario): an array
+// of UTF-8 strings, sent with its JSON as the text block.
+function FixtureArrayOutput(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Values: TJSONArray;
+begin
+  Values := TJSONArray.Create;
+  Values.Add('Gr' + #$C3#$BC + #$C3#$9F + 'e');
+  Values.Add(#$F0#$9F#$98#$80);
+  Result := MCPStructuredResult(Values);
+end;
+
+// Output that breaks its integer outputSchema (#91): the server answers
+// isError instead of sending it.
+function FixtureBadOutput(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult(TJSONString.Create('not a number'));
+end;
+
+// A tool definition with an outputSchema, for the #91 fixture tools.
+function OutputTool(const AName, ADescription,
+  AOutputSchema: string): TJSONObject;
+begin
+  Result := TJSONObject.Create;
+  Result.Add('name', AName);
+  Result.Add('description', ADescription);
+  Result.Add('inputSchema', GetJSON(NO_ARGUMENTS));
+  Result.Add('outputSchema', GetJSON(AOutputSchema));
+end;
+
 function MultipleContentTypes(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
@@ -598,6 +630,13 @@ begin
   AServer.RegisterTool('json_schema_2020_12_tool',
     'Tool with JSON Schema 2020-12 features', JSON_SCHEMA_2020_12,
     JsonSchemaTool).ApplicationValidated;
+  AServer.RegisterTool(OutputTool('fixture_array_output',
+    'Returns an array of UTF-8 strings as structured output (not a suite ' +
+    'scenario)', '{"type":"array","items":{"type":"string"}}'),
+    FixtureArrayOutput);
+  AServer.RegisterTool(OutputTool('fixture_bad_output',
+    'Returns output that breaks its schema (not a suite scenario)',
+    '{"type":"integer"}'), FixtureBadOutput);
   AServer.RegisterTool('test_custom_headers',
     'Tool whose region argument is mirrored into an Mcp-Param header',
     CUSTOM_HEADER_SCHEMA, CustomHeaders).ApplicationValidated;

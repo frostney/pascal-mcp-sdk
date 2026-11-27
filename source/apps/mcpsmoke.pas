@@ -281,6 +281,26 @@ begin
       'content: resource link (MCPResourceLink), UTF-8 byte-exact');
     Response.Free;
 
+    // Non-object structured output and its JSON text block (#91).
+    Response := RoundTripWithLine(Fixture,
+      '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{' +
+      '"name":"fixture_array_output",' + META_MODERN + '}}', ResponseLine);
+    Check(Pos('"content" : [{ "type" : "text", "text" : "[\"Gr' +
+      #$C3#$BC + #$C3#$9F + 'e\", \"' + #$F0#$9F#$98#$80 + '\"]" }], ' +
+      '"isError" : false, "structuredContent" : ["Gr' + #$C3#$BC + #$C3#$9F +
+      'e", "' + #$F0#$9F#$98#$80 + '"]', ResponseLine) > 0,
+      'output: array structuredContent and its JSON text, UTF-8 byte-exact');
+    Response.Free;
+
+    Response := RoundTripWithLine(Fixture,
+      '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{' +
+      '"name":"fixture_bad_output",' + META_MODERN + '}}', ResponseLine);
+    Check(Pos('"text" : "Tool \"fixture_bad_output\" produced output that ' +
+      'does not match its outputSchema: Structured output must be an ' +
+      'integer" }], "isError" : true', ResponseLine) > 0,
+      'output: output breaking its schema becomes isError');
+    Response.Free;
+
     Response := RoundTripWithLine(Fixture,
       '{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{' +
       '"name":"test_prompt_with_embedded_resource","arguments":{' +

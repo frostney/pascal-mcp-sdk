@@ -80,7 +80,11 @@ Results are built with the helpers in
 
 - `MCPTextResult('...')` — plain text content.
 - `MCPStructuredResult(Text, StructuredData)` — text plus
-  `structuredContent` matching your output schema.
+  `structuredContent` matching your output schema, which the server
+  checks before sending when the schema is inside
+  [the enforced subset](schemas.md#the-enforced-subset).
+  `MCPStructuredResult(StructuredData)` uses the serialized JSON as the
+  text. The value can be any JSON value: an array of records, a number.
 - `MCPImageResult(Bytes, 'image/png')` — one image content block;
   takes raw bytes (base64-encoded for you) or already-base64 data.
 - `MCPErrorResult('...')` — an explicit in-band error
@@ -95,17 +99,19 @@ example a client capability it needs and did not declare, raise
 
 ## Validation before your handler runs
 
-Every call is checked against the registered schema's enforceable
-subset — `type`, `properties`, `required`, `enum`, `default` —
-before the handler runs. Violations become in-band `isError` results
+Every call is checked before the handler runs. A raw schema's
+arguments are checked against the enforced subset — `type`,
+`properties`, `required`, `items`, `enum`, `default`, nested to any
+depth; a typed tool's are checked as they bind to its argument class.
+Violations become in-band `isError` results
 in the same shape for raw and typed tools, so the model sees what it
 got wrong and retries. Absent optional arguments are seeded with their
 schema `default`; unknown argument properties are ignored.
 
 A raw schema that uses keywords *outside* the enforced subset fails at
 startup, naming the offending keyword, unless the registration is
-marked `.ApplicationValidated` — the documented escape hatch that
-hands argument validation to your handler (see
+marked `.ApplicationValidated` — the documented escape hatch, for input
+schemas only, that hands argument validation to your handler (see
 [Schemas](schemas.md#the-enforced-subset)).
 
 Deeper, semantic validation stays your handler's job — report

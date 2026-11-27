@@ -196,6 +196,23 @@ function OversizedLineResponse(AMaxLineLength: Integer): string;
 transports wrap — only custom transport authors call these directly
 (see [Architecture](../internals/architecture.md#the-sans-io-core)).
 
+### Schema checks
+
+`MCP.Schema` exposes the checks the server runs on arguments and
+structured output (see [the enforced subset](../guides/schemas.md#the-enforced-subset)):
+
+```pascal
+function MCPSchemaSubsetViolation(ASchema: TJSONObject;
+  AObjectRoot: Boolean): string;
+function MCPValidateAgainstSchema(ASchema: TJSONObject; AValue: TJSONData;
+  const AKind: string; ASeedDefaults: Boolean; out AError: string): Boolean;
+```
+
+| Function | Contract |
+| --- | --- |
+| `MCPSchemaSubsetViolation` | `''` when `ASchema` is inside the subset, otherwise the first violation with its path. `AObjectRoot` also requires an `object` root, as input schemas need. `ASchema` is borrowed |
+| `MCPValidateAgainstSchema` | `True` when `AValue` conforms; otherwise `False` with the first violation in `AError`, naming the value with `AKind` (`'argument'` gives `Missing required argument "a.b"`). `ASchema` must be inside the subset. Both are borrowed; with `ASeedDefaults`, absent optional properties that declare a default are added to `AValue` |
+
 ## Stdio transport
 
 From `MCP.Transport.Stdio`:
