@@ -253,7 +253,7 @@ function IsExtensionId(const AId: string): Boolean;
 
 // AInputRequests is borrowed.
 // '' when every inputRequests entry names a kind the client declared,
-// with the member it needs (InputRequestMember); otherwise the first
+// with the member of that capability it needs; otherwise the first
 // missing capability, and in AMissingMember the member it lacks, or ''
 // when the capability alone is missing and enough. AUnknownKind carries the
 // method of an entry that is not an MRTR kind at all, and stays
@@ -263,13 +263,6 @@ function IsExtensionId(const AId: string): Boolean;
 function MissingInputCapability(AInputRequests: TJSONObject;
   const ACtx: TMCPRequestContext; out AUnknownKind,
   AMissingMember: string): string;
-
-// The member of capability its kind needs that input request AEntry
-// (borrowed: an object with method and params) needs too, or '': for
-// elicitation/create its mode ("form" when absent), for
-// sampling/createMessage "tools" when it carries tools or toolChoice.
-function InputRequestMember(const AMethod: string;
-  AEntry: TJSONObject): string;
 
 // The automatic -32021 for a subject lacking ANames (not empty), both
 // for declared needs (#84) and for a run-time input request.
@@ -338,17 +331,19 @@ begin
   if not HasCapability(AName) then
     Exit(False);
   Capability := ClientCapabilities.Find(AName);
+  // A classic client's capability counts by presence, so it may be no
+  // object: then it declares no member.
+  if (Capability = nil) or (Capability.JSONType <> jtObject) then
+    Exit(False);
   // "an empty capabilities object is equivalent to declaring support
   // for form mode only" (client/elicitation#capabilities, 2026-07-28 and
   // 2025-11-25, verified 2026-11-27); 2025-06-18 has only the empty
   // object.
   if (AName = 'elicitation') and (AMember = 'form') and
-    ((Capability = nil) or (Capability.JSONType <> jtObject) or
-    (Capability.Count = 0)) then
+    (Capability.Count = 0) then
     Exit(True);
   // HasCapability checked a 2026-07-28 request's typed members' shapes.
-  Result := (Capability <> nil) and (Capability.JSONType = jtObject) and
-    (MemberPosition(TJSONObject(Capability), AMember) >= 0);
+  Result := MemberPosition(TJSONObject(Capability), AMember) >= 0;
 end;
 
 function TMCPRequestContext.ExtensionSettings(const AId: string): TJSONObject;
@@ -757,45 +752,56 @@ begin
     Result := '';
 end;
 
-// '' when every inputRequests entry names a kind the client declared;
-// otherwise the first missing capability. AUnknownKind carries the
-// method of an entry that is not an MRTR kind at all, and stays
-// non-empty for a malformed entry too — one that is not an object, or
-// carries no string "method" — so callers can keep testing it with a
-// single `<> ''` guard and never emit such a map on the wire.
-// elicitation/create: "Servers MUST NOT send elicitation requests with
-// modes that are not supported by the client"; sampling: "Servers MUST
-// NOT send tool-enabled sampling requests to Clients that have not
-// declared support for tool use via the sampling.tools capability"
-// (client/elicitation#capabilities and client/sampling#tools-in-sampling,
-// 2026-07-28, verified 2026-11-27).
-function InputRequestMember(const AMethod: string;
-  AEntry: TJSONObject): string;
+// The member of its capability that input request AEntry (borrowed, an
+// object) needs, in AMember ('' for none): for elicitation/create its
+// mode, form when absent, and for sampling/createMessage "tools" when
+// it carries tools or toolChoice. False for a mode other than "form"
+// or "url". elicitation: "Servers MUST NOT send elicitation requests
+// with modes that are not supported by the client", "form mode
+// requests MAY omit mode"; sampling: "Servers MUST NOT send
+// tool-enabled sampling requests to Clients that have not declared
+// support for tool use via the sampling.tools capability"
+// (client/elicitation#capabilities, #elicitation-requests and
+// client/sampling#tools-in-sampling, 2026-07-28, verified 2026-11-27).
+// Members are found by key, so one a caller stored as nil counts.
+function InputRequestMember(const AMethod: string; AEntry: TJSONObject;
+  out AMember: string): Boolean;
 var
   Params, Mode: TJSONData;
+  Position: Integer;
 begin
-  Result := '';
+  Result := True;
+  AMember := '';
   Params := AEntry.Find('params');
   if not IsJSONObjectValue(Params) then
     Params := nil;
   if AMethod = 'elicitation/create' then
   begin
-    // "form mode requests MAY omit mode".
-    Result := 'form';
-    if Params <> nil then
-    begin
-      Mode := TJSONObject(Params).Find('mode');
-      if (Mode <> nil) and (Mode.JSONType = jtString) and
-        (Mode.AsString <> '') then
-        Result := Mode.AsString;
-    end;
+    AMember := 'form';
+    if Params = nil then
+      Exit;
+    Position := MemberPosition(TJSONObject(Params), 'mode');
+    if Position < 0 then
+      Exit;
+    Mode := TJSONObject(Params).Items[Position];
+    if (Mode = nil) or (Mode.JSONType <> jtString) or
+      ((Mode.AsString <> 'form') and (Mode.AsString <> 'url')) then
+      Exit(False);
+    AMember := Mode.AsString;
   end
   else if (AMethod = 'sampling/createMessage') and (Params <> nil) and
-    ((TJSONObject(Params).Find('tools') <> nil) or
-    (TJSONObject(Params).Find('toolChoice') <> nil)) then
-    Result := 'tools';
+    ((MemberPosition(TJSONObject(Params), 'tools') >= 0) or
+    (MemberPosition(TJSONObject(Params), 'toolChoice') >= 0)) then
+    AMember := 'tools';
 end;
 
+// '' when every inputRequests entry names a kind the client declared;
+// otherwise the first missing capability. AUnknownKind carries the
+// method of an entry that is not an MRTR kind at all, and stays
+// non-empty for a malformed entry too — one that is not an object,
+// carries no string "method", or asks for an elicitation mode that
+// does not exist — so callers can keep testing it with a single `<> ''`
+// guard and never emit such a map on the wire.
 function MissingInputCapability(AInputRequests: TJSONObject;
   const ACtx: TMCPRequestContext; out AUnknownKind,
   AMissingMember: string): string;
@@ -831,7 +837,11 @@ begin
         AUnknownKind := Method;
       Exit;
     end;
-    Member := InputRequestMember(Method, TJSONObject(Entry));
+    if not InputRequestMember(Method, TJSONObject(Entry), Member) then
+    begin
+      AUnknownKind := Method + ' with an unknown mode';
+      Exit;
+    end;
     if not ACtx.HasCapability(Capability) then
     begin
       // An empty elicitation object would do for form mode.

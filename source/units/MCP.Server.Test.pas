@@ -338,7 +338,14 @@ type
 
   // The input gate checks the member of a capability each request
   // needs (#108): an elicitation mode, and sampling.tools for a
-  // tool-enabled sampling request.
+  // tool-enabled sampling request. Verified 2026-11-27 against
+  // https://modelcontextprotocol.io/specification/2026-07-28/client/elicitation#capabilities
+  // ("Servers MUST NOT send elicitation requests with modes that are not
+  // supported by the client"; an empty object means form only) and
+  // https://modelcontextprotocol.io/specification/2026-07-28/client/sampling#tools-in-sampling
+  // ("Servers MUST NOT send tool-enabled sampling requests to Clients
+  // that have not declared support for tool use via the sampling.tools
+  // capability").
   TInputMembers = class(TDispatchSuite)
   protected
     procedure BeforeEach; override;
@@ -351,7 +358,7 @@ type
     procedure TestElicitationModes;
     procedure TestElicitationUndeclared;
     procedure TestToolEnabledSampling;
-    procedure TestHasSubCapability;
+    procedure TestUnknownModes;
   end;
 
   // requestState sealing (#89): what reaches the client is a token,
@@ -5049,20 +5056,24 @@ begin
       '"maxTokens":10,"toolChoice":{"mode":"none"}}')))
   else if Kind = 'plain' then
     Request := MCPSamplingTextRequest('Hi', 10)
+  else if Kind = 'niltools' then
+  begin
+    // A caller-built request whose tools member is stored as nil, which
+    // goes out as null and still asks for tools.
+    Request := TJSONObject(GetJSON('{"messages":[],"maxTokens":10}'));
+    Request.Add('tools', TJSONData(nil));
+    Request := MCPSamplingRequest(Request);
+  end
+  else if Kind = 'weirdmode' then
+    Request := TJSONObject(GetJSON('{"method":"elicitation/create",' +
+      '"params":{"mode":"weird","message":"Name?"}}'))
+  else if Kind = 'nullmode' then
+    Request := TJSONObject(GetJSON('{"method":"elicitation/create",' +
+      '"params":{"mode":null,"message":"Name?",' +
+      '"requestedSchema":{"type":"object"}}}'))
   else
     Request := MCPElicitFormRequest('Name?', ObjectSchema.AddString('name'));
   Result := MCPInputRequired(TJSONObject.Create(['q', Request]));
-end;
-
-// F/f, U/u, T/t: whether the client declared elicitation.form,
-// elicitation.url and sampling.tools.
-function SubCapabilityHandler(AArguments: TJSONObject;
-  const ACtx: TMCPRequestContext): TMCPToolResult;
-begin
-  Result := MCPTextResult(
-    BoolToStr(ACtx.HasSubCapability('elicitation', 'form'), 'F', 'f') +
-    BoolToStr(ACtx.HasSubCapability('elicitation', 'url'), 'U', 'u') +
-    BoolToStr(ACtx.HasSubCapability('sampling', 'tools'), 'T', 't'));
 end;
 
 procedure TInputMembers.BeforeEach;
@@ -5070,8 +5081,6 @@ begin
   inherited BeforeEach;
   FServer.RegisterTool('ask', 'Asks one kind of input',
     '{"type":"object","properties":{"kind":{"type":"string"}}}', AskHandler);
-  FServer.RegisterTool('probe', 'Reports sub-capabilities',
-    '{"type":"object"}', SubCapabilityHandler);
 end;
 
 function TInputMembers.Ask(const AKind, ACapabilities: string): string;
@@ -5128,6 +5137,7 @@ end;
 procedure TInputMembers.TestElicitationUndeclared;
 begin
   ExpectRefused('form', '{}', 'elicitation', '{ "elicitation" : {} }');
+  ExpectRefused('bare', '{}', 'elicitation', '{ "elicitation" : {} }');
   ExpectRefused('url', '{}', 'elicitation.url',
     '{ "elicitation" : { "url" : {} } }');
 end;
@@ -5143,31 +5153,24 @@ begin
   ExpectSent('tools', '{"sampling":{"tools":{}}}');
   ExpectSent('choice', '{"sampling":{"tools":{}}}');
   ExpectSent('plain', '{"sampling":{}}');
+  ExpectRefused('niltools', '{"sampling":{}}', 'sampling.tools', NEEDS_TOOLS);
 end;
 
-procedure TInputMembers.TestHasSubCapability;
-
-  function Probe(ASuite: TInputMembers; const ACapabilities: string): string;
-  var
-    Line: string;
-  begin
-    ASuite.Dispatch('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
-      '"params":{"name":"probe","_meta":{' +
-      '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
-      '"io.modelcontextprotocol/clientCapabilities":' + ACapabilities + '}}}',
-      Line);
-    Result := Copy(Line, Pos('"text" : "', Line) + 10, 3);
-  end;
-
+// A mode other than form or url is the handler's mistake, not a
+// capability the client could declare: -32603, nothing sent.
+procedure TInputMembers.TestUnknownModes;
+const
+  BOTH = '{"elicitation":{"form":{},"url":{}}}';
+var
+  Line: string;
 begin
-  Expect<string>(Probe(Self, '{}')).ToBe('fut');
-  Expect<string>(Probe(Self, '{"elicitation":{}}')).ToBe('Fut');
-  Expect<string>(Probe(Self, '{"elicitation":{"url":{}}}')).ToBe('fUt');
-  Expect<string>(Probe(Self, '{"elicitation":{"form":{},"url":{}},' +
-    '"sampling":{"tools":{}}}')).ToBe('FUT');
-  // A member that is not an object is not declared (the schema types
-  // it), and neither is the capability then.
-  Expect<string>(Probe(Self, '{"sampling":{"tools":true}}')).ToBe('fut');
+  Line := Ask('weirdmode', BOTH);
+  Expect<Boolean>(Pos('"code" : -32603', Line) > 0).ToBe(True);
+  Expect<Boolean>(Pos('unsupported input request kind ' +
+    '\"elicitation/create with an unknown mode\"', Line) > 0).ToBe(True);
+  Line := Ask('nullmode', BOTH);
+  Expect<Boolean>(Pos('"code" : -32603', Line) > 0).ToBe(True);
+  Expect<Boolean>(Pos('input_required', Line) = 0).ToBe(True);
 end;
 
 procedure TInputMembers.SetupTests;
@@ -5178,8 +5181,8 @@ begin
     TestElicitationUndeclared);
   Test('tool-enabled sampling needs sampling.tools',
     TestToolEnabledSampling);
-  Test('HasSubCapability reads members; empty elicitation is form',
-    TestHasSubCapability);
+  Test('an elicitation mode other than form or url → -32603',
+    TestUnknownModes);
 end;
 
 { ───────── subset validation (#23) ───────── }

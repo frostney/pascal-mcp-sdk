@@ -749,6 +749,20 @@ begin
       nil, 'MRTR without capability: error data names elicitation');
     Response.Free;
 
+    // A client that declares only URL elicitation cannot take the form
+    // greet_user sends (#108; client/elicitation#capabilities, verified
+    // 2026-11-27).
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{' +
+      '"name":"greet_user","_meta":{' +
+      '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+      '"io.modelcontextprotocol/clientCapabilities":' +
+      '{"elicitation":{"url":{}}}}}}');
+    Check((PathInt(Response, 'error.code') = -32021) and
+      (FindPath(Response, 'error.data.requiredCapabilities.elicitation.form')
+      <> nil), 'MRTR URL-only client: -32021 names elicitation.form');
+    Response.Free;
+
     // The MCP Apps card is an ordinary resources/read (#98).
     Response := RoundTripWithLine(Demo,
       '{"jsonrpc":"2.0","id":36,"method":"resources/read","params":{' +
