@@ -32,13 +32,12 @@ unit MCP.Transport.HTTP;
 //     =?base64?...?= sentinel decoded first) on tools/call,
 //     resources/read and prompts/get. Failures answer 400 with a
 //     -32020 HeaderMismatch JSON-RPC error. A request without the
-//     envelope claim skips header validation — SDK-anchor fact
-//     (verified 2026-08-08 against @modelcontextprotocol/client
-//     2.0.0): the official client derives these headers from the
-//     body envelope and sends its pre-negotiation server/discover
-//     probe bare, so demanding the header there would break the
-//     documented up-front version-selection flow; the core still
-//     rejects every other _meta-less request with -32602.
+//     envelope claim skips header validation: it is malformed anyway,
+//     and the core's -32602 (HTTP 400, #79) names what is missing,
+//     where a -32020 would point at the headers instead. The official
+//     client sends the full envelope and headers even on its first
+//     server/discover probe (re-checked 2026-11-26 against
+//     @modelcontextprotocol/client 2.0.0, buildProbeRequest).
 //     Mcp-Param-* headers (#90): on tools/call, every parameter the
 //     tool designates with x-mcp-header (MCP.Server
 //     ToolHeaderParameters) must arrive as Mcp-Param-<name> whose
@@ -52,8 +51,12 @@ unit MCP.Transport.HTTP;
 //   - HTTP status mapping: -32601 → 404 (unknown RPC method, and the
 //     legacy-initialize rejection whose diagnostic names the
 //     supported versions); -32700/-32600/-32020/-32021/-32022 → 400;
-//     every other JSON-RPC response — results and in-band protocol
-//     errors alike — is 200;
+//     -32602 → 400 when the request lacks a required per-request
+//     field (MCP.Protocol.MissingRequiredMeta: _meta, its
+//     protocolVersion or its clientCapabilities), which the spec makes
+//     a malformed request (#79, basic/index#_meta, verified
+//     2026-11-26); every other JSON-RPC response — results and in-band
+//     protocol errors alike, other -32602s included — is 200;
 //   - a request that opted into request-scoped notifications
 //     (_meta.progressToken or the logLevel key) on a handler-backed
 //     method (tools/call, resources/read, prompts/get) is answered as
@@ -149,9 +152,11 @@ type
       var AResponse: TFPHTTPConnectionResponse);
     procedure AnswerJSON(AResponse: TFPHTTPConnectionResponse;
       ACode: Integer; const ABody: string);
+    // AMalformedRequest: the request lacked a required per-request
+    // field, so a -32602 answer maps to 400 (#79).
     procedure AnswerRequest(ARequest: TFPHTTPConnectionRequest;
       AResponse: TFPHTTPConnectionResponse; const ABody: string;
-      AStream: Boolean);
+      AStream, AMalformedRequest: Boolean);
   public
     constructor Create(AServer: TMCPServer);
     destructor Destroy; override;
@@ -374,8 +379,11 @@ begin
 end;
 
 // The HTTP status the transport profile prescribes for a JSON-RPC
-// response line (unit header lists the mapping).
-function HTTPStatusForResponse(const ALine: string): Integer;
+// response line (unit header lists the mapping). AMalformedRequest:
+// the request lacked a required per-request field, so its -32602 is
+// the malformed-request rejection rather than an in-band error.
+function HTTPStatusForResponse(const ALine: string;
+  AMalformedRequest: Boolean): Integer;
 var
   Root: TJSONData;
   ErrorData: TJSONData;
@@ -401,6 +409,9 @@ begin
       MCP_ERROR_HEADER_MISMATCH, MCP_ERROR_MISSING_CLIENT_CAPABILITY,
       MCP_ERROR_UNSUPPORTED_PROTOCOL_VERSION:
         Result := 400;
+      JSONRPC_INVALID_PARAMS:
+        if AMalformedRequest then
+          Result := 400;
     end;
   finally
     Root.Free;
@@ -619,10 +630,8 @@ begin
   Result := True;
 
   // The mirrored headers derive from the body's _meta envelope; a
-  // request without the envelope claim (the official client's
-  // pre-negotiation server/discover probe) carries none and is left
-  // to the core, which rejects every other _meta-less request with
-  // its more useful -32602 diagnostic.
+  // request without the envelope claim is malformed and left to the
+  // core, whose -32602 names the missing field (400 on HTTP, #79).
   BodyVersion := '';
   Meta := MetaObject(AMessage.Params);
   if Meta <> nil then
@@ -780,7 +789,7 @@ end;
 // handler actually emits a notification.
 procedure TMCPHTTPServer.AnswerRequest(ARequest: TFPHTTPConnectionRequest;
   AResponse: TFPHTTPConnectionResponse; const ABody: string;
-  AStream: Boolean);
+  AStream, AMalformedRequest: Boolean);
 var
   Session: TMCPSession;
   Stream: TSSEStream;
@@ -810,25 +819,23 @@ begin
         // the end of it.
         on EStreamError do;
       end;
-      if not Stream.HeadersSent then
-        // No notification flowed, so the opt-in changed nothing about
-        // how this request is answered.
-        if Produced then
-          AnswerJSON(AResponse, HTTPStatusForResponse(ResponseLine),
-            ResponseLine)
-        else
-          AResponse.Code := 202;
+      // Once the stream is open, the response went out as its last
+      // event. Otherwise no notification flowed, so the opt-in changed
+      // nothing about how this request is answered.
+      if Stream.HeadersSent then
+        Exit;
     end
     else
-    begin
-      if FServer.HandleMessage(Session, ABody, nil, nil, ResponseLine) then
-        AnswerJSON(AResponse, HTTPStatusForResponse(ResponseLine),
-          ResponseLine)
-      else
-        // Notification-shaped bodies (including malformed ones the
-        // core drops as fire-and-forget) are accepted with no body.
-        AResponse.Code := 202;
-    end;
+      Produced := FServer.HandleMessage(Session, ABody, nil, nil,
+        ResponseLine);
+    // One place answers every non-streamed request (#79 review).
+    if Produced then
+      AnswerJSON(AResponse, HTTPStatusForResponse(ResponseLine,
+        AMalformedRequest), ResponseLine)
+    else
+      // Notification-shaped bodies (including malformed ones the core
+      // drops as fire-and-forget) are accepted with no body.
+      AResponse.Code := 202;
   finally
     Session.Free;
   end;
@@ -898,13 +905,14 @@ begin
           MCP_ERROR_HEADER_MISMATCH, Failure));
         Exit;
       end;
-      AnswerRequest(ARequest, AResponse, Body, WantsStream(Msg));
+      AnswerRequest(ARequest, AResponse, Body, WantsStream(Msg),
+        MissingRequiredMeta(Msg.Params) <> '');
     end
     else
       // Notifications (well-formed or dropped-malformed) and invalid
       // request-shaped bodies alike go through the core; the header
       // profile defines no requirements for notification POSTs.
-      AnswerRequest(ARequest, AResponse, Body, False);
+      AnswerRequest(ARequest, AResponse, Body, False, False);
   finally
     FreeJSONRPCMessage(Msg);
   end;

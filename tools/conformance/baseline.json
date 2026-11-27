@@ -106,32 +106,7 @@
       "expected": "pass"
     },
     "server-stateless": {
-      "expected": "fail",
-      "issue": 79,
-      "passingChecks": [
-        "sep-2575-discover-capabilities-match-handlers",
-        "sep-2575-http-server-error-jsonrpc-id",
-        "sep-2575-http-server-header-mismatch-400",
-        "sep-2575-http-server-method-not-found-404",
-        "sep-2575-http-server-method-not-found-404-initialize",
-        "sep-2575-http-server-method-not-found-404-logging-setlevel",
-        "sep-2575-http-server-method-not-found-404-ping",
-        "sep-2575-http-server-method-not-found-404-resources-subscribe",
-        "sep-2575-http-server-method-not-found-404-resources-unsubscribe",
-        "sep-2575-http-server-no-independent-requests-on-stream",
-        "sep-2575-http-server-unsupported-version-400",
-        "sep-2575-missing-capability-http-400",
-        "sep-2575-request-meta-client-info-optional",
-        "sep-2575-request-meta-invalid-missing-client-capabilities",
-        "sep-2575-request-meta-invalid-missing-meta",
-        "sep-2575-request-meta-invalid-missing-protocol-version",
-        "sep-2575-server-declares-prompts-in-discover",
-        "sep-2575-server-identifies-in-result-meta",
-        "sep-2575-server-implements-discover",
-        "sep-2575-server-no-log-without-loglevel",
-        "sep-2575-server-rejects-undeclared-capability",
-        "sep-2575-server-unsupported-version-error"
-      ]
+      "expected": "pass"
     },
     "tasks-capability-negotiation": {
       "expected": "fail",
