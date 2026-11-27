@@ -83,7 +83,9 @@ unit MCP.Transport.HTTP;
 //     handler that never writes stops too. Receive EOF cannot tell a
 //     client that closed only its sending side from one that closed
 //     both, so that client has cancelled too: its request ends and it
-//     gets no JSON-RPC message, only an empty 202. And when
+//     gets no JSON-RPC message: an empty 202, or, when its SSE stream
+//     had already opened, the end of that stream without a final
+//     event. And when
 //     a stream write fails, the failure aborts the running handler,
 //     the core converts it into a response the transport can no
 //     longer deliver, and nothing further is sent for that request

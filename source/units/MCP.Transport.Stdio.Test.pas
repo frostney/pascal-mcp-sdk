@@ -61,6 +61,8 @@ type
     procedure TestCancelReachesRunningHandler;
     procedure TestCancelWrittenAfterHandlerStarts;
     procedure TestCancelForQueuedRequestWaits;
+    procedure TestMalformedThenValidCancellation;
+    procedure TestServerOverCustomInput;
     procedure TestEscapedCancellationMethod;
     procedure TestTextBufferTakenOver;
     procedure TestStreamBackedInput;
@@ -104,6 +106,17 @@ begin
   Result := MCPTextResult('finished');
 end;
 
+// Asks IsCancelled exactly once, as a handler at its last checkpoint.
+function PollOnceHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  if ACtx.IsCancelled then
+    WaiterOutcome := 'cancelled'
+  else
+    WaiterOutcome := 'finished';
+  Result := MCPTextResult(WaiterOutcome);
+end;
+
 // Writes its own cancellation into the input pipe once it runs, then
 // closes the pipe and polls: only a poll that reads the handle can see
 // it, as the loop read the request before the cancellation existed.
@@ -144,6 +157,9 @@ begin
   FServer.RegisterTool('waiter', 'Waits', '{"type":"object"}', WaiterHandler);
   FServer.RegisterTool('self_cancel', 'Cancels itself through the pipe',
     '{"type":"object"}', SelfCancelHandler);
+  FServer.RegisterTool('poll_once', 'Polls once', '{"type":"object"}',
+    PollOnceHandler);
+  WaiterOutcome := '';
   WaiterOutcomes := '';
   FDir := GetTempDir + 'pascal-mcp-sdk-stdio-test' + PathDelim;
   ForceDirectories(FDir);
@@ -461,13 +477,13 @@ var
 begin
   Bytes := TStringStream.Create('');
   try
-    Bytes.SaveToFile(FDir + 'pipe-in.txt');
+    Bytes.SaveToFile(FDir + 'in.txt');
   finally
     Bytes.Free;
   end;
   OpenPipe(PipeReader, PipeWriter);
   FileWrite(PipeWriter, REQUEST[1], Length(REQUEST));
-  Assign(InFile, FDir + 'pipe-in.txt');
+  Assign(InFile, FDir + 'in.txt');
   Reset(InFile);
   FileClose(TextRec(InFile).Handle);
   TextRec(InFile).Handle := PipeReader;
@@ -508,7 +524,52 @@ begin
   RunLoop(WaiterCall('3') + #10 +
     '{"jsonrpc":"2.0","method":"notifications\/cancelled","params":' +
     '{"requestId":3}}' + #10);
+  Expect<string>(WaiterOutcomes).ToBe('cancelled,');
+end;
+
+// A malformed cancellation naming the running request is skipped, and
+// the valid one behind it is found by the same poll (#93 review).
+procedure TStdioLoop.TestMalformedThenValidCancellation;
+begin
+  RunLoop('{"jsonrpc":"2.0","id":4,"method":"tools/call","params":' +
+    '{"name":"poll_once",' + META_MODERN + '}}' + #10 +
+    '{"jsonrpc":"2.0","method":"notifications/cancelled","params":' +
+    '{"requestId":4,"reason":5}}' + #10 +
+    '{"jsonrpc":"2.0","method":"notifications/cancelled","params":' +
+    '{"requestId":4,"reason":"user"}}' + #10);
   Expect<string>(WaiterOutcome).ToBe('cancelled');
+end;
+
+// RunMCPStdioServer over a global Input that has its own driver: the
+// plain-file check does not take Input's driver for the plain one, so
+// the stream is read through Text (#93 review).
+procedure TStdioLoop.TestServerOverCustomInput;
+var
+  SavedInput, SavedOutput: TextRec;
+  Source, Sink: TStringStream;
+begin
+  Source := TStringStream.Create(DiscoverLine(8) + #10);
+  Sink := TStringStream.Create('');
+  SavedInput := TextRec(Input);
+  SavedOutput := TextRec(Output);
+  try
+    AssignStream(Input, Source);
+    Reset(Input);
+    AssignStream(Output, Sink);
+    Rewrite(Output);
+    try
+      RunMCPStdioServer(FServer);
+    finally
+      Close(Input);
+      Close(Output);
+      TextRec(Input) := SavedInput;
+      TextRec(Output) := SavedOutput;
+    end;
+    Expect<Boolean>(Pos('"id" : 8', Sink.DataString) > 0).ToBe(True);
+  finally
+    Source.Free;
+    Sink.Free;
+  end;
 end;
 
 // Bytes the caller's Text had already buffered are served, not skipped
@@ -518,14 +579,19 @@ var
   InFile, OutFile: Text;
   Bytes: TStringStream;
   Header, Output: string;
+  LargeBuffer: array[0..4095] of Char;
 begin
-  Bytes := TStringStream.Create('header'#10 + DiscoverLine(5) + #10);
+  // A header longer than 256 bytes, read through a larger buffer, so
+  // the takeover starts beyond the declared TextBuf bounds.
+  Bytes := TStringStream.Create(StringOfChar('h', 300) + #10 +
+    DiscoverLine(5) + #10);
   try
     Bytes.SaveToFile(FDir + 'in.txt');
   finally
     Bytes.Free;
   end;
   Assign(InFile, FDir + 'in.txt');
+  SetTextBuf(InFile, LargeBuffer, SizeOf(LargeBuffer));
   Reset(InFile);
   ReadLn(InFile, Header);
   Assign(OutFile, FDir + 'out.txt');
@@ -543,7 +609,7 @@ begin
   finally
     Bytes.Free;
   end;
-  Expect<string>(Header).ToBe('header');
+  Expect<string>(Header).ToBe(StringOfChar('h', 300));
   Expect<Boolean>(Pos('"id" : 5', Output) > 0).ToBe(True);
 end;
 
@@ -627,6 +693,10 @@ begin
     TestCancelWrittenAfterHandlerStarts);
   Test('a cancellation for a queued request waits for that request',
     TestCancelForQueuedRequestWaits);
+  Test('a malformed cancellation does not hide a valid one behind it',
+    TestMalformedThenValidCancellation);
+  Test('RunMCPStdioServer reads a custom-driver Input through Text',
+    TestServerOverCustomInput);
   Test('an escaped notifications\/cancelled method still cancels',
     TestEscapedCancellationMethod);
   Test('bytes the caller''s Text already buffered are served',

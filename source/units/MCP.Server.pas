@@ -385,11 +385,12 @@ type
     // session is freed.
     procedure SetCancellationPoll(APoll: TMCPCancellationPoll;
       AUserData: Pointer);
-    // Whether ARequestId (borrowed) names the request this session is
-    // running, matched as notifications/cancelled matches it: strings
-    // by decoded value, numbers by value. Lets a transport pick out the
-    // cancellation that concerns the running request (#93).
-    function IsActiveRequestId(ARequestId: TJSONData): Boolean;
+    // Whether ALine is a notifications/cancelled that HandleMessage
+    // would accept for the request this session is running: well formed
+    // (a string reason or none) and naming that request's id, strings
+    // by decoded value and numbers by value. Lets a transport pick out
+    // the cancellation that concerns the running request (#93).
+    function CancelsActiveRequest(const ALine: string): Boolean;
   end;
 
   TMCPServer = class
@@ -1278,14 +1279,24 @@ begin
   Result := -1;
 end;
 
+// Checked once a notification is due: the server's own emitter checks
+// cancellation itself (TMCPRequestDispatch.EmitNotification, which
+// consults the transport's poll), so only another notifier, as a
+// handler outside dispatch might have, is checked here (#93 review).
+function CancelledBeforeEmit(const ACtx: TMCPRequestContext): Boolean;
+begin
+  Result := (TMethod(ACtx.Notifier).Code <>
+    Pointer(@TMCPRequestDispatch.EmitNotification)) and ACtx.IsCancelled;
+end;
+
 procedure MCPReportProgress(const ACtx: TMCPRequestContext;
   AProgress: Double; ATotal: Double; const AMessage: string);
 var
   NotificationParams, Params: TJSONObject;
   ProgressToken: TJSONData;
 begin
-  if ACtx.IsCancelled or
-     not (ACtx.HasProgressToken and Assigned(ACtx.Notifier)) then
+  if not (ACtx.HasProgressToken and Assigned(ACtx.Notifier)) or
+    CancelledBeforeEmit(ACtx) then
     Exit;
   Params := TJSONObject.Create;
   try
@@ -1325,10 +1336,9 @@ procedure MCPLogMessage(const ACtx: TMCPRequestContext;
 var
   NotificationParams, Params: TJSONObject;
 begin
-  if ACtx.IsCancelled or (ACtx.LogLevel = '') or
-     not Assigned(ACtx.Notifier) then
-    Exit;
-  if LogSeverity(ALevel) < LogSeverity(ACtx.LogLevel) then
+  if (ACtx.LogLevel = '') or not Assigned(ACtx.Notifier) or
+    (LogSeverity(ALevel) < LogSeverity(ACtx.LogLevel)) or
+    CancelledBeforeEmit(ACtx) then
     Exit;
   Params := TJSONObject.Create;
   try
@@ -1793,10 +1803,38 @@ begin
   FCancellationPollData := AUserData;
 end;
 
-function TMCPSession.IsActiveRequestId(ARequestId: TJSONData): Boolean;
+// The requestId of a well-formed notifications/cancelled (borrowed from
+// AMessage), or nil: params present, and a reason absent or a string.
+// A malformed reason invalidates the whole notification. Spec verified
+// 2026-07-21:
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation
+function CancellationRequestId(const AMessage: TJSONRPCMessage): TJSONData;
+var
+  ReasonData: TJSONData;
 begin
-  Result := (FCurrentRequestToken <> nil) and
-    TMCPRequestCancellationToken(FCurrentRequestToken).Matches(ARequestId);
+  Result := nil;
+  if (AMessage.Kind <> jrkNotification) or
+    (AMessage.Method <> 'notifications/cancelled') or
+    (AMessage.Params = nil) then
+    Exit;
+  ReasonData := AMessage.Params.Find('reason');
+  if (ReasonData = nil) or (ReasonData.JSONType = jtString) then
+    Result := AMessage.Params.Find('requestId');
+end;
+
+function TMCPSession.CancelsActiveRequest(const ALine: string): Boolean;
+var
+  Msg: TJSONRPCMessage;
+begin
+  if FCurrentRequestToken = nil then
+    Exit(False);
+  Msg := ParseJSONRPCMessage(ALine);
+  try
+    Result := TMCPRequestCancellationToken(FCurrentRequestToken).Matches(
+      CancellationRequestId(Msg));
+  finally
+    FreeJSONRPCMessage(Msg);
+  end;
 end;
 
 procedure TMCPSession.CompleteLegacyInitialize;
@@ -3062,19 +3100,11 @@ begin
         begin
           if Msg.Method = 'notifications/initialized' then
             ASession.CompleteLegacyInitialize;
-          if (Msg.Method = 'notifications/cancelled') and
-             (Msg.Params <> nil) then
+          // Accepted reasons are logged best-effort for debugging.
+          if ASession.TryCancelRequest(CancellationRequestId(Msg)) then
           begin
-            // A malformed reason invalidates the whole notification;
-            // accepted reasons are logged best-effort for debugging.
-            // Spec verified 2026-07-21:
-            // https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation
             ReasonData := Msg.Params.Find('reason');
-            if ((ReasonData = nil) or
-                (ReasonData.JSONType = jtString)) and
-               ASession.TryCancelRequest(
-                 Msg.Params.Find('requestId')) and
-               (ReasonData <> nil) then
+            if ReasonData <> nil then
               TryLogToStderr('MCP cancellation reason: ' +
                 SanitizeLogText(ReasonData.AsString));
           end;

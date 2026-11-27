@@ -90,11 +90,13 @@ uses
   {$IFDEF WINDOWS}
   Windows,
   {$ENDIF}
-  fpjson,
   MCP.JSONRPC;
 
 const
   READ_CHUNK = 65536;
+  // What a queued line costs besides its bytes, so empty and short
+  // lines count against the queue's budget too.
+  QUEUE_ENTRY_COST = 64;
 
 type
   PText = ^Text;
@@ -102,9 +104,9 @@ type
   TQueuedLine = record
     Line: string;
     Overflow: Boolean;
-    // The requestId of a notifications/cancelled line (owned), nil for
-    // any other line; set once the line has been classified.
-    CancelId: TJSONData;
+    // A notifications/cancelled line, set once the line is classified;
+    // whether it concerns the running request is the core's to say.
+    Cancellation: Boolean;
   end;
 
   // The loop's input (#93). On a plain file Text (stdin, a file, a
@@ -136,13 +138,13 @@ type
     procedure Feed(const AChunk: string);
     procedure Push(const ALine: string; AOverflow: Boolean);
     procedure EndInput(AError: Integer);
-    function ReadChunk: Boolean;
+    function ReadChunk(ABlocking: Boolean): Boolean;
     function DataWaiting: Boolean;
     procedure ClassifyQueued;
     procedure RemoveAt(AIndex: Integer);
+    procedure Compact;
   public
     constructor Create(var AInput: Text; AMax: Integer);
-    destructor Destroy; override;
     // The next line, blocking until one is complete; False at the end
     // of input. Raises EInOutError when reading failed.
     function NextLine(out ALine: string; out AOverflow: Boolean): Boolean;
@@ -150,17 +152,40 @@ type
     // FQueueLimit bytes are queued; True when something was read.
     function ReadWaitingChunk: Boolean;
     // Removes and returns the first queued notifications/cancelled line
-    // whose requestId names the request ASession is running.
+    // the core would accept for the request ASession is running.
     function TakeActiveCancellation(ASession: TMCPSession;
       out ALine: string): Boolean;
   end;
 
-// The Text read function every plain file shares (stdin's included):
-// any other one is a custom driver whose handle means nothing here.
+var
+  // The read function the RTL gives every plain file Text, taken at
+  // initialization from a Text this unit opens on the null device, so a
+  // host that installs its own driver on Input does not change it.
+  PlainFileReadFunc: CodePointer = nil;
+
+procedure FindPlainFileReadFunc;
+var
+  Probe: Text;
+begin
+  {$PUSH}{$I-}
+  Assign(Probe, {$IFDEF WINDOWS}'NUL'{$ELSE}'/dev/null'{$ENDIF});
+  Reset(Probe);
+  if IOResult = 0 then
+  begin
+    PlainFileReadFunc := TextRec(Probe).InOutFunc;
+    Close(Probe);
+    IOResult;
+  end;
+  {$POP}
+end;
+
+// Whether AInput is a plain file Text: any other read function is a
+// custom driver whose handle means nothing here.
 function IsPlainFileInput(var AInput: Text): Boolean;
 begin
-  Result := (TextRec(AInput).Mode = fmInput) and
-    (TextRec(AInput).InOutFunc = TextRec(Input).InOutFunc);
+  Result := (PlainFileReadFunc <> nil) and
+    (TextRec(AInput).Mode = fmInput) and
+    (TextRec(AInput).InOutFunc = PlainFileReadFunc);
 end;
 
 constructor TStdioReader.Create(var AInput: Text; AMax: Integer);
@@ -177,34 +202,31 @@ begin
   if not FRaw then
     Exit;
   FHandle := TextRec(AInput).Handle;
+  // By byte offset: a buffer from SetTextBuf can be larger than the
+  // TextBuf type BufPtr declares.
   with TextRec(AInput) do
     if BufPos < BufEnd then
     begin
-      SetString(Buffered, PChar(@BufPtr^[BufPos]), BufEnd - BufPos);
+      SetString(Buffered, PChar(BufPtr) + BufPos, BufEnd - BufPos);
       BufPos := BufEnd;
       Feed(Buffered);
     end;
-end;
-
-destructor TStdioReader.Destroy;
-var
-  I: Integer;
-begin
-  for I := FHead to High(FQueue) do
-    FQueue[I].CancelId.Free;
-  inherited Destroy;
 end;
 
 procedure TStdioReader.Push(const ALine: string; AOverflow: Boolean);
 var
   Slot: Integer;
 begin
+  // The loop skips empty lines (a lone CR included), so they are not
+  // queued at all.
+  if not AOverflow and ((ALine = '') or (ALine = #13)) then
+    Exit;
   Slot := Length(FQueue);
   SetLength(FQueue, Slot + 1);
   FQueue[Slot].Line := ALine;
   FQueue[Slot].Overflow := AOverflow;
-  FQueue[Slot].CancelId := nil;
-  Inc(FQueuedBytes, Length(ALine));
+  FQueue[Slot].Cancellation := False;
+  Inc(FQueuedBytes, Length(ALine) + QUEUE_ENTRY_COST);
 end;
 
 procedure TStdioReader.Feed(const AChunk: string);
@@ -237,8 +259,9 @@ procedure TStdioReader.EndInput(AError: Integer);
 begin
   FEOF := True;
   FReadError := AError;
-  // A last line without its LF still counts, as before.
-  if (FPartialLen > 0) or FPartialOverflow then
+  // A last line without its LF still counts at a clean end, as before;
+  // after a failed read it may be cut short, so it is dropped.
+  if (AError = 0) and ((FPartialLen > 0) or FPartialOverflow) then
   begin
     Push(Copy(FPartial, 1, FPartialLen), FPartialOverflow);
     FPartialLen := 0;
@@ -262,11 +285,12 @@ begin
 end;
 {$ENDIF}
 
-// One read from the handle; False once the input has ended. A read
-// that fails is the end of input too, remembered for NextLine to
-// report, except the normal ends: a closed pipe on Windows, and on Unix
-// an interrupted or would-block read, which is retried.
-function TStdioReader.ReadChunk: Boolean;
+// One read from the handle; False when nothing was read. A read that
+// fails is the end of input, remembered for NextLine to report, except
+// the normal ends: a closed pipe on Windows is EOF, and on Unix an
+// interrupted read is retried and a would-block one waits when
+// ABlocking (the loop), or returns at once from a poll.
+function TStdioReader.ReadChunk(ABlocking: Boolean): Boolean;
 var
   Chunk: string;
   Got: LongInt;
@@ -283,6 +307,8 @@ begin
       Continue;
     if Failure = ESysEAGAIN then
     begin
+      if not ABlocking then
+        Exit(False);
       WaitReadable(FHandle);
       Continue;
     end;
@@ -349,7 +375,7 @@ begin
   Result := FRaw and not FEOF and
     (FQueuedBytes + FPartialLen < FQueueLimit) and DataWaiting;
   if Result then
-    ReadChunk;
+    ReadChunk(False);
 end;
 
 // Read one LF-terminated line through Text, storing at most AMax bytes:
@@ -398,7 +424,7 @@ begin
   if not FRaw then
     Exit(ReadBoundedLine(FInput^, FMax, ALine, AOverflow));
   while (FHead >= Length(FQueue)) and not FEOF do
-    ReadChunk;
+    ReadChunk(True);
   if FHead >= Length(FQueue) then
   begin
     ALine := '';
@@ -416,12 +442,9 @@ begin
   AOverflow := FQueue[FHead].Overflow;
   // Released as it is taken: a long queue keeps no served lines.
   FQueue[FHead].Line := '';
-  Dec(FQueuedBytes, Length(ALine));
-  if FQueue[FHead].CancelId <> nil then
-  begin
-    FreeAndNil(FQueue[FHead].CancelId);
+  Dec(FQueuedBytes, Length(ALine) + QUEUE_ENTRY_COST);
+  if FQueue[FHead].Cancellation then
     Dec(FCancelCount);
-  end;
   Inc(FHead);
   if FClassified < FHead then
     FClassified := FHead;
@@ -430,18 +453,35 @@ begin
     FQueue := nil;
     FHead := 0;
     FClassified := 0;
-  end;
+  end
+  else if FHead * 2 >= Length(FQueue) then
+    Compact;
   Result := True;
 end;
 
-// Classifies the queued lines not seen yet: a notifications/cancelled
-// keeps its requestId. The method is compared decoded, as the core
-// compares it, so an escaped spelling counts; the cheap text check only
-// skips lines with neither the plain name nor any escape.
+// Drops the served slots of a queue that never empties, so a sustained
+// backlog keeps no more slots than lines waiting.
+procedure TStdioReader.Compact;
+var
+  I: Integer;
+begin
+  for I := FHead to High(FQueue) do
+  begin
+    FQueue[I - FHead] := FQueue[I];
+    FQueue[I].Line := '';
+  end;
+  SetLength(FQueue, Length(FQueue) - FHead);
+  Dec(FClassified, FHead);
+  FHead := 0;
+end;
+
+// Classifies the queued lines not seen yet, marking the
+// notifications/cancelled ones. The method is compared decoded, as the
+// core compares it, so an escaped spelling counts; the cheap text check
+// only skips lines with neither the plain name nor any escape.
 procedure TStdioReader.ClassifyQueued;
 var
   Msg: TJSONRPCMessage;
-  Id: TJSONData;
 begin
   while FClassified < Length(FQueue) do
   begin
@@ -451,20 +491,13 @@ begin
       begin
         Msg := ParseJSONRPCMessage(Line);
         try
-          if (Msg.Kind = jrkNotification) and
-            (Msg.Method = 'notifications/cancelled') and
-            (Msg.Params <> nil) then
-          begin
-            Id := Msg.Params.Find('requestId');
-            if Id <> nil then
-            begin
-              CancelId := Id.Clone;
-              Inc(FCancelCount);
-            end;
-          end;
+          Cancellation := (Msg.Kind = jrkNotification) and
+            (Msg.Method = 'notifications/cancelled');
         finally
           FreeJSONRPCMessage(Msg);
         end;
+        if Cancellation then
+          Inc(FCancelCount);
       end;
     Inc(FClassified);
   end;
@@ -474,16 +507,12 @@ procedure TStdioReader.RemoveAt(AIndex: Integer);
 var
   I: Integer;
 begin
-  Dec(FQueuedBytes, Length(FQueue[AIndex].Line));
-  if FQueue[AIndex].CancelId <> nil then
-  begin
-    FreeAndNil(FQueue[AIndex].CancelId);
+  Dec(FQueuedBytes, Length(FQueue[AIndex].Line) + QUEUE_ENTRY_COST);
+  if FQueue[AIndex].Cancellation then
     Dec(FCancelCount);
-  end;
   for I := AIndex to High(FQueue) - 1 do
     FQueue[I] := FQueue[I + 1];
   FQueue[High(FQueue)].Line := '';
-  FQueue[High(FQueue)].CancelId := nil;
   SetLength(FQueue, Length(FQueue) - 1);
   Dec(FClassified);
 end;
@@ -495,10 +524,12 @@ var
 begin
   ALine := '';
   ClassifyQueued;
+  // The first one the core would accept for the running request: a
+  // malformed one naming it is skipped, not taken (#93 review).
   if FCancelCount > 0 then
     for I := FHead to High(FQueue) do
-      if (FQueue[I].CancelId <> nil) and
-        ASession.IsActiveRequestId(FQueue[I].CancelId) then
+      if FQueue[I].Cancellation and
+        ASession.CancelsActiveRequest(FQueue[I].Line) then
       begin
         ALine := FQueue[I].Line;
         RemoveAt(I);
@@ -614,5 +645,8 @@ begin
   // Windows console, and the host's code page restored afterwards.
   MCPWriteStderrLine(AMessage);
 end;
+
+initialization
+  FindPlainFileReadFunc;
 
 end.

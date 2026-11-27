@@ -152,13 +152,20 @@ A cancellation can arrive while the handler runs (#93). Each transport
 installs a cancellation poll on its session
 (`TMCPSession.SetCancellationPoll`), which the request consults
 whenever the handler asks `IsCancelled` and before each in-request
-notification, on the handler's own thread. The stdio loop reads stdin
-into its own buffer; its poll takes what is waiting without blocking
-and hands any `notifications/cancelled` line to the core, keeping the
-other lines queued in order. The HTTP binding's poll reports a closed
-connection, checked at most every 50 ms. No thread is involved, so a
-stdio-only program needs no thread driver; cancellation stays
-cooperative, as handlers already code it.
+notification, on the handler's own thread. On a plain file input the
+stdio loop reads stdin into its own buffer; its poll checks the lines
+already queued, then reads at most one chunk that is waiting, without
+blocking, and hands the core the `notifications/cancelled` it accepts
+for the running request (`TMCPSession.CancelsActiveRequest`). Other
+lines, cancellations for queued requests included, stay queued in
+order, and once about one line's budget is queued the poll stops
+reading, so a cancellation behind that backlog waits its turn. The
+HTTP binding's poll reports a closed or reset connection, checked at
+most every 50 ms. No thread is involved, so a stdio-only program needs
+no thread driver; cancellation stays cooperative, as handlers already
+code it. The poll lives on the session rather than arriving with each
+call, as [ADR-0001](../adr/0001-sans-io-core.md#amendment-2026-11-27-93)
+records.
 
 ## Registration and handler model
 

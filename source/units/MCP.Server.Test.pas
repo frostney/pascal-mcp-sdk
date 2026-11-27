@@ -230,6 +230,7 @@ type
     procedure TestLegacyFinishedAndRepeatedIgnored;
     procedure TestTransportPollCancels;
     procedure TestActiveRequestIdMatches;
+    procedure TestOptedOutNotificationsDoNotPoll;
     procedure TestTransportPollOnlyDuringRequests;
   end;
 
@@ -3207,6 +3208,15 @@ end;
 
 { ───────── cooperative cancellation ───────── }
 
+// Reports progress and logs a debug line, never asking IsCancelled.
+function ReporterHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  MCPReportProgress(ACtx, 0.5, 1.0);
+  MCPLogMessage(ACtx, 'debug', 'detail');
+  Result := MCPTextResult('reported');
+end;
+
 procedure TCancellationDispatch.BeforeEach;
 begin
   inherited BeforeEach;
@@ -3216,6 +3226,8 @@ begin
     '{"type":"object"}', SelfCancellingHandler);
   FServer.RegisterTool('notification-cancel', 'Receives cancellation',
     '{"type":"object"}', NotificationCancellingHandler);
+  FServer.RegisterTool('reporter', 'Reports progress and logs',
+    '{"type":"object"}', ReporterHandler);
   FLines := TStringList.Create;
   FLineSink := CaptureSink;
   FLineSinkData := FLines;
@@ -3427,36 +3439,43 @@ begin
 end;
 
 var
-  // What IsActiveRequestId said, from inside the poll, for 9, "9", 9.0
-  // and 10.
+  // What CancelsActiveRequest said, from inside the poll, for each of
+  // CANCEL_PROBES.
   ActiveAnswers: string;
 
+const
+  CANCEL_PROBES: array[0..6] of string = (
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+      '"params":{"requestId":9}}',
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+      '"params":{"requestId":"9"}}',
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+      '"params":{"requestId":9.0,"reason":"user"}}',
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+      '"params":{"requestId":10}}',
+    // A numeric reason invalidates the notification, as dispatch has it.
+    '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+      '"params":{"requestId":9,"reason":5}}',
+    '{"jsonrpc":"2.0","method":"notifications\/cancelled",' +
+      '"params":{"requestId":9}}',
+    'not json');
+
 function RecordingPoll(ASession: TMCPSession; AUserData: Pointer): Boolean;
-
-  procedure Answer(AId: TJSONData);
-  begin
-    try
-      if ASession.IsActiveRequestId(AId) then
-        ActiveAnswers := ActiveAnswers + 'y'
-      else
-        ActiveAnswers := ActiveAnswers + 'n';
-    finally
-      AId.Free;
-    end;
-  end;
-
+var
+  Probe: string;
 begin
   ActiveAnswers := '';
-  Answer(TJSONIntegerNumber.Create(9));
-  Answer(TJSONString.Create('9'));
-  Answer(TJSONFloatNumber.Create(9.0));
-  Answer(TJSONIntegerNumber.Create(10));
+  for Probe in CANCEL_PROBES do
+    if ASession.CancelsActiveRequest(Probe) then
+      ActiveAnswers := ActiveAnswers + 'y'
+    else
+      ActiveAnswers := ActiveAnswers + 'n';
   Result := False;
 end;
 
-// A transport picks out the cancellation for the running request as
-// notifications/cancelled matches it: numbers by value, strings apart
-// (#93 review).
+// A transport picks out the cancellation for the running request by
+// the core's own rule: numbers by value, strings apart, a malformed
+// reason refused, the method decoded (#93 review).
 procedure TCancellationDispatch.TestActiveRequestIdMatches;
 var
   Response: TJSONObject;
@@ -3465,8 +3484,34 @@ begin
   Response := Call('{"jsonrpc":"2.0","id":9,"method":"tools/call",' +
     '"params":{"name":"cancellation-aware",' + META_MODERN + '}}');
   Response.Free;
-  Expect<string>(ActiveAnswers).ToBe('ynyn');
-  Expect<Boolean>(FSession.IsActiveRequestId(TJSONData(nil))).ToBe(False);
+  Expect<string>(ActiveAnswers).ToBe('ynynnyn');
+  // No request running: nothing is active.
+  Expect<Boolean>(FSession.CancelsActiveRequest(CANCEL_PROBES[0]))
+    .ToBe(False);
+end;
+
+// A progress or log call the client did not opt into (no progressToken,
+// a log floor above the level) is a no-op: it does not reach the
+// transport's poll; an eligible one polls once, at emission (#93
+// review).
+procedure TCancellationDispatch.TestOptedOutNotificationsDoNotPoll;
+var
+  ResponseLine: string;
+begin
+  PollCalls := 0;
+  PollAnswer := False;
+  FSession.SetCancellationPoll(CountingPoll, nil);
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":11,"method":"tools/call",' +
+    '"params":{"name":"reporter",' + META_MODERN + '}}', ResponseLine))
+    .ToBe(True);
+  Expect<Integer>(PollCalls).ToBe(0);
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":12,"method":"tools/call",' +
+    '"params":{"name":"reporter","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"io.modelcontextprotocol/logLevel":"error","progressToken":1}}}',
+    ResponseLine)).ToBe(True);
+  Expect<Integer>(PollCalls).ToBe(1);
 end;
 
 // Spec verified 2026-11-27: the receiver SHOULD stop processing a
@@ -3539,7 +3584,9 @@ begin
     TestLegacyFinishedAndRepeatedIgnored);
   Test('a transport poll that reports cancellation cancels the request',
     TestTransportPollCancels);
-  Test('IsActiveRequestId matches as notifications/cancelled does',
+  Test('opted-out progress and log calls do not poll the transport',
+    TestOptedOutNotificationsDoNotPoll);
+  Test('CancelsActiveRequest follows the dispatch rule for cancellations',
     TestActiveRequestIdMatches);
   Test('the poll runs only when a handler asks, and nil removes it',
     TestTransportPollOnlyDuringRequests);

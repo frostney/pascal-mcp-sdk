@@ -144,7 +144,8 @@ type
     procedure TestOversizedBody;
     procedure TestDeclaredCapabilityRefusedBeforeStreaming;
     procedure TestUndeclaredCapabilityStillEndsTheStream;
-    function AbandonWaiter(AReset: Boolean): string;
+    function AbandonWaiter(AReset: Boolean;
+      out ASawOpen, AResetSet: Boolean): string;
     procedure TestDisconnectCancelsSilentHandler;
     procedure TestResetCancelsSilentHandler;
     procedure TestSSEStream;
@@ -244,6 +245,8 @@ var
   // Set once the handler's first poll found the connection open, and
   // once it has ended.
   WaiterEntered, WaiterDone: PRTLEvent;
+  // The first poll found the connection open.
+  WaiterSawOpen: Boolean;
 
 // Polls IsCancelled for up to three seconds without writing anything:
 // only the binding's disconnect poll can cancel it (#93).
@@ -261,7 +264,10 @@ begin
       Break;
     end;
     if I = 1 then
+    begin
+      WaiterSawOpen := True;
       RTLEventSetEvent(WaiterEntered);
+    end;
     Sleep(10);
   end;
   Result := MCPTextResult(WaiterOutcome);
@@ -1352,7 +1358,8 @@ end;
 // Sends a waiter call, waits until the handler's first poll found the
 // connection open, then gives up on it: an orderly close, or with
 // AReset a reset (SO_LINGER 0). Returns how the handler ended.
-function THTTPBinding.AbandonWaiter(AReset: Boolean): string;
+function THTTPBinding.AbandonWaiter(AReset: Boolean;
+  out ASawOpen, AResetSet: Boolean): string;
 type
   {$IFDEF WINDOWS}
   TResetLinger = record
@@ -1371,6 +1378,8 @@ begin
   RTLEventResetEvent(WaiterEntered);
   RTLEventResetEvent(WaiterDone);
   WaiterOutcome := '';
+  WaiterSawOpen := False;
+  AResetSet := False;
   Body := CallLine(1, 'waiter');
   Request := 'POST /mcp HTTP/1.1'#13#10 +
     'Host: 127.0.0.1:' + IntToStr(FTransport.Port) + #13#10 +
@@ -1387,14 +1396,16 @@ begin
     begin
       Linger.OnOff := 1;
       Linger.Seconds := 0;
-      fpsetsockopt(Sock.Handle, SOL_SOCKET, SO_LINGER, @Linger,
-        SizeOf(Linger));
+      AResetSet := fpsetsockopt(Sock.Handle, SOL_SOCKET, SO_LINGER, @Linger,
+        SizeOf(Linger)) = 0;
     end;
   finally
     // The client gives up: closing the connection is the cancellation.
     Sock.Free;
   end;
   RTLEventWaitFor(WaiterDone, 5000);
+  // Read after the handler's last write, which WaiterDone orders.
+  ASawOpen := WaiterSawOpen;
   Result := WaiterOutcome;
 end;
 
@@ -1402,14 +1413,23 @@ end;
 // https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#cancellation),
 // and the handler learns it while it runs, though it never writes.
 procedure THTTPBinding.TestDisconnectCancelsSilentHandler;
+var
+  SawOpen, ResetSet: Boolean;
 begin
-  Expect<string>(AbandonWaiter(False)).ToBe('cancelled');
+  // The handler first saw the connection open, then cancelled: the
+  // close caused it.
+  Expect<string>(AbandonWaiter(False, SawOpen, ResetSet)).ToBe('cancelled');
+  Expect<Boolean>(SawOpen).ToBe(True);
 end;
 
 // A reset is a closed connection too (#93 review).
 procedure THTTPBinding.TestResetCancelsSilentHandler;
+var
+  SawOpen, ResetSet: Boolean;
 begin
-  Expect<string>(AbandonWaiter(True)).ToBe('cancelled');
+  Expect<string>(AbandonWaiter(True, SawOpen, ResetSet)).ToBe('cancelled');
+  Expect<Boolean>(SawOpen).ToBe(True);
+  Expect<Boolean>(ResetSet).ToBe(True);
 end;
 
 procedure THTTPBinding.SetupTests;
