@@ -8,7 +8,7 @@ the README links here.
 | --- | --- |
 | `server/discover` | ✅ mandatory entry point, capabilities + instructions |
 | `tools/list` | ✅ registered tool definitions, whole list in registration order (deterministic; no pagination cursor) |
-| `tools/call` | ✅ text / image / audio / resource-link / embedded-resource / structured content, in-band execution errors, server-side subset validation of arguments |
+| `tools/call` | ✅ text / image / audio / resource-link / embedded-resource / structured content, in-band execution errors, server-side subset validation of arguments, structured output of any JSON type checked against a subset `outputSchema` |
 | `resources/list`, `resources/read` | ✅ static + dynamic, text + blob builders |
 | `resources/templates/list` + template matching | ✅ RFC 6570 level-1 (`{var}`), exact resources win, vars passed to readers |
 | `prompts/list`, `prompts/get` | ✅ fluent argument declaration, message builders for every content type, spec error codes |
