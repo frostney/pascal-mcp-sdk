@@ -66,8 +66,9 @@ type
   // without replay. NextPollMs 0 takes the registration's interval.
   // GapCursor, with Truncated and events, is the position delivery
   // resumed from, before them: a push stream sends it in its gap's
-  // active notification ('' repeats the cursor the stream had, from
-  // which resuming delivers the events again). Poll ignores it.
+  // active notification. With '' that notification carries the fresh
+  // cursor, after the events, which then belong to the gap Truncated
+  // signals. Poll ignores it.
   TMCPEventPoll = record
     Events: TJSONArray;
     Cursor: string;
@@ -192,7 +193,7 @@ type
     // The client's maxAgeMs, passed on while the first backlog drains.
     FMaxAgeMs: Int64;
     FCatchingUp: Boolean;
-    FReplayStart: Int64;
+    FReplayStart, FPendingCompleted: Int64;
     FProtocolVersion, FClientName, FClientVersion, FLogLevel: string;
     FCapabilities, FMeta: TJSONObject; // owned copies of the request's
     function IsCancelled: Boolean;
@@ -207,13 +208,16 @@ type
       ASinkData: Pointer);
     procedure CheckAgain(ASink: TMCPLineSink; ASinkData: Pointer);
     procedure LogStreamFailure(E: Exception);
+    procedure HeartbeatIfDue(ASink: TMCPLineSink; ASinkData: Pointer);
   public
     // APage (owned) is the first check's result, AAfter and AGap its
     // cursor and GapCursor.
+    // AStarted and ACompleted: when the first check began and returned,
+    // on MCPStreamNow's clock.
     constructor Create(ACatalog: TEventCatalog; AType: Integer;
       const AQuery: TMCPEventQuery; const AAfter, AGap: string;
-      ANoReplay: Boolean; AHeartbeatMs: Int64; APage: TJSONObject;
-      const ACtx: TMCPRequestContext);
+      ANoReplay: Boolean; AHeartbeatMs, AStarted, ACompleted: Int64;
+      APage: TJSONObject; const ACtx: TMCPRequestContext);
     destructor Destroy; override;
     function Step(ASink: TMCPLineSink; ASinkData: Pointer): Int64; override;
     procedure Close(ASink: TMCPLineSink; ASinkData: Pointer); override;
@@ -634,6 +638,22 @@ begin
   end;
 end;
 
+type
+  // The opening check's cancellation: the request's own, or the
+  // transport ending (#126 review).
+  TOpeningProbe = class
+  private
+    FInner: TMCPCancellationProbe;
+    FHost: TMCPStreamHost; // borrowed
+  public
+    function Cancelled: Boolean;
+  end;
+
+function TOpeningProbe.Cancelled: Boolean;
+begin
+  Result := (Assigned(FInner) and FInner()) or FHost.ShuttingDown;
+end;
+
 // events/stream (events.mdx, Push-Based Delivery, #126): the request
 // is checked and the check called once here, so an invalid subscription
 // is the immediate JSON-RPC error; then the stream is parked for the
@@ -649,11 +669,19 @@ var
   Cursor, Gap: string;
   NoReplay: Boolean;
   Quiet: TMCPRequestContext;
+  Opening: TOpeningProbe;
+  Started, Completed: Int64;
 begin
   RefuseLegacy(ALegacy, 'events/stream');
   ReadSubscription(AParams, Index, Query, Owned);
   try
     Heartbeat := OptionalCount(AParams, 'heartbeatMs', 0);
+    // The request id is the subscription id, a string or an integer
+    // (events.mdx, Subscription Termination; #126 review).
+    if (ACtx.RequestId <> nil) and (ACtx.RequestId.JSONType = jtNumber) and
+      (TJSONNumber(ACtx.RequestId).NumberType = ntFloat) then
+      raise InvalidParams('events/stream needs a string or integer ' +
+        'request id');
     if not (ACtx.StreamHost is TMCPStreamHost) then
       raise EMCPProtocolError.Create(MCP_ERROR_UNSUPPORTED, 'Unsupported',
         TJSONObject.Create(['feature', 'deliveryMode', 'value', 'push']));
@@ -664,14 +692,29 @@ begin
     Query.MaxEvents := 1;
     Quiet := ACtx;
     Quiet.Notifier := nil;
-    Page := CheckPage(Index, Query, Quiet, Cursor, Gap, NoReplay);
+    // The check also stops waiting when the transport ends.
+    Opening := TOpeningProbe.Create;
+    try
+      Opening.FInner := ACtx.CancellationProbe;
+      Opening.FHost := TMCPStreamHost(ACtx.StreamHost);
+      Quiet.CancellationProbe := Opening.Cancelled;
+      // Replay starts here, and the schedule from the check's return
+      // (#126 review).
+      Started := MCPStreamNow;
+      Page := CheckPage(Index, Query, Quiet, Cursor, Gap, NoReplay);
+      Completed := MCPStreamNow;
+    finally
+      Opening.Free;
+    end;
     // A cancellation the check saw: no stream, and the core sends
-    // nothing for the request.
+    // nothing for the request. A transport that is ending gets the
+    // stream, and ends it as it ends every other.
     if ACtx.IsCancelled then
       Page.Free
     else
       TMCPStreamHost(ACtx.StreamHost).Park(TEventStream.Create(Self, Index,
-        Query, Cursor, Gap, NoReplay, Heartbeat, Page, ACtx));
+        Query, Cursor, Gap, NoReplay, Heartbeat, Started, Completed, Page,
+        ACtx));
   finally
     Owned.Free;
   end;
@@ -682,8 +725,8 @@ end;
 
 constructor TEventStream.Create(ACatalog: TEventCatalog; AType: Integer;
   const AQuery: TMCPEventQuery; const AAfter, AGap: string;
-  ANoReplay: Boolean; AHeartbeatMs: Int64; APage: TJSONObject;
-  const ACtx: TMCPRequestContext);
+  ANoReplay: Boolean; AHeartbeatMs, AStarted, ACompleted: Int64;
+  APage: TJSONObject; const ACtx: TMCPRequestContext);
 begin
   // Own the page first: an exception in a constructor runs the
   // destructor, which frees what is owned.
@@ -705,6 +748,8 @@ begin
   // The replay floor holds while the backlog drains (#126 review).
   FMaxAgeMs := AQuery.MaxAgeMs;
   FCatchingUp := True;
+  FReplayStart := AStarted;
+  FPendingCompleted := ACompleted;
   // The grant: 30 seconds unless the client suggests another, clamped
   // to 1 second .. 5 minutes (events.mdx, Lifecycle).
   if AHeartbeatMs < 0 then
@@ -902,7 +947,7 @@ var
   Page: TJSONObject;
   After, Gap: string;
   NoReplay: Boolean;
-  Completed: Int64;
+  Completed, Elapsed: Int64;
 begin
   Query := Default(TMCPEventQuery);
   Query.Arguments := FArguments;
@@ -910,7 +955,16 @@ begin
   // The cutoff stays where replay began: the age grows by the time since
   // (#126 review).
   if FCatchingUp and (FMaxAgeMs >= 0) then
-    Query.MaxAgeMs := FMaxAgeMs + (Now - FReplayStart)
+  begin
+    Elapsed := Now - FReplayStart;
+    if Elapsed < 0 then
+      Elapsed := 0;
+    // Saturated: maxAgeMs may be as large as an Int64 (#126 review).
+    if FMaxAgeMs > High(Int64) - Elapsed then
+      Query.MaxAgeMs := High(Int64)
+    else
+      Query.MaxAgeMs := FMaxAgeMs + Elapsed;
+  end
   else
     Query.MaxAgeMs := -1;
   Query.MaxEvents := 1;
@@ -935,11 +989,14 @@ begin
     end;
     on E: Exception do
     begin
+      // The retry is timed from the failure, not from after the
+      // writes (#126 review).
+      Completed := Now;
       LogStreamFailure(E);
       Send('notifications/events/error', TJSONObject.Create(['error',
         ErrorObject(JSONRPC_INTERNAL_ERROR, 'Internal error', nil)]),
         ASink, ASinkData);
-      FNextCheck := Now + FInterval;
+      FNextCheck := Completed + FInterval;
       Exit;
     end;
   end;
@@ -956,6 +1013,14 @@ procedure TEventStream.LogStreamFailure(E: Exception);
 begin
   MCPLogDiagnostic('events/stream ' + FCatalog.FTypes[FType].Name + ': ' +
     E.ClassName + ': ' + E.Message);
+end;
+
+procedure TEventStream.HeartbeatIfDue(ASink: TMCPLineSink;
+  ASinkData: Pointer);
+begin
+  if not Cancelled and (Now - FLastWrite >= FHeartbeatMs) then
+    Send('notifications/events/heartbeat', TJSONObject.Create(['cursor',
+      WireCursor]), ASink, ASinkData);
 end;
 
 // The first page, the checks that are due (at most STEP_BUDGET of them,
@@ -976,24 +1041,23 @@ begin
   begin
     Page := FPending;
     FPending := nil;
-    // The replay began with the handler's check, just before this.
-    FReplayStart := Now;
     try
       SendPage(Page, FPendingCursor, FPendingGap, FPendingNoReplay, True,
-        FReplayStart, ASink, ASinkData);
+        FPendingCompleted, ASink, ASinkData);
     finally
       Page.Free;
     end;
   end;
   Budget := STEP_BUDGET;
+  HeartbeatIfDue(ASink, ASinkData);
   while not Cancelled and (Now >= FNextCheck) and (Budget > 0) do
   begin
     CheckAgain(ASink, ASinkData);
     Dec(Budget);
+    // Between pages too: a long scan keeps the granted interval (#126
+    // review).
+    HeartbeatIfDue(ASink, ASinkData);
   end;
-  if not Cancelled and (Now - FLastWrite >= FHeartbeatMs) then
-    Send('notifications/events/heartbeat', TJSONObject.Create(['cursor',
-      WireCursor]), ASink, ASinkData);
   if Finished then
     Exit;
   Result := FNextCheck;

@@ -152,12 +152,18 @@ name and bad arguments. Then the stream sends, each message tagged with
   (`-32603`). The final frame, `{"resultType": "complete"}` with the
   subscription id in `_meta`, follows, and the stream ends.
 
-The first check runs without a notifier, so its progress and log
-notifications go nowhere. Later checks get a context whose
+The request id is the subscription id, so it must be a string or an
+integer: a fractional one answers `-32602`. The first check runs
+without a notifier, so its progress and log notifications go nowhere,
+and its `IsCancelled` also turns true when the transport ends (`Stop`,
+or the end of stdin). Later checks get a context whose
 `IsCancelled` turns true when the client goes away, so a check that
-waits can stop. `MaxAgeMs` bounds the whole first backlog; once the
-stream has caught up, later checks get `-1`. The next check is timed
-from when a check returns.
+waits can stop. `MaxAgeMs` bounds the whole first backlog, from when
+the subscription opened (later pages get the age grown by the time
+since); once the stream has caught up, later checks get `-1`. The next
+check, and the retry after a failure, are timed from when the check
+returned, and heartbeats keep their interval during a long backlog
+scan.
 
 On Streamable HTTP the response is an SSE stream that opens at once,
 and the client cancels by closing the connection, which the server
@@ -169,8 +175,9 @@ On stdio the loop stays single-threaded: it waits for input no longer
 than the next stream is due, and steps the streams between lines, so
 other requests, and other streams, carry on. A `notifications/cancelled`
 for the stream's id ends it, and nothing more is sent for it. The end
-of input ends every stream. A request that runs long delays the streams
-until it returns. A loop over a Text with its own driver, or a Windows
+of input ends every stream at once, a check that waits included, and
+the requests already queued are still served. A request that runs long
+delays the streams until it returns. A loop over a Text with its own driver, or a Windows
 console, cannot wait with a time limit, and `events/stream` then
 answers `-32026` (Unsupported, `data.feature` `"deliveryMode"`), as it
 does over the in-process test client.

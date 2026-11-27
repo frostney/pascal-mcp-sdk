@@ -499,7 +499,7 @@ procedure RegisterEvent(AServer: TMCPServer; const AName,
 | --- | --- |
 | `RegisterEvent` | Event type `AName`, delivered by poll and push, before the server starts. `AInputSchema` (owned) describes the arguments: root type object, `x-mcp-header` annotations as for tools, checked against arguments when inside the server-enforced subset. `APayloadSchema` (owned) describes each occurrence's data, checked when inside the subset. An input schema outside the subset is refused. The first call declares the extension with `{}` on `server/discover` only (`RestrictExtensionToModern`, `PinExtensionSettings`) and serves `events/list`, `events/poll` and `events/stream` on 2026-07-28 (`-32601` for a classic client), routed on Streamable HTTP. A stream polls the check with `MaxEvents` 1, and answers `-32026` where the transport cannot stream. A duplicate or empty name, a bad schema, a nil check or a call after the server started raises `EMCPServer` |
 | `TMCPEventQuery` | One poll: the arguments, the cursor or `FromNow` for a null or absent one, and the client's `maxAgeMs` (at least 0) and `maxEvents` (at least 1), read as the schema reads integers |
-| `TMCPEventPoll` | A check's answer: at most `MaxEvents` occurrences, the cursor after them (null with `NoReplay`), `HasMore`, `Truncated` and `NextPollMs`. Events on a poll from now, more than `MaxEvents`, an occurrence without object data, an RFC 3339 timestamp or a payload matching its schema, and on a poll `HasMore` with `NoReplay`, answer `-32603`. With `Truncated` and events, `GapCursor` is the position delivery resumed from, before them, which a push stream's gap notification carries; `''` repeats the stream's cursor, from which resuming delivers the events again |
+| `TMCPEventPoll` | A check's answer: at most `MaxEvents` occurrences, the cursor after them (null with `NoReplay`), `HasMore`, `Truncated` and `NextPollMs`. Events on a poll from now, more than `MaxEvents`, an occurrence without object data, an RFC 3339 timestamp or a payload matching its schema, and on a poll `HasMore` with `NoReplay`, answer `-32603`. With `Truncated` and events, `GapCursor` is the position delivery resumed from, before them, which a push stream's gap notification carries; with `''` that notification carries the fresh cursor, after the events, which then belong to the gap `Truncated` signals |
 | `MCPEventOccurrence` | One occurrence: `AData` (owned) and `AMeta` (owned) as given. An empty `AEventId` is derived from the name, timestamp and data, so the same event keeps its id; the server adds the name |
 
 ### The request context
@@ -604,7 +604,11 @@ function MCPTakeStream(AHost: TMCPStreamHost; AProduced: Boolean;
   const AResponse: string): TMCPStream;   // the stream to drive, or nil
 property TMCPSession.StreamHost: TObject;   // borrowed; nil for none
 function MCPNowMs: Int64;                   // monotonic milliseconds
-property TMCPStream.Clock: TMCPClock;       // MCPNowMs unless a test sets one
+property TMCPStream.Clock: TMCPClock;       // MCPStreamClock, else MCPNowMs
+var MCPStreamClock: TMCPClock;              // nil: MCPNowMs; tests set it
+function MCPStreamNow: Int64;               // MCPStreamClock's time
+property TMCPStreamHost.ShutdownProbe: TMCPCancellationProbe;
+function TMCPStreamHost.ShuttingDown: Boolean;
 property TMCPStream.CancelProbe: TMCPCancellationProbe;   // the transport's
 function TMCPStream.Cancelled: Boolean;
 ```
@@ -625,8 +629,11 @@ stream's own steps and from the checks the stream runs. It calls
 `Cancel` when the client goes away. Streamable HTTP calls `Close`, for
 the final frame, when the transport stops, after a check that was
 running returns; the stdio loop ends every stream at the end of input,
-once the lines before it are served, and a check that was running sees
-`IsCancelled`. A sink that raises ends the stream.
+and a check that was running sees `IsCancelled`, while requests already
+queued are still served. A transport sets `TMCPStreamHost.ShutdownProbe`
+to its Stop or end of input, which a handler's own checks ask beside the
+request's cancellation (`ShuttingDown`). A sink that raises ends the
+stream.
 Streamable HTTP steps a stream in the request's thread; the stdio loop
 steps its streams between lines on its one thread.
 

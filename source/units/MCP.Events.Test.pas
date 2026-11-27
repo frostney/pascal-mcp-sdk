@@ -789,8 +789,11 @@ begin
     Result.NextPollMs := 5000;
   if AQuery.FromNow then
     Exit;
-  // More waiting, none delivered yet: the backlog keeps draining.
-  if PushFault = 'stall' then
+  // More waiting, none delivered yet: the backlog keeps draining; the
+  // slow kind takes 100 ms of the test clock per call.
+  if PushFault = 'stallslow' then
+    Inc(FakeNow, 100);
+  if (PushFault = 'stall') or (PushFault = 'stallslow') then
   begin
     Result.HasMore := True;
     Result.Cursor := AQuery.Cursor;
@@ -909,6 +912,11 @@ type
     procedure TestCutoffAnchoredWhileDraining;
     procedure TestNoIntervalIsTheDefault;
     procedure TestIntervalNotDelayedByWrites;
+    procedure TestCutoffFromTheOpening;
+    procedure TestOpeningAndRetrySchedule;
+    procedure TestHugeMaxAgeSaturates;
+    procedure TestHeartbeatsDuringAScan;
+    procedure TestFractionalIdRefused;
   end;
 
 procedure TPushSuite.BeforeEach;
@@ -919,6 +927,8 @@ begin
   Captured := '';
   AgeLog := '';
   FakeNow := 0;
+  // Streams, and the opening check's timing, run on the test clock.
+  MCPStreamClock := @TestClock;
   ProbeCancelled := False;
   SawCancel := False;
   FServer := TMCPServer.Create('events', '1.0');
@@ -937,6 +947,7 @@ end;
 
 procedure TPushSuite.AfterEach;
 begin
+  MCPStreamClock := nil;
   FreeAndNil(FStream);
   FreeAndNil(FSession);
   FreeAndNil(FHost);
@@ -1155,10 +1166,11 @@ begin
   Expect<Boolean>(FStream.Finished).ToBe(True);
 end;
 
-// A gap whose first retained occurrence follows: active carries the
-// position before it, the check's GapCursor or else the cursor the
-// stream had, so a client that persists it and reconnects is sent the
-// occurrence again, never past it (#126 review).
+// A gap whose first retained occurrence follows: with the check's
+// GapCursor, active carries the position before it, so a client that
+// persists it and reconnects is sent the occurrence again; without one,
+// the fresh cursor after it, the occurrence then part of the gap
+// (#126 review).
 procedure TPushSuite.TestGapBeforeAnEvent;
 begin
   Open('"name":"tick","cursor":"3",');
@@ -1327,6 +1339,79 @@ begin
   Expect<Boolean>(Pos('"eventId" : "e4"', Captured) > 0).ToBe(True);
 end;
 
+// The cutoff is anchored when the subscription opens, even when the
+// transport steps the stream later (#126 review).
+procedure TPushSuite.TestCutoffFromTheOpening;
+begin
+  // Opened at 2 s, first stepped at 7 s: the age grows by 5 s.
+  PushFault := 'stall';
+  FakeNow := 2000;
+  Open('"name":"tick","cursor":"0","maxAgeMs":60000,');
+  Step(7000);
+  Expect<Boolean>(Pos('65000,', AgeLog) > 0).ToBe(True);
+end;
+
+// The first page is scheduled from when the opening check returned,
+// and a failed check's retry from the failure (#126 review).
+procedure TPushSuite.TestOpeningAndRetrySchedule;
+begin
+  Open('"name":"tick","cursor":"3",');
+  Step(3000);
+  // Due at 1000, so the step at 3000 checked again.
+  Expect<string>(AgeLog).ToBe('-1,-1,');
+  // A 5 s interval, then a failure at 10 s whose error write takes 3 s:
+  // the retry is due at 15 s, not 18 s.
+  PushFault := 'interval5';
+  Step(4000);
+  PushFault := 'boom';
+  FakeNow := 10000;
+  Captured := '';
+  Expect<Int64>(FStream.Step(SlowSink, nil)).ToBe(15000);
+end;
+
+// A maxAgeMs as large as an Int64 saturates while the backlog drains
+// (#126 review).
+procedure TPushSuite.TestHugeMaxAgeSaturates;
+begin
+  PushFault := 'stall';
+  Open('"name":"tick","cursor":"0","maxAgeMs":9223372036854775807,');
+  Step(0);
+  Step(500);
+  Expect<Boolean>(Pos('9223372036854775807,', AgeLog) > 0).ToBe(True);
+  Expect<Integer>(Pos('-9', AgeLog)).ToBe(0);
+end;
+
+// A long backlog scan keeps the granted heartbeat between pages (#126
+// review): fifty 100 ms pages on a 1 s grant send four or more.
+procedure TPushSuite.TestHeartbeatsDuringAScan;
+var
+  Count, At: Integer;
+begin
+  PushFault := 'stallslow';
+  Open('"name":"tick","cursor":"0","heartbeatMs":1000,');
+  // The opening check took the clock to 100 ms.
+  Step(100);
+  Count := 0;
+  At := Pos('notifications/events/heartbeat', Captured);
+  while At > 0 do
+  begin
+    Inc(Count);
+    At := Pos('notifications/events/heartbeat', Copy(Captured, 1, MaxInt),
+      At + 1);
+  end;
+  Expect<Boolean>(Count >= 4).ToBe(True);
+end;
+
+// A fractional request id cannot be a subscription id: refused before
+// the opening check, with no stream (#126 review).
+procedure TPushSuite.TestFractionalIdRefused;
+begin
+  Expect<Boolean>(Pos('"code" : -32602', Open('"name":"tick",', '1.5')) > 0)
+    .ToBe(True);
+  Expect<Boolean>(FStream = nil).ToBe(True);
+  Expect<string>(AgeLog).ToBe('');
+end;
+
 procedure TPushSuite.SetupTests;
 begin
   Test('a stream opens with active, then the backlog one cursor each',
@@ -1363,6 +1448,13 @@ begin
     TestCutoffAnchoredWhileDraining);
   Test('no interval is the default one', TestNoIntervalIsTheDefault);
   Test('writes do not delay the next check', TestIntervalNotDelayedByWrites);
+  Test('the cutoff is anchored at the opening', TestCutoffFromTheOpening);
+  Test('the first page and a retry are scheduled from their check',
+    TestOpeningAndRetrySchedule);
+  Test('a huge maxAgeMs saturates', TestHugeMaxAgeSaturates);
+  Test('heartbeats keep their interval during a long scan',
+    TestHeartbeatsDuringAScan);
+  Test('a fractional request id is refused', TestFractionalIdRefused);
 end;
 
 begin

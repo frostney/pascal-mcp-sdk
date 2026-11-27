@@ -34,6 +34,7 @@ uses
   MCP.Protocol,
   MCP.Schema,
   MCP.Server,
+  MCP.Streams,
   MCP.Transport.HTTP,
   TestingPascalLibrary;
 
@@ -130,6 +131,8 @@ type
     procedure TestEventStream;
     procedure TestEventStreamClientClose;
     procedure TestStopDuringACheck;
+    procedure TestStopDuringTheOpeningCheck;
+    procedure TestProgressThenPark;
     procedure TestStreamingOptInMissingCapabilities400;
     procedure TestNotificationAccepted;
     procedure TestMalformedNotificationAccepted;
@@ -455,6 +458,44 @@ begin
 end;
 
 type
+  // A stream that writes one frame and ends.
+  TOneFrameStream = class(TMCPStream)
+  public
+    function Step(ASink: TMCPLineSink; ASinkData: Pointer): Int64; override;
+    procedure Close(ASink: TMCPLineSink; ASinkData: Pointer); override;
+  end;
+
+  // test/parkprogress: reports progress, then parks a one-frame stream.
+  TParkProgress = class
+    function Handle(AParams: TJSONObject; const ACtx: TMCPRequestContext;
+      ALegacy: Boolean): TJSONObject;
+  end;
+
+function TOneFrameStream.Step(ASink: TMCPLineSink; ASinkData: Pointer): Int64;
+begin
+  ASink('{"frame":"stream"}', ASinkData);
+  Finish;
+  Result := High(Int64);
+end;
+
+procedure TOneFrameStream.Close(ASink: TMCPLineSink; ASinkData: Pointer);
+begin
+  Finish;
+end;
+
+function TParkProgress.Handle(AParams: TJSONObject;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+begin
+  MCPReportProgress(ACtx, 1);
+  TMCPStreamHost(ACtx.StreamHost).Park(TOneFrameStream.Create(
+    ACtx.RequestId));
+  Result := TJSONObject.Create;
+end;
+
+var
+  ParkProgress: TParkProgress;
+
+type
   // Stops the transport after a delay, from its own thread.
   TStopLater = class(TThread)
   private
@@ -537,6 +578,7 @@ begin
     ObjectSchema, EndlessCheck);
   RegisterEvent(FServer, 'waiting', 'Waits in its check', ObjectSchema,
     ObjectSchema, WaitingCheck);
+  FServer.RegisterMethod('test/parkprogress', ParkProgress.Handle);
   WaitingSawStop := False;
   EndingCalls := 0;
   EndlessCalls := 0;
@@ -1218,6 +1260,43 @@ begin
     '{ "resultType" : "complete"', Body) > 0).ToBe(True);
 end;
 
+// Stop reaches the opening check too, inside the request (#126
+// review).
+procedure THTTPBinding.TestStopDuringTheOpeningCheck;
+var
+  Body: string;
+  Stopper: TStopLater;
+begin
+  Stopper := TStopLater.Create(FTransport, 300);
+  try
+    Expect<Integer>(RawExchange(FTransport.Port, StreamRequest(
+      FTransport.Port, 'waiting', True, '0'), Body)).ToBe(200);
+  finally
+    Stopper.WaitFor;
+    Stopper.Free;
+  end;
+  Expect<Boolean>(WaitingSawStop).ToBe(True);
+end;
+
+// A handler whose progress opened the SSE response, and that then parks
+// a stream, gets the stream on that response, not its placeholder
+// result (#126 review).
+procedure THTTPBinding.TestProgressThenPark;
+var
+  Body, ContentType: string;
+begin
+  Expect<Integer>(Exchange('POST', '/mcp', '{"jsonrpc":"2.0","id":6,' +
+    '"method":"test/parkprogress","params":{"_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},"progressToken":"t"}}}',
+    [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+    HeaderPair('Mcp-Method', 'test/parkprogress')], Body, ContentType))
+    .ToBe(200);
+  Expect<Boolean>(Pos('notifications/progress', Body) > 0).ToBe(True);
+  Expect<Boolean>(Pos('{"frame":"stream"}', Body) > 0).ToBe(True);
+  Expect<Integer>(Pos('"result"', Body)).ToBe(0);
+end;
+
 // A client that closes the connection cancels its stream (events.mdx,
 // Lifecycle): the server stops calling the check.
 procedure THTTPBinding.TestEventStreamClientClose;
@@ -1865,6 +1944,9 @@ begin
     TestEventStreamClientClose);
   Test('Stop reaches a waiting check, then the final frame',
     TestStopDuringACheck);
+  Test('Stop reaches the opening check', TestStopDuringTheOpeningCheck);
+  Test('progress, then a parked stream, on one SSE response',
+    TestProgressThenPark);
   Test('Mcp-Param header mismatched → 400, -32020', TestParamHeaderMismatch);
   Test('Mcp-Param base64 with bad padding or characters → 400',
     TestParamHeaderBadBase64);
@@ -1918,10 +2000,12 @@ begin
 end;
 
 begin
+  ParkProgress := TParkProgress.Create;
   WaiterEntered := RTLEventCreate;
   WaiterDone := RTLEventCreate;
   TestRunnerProgram.AddSuite(THTTPBinding.Create('Transport.HTTP: binding'));
   TestRunnerProgram.Run;
   RTLEventDestroy(WaiterDone);
   RTLEventDestroy(WaiterEntered);
+  ParkProgress.Free;
 end.

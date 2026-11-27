@@ -43,9 +43,10 @@ unit MCP.Transport.Stdio;
 // waiting for input no longer than the next stream is due and stepping
 // the due streams between lines, so other requests and streams carry
 // on. A notifications/cancelled for an open stream removes it and sends
-// nothing more; the end of input ends every stream. A Text with its own
-// driver, or a Windows console, cannot be waited on with a time limit,
-// so that loop offers no stream host.
+// nothing more; the end of input ends every stream at once, a waiting
+// check included, and queued requests are still served. A Text with its
+// own driver, or a Windows console, cannot be waited on with a time
+// limit, so that loop offers no stream host.
 //
 // The stdio binding says clients MUST send notifications/cancelled and
 // servers SHOULD stop work as soon as practical and MUST NOT send any
@@ -186,8 +187,8 @@ type
     // notifications/cancelled the core accepts (borrowed until the next
     // NextLine), else nil.
     function LastCancelTarget: TJSONData;
-    // The raw input has ended (EOF or a failed read) and every line
-    // before the end has been taken.
+    // The raw input has ended (EOF or a failed read), whether or not
+    // lines before the end are still queued.
     function InputEnded: Boolean;
     // Removes and returns the first queued notifications/cancelled line
     // the core would accept for the request ASession is running.
@@ -636,8 +637,9 @@ end;
 
 function TStdioReader.InputEnded: Boolean;
 begin
-  // Lines still queued are served first, streams included.
-  Result := FEOF and (FHead >= Length(FQueue));
+  // At once, queued lines or not: a check that waits returns, the
+  // streams end, and the queued requests are served (#126 review).
+  Result := FEOF;
 end;
 
 procedure TStdioReader.RemoveAt(AIndex: Integer);
@@ -944,6 +946,8 @@ begin
       if Reader.CanWait then
       begin
         Host := TMCPStreamHost.Create;
+        // A handler's checks stop waiting at the end of input.
+        Host.ShutdownProbe := Reader.InputEnded;
         Session.StreamHost := Host;
       end;
       repeat

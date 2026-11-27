@@ -75,7 +75,14 @@ type
   TMCPStreamHost = class
   private
     FParked: TMCPStream; // owned until taken
+    FShutdownProbe: TMCPCancellationProbe;
   public
+    // The transport is ending (stdio's end of input, HTTP's Stop): a
+    // handler's own checks ask it beside the request's cancellation,
+    // so one that waits returns (#126 review). Nil for never.
+    property ShutdownProbe: TMCPCancellationProbe read FShutdownProbe
+      write FShutdownProbe;
+    function ShuttingDown: Boolean;
     destructor Destroy; override;
     // Takes ownership of AStream. A second stream before the first is
     // taken raises EMCPServer (and frees AStream).
@@ -88,6 +95,13 @@ type
 
 // A monotonic clock in milliseconds, the one streams run on.
 function MCPNowMs: Int64;
+
+var
+  // The clock new streams start with, and handlers time a stream's
+  // opening by (MCPStreamNow): MCPNowMs unless a test sets another.
+  MCPStreamClock: TMCPClock = nil;
+
+function MCPStreamNow: Int64;
 
 // The stream a request parked with AHost, for the transport to drive,
 // or nil. One rule for every transport (#126 review): only a request
@@ -110,6 +124,14 @@ begin
   Result := Int64(GetTickCount64);
 end;
 
+function MCPStreamNow: Int64;
+begin
+  if Assigned(MCPStreamClock) then
+    Result := MCPStreamClock()
+  else
+    Result := MCPNowMs;
+end;
+
 constructor TMCPStream.Create(ARequestId: TJSONData);
 begin
   inherited Create;
@@ -117,7 +139,10 @@ begin
     FId := ARequestId.Clone
   else
     FId := TJSONNull.Create;
-  FClock := @MCPNowMs;
+  if Assigned(MCPStreamClock) then
+    FClock := MCPStreamClock
+  else
+    FClock := @MCPNowMs;
 end;
 
 destructor TMCPStream.Destroy;
@@ -162,6 +187,11 @@ begin
     raise EMCPServer.Create('A stream is already parked for this request');
   end;
   FParked := AStream;
+end;
+
+function TMCPStreamHost.ShuttingDown: Boolean;
+begin
+  Result := Assigned(FShutdownProbe) and FShutdownProbe();
 end;
 
 function TMCPStreamHost.TakeParked: TMCPStream;

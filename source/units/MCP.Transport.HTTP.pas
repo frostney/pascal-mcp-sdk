@@ -174,6 +174,8 @@ type
       ACode: Integer; const ABody: string);
     procedure DriveStream(AStream: TMCPStream; ASession: TMCPSession;
       ASSE: Pointer; APoll: Pointer);
+    // Stop was called (a stream host's shutdown probe).
+    function StopRequested: Boolean;
     // AMalformedRequest: the request lacked a required per-request
     // field, so a -32602 answer maps to 400 (#79).
     procedure AnswerRequest(ARequest: TFPHTTPConnectionRequest;
@@ -1162,6 +1164,11 @@ type
 
 // The client went away, or Stop was called: a check that waits stops
 // either way, and on Stop the final frame follows (#126 review).
+function TMCPHTTPServer.StopRequested: Boolean;
+begin
+  Result := FStopPending;
+end;
+
 function THTTPStreamProbe.Cancelled: Boolean;
 begin
   if FServer.FStopPending then
@@ -1258,6 +1265,9 @@ begin
     Stream.Response := AResponse;
     Stream.Socket := ARequest.Connection.Socket;
     Stream.HeadersSent := False;
+    // A handler's checks stop waiting when the transport stops (#126
+    // review).
+    Host.ShutdownProbe := StopRequested;
     if AStream then
     begin
       // Nothing is committed up front: the sink opens the stream on
@@ -1265,10 +1275,14 @@ begin
       // which no notification ever precedes — still gets the status
       // the mapping prescribes instead of a 200 SSE stream.
       Produced := False;
+      Parked := nil;
       try
         Produced := FServer.HandleMessage(Session, ABody, @SSESink,
           @Stream, ResponseLine);
-        if Stream.HeadersSent and Produced then
+        // A parked stream goes on the response its notifications
+        // opened, in place of the placeholder (#126 review).
+        Parked := MCPTakeStream(Host, Produced, ResponseLine);
+        if Stream.HeadersSent and Produced and (Parked = nil) then
           SSESink(ResponseLine, @Stream);
       except
         // A dead client stream: the spec forbids sending anything
@@ -1279,15 +1293,17 @@ begin
       // Once the stream is open, the response went out as its last
       // event. Otherwise no notification flowed, so the opt-in changed
       // nothing about how this request is answered.
-      if Stream.HeadersSent then
+      if Stream.HeadersSent and (Parked = nil) then
         Exit;
     end
     else
+    begin
       Produced := FServer.HandleMessage(Session, ABody, nil, nil,
         ResponseLine);
-    // A push stream's handler answers with a placeholder: the stream
-    // writes its own frames from here on (MCPTakeStream's rule).
-    Parked := MCPTakeStream(Host, Produced, ResponseLine);
+      // A push stream's handler answers with a placeholder: the stream
+      // writes its own frames from here on (MCPTakeStream's rule).
+      Parked := MCPTakeStream(Host, Produced, ResponseLine);
+    end;
     if Parked <> nil then
     begin
       DriveStream(Parked, Session, @Stream, @Poll);

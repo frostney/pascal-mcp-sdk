@@ -48,6 +48,9 @@ type
     // Feed AInput through the loop; returns the raw bytes written out.
     function RunLoop(const AInput: string;
       AMaxLineLength: Integer = MCP_STDIO_DEFAULT_MAX_LINE): string;
+    // Feed AInput through a pipe that closes after ACloseMs, so streams
+    // run while stdin stays open; returns the bytes written out.
+    function RunPipe(const AInput: string; ACloseMs: Integer): string;
     function RunWithCodePage(const AInput: string;
       ACodePage: TSystemCodePage; out AAfter: TSystemCodePage): string;
   protected
@@ -83,6 +86,8 @@ type
     procedure TestParkedStreamOfCancelledRequestDropped;
     procedure TestEndOfInputReachesAWaitingCheck;
     procedure TestParkThenRaiseKeepsTheError;
+    procedure TestEndOfInputWithARequestQueued;
+    procedure TestEndOfInputReachesTheOpeningCheck;
     procedure TestLastLineWithoutNewline;
   end;
 
@@ -180,7 +185,8 @@ begin
   end;
   if BeatCalls = BeatGrowAt then
     Inc(BeatHead);
-  if AQuery.Arguments.Get('wait', False) and (BeatCalls >= 2) then
+  if (AQuery.Arguments.Get('wait', False) and (BeatCalls >= 2)) or
+    AQuery.Arguments.Get('waitfirst', False) then
     for I := 1 to 300 do
     begin
       if ACtx.IsCancelled then
@@ -367,6 +373,66 @@ begin
   DeleteFile(FDir + 'in.txt');
   DeleteFile(FDir + 'out.txt');
   RemoveDir(FDir);
+end;
+
+// A pipe whose write end the handler keeps; the read end replaces the
+// handle of an ordinary Text opened on an empty file, so the loop sees a
+// plain file Text over a real pipe.
+procedure OpenPipe(out AReader, AWriter: THandle);
+{$IFDEF UNIX}
+var
+  Ends: TFilDes;
+begin
+  if fpPipe(Ends) <> 0 then
+    raise Exception.Create('pipe failed');
+  AReader := Ends[0];
+  AWriter := Ends[1];
+end;
+{$ELSE}
+begin
+  if not CreatePipe(AReader, AWriter, nil, 0) then
+    raise Exception.Create('CreatePipe failed');
+end;
+{$ENDIF}
+
+function TStdioLoop.RunPipe(const AInput: string; ACloseMs: Integer): string;
+var
+  InFile, OutFile: Text;
+  PipeReader: THandle;
+  Bytes: TStringStream;
+  Closer: TPipeScript;
+begin
+  Bytes := TStringStream.Create('');
+  try
+    Bytes.SaveToFile(FDir + 'in.txt');
+  finally
+    Bytes.Free;
+  end;
+  OpenPipe(PipeReader, PipeWriter);
+  PipeOpen := 1;
+  FileWrite(PipeWriter, AInput[1], Length(AInput));
+  Assign(InFile, FDir + 'in.txt');
+  Reset(InFile);
+  FileClose(TextRec(InFile).Handle);
+  TextRec(InFile).Handle := PipeReader;
+  Assign(OutFile, FDir + 'out.txt');
+  Rewrite(OutFile);
+  Closer := TPipeScript.Create(ACloseMs, '', True);
+  try
+    RunMCPStdioLoop(InFile, OutFile, FServer);
+  finally
+    Close(InFile);
+    Close(OutFile);
+    Closer.WaitFor;
+    Closer.Free;
+  end;
+  Bytes := TStringStream.Create('');
+  try
+    Bytes.LoadFromFile(FDir + 'out.txt');
+    Result := Bytes.DataString;
+  finally
+    Bytes.Free;
+  end;
 end;
 
 function TStdioLoop.RunLoop(const AInput: string;
@@ -633,25 +699,6 @@ begin
     .ToBe(True);
 end;
 
-// A pipe whose write end the handler keeps; the read end replaces the
-// handle of an ordinary Text opened on an empty file, so the loop sees a
-// plain file Text over a real pipe.
-procedure OpenPipe(out AReader, AWriter: THandle);
-{$IFDEF UNIX}
-var
-  Ends: TFilDes;
-begin
-  if fpPipe(Ends) <> 0 then
-    raise Exception.Create('pipe failed');
-  AReader := Ends[0];
-  AWriter := Ends[1];
-end;
-{$ELSE}
-begin
-  if not CreatePipe(AReader, AWriter, nil, 0) then
-    raise Exception.Create('CreatePipe failed');
-end;
-{$ENDIF}
 
 // Cancellation reaches a running handler on stdio (spec verified
 // 2026-11-27: the receiver SHOULD stop processing a cancelled request
@@ -857,13 +904,15 @@ var
   Output: string;
   Lines: TStringList;
 begin
-  Output := RunLoop(StreamLine('"a"', '"cursor":"0",') + #10 +
+  // Over a pipe: the end of input ends every stream, so stdin stays
+  // open while they run.
+  Output := RunPipe(StreamLine('"a"', '"cursor":"0",') + #10 +
     StreamLine('"c"', '"arguments":{"more":true},') + #10 +
     StreamLine('"b"', '') + #10 +
     '{"jsonrpc":"2.0","method":"notifications/cancelled","params":' +
     '{"requestId":"c"}}' + #10 +
     '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":' +
-    '"ping",' + META_MODERN + '}}' + #10);
+    '"ping",' + META_MODERN + '}}' + #10, 300);
   // Stream c, which always has more, was cancelled by the line already
   // waiting: its probe took it before c wrote anything, and c was never
   // checked again.
@@ -1086,6 +1135,69 @@ begin
   Expect<Integer>(Pos('dummy', Output)).ToBe(0);
 end;
 
+// The end of input reaches a waiting check while a request is still
+// queued behind it: the check returns, the stream ends, and the request
+// is served (#126 review).
+procedure TStdioLoop.TestEndOfInputWithARequestQueued;
+var
+  InFile, OutFile: Text;
+  PipeReader: THandle;
+  Request, Output: string;
+  Bytes: TStringStream;
+  Late: TPipeScript;
+begin
+  BeatPollMs := 50;
+  Request := StreamLine('8', '"cursor":"2","arguments":{"wait":true},') +
+    #10;
+  Bytes := TStringStream.Create('');
+  try
+    Bytes.SaveToFile(FDir + 'in.txt');
+  finally
+    Bytes.Free;
+  end;
+  OpenPipe(PipeReader, PipeWriter);
+  PipeOpen := 1;
+  FileWrite(PipeWriter, Request[1], Length(Request));
+  Assign(InFile, FDir + 'in.txt');
+  Reset(InFile);
+  FileClose(TextRec(InFile).Handle);
+  TextRec(InFile).Handle := PipeReader;
+  Assign(OutFile, FDir + 'out.txt');
+  Rewrite(OutFile);
+  Late := TPipeScript.Create(200, '{"jsonrpc":"2.0","id":3,"method":' +
+    '"tools/call","params":{"name":"ping",' + META_MODERN + '}}' + #10,
+    True);
+  try
+    RunMCPStdioLoop(InFile, OutFile, FServer);
+  finally
+    Close(InFile);
+    Close(OutFile);
+    Late.WaitFor;
+    Late.Free;
+  end;
+  Bytes := TStringStream.Create('');
+  try
+    Bytes.LoadFromFile(FDir + 'out.txt');
+    Output := Bytes.DataString;
+  finally
+    Bytes.Free;
+  end;
+  Expect<Boolean>(BeatSawCancel).ToBe(True);
+  Expect<Boolean>(Pos('"id" : 3', Output) > 0).ToBe(True);
+end;
+
+// The opening check, inside the request, also sees the end of input
+// (#126 review).
+procedure TStdioLoop.TestEndOfInputReachesTheOpeningCheck;
+var
+  Output: string;
+begin
+  Output := RunPipe(StreamLine('4', '"cursor":"0","arguments":' +
+    '{"waitfirst":true},') + #10, 200);
+  Expect<Boolean>(BeatSawCancel).ToBe(True);
+  Expect<Integer>(Pos('notifications/events/', Output)).ToBe(0);
+end;
+
 // A Text with its own I/O driver cannot be waited on, so the loop
 // offers no stream host and events/stream answers -32026.
 procedure TStdioLoop.TestStreamRefusedOverTextDriver;
@@ -1191,6 +1303,10 @@ begin
     TestEndOfInputReachesAWaitingCheck);
   Test('a handler that parks and fails keeps its error',
     TestParkThenRaiseKeepsTheError);
+  Test('the end of input reaches a waiting check; a queued request is served',
+    TestEndOfInputWithARequestQueued);
+  Test('the end of input reaches the opening check',
+    TestEndOfInputReachesTheOpeningCheck);
 end;
 
 begin
