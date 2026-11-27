@@ -114,9 +114,10 @@ errors.
 The one addition to line-in/line-out is the **per-call notification
 sink**: the sink and its user data are arguments to the
 `HandleMessage` overload, so shared server state retains no transport
-state. A session keeps one transport hook: the cancellation poll and
+state. A session keeps two transport hooks: the cancellation poll and
 its borrowed user data (#93), installed for the connection and
-consulted only while one of its requests runs.
+consulted only while one of its requests runs, and the stream host
+(#126), handed to each 2026-07-28 handler.
 
 ```mermaid
 sequenceDiagram
@@ -150,7 +151,7 @@ validates its own `_meta`, and the session contributes no negotiated
 identity to that path. The session exists for two things only —
 isolating legacy lifecycle/identity, and exposing the one currently
 active cooperative-cancellation token, together with the transport's
-cancellation poll.
+cancellation poll and stream host.
 
 ```mermaid
 stateDiagram-v2

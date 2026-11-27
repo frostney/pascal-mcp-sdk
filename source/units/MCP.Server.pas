@@ -1060,6 +1060,12 @@ function MCPCompleteFrom(const AValue: string;
 // as a new object the caller owns; nil for any other line. A transport
 // that classifies queued lines once keeps the result and matches it
 // with TMCPSession.IsActiveRequestId (#93).
+// Writes AMessage to stderr as one line, best effort: a closed stderr
+// is ignored, and on Unix cannot kill the process with SIGPIPE. The
+// writer the core's own diagnostics use, for code beside it such as an
+// extension's push stream (#126 review).
+procedure MCPLogDiagnostic(const AMessage: string);
+
 function MCPCancellationTarget(const ALine: string): TJSONData;
 
 // In-request notifications, callable from any handler. Both are
@@ -2023,6 +2029,11 @@ procedure TMCPSession.SetCancellationPoll(APoll: TMCPCancellationPoll;
 begin
   FCancellationPoll := APoll;
   FCancellationPollData := AUserData;
+end;
+
+procedure MCPLogDiagnostic(const AMessage: string);
+begin
+  TryLogToStderr(SanitizeLogText(AMessage));
 end;
 
 function MCPCancellationTarget(const ALine: string): TJSONData;

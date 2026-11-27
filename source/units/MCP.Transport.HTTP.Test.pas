@@ -30,6 +30,7 @@ uses
   ssockets,
   MCP.Events,
   MCP.Extensions,
+  MCP.JSONRPC,
   MCP.Protocol,
   MCP.Schema,
   MCP.Server,
@@ -416,8 +417,16 @@ begin
   Inc(EndingCalls);
   if EndingCalls >= 2 then
     raise EMCPProtocolError.Create(-32024, 'Forbidden');
-  Result := MCPEventPoll('0');
+  Result := MCPEventPoll('0', TJSONArray.Create);
   Result.NextPollMs := 50;
+  // From a cursor, one non-ASCII occurrence, which the SSE frame must
+  // carry byte-exact (#126 review).
+  if not AQuery.FromNow then
+  begin
+    Result.Events.Add(MCPEventOccurrence('u', '2026-11-27T10:00:00Z',
+      TJSONObject(MCPParseJSON('{"text":"Gr\u00fc\u00dfe"}'))));
+    Result.Cursor := '1';
+  end;
 end;
 
 // Never ends by itself: asks again every 50 ms.
@@ -592,12 +601,15 @@ end;
 // An events/stream POST for event AName, with Mcp-Name unless
 // AWithName is false.
 function StreamRequest(APort: Word; const AName: string;
-  AWithName: Boolean = True): string;
+  AWithName: Boolean = True; const ACursor: string = ''): string;
 var
   Payload: string;
 begin
   Payload := '{"jsonrpc":"2.0","id":5,"method":"events/stream","params":{' +
-    '"name":"' + AName + '",' + META_MODERN + '}}';
+    '"name":"' + AName + '",';
+  if ACursor <> '' then
+    Payload := Payload + '"cursor":"' + ACursor + '",';
+  Payload := Payload + META_MODERN + '}}';
   Result := 'POST /mcp HTTP/1.1'#13#10 +
     'Host: 127.0.0.1:' + IntToStr(APort) + #13#10 +
     'Content-Type: application/json'#13#10 +
@@ -1120,6 +1132,12 @@ begin
   Expect<Boolean>(Pos('data: { "jsonrpc" : "2.0", "id" : 5, "result" : ' +
     '{ "resultType" : "complete"', Body) > 0).ToBe(True);
   Expect<Integer>(EndingCalls).ToBe(2);
+  // From a cursor, the non-ASCII occurrence, its UTF-8 bytes as sent.
+  EndingCalls := 0;
+  Expect<Integer>(RawExchange(FTransport.Port, StreamRequest(
+    FTransport.Port, 'ending', True, '0'), Body)).ToBe(200);
+  Expect<Boolean>(Pos('"text" : "Gr' + #$C3#$BC#$C3#$9F + 'e"', Body) > 0)
+    .ToBe(True);
   // Mcp-Name is required on events/stream as on events/poll.
   Expect<Integer>(RawExchange(FTransport.Port, StreamRequest(
     FTransport.Port, 'ending', False), Body)).ToBe(400);

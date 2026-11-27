@@ -153,6 +153,7 @@ type
     function ReadChunk(ABlocking: Boolean): Boolean;
     function DataWaiting: Boolean;
     procedure ClassifyQueued;
+    function TakeQueuedCancellationOf(AId: TJSONData): Boolean;
     procedure RemoveAt(AIndex: Integer);
     procedure Compact;
   public
@@ -169,8 +170,13 @@ type
     // file, not a console), so push streams can step between lines.
     function CanWait: Boolean;
     // True when a line is queued or the input ended, so NextLine returns
-    // at once; False when ATimeoutMs passed first.
+    // at once; False when ATimeoutMs passed first. Input that keeps
+    // arriving without completing a line still returns at the deadline.
     function WaitForLine(ATimeoutMs: Int64): Boolean;
+    // Takes a queued or waiting notifications/cancelled for AId (an open
+    // stream's request id, borrowed) out of the input: True when one
+    // was there (#126 review).
+    function TakeCancellationOf(AId: TJSONData): Boolean;
     // Removes and returns the first queued notifications/cancelled line
     // the core would accept for the request ASession is running.
     function TakeActiveCancellation(ASession: TMCPSession;
@@ -450,16 +456,21 @@ begin
   repeat
     if (FHead < Length(FQueue)) or FEOF then
       Exit(True);
+    // One read even when a stream is already due; then the deadline,
+    // so a feed that never completes a line cannot starve the streams
+    // (#126 review).
     if DataWaiting then
+      ReadChunk(False)
+    else
     begin
-      ReadChunk(False);
-      Continue;
+      Left := Deadline - MCPNowMs;
+      if Left > 0 then
+        WaitReadableFor(FHandle, Left);
     end;
-    Left := Deadline - MCPNowMs;
-    if Left <= 0 then
-      Exit(False);
-    WaitReadableFor(FHandle, Left);
-  until False;
+    if (FHead < Length(FQueue)) or FEOF then
+      Exit(True);
+  until MCPNowMs >= Deadline;
+  Result := False;
 end;
 
 // Read one LF-terminated line through Text, storing at most AMax bytes:
@@ -623,6 +634,29 @@ begin
   Result := False;
 end;
 
+// A cancellation for AId among the queued lines, taken out.
+function TStdioReader.TakeQueuedCancellationOf(AId: TJSONData): Boolean;
+var
+  I: Integer;
+begin
+  ClassifyQueued;
+  if FCancelCount > 0 then
+    for I := FHead to High(FQueue) do
+      if (FQueue[I].CancelId <> nil) and
+        SameRequestId(FQueue[I].CancelId, AId) then
+      begin
+        RemoveAt(I);
+        Exit(True);
+      end;
+  Result := False;
+end;
+
+function TStdioReader.TakeCancellationOf(AId: TJSONData): Boolean;
+begin
+  Result := TakeQueuedCancellationOf(AId) or
+    (ReadWaitingChunk and TakeQueuedCancellationOf(AId));
+end;
+
 type
   TStdioPollState = record
     Reader: TStdioReader;
@@ -660,12 +694,26 @@ end;
 type
   // The loop's open push streams (#126), each with the time it is next
   // due, stepped between lines on the one thread.
+  // An open stream's live cancellation check: a notifications/cancelled
+  // for it that is queued or waiting on stdin while the stream steps.
+  TStdioStreamProbe = class
+  private
+    FReader: TStdioReader; // borrowed
+    FId: TJSONData;        // borrowed: the stream's
+  public
+    constructor Create(AReader: TStdioReader; AId: TJSONData);
+    function Cancelled: Boolean;
+  end;
+
   TStdioStreams = class
   private
+    FReader: TStdioReader; // borrowed
     FStreams: array of TMCPStream; // owned
+    FProbes: array of TStdioStreamProbe; // owned
     FDue: array of Int64;
     procedure Drop(AIndex: Integer);
   public
+    constructor Create(AReader: TStdioReader);
     destructor Destroy; override;
     function Count: Integer;
     // Takes ownership of AStream and steps it at once (its first frame).
@@ -678,6 +726,24 @@ type
     function Cancels(const ALine: string): Boolean;
   end;
 
+constructor TStdioStreamProbe.Create(AReader: TStdioReader; AId: TJSONData);
+begin
+  inherited Create;
+  FReader := AReader;
+  FId := AId;
+end;
+
+function TStdioStreamProbe.Cancelled: Boolean;
+begin
+  Result := FReader.TakeCancellationOf(FId);
+end;
+
+constructor TStdioStreams.Create(AReader: TStdioReader);
+begin
+  inherited Create;
+  FReader := AReader;
+end;
+
 destructor TStdioStreams.Destroy;
 var
   I: Integer;
@@ -687,6 +753,7 @@ begin
   begin
     FStreams[I].Cancel;
     FStreams[I].Free;
+    FProbes[I].Free;
   end;
   inherited Destroy;
 end;
@@ -701,20 +768,26 @@ var
   I: Integer;
 begin
   FStreams[AIndex].Free;
+  FProbes[AIndex].Free;
   for I := AIndex to High(FStreams) - 1 do
   begin
     FStreams[I] := FStreams[I + 1];
+    FProbes[I] := FProbes[I + 1];
     FDue[I] := FDue[I + 1];
   end;
   SetLength(FStreams, Length(FStreams) - 1);
+  SetLength(FProbes, Length(FProbes) - 1);
   SetLength(FDue, Length(FDue) - 1);
 end;
 
 procedure TStdioStreams.Add(AStream: TMCPStream; var AOutput: Text);
 begin
   SetLength(FStreams, Length(FStreams) + 1);
+  SetLength(FProbes, Length(FProbes) + 1);
   SetLength(FDue, Length(FDue) + 1);
   FStreams[High(FStreams)] := AStream;
+  FProbes[High(FProbes)] := TStdioStreamProbe.Create(FReader, AStream.Id);
+  AStream.CancelProbe := FProbes[High(FProbes)].Cancelled;
   FDue[High(FDue)] := MCPNowMs;
   StepDue(AOutput);
 end;
@@ -722,16 +795,14 @@ end;
 procedure TStdioStreams.StepDue(var AOutput: Text);
 var
   I: Integer;
-  Now: Int64;
 begin
   I := 0;
   while I < Length(FStreams) do
   begin
-    Now := MCPNowMs;
-    if FDue[I] <= Now then
+    if FDue[I] <= MCPNowMs then
     begin
       try
-        FDue[I] := FStreams[I].Step(Now, StdioNotificationSink, @AOutput);
+        FDue[I] := FStreams[I].Step(StdioNotificationSink, @AOutput);
       except
         // A failed stdout write is the whole loop's end; anything else
         // ends only this stream.
@@ -774,7 +845,10 @@ var
   I: Integer;
 begin
   Result := False;
-  if Length(FStreams) = 0 then
+  // The reader's own filter: only a line that may be a cancellation is
+  // parsed twice (#126 review).
+  if (Length(FStreams) = 0) or ((Pos('notifications/cancelled', ALine) = 0)
+    and (Pos('\', ALine) = 0)) then
     Exit;
   Target := MCPCancellationTarget(ALine);
   if Target = nil then
@@ -824,7 +898,7 @@ begin
       Reader := TStdioReader.Create(AInput, AMaxLineLength);
       PollState.Reader := Reader;
       Session.SetCancellationPoll(StdioCancellationPoll, @PollState);
-      Streams := TStdioStreams.Create;
+      Streams := TStdioStreams.Create(Reader);
       // Push streams need a loop that can wait with a time limit; a Text
       // with its own driver, or a Windows console, cannot (#126).
       if Reader.CanWait then
@@ -860,9 +934,15 @@ begin
         if Host <> nil then
           Parked := Host.TakeParked;
         // A stream's handler answers with a placeholder: the stream
-        // writes its own frames from here on.
-        if Parked <> nil then
+        // writes its own frames from here on, unless the request was
+        // cancelled and the core answers nothing (#126 review).
+        if (Parked <> nil) and Produced then
           Streams.Add(Parked, AOutput)
+        else if Parked <> nil then
+        begin
+          Parked.Cancel;
+          Parked.Free;
+        end
         else if Produced then
         begin
           Write(AOutput, Response, #10);

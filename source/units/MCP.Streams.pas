@@ -22,35 +22,52 @@ uses
   SysUtils,
 
   fpjson,
+  MCP.Protocol,
   MCP.Server;
 
 type
+  // A clock in milliseconds; MCPNowMs unless a test sets another.
+  TMCPClock = function: Int64;
+
   TMCPStream = class
   private
     FId: TJSONData; // owned: the request's id
     FFinished: Boolean;
+    FClock: TMCPClock;
+    FCancelProbe: TMCPCancellationProbe;
   protected
-    // Set by Step when the stream has ended (its final frame, if any,
-    // already written).
+    // Set when the stream has ended (its final frame, if any, already
+    // written).
     procedure Finish;
+    // The stream's clock now.
+    function Now: Int64;
   public
     // ARequestId (borrowed) is copied: the request's JSON-RPC id.
     constructor Create(ARequestId: TJSONData);
     destructor Destroy; override;
-    // Writes what is due at ANowMs (MCPNowMs) through ASink, one JSON
-    // line per call, and returns when it is next due on the same clock.
-    // A sink that raises ends the stream: the transport stops stepping
-    // it and calls Cancel.
-    function Step(ANowMs: Int64; ASink: TMCPLineSink;
-      ASinkData: Pointer): Int64; virtual; abstract;
+    // Writes what is due through ASink, one JSON line per call, and
+    // returns when it is next due on the stream's clock. A sink that
+    // raises ends the stream: the transport stops stepping it.
+    function Step(ASink: TMCPLineSink; ASinkData: Pointer): Int64; virtual;
+      abstract;
     // The client went away or cancelled: nothing more is written.
     procedure Cancel; virtual;
     // The server ends the stream, such as when its transport stops:
     // the final frame through ASink, then Finished.
     procedure Close(ASink: TMCPLineSink; ASinkData: Pointer); virtual;
       abstract;
+    // Whether the stream has ended or the transport's probe reports the
+    // client gone; a True probe cancels the stream. Asked between the
+    // stream's own steps, and by the checks it runs (#126 review).
+    function Cancelled: Boolean;
     property Id: TJSONData read FId;
     property Finished: Boolean read FFinished;
+    // MCPNowMs unless set: how a test drives the stream's time.
+    property Clock: TMCPClock read FClock write FClock;
+    // The transport's live check for a client that went away or a
+    // cancellation that arrived while the stream steps (nil for none).
+    property CancelProbe: TMCPCancellationProbe read FCancelProbe
+      write FCancelProbe;
   end;
 
   // Where a handler parks its stream for the transport (one at a time:
@@ -63,17 +80,24 @@ type
     // Takes ownership of AStream. A second stream before the first is
     // taken raises EMCPServer (and frees AStream).
     procedure Park(AStream: TMCPStream);
-    // The parked stream (the caller's), or nil.
+    // The parked stream (the caller's), or nil. A transport whose
+    // HandleMessage produced no response (the request was cancelled)
+    // cancels and frees it instead of driving it.
     function TakeParked: TMCPStream;
   end;
 
-// A monotonic clock in milliseconds, the one Step is driven by.
+// A monotonic clock in milliseconds, the one streams run on.
 function MCPNowMs: Int64;
 
 implementation
 
 uses
   MCP.Errors;
+
+function MCPNowMs: Int64;
+begin
+  Result := Int64(GetTickCount64);
+end;
 
 constructor TMCPStream.Create(ARequestId: TJSONData);
 begin
@@ -82,6 +106,7 @@ begin
     FId := ARequestId.Clone
   else
     FId := TJSONNull.Create;
+  FClock := @MCPNowMs;
 end;
 
 destructor TMCPStream.Destroy;
@@ -95,9 +120,21 @@ begin
   FFinished := True;
 end;
 
+function TMCPStream.Now: Int64;
+begin
+  Result := FClock();
+end;
+
 procedure TMCPStream.Cancel;
 begin
   FFinished := True;
+end;
+
+function TMCPStream.Cancelled: Boolean;
+begin
+  if not FFinished and Assigned(FCancelProbe) and FCancelProbe() then
+    Cancel;
+  Result := FFinished;
 end;
 
 destructor TMCPStreamHost.Destroy;
@@ -120,11 +157,6 @@ function TMCPStreamHost.TakeParked: TMCPStream;
 begin
   Result := FParked;
   FParked := nil;
-end;
-
-function MCPNowMs: Int64;
-begin
-  Result := Int64(GetTickCount64);
 end;
 
 end.

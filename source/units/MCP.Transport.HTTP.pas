@@ -172,10 +172,10 @@ type
       var AResponse: TFPHTTPConnectionResponse);
     procedure AnswerJSON(AResponse: TFPHTTPConnectionResponse;
       ACode: Integer; const ABody: string);
-    // AMalformedRequest: the request lacked a required per-request
-    // field, so a -32602 answer maps to 400 (#79).
     procedure DriveStream(AStream: TMCPStream; ASession: TMCPSession;
       ASSE: Pointer; APoll: Pointer);
+    // AMalformedRequest: the request lacked a required per-request
+    // field, so a -32602 answer maps to 400 (#79).
     procedure AnswerRequest(ARequest: TFPHTTPConnectionRequest;
       AResponse: TFPHTTPConnectionResponse; const ABody: string;
       AStream, AMalformedRequest: Boolean);
@@ -1146,36 +1146,63 @@ begin
   end;
 end;
 
+type
+  // A stream's live cancellation check on HTTP: the connection's
+  // closed-socket poll, so a check that waits sees the client go
+  // (#126 review).
+  THTTPStreamProbe = class
+  private
+    FSession: TMCPSession; // borrowed
+    FPoll: Pointer;        // borrowed: the request's THTTPDisconnectPoll
+  public
+    function Cancelled: Boolean;
+  end;
+
+function THTTPStreamProbe.Cancelled: Boolean;
+begin
+  Result := HTTPDisconnectPoll(FSession, FPoll);
+end;
+
 // Steps AStream (owned) in this request's thread until it ends (#126):
 // its frames are SSE events, the first one opening the stream. A
-// closed connection, checked at least every 50 ms, or a failed write
-// cancels it, and nothing more is sent (events.mdx, Lifecycle); Stop
-// closes it with its final frame. No cap on concurrent requests counts
-// it: each stream holds only its own connection's thread.
+// closed connection, probed every 50 ms and from inside the stream's
+// checks, or a failed write cancels it, and nothing more is sent
+// (events.mdx, Lifecycle); Stop closes it with its final frame. No cap
+// on concurrent requests counts it: each stream holds only its own
+// connection's thread.
 procedure TMCPHTTPServer.DriveStream(AStream: TMCPStream;
   ASession: TMCPSession; ASSE: Pointer; APoll: Pointer);
 var
-  Due, Now: Int64;
+  Due, Now, Wait: Int64;
+  Probe: THTTPStreamProbe;
 begin
+  Probe := THTTPStreamProbe.Create;
   try
+    Probe.FSession := ASession;
+    Probe.FPoll := APoll;
+    AStream.CancelProbe := Probe.Cancelled;
     try
       repeat
-        Due := AStream.Step(MCPNowMs, @SSESink, ASSE);
+        Due := AStream.Step(@SSESink, ASSE);
         while not AStream.Finished do
         begin
           if FStopPending then
             AStream.Close(@SSESink, ASSE)
-          else if HTTPDisconnectPoll(ASession, APoll) then
-            AStream.Cancel
-          else
+          else if not AStream.Cancelled then
           begin
             Now := MCPNowMs;
             if Now >= Due then
               Break;
-            if Due - Now < 50 then
-              Sleep(Due - Now)
-            else
-              Sleep(50);
+            // Until the stream is due or the socket is probed again,
+            // whichever comes first.
+            Wait := Due - Now;
+            if Int64(PHTTPDisconnectPoll(APoll)^.LastCheck) +
+              DISCONNECT_POLL_INTERVAL_MS - Now < Wait then
+              Wait := Int64(PHTTPDisconnectPoll(APoll)^.LastCheck) +
+                DISCONNECT_POLL_INTERVAL_MS - Now;
+            if Wait < 1 then
+              Wait := 1;
+            Sleep(Wait);
           end;
         end;
       until AStream.Finished;
@@ -1186,6 +1213,7 @@ begin
     end;
   finally
     AStream.Free;
+    Probe.Free;
   end;
 end;
 
@@ -1244,8 +1272,15 @@ begin
       Produced := FServer.HandleMessage(Session, ABody, nil, nil,
         ResponseLine);
     // A push stream's handler answers with a placeholder: the stream
-    // writes its own frames from here on.
+    // writes its own frames from here on, unless the request was
+    // cancelled and the core answers nothing (#126 review).
     Parked := Host.TakeParked;
+    if (Parked <> nil) and not Produced then
+    begin
+      Parked.Cancel;
+      Parked.Free;
+      Parked := nil;
+    end;
     if Parked <> nil then
     begin
       DriveStream(Parked, Session, @Stream, @Poll);

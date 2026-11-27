@@ -12,7 +12,9 @@ program MCP.Transport.Stdio.Test;
 {$I MCP.inc}
 
 uses
+  // The pipe script thread needs the Unix thread driver first.
   {$IFDEF UNIX}
+  cthreads,
   BaseUnix,
   {$ENDIF}
   {$IFDEF WINDOWS}
@@ -27,6 +29,7 @@ uses
   MCP.Events,
   MCP.Protocol,
   MCP.Schema,
+  MCP.Streams,
   MCP.Server,
   MCP.Transport.Stdio,
   TestingPascalLibrary;
@@ -75,6 +78,9 @@ type
     procedure TestStreamsBesideRequests;
     procedure TestStreamStepsWhileInputIdle;
     procedure TestStreamRefusedOverTextDriver;
+    procedure TestStreamCancelledBetweenSteps;
+    procedure TestStreamCancelledDuringFirstCheck;
+    procedure TestParkedStreamOfCancelledRequestDropped;
     procedure TestLastLineWithoutNewline;
   end;
 
@@ -101,6 +107,57 @@ var
   // again after BeatPollMs; on call BeatCloseAt it adds one occurrence
   // and closes PipeWriter, ending the input.
   BeatHead, BeatPollMs, BeatCalls, BeatCloseAt: Integer;
+  // 1 while PipeWriter is open, for ClosePipeOnce.
+  PipeOpen: LongInt;
+
+// Closes PipeWriter once, whoever gets there first: the check, or the
+// script thread that bounds a test.
+procedure ClosePipeOnce;
+begin
+  if InterLockedExchange(PipeOpen, 0) = 1 then
+    FileClose(PipeWriter);
+end;
+
+type
+  // Writes AData (if any) to PipeWriter after ADelayMs, then closes it
+  // when AClose: input that arrives while the loop waits.
+  TPipeScript = class(TThread)
+  private
+    FDelayMs: Integer;
+    FData: string;
+    FClose: Boolean;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(ADelayMs: Integer; const AData: string;
+      AClose: Boolean);
+  end;
+
+constructor TPipeScript.Create(ADelayMs: Integer; const AData: string;
+  AClose: Boolean);
+begin
+  FDelayMs := ADelayMs;
+  FData := AData;
+  FClose := AClose;
+  inherited Create(False);
+end;
+
+procedure TPipeScript.Execute;
+var
+  Waited: Integer;
+begin
+  // A closer whose pipe is already closed has nothing left to do.
+  Waited := 0;
+  while (Waited < FDelayMs) and not (FClose and (PipeOpen = 0)) do
+  begin
+    Sleep(10);
+    Inc(Waited, 10);
+  end;
+  if (FData <> '') and (PipeOpen = 1) then
+    FileWrite(PipeWriter, FData[1], Length(FData));
+  if FClose then
+    ClosePipeOnce;
+end;
 
 function BeatCheck(const AQuery: TMCPEventQuery;
   const ACtx: TMCPRequestContext): TMCPEventPoll;
@@ -112,8 +169,12 @@ begin
   if BeatCalls = BeatCloseAt then
   begin
     Inc(BeatHead);
-    FileClose(PipeWriter);
+    ClosePipeOnce;
   end;
+  // A check that polls IsCancelled, as a cooperative one does (#126
+  // review).
+  if AQuery.Arguments.Get('poll', False) then
+    ACtx.IsCancelled;
   Result := MCPEventPoll(IntToStr(BeatHead), TJSONArray.Create);
   Result.NextPollMs := BeatPollMs;
   // A stream that always has more is stepped on every loop turn.
@@ -129,10 +190,48 @@ begin
   end;
   for I := From to Last do
     Result.Events.Add(MCPEventOccurrence('e' + IntToStr(I),
-      '2026-11-27T10:00:00Z', TJSONObject.Create(['n', I])));
+      '2026-11-27T10:00:00Z', TJSONObject.Create(['n', I, 'text',
+      UTF8_PAYLOAD])));
   if Last >= From then
     Result.Cursor := IntToStr(Last);
 end;
+
+type
+  // A stream that would write one line on its first step.
+  TDummyStream = class(TMCPStream)
+  public
+    function Step(ASink: TMCPLineSink; ASinkData: Pointer): Int64; override;
+    procedure Close(ASink: TMCPLineSink; ASinkData: Pointer); override;
+  end;
+
+  // test/park: parks a dummy stream, then sees a cancellation waiting.
+  TParkMethod = class
+    function Park(AParams: TJSONObject; const ACtx: TMCPRequestContext;
+      ALegacy: Boolean): TJSONObject;
+  end;
+
+function TDummyStream.Step(ASink: TMCPLineSink; ASinkData: Pointer): Int64;
+begin
+  ASink('{"dummy":true}', ASinkData);
+  Finish;
+  Result := High(Int64);
+end;
+
+procedure TDummyStream.Close(ASink: TMCPLineSink; ASinkData: Pointer);
+begin
+  Finish;
+end;
+
+function TParkMethod.Park(AParams: TJSONObject;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+begin
+  TMCPStreamHost(ACtx.StreamHost).Park(TDummyStream.Create(ACtx.RequestId));
+  ACtx.IsCancelled;
+  Result := TJSONObject.Create;
+end;
+
+var
+  ParkMethod: TParkMethod;
 
 function StreamLine(const AId, AParams: string): string;
 begin
@@ -217,6 +316,7 @@ begin
     PollOnceHandler);
   RegisterEvent(FServer, 'beat', 'Beats', ObjectSchema, ObjectSchema
     .AddInteger('n'), BeatCheck);
+  FServer.RegisterMethod('test/park', ParkMethod.Park);
   BeatHead := 2;
   BeatPollMs := 60000;
   BeatCalls := 0;
@@ -728,21 +828,22 @@ begin
     StreamLine('"c"', '"arguments":{"more":true},') + #10 +
     StreamLine('"b"', '') + #10 +
     '{"jsonrpc":"2.0","method":"notifications/cancelled","params":' +
-    '{"requestId":"a"}}' + #10 +
-    '{"jsonrpc":"2.0","method":"notifications/cancelled","params":' +
     '{"requestId":"c"}}' + #10 +
     '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":' +
     '"ping",' + META_MODERN + '}}' + #10);
-  // Stream c, which always has more, was checked until its
-  // cancellation, and never after it.
-  Expect<Boolean>(Pos('c', CallLog) > 0).ToBe(True);
-  Expect<Integer>(Pos('c', Copy(CallLog, Pos('|ping', CallLog),
-    MaxInt))).ToBe(0);
+  // Stream c, which always has more, was cancelled by the line already
+  // waiting: its probe took it before c wrote anything, and c was never
+  // checked again.
+  // a: the handler's check and one more for its backlog; c: the
+  // handler's only; b: the handler's.
+  Expect<string>(CallLog).ToBe('aacb|ping');
+  Expect<Integer>(Pos('/subscriptionId" : "c"', Output)).ToBe(0);
+  // Non-ASCII occurrence data goes out byte-exact (#126 review).
+  Expect<Boolean>(Pos('"text" : "' + UTF8_PAYLOAD + '"', Output) > 0)
+    .ToBe(True);
   Lines := TStringList.Create;
   try
     Lines.Text := Output;
-    // Stream c's active sits between a's frames and b's.
-    Lines.Delete(3);
     Expect<Integer>(Lines.Count).ToBe(5);
     Expect<Boolean>(Pos('notifications/events/active', Lines[0]) > 0)
       .ToBe(True);
@@ -770,11 +871,13 @@ var
   Request, Output: string;
   Bytes: TStringStream;
   Started: QWord;
+  Script: TPipeScript;
 begin
   BeatHead := 0;
   BeatPollMs := 100;
   BeatCloseAt := 2;
   Request := StreamLine('9', '"cursor":"0",') + #10;
+  Script := nil;
   Bytes := TStringStream.Create('');
   try
     Bytes.SaveToFile(FDir + 'in.txt');
@@ -782,6 +885,7 @@ begin
     Bytes.Free;
   end;
   OpenPipe(PipeReader, PipeWriter);
+  PipeOpen := 1;
   FileWrite(PipeWriter, Request[1], Length(Request));
   Assign(InFile, FDir + 'in.txt');
   Reset(InFile);
@@ -791,10 +895,18 @@ begin
   Rewrite(OutFile);
   Started := GetTickCount64;
   try
+    // A bound: if the idle loop never steps the stream, the input still
+    // ends, and the missing occurrence fails the test (#126 review).
+    Script := TPipeScript.Create(3000, '', True);
     RunMCPStdioLoop(InFile, OutFile, FServer);
   finally
     Close(InFile);
     Close(OutFile);
+    if Script <> nil then
+    begin
+      Script.WaitFor;
+      Script.Free;
+    end;
   end;
   Bytes := TStringStream.Create('');
   try
@@ -808,6 +920,71 @@ begin
   Expect<Integer>(Pos('{ "jsonrpc" : "2.0", "method" : ' +
     '"notifications/events/active"', Output)).ToBe(1);
   Expect<Boolean>(Pos('"eventId" : "e1"', Output) > 0).ToBe(True);
+end;
+
+// A cancellation that arrives while its stream is not due is read by
+// the loop itself, and the stream is dropped there: it is not checked
+// again when it would have been due.
+procedure TStdioLoop.TestStreamCancelledBetweenSteps;
+var
+  InFile, OutFile: Text;
+  PipeReader: THandle;
+  Request: string;
+  Bytes: TStringStream;
+  Cancel, Closer: TPipeScript;
+begin
+  BeatPollMs := 400;
+  Request := StreamLine('5', '"cursor":"2",') + #10;
+  Bytes := TStringStream.Create('');
+  try
+    Bytes.SaveToFile(FDir + 'in.txt');
+  finally
+    Bytes.Free;
+  end;
+  OpenPipe(PipeReader, PipeWriter);
+  PipeOpen := 1;
+  FileWrite(PipeWriter, Request[1], Length(Request));
+  Assign(InFile, FDir + 'in.txt');
+  Reset(InFile);
+  FileClose(TextRec(InFile).Handle);
+  TextRec(InFile).Handle := PipeReader;
+  Assign(OutFile, FDir + 'out.txt');
+  Rewrite(OutFile);
+  Cancel := TPipeScript.Create(100, '{"jsonrpc":"2.0","method":' +
+    '"notifications/cancelled","params":{"requestId":5}}' + #10, False);
+  Closer := TPipeScript.Create(900, '', True);
+  try
+    RunMCPStdioLoop(InFile, OutFile, FServer);
+  finally
+    Close(InFile);
+    Close(OutFile);
+    Cancel.WaitFor;
+    Cancel.Free;
+    Closer.WaitFor;
+    Closer.Free;
+  end;
+  // The handler's check only: none at 400 ms.
+  Expect<string>(CallLog).ToBe('5');
+end;
+
+// A cancellation that a cooperative first check sees: no stream opens
+// and nothing is written for the request (#126 review).
+procedure TStdioLoop.TestStreamCancelledDuringFirstCheck;
+begin
+  Expect<string>(RunLoop(StreamLine('6', '"cursor":"0","arguments":' +
+    '{"poll":true},') + #10 + '{"jsonrpc":"2.0","method":' +
+    '"notifications/cancelled","params":{"requestId":6}}' + #10)).ToBe('');
+  Expect<string>(CallLog).ToBe('6');
+end;
+
+// A stream parked by a request the core then answers nothing for (the
+// request was cancelled after the stream was parked) is dropped, not
+// driven (#126 review).
+procedure TStdioLoop.TestParkedStreamOfCancelledRequestDropped;
+begin
+  Expect<string>(RunLoop('{"jsonrpc":"2.0","id":7,"method":"test/park",' +
+    '"params":{' + META_MODERN + '}}' + #10 + '{"jsonrpc":"2.0","method":' +
+    '"notifications/cancelled","params":{"requestId":7}}' + #10)).ToBe('');
 end;
 
 // A Text with its own I/O driver cannot be waited on, so the loop
@@ -905,9 +1082,17 @@ begin
     TestStreamStepsWhileInputIdle);
   Test('a Text with its own driver cannot stream: -32026',
     TestStreamRefusedOverTextDriver);
+  Test('a cancellation read between steps drops the stream',
+    TestStreamCancelledBetweenSteps);
+  Test('a cancellation the first check sees opens no stream',
+    TestStreamCancelledDuringFirstCheck);
+  Test('a stream parked by a cancelled request is dropped',
+    TestParkedStreamOfCancelledRequestDropped);
 end;
 
 begin
+  ParkMethod := TParkMethod.Create;
   TestRunnerProgram.AddSuite(TStdioLoop.Create('Transport.Stdio: loop'));
   TestRunnerProgram.Run;
+  ParkMethod.Free;
 end.

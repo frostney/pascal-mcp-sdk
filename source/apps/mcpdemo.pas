@@ -278,6 +278,9 @@ begin
   begin
     Minute := Floor;
     Result.Truncated := True;
+    // Where delivery resumed, before the ticks that follow the gap: a
+    // push stream's gap notification carries it (#126 review).
+    Result.GapCursor := IntToStr(Floor);
   end;
   Last := Now;
   // Compared before adding, so no cursor overflows.

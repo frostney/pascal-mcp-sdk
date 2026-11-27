@@ -127,18 +127,30 @@ name and bad arguments. Then the stream sends, each message tagged with
 
 - `notifications/events/active` first, with the client's cursor (or a
   fresh one), `truncated` and the granted `heartbeatMs`, and again with
-  `truncated: true` after a gap.
+  `truncated: true` after a gap. When an occurrence follows the gap,
+  the cursor is the position before it: the check's `GapCursor`, or the
+  cursor the stream had, so a client that reconnects from it is sent the
+  occurrence again rather than past it.
 - `notifications/events/event` for each occurrence, with its cursor.
 - `notifications/events/heartbeat` whenever `heartbeatMs` passes
   without another message, with the position checked up to. The grant
   is 30 seconds, or the client's suggestion clamped to 1 second to 5
   minutes.
-- `notifications/events/error` (`-32603`) when the check fails with an
-  ordinary exception. The stream retries at the next interval.
+- `notifications/events/error` (`-32603`) when the check fails with
+  any other exception, `EMCPServer` included. The stream retries at the
+  next interval.
 - `notifications/events/terminated` when the check raises
-  `EMCPProtocolError`, such as `-32024` for revoked access, or returns
-  occurrences that break the rules (`-32603`). The final frame, the
-  `StreamEventsResult`, follows, and the stream ends.
+  `EMCPProtocolError`, such as `-32024` for revoked access (its data
+  when that is an object), or returns occurrences that break the rules
+  (`-32603`). The final frame, `{"resultType": "complete"}` with the
+  subscription id in `_meta`, follows, and the stream ends.
+
+The first check runs without a notifier, so its progress and log
+notifications go nowhere. Later checks get a context whose
+`IsCancelled` turns true when the client goes away, so a check that
+waits can stop. `MaxAgeMs` bounds the whole first backlog; once the
+stream has caught up, later checks get `-1`. The next check is timed
+from when a check returns.
 
 On Streamable HTTP the response is an SSE stream that opens at once,
 and the client cancels by closing the connection, which the server

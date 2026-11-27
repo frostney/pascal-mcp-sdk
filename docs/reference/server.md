@@ -479,6 +479,7 @@ type TMCPEventPoll = record
   NoReplay: Boolean;        // cursor null
   HasMore, Truncated: Boolean;
   NextPollMs: Integer;      // 0: the registration's
+  GapCursor: string;        // push: the position before a gap's events
 end;
 
 TMCPEventCheck = function(const AQuery: TMCPEventQuery;
@@ -498,7 +499,7 @@ procedure RegisterEvent(AServer: TMCPServer; const AName,
 | --- | --- |
 | `RegisterEvent` | Event type `AName`, delivered by poll and push, before the server starts. `AInputSchema` (owned) describes the arguments: root type object, `x-mcp-header` annotations as for tools, checked against arguments when inside the server-enforced subset. `APayloadSchema` (owned) describes each occurrence's data, checked when inside the subset. An input schema outside the subset is refused. The first call declares the extension with `{}` on `server/discover` only (`RestrictExtensionToModern`, `PinExtensionSettings`) and serves `events/list`, `events/poll` and `events/stream` on 2026-07-28 (`-32601` for a classic client), routed on Streamable HTTP. A stream polls the check with `MaxEvents` 1, and answers `-32026` where the transport cannot stream. A duplicate or empty name, a bad schema, a nil check or a call after the server started raises `EMCPServer` |
 | `TMCPEventQuery` | One poll: the arguments, the cursor or `FromNow` for a null or absent one, and the client's `maxAgeMs` (at least 0) and `maxEvents` (at least 1), read as the schema reads integers |
-| `TMCPEventPoll` | A check's answer: at most `MaxEvents` occurrences, the cursor after them (null with `NoReplay`), `HasMore`, `Truncated` and `NextPollMs`. Events on a poll from now, more than `MaxEvents`, or an occurrence without object data, an RFC 3339 timestamp or a payload matching its schema answer `-32603` |
+| `TMCPEventPoll` | A check's answer: at most `MaxEvents` occurrences, the cursor after them (null with `NoReplay`), `HasMore`, `Truncated` and `NextPollMs`. Events on a poll from now, more than `MaxEvents`, an occurrence without object data, an RFC 3339 timestamp or a payload matching its schema, and on a poll `HasMore` with `NoReplay`, answer `-32603`. With `Truncated` and events, `GapCursor` is the position delivery resumed from, before them, which a push stream's gap notification carries; `''` repeats the stream's cursor, from which resuming delivers the events again |
 | `MCPEventOccurrence` | One occurrence: `AData` (owned) and `AMeta` (owned) as given. An empty `AEventId` is derived from the name, timestamp and data, so the same event keeps its id; the server adds the name |
 
 ### The request context
@@ -601,17 +602,29 @@ end;
 
 property TMCPSession.StreamHost: TObject;   // borrowed; nil for none
 function MCPNowMs: Int64;                   // monotonic milliseconds
+property TMCPStream.Clock: TMCPClock;       // MCPNowMs unless a test sets one
+property TMCPStream.CancelProbe: TMCPCancellationProbe;   // the transport's
+function TMCPStream.Cancelled: Boolean;
 ```
 
 A transport that can drive streams sets `StreamHost` on its session.
 The core hands it to each 2026-07-28 handler as `ACtx.StreamHost`. A
 handler parks at most one stream and returns a placeholder result, which
-the transport drops. The transport then calls `Step` with `MCPNowMs`
-until `Finished`, again by the time `Step` returns. It calls `Cancel`
-when the client goes away, or `Close` for the final frame when the
-transport stops. A sink that raises ends the stream. Streamable HTTP
-steps a stream in the request's thread; the stdio loop steps its
-streams between lines on its one thread.
+the transport drops; when the core answers nothing, because the request
+was cancelled, the transport cancels and frees the stream instead. The
+transport then calls `Step` until `Finished`, again by the time `Step`
+returns on the stream's clock. It sets `CancelProbe` to its live check
+for a client that went away, which `Cancelled` asks, between the
+stream's own steps and from the checks the stream runs. It calls
+`Cancel` when the client goes away. Streamable HTTP calls `Close`, for
+the final frame, when the transport stops; the stdio loop cancels every
+stream at the end of input. A sink that raises ends the stream.
+Streamable HTTP steps a stream in the request's thread; the stdio loop
+steps its streams between lines on its one thread.
+
+`MCPLogDiagnostic` writes one line to stderr, best effort, the way the
+core's own diagnostics do: a closed stderr is ignored, and on Unix
+cannot end the process with SIGPIPE.
 
 ### Schema builder and argument classes
 
