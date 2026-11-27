@@ -463,6 +463,15 @@ type
     procedure TestFoldPairs;
   end;
 
+  TTypedNested = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestNestedArgumentsReachHandler;
+    procedure TestNestedErrorIsInBand;
+  end;
+
   // .RequiresClientCapability (#84): a declared need is checked before
   // the handler runs.
   TDeclaredCapabilities = class(TDispatchSuite)
@@ -547,6 +556,23 @@ begin
 end;
 
 type
+  // #95: a typed tool with a nested object and an array.
+  TBatchItem = class(TMCPArgs)
+  private
+    FLabel: string;
+    FWeights: TStringArray;
+  published
+    property label_: string read FLabel write FLabel;
+    property weights: TStringArray read FWeights write FWeights;
+  end;
+
+  TBatchArgs = class(TMCPArgs)
+  private
+    FItem: TBatchItem;
+  published
+    property item: TBatchItem read FItem write FItem;
+  end;
+
   TScaleArgs = class(TMCPArgs)
   private
     FValue: Double;
@@ -6521,6 +6547,59 @@ begin
   Test('classic era: capability and completion/complete', TestLegacyEra);
 end;
 
+{ ───────── typed tools with nested arguments (#95) ───────── }
+
+function BatchHandler(AArgs: TMCPArgs;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Batch: TBatchArgs;
+begin
+  Batch := AArgs as TBatchArgs;
+  Result := MCPTextResult(Batch.item.label_ + ':' +
+    IntToStr(Length(Batch.item.weights)) + ':' + Batch.item.weights[0]);
+end;
+
+procedure TTypedNested.BeforeEach;
+begin
+  inherited BeforeEach;
+  FServer.RegisterTool('batch', 'Batch', TBatchArgs, BatchHandler);
+end;
+
+procedure TTypedNested.TestNestedArgumentsReachHandler;
+var
+  Line: string;
+begin
+  // The handler's text carries the nested array's UTF-8 element; the
+  // wire line is asserted as bytes.
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"batch","arguments":{"item":{"label_":"x",' +
+    '"weights":["\u00e9","b"]}},' + META_MODERN + '}}', Line)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "x:2:' + #$C3#$A9 + '"', Line) > 0)
+    .ToBe(True);
+end;
+
+procedure TTypedNested.TestNestedErrorIsInBand;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{' +
+    '"name":"batch","arguments":{"item":{"label_":"x","weights":[1]}},' +
+    META_MODERN + '}}');
+  Expect<Boolean>(TJSONData(Response.FindPath('result.isError')).AsBoolean)
+    .ToBe(True);
+  Expect<string>(TJSONData(Response.FindPath('result.content[0].text'))
+    .AsString).ToBe('Argument "item.weights[0]" must be a string');
+  Response.Free;
+end;
+
+procedure TTypedNested.SetupTests;
+begin
+  Test('nested object and array arguments reach a typed handler',
+    TestNestedArgumentsReachHandler);
+  Test('a nested binding error is an in-band isError naming the path',
+    TestNestedErrorIsInBand);
+end;
+
 { ───────── declared client capabilities (#84) ───────── }
 
 var
@@ -6952,6 +7031,8 @@ begin
     TMRTRDispatch.Create('Server: MRTR input_required'));
   TestRunnerProgram.AddSuite(
     TImageResults.Create('Server: image tool results'));
+  TestRunnerProgram.AddSuite(
+    TTypedNested.Create('Server: typed tools with nested arguments'));
   TestRunnerProgram.AddSuite(
     TDeclaredCapabilities.Create('Server: declared client capabilities'));
   TestRunnerProgram.AddSuite(
