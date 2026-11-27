@@ -129,6 +129,7 @@ type
     procedure TestEventRouting;
     procedure TestEventStream;
     procedure TestEventStreamClientClose;
+    procedure TestStopDuringACheck;
     procedure TestStreamingOptInMissingCapabilities400;
     procedure TestNotificationAccepted;
     procedure TestMalformedNotificationAccepted;
@@ -429,6 +430,55 @@ begin
   end;
 end;
 
+var
+  WaitingSawStop: Boolean;
+
+// Asks again every 50 ms; its second call waits, up to 3 s, for
+// IsCancelled, which Stop turns true (#126 review).
+function WaitingCheck(const AQuery: TMCPEventQuery;
+  const ACtx: TMCPRequestContext): TMCPEventPoll;
+var
+  I: Integer;
+begin
+  if not AQuery.FromNow then
+    for I := 1 to 300 do
+    begin
+      if ACtx.IsCancelled then
+      begin
+        WaitingSawStop := True;
+        Break;
+      end;
+      Sleep(10);
+    end;
+  Result := MCPEventPoll('0');
+  Result.NextPollMs := 50;
+end;
+
+type
+  // Stops the transport after a delay, from its own thread.
+  TStopLater = class(TThread)
+  private
+    FTransport: TMCPHTTPServer;
+    FDelayMs: Integer;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(ATransport: TMCPHTTPServer; ADelayMs: Integer);
+  end;
+
+constructor TStopLater.Create(ATransport: TMCPHTTPServer; ADelayMs: Integer);
+begin
+  FTransport := ATransport;
+  FDelayMs := ADelayMs;
+  inherited Create(False);
+end;
+
+procedure TStopLater.Execute;
+begin
+  Sleep(FDelayMs);
+  FTransport.Stop;
+end;
+
 // Never ends by itself: asks again every 50 ms.
 function EndlessCheck(const AQuery: TMCPEventQuery;
   const ACtx: TMCPRequestContext): TMCPEventPoll;
@@ -485,6 +535,9 @@ begin
     EndingCheck);
   RegisterEvent(FServer, 'endless', 'Never ends', ObjectSchema,
     ObjectSchema, EndlessCheck);
+  RegisterEvent(FServer, 'waiting', 'Waits in its check', ObjectSchema,
+    ObjectSchema, WaitingCheck);
+  WaitingSawStop := False;
   EndingCalls := 0;
   EndlessCalls := 0;
   FServer.RegisterRoute('example/route', 'target', FRouteFixture.Headers);
@@ -1144,6 +1197,27 @@ begin
   Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
 end;
 
+// Stop reaches a check that waits: it returns, and the client, still
+// reading, gets the final frame (#126 review).
+procedure THTTPBinding.TestStopDuringACheck;
+var
+  Body: string;
+  Stopper: TStopLater;
+begin
+  Stopper := TStopLater.Create(FTransport, 300);
+  try
+    // From now: the stream's own second check is the one that waits.
+    Expect<Integer>(RawExchange(FTransport.Port, StreamRequest(
+      FTransport.Port, 'waiting'), Body)).ToBe(200);
+  finally
+    Stopper.WaitFor;
+    Stopper.Free;
+  end;
+  Expect<Boolean>(WaitingSawStop).ToBe(True);
+  Expect<Boolean>(Pos('data: { "jsonrpc" : "2.0", "id" : 5, "result" : ' +
+    '{ "resultType" : "complete"', Body) > 0).ToBe(True);
+end;
+
 // A client that closes the connection cancels its stream (events.mdx,
 // Lifecycle): the server stops calling the check.
 procedure THTTPBinding.TestEventStreamClientClose;
@@ -1789,6 +1863,8 @@ begin
     TestEventStream);
   Test('a client that closes the connection ends its stream',
     TestEventStreamClientClose);
+  Test('Stop reaches a waiting check, then the final frame',
+    TestStopDuringACheck);
   Test('Mcp-Param header mismatched → 400, -32020', TestParamHeaderMismatch);
   Test('Mcp-Param base64 with bad padding or characters → 400',
     TestParamHeaderBadBase64);

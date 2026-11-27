@@ -763,6 +763,10 @@ begin
     MCPLogMessage(ACtx, 'error', 'from the check');
   if PushFault = 'slow' then
     Inc(FakeNow, 5000);
+  // The cancellation arrives while the check runs, which then waits for
+  // IsCancelled.
+  if PushFault = 'wait' then
+    ProbeCancelled := True;
   if PushFault = 'wait' then
     for I := 1 to 1000 do
       if ACtx.IsCancelled then
@@ -781,8 +785,17 @@ begin
   PushRaise(ACtx);
   Result := MCPEventPoll(IntToStr(UpstreamHead), TJSONArray.Create);
   Result.NextPollMs := 1000;
+  if PushFault = 'interval5' then
+    Result.NextPollMs := 5000;
   if AQuery.FromNow then
     Exit;
+  // More waiting, none delivered yet: the backlog keeps draining.
+  if PushFault = 'stall' then
+  begin
+    Result.HasMore := True;
+    Result.Cursor := AQuery.Cursor;
+    Exit;
+  end;
   if PushFault = 'gap' then
   begin
     PushFault := '';
@@ -845,6 +858,19 @@ begin
   end;
 end;
 
+function QuietCheck(const AQuery: TMCPEventQuery;
+  const ACtx: TMCPRequestContext): TMCPEventPoll;
+begin
+  Result := MCPEventPoll('0');
+end;
+
+// A sink as slow as three seconds of the test clock.
+procedure SlowSink(const ALine: string; AUserData: Pointer);
+begin
+  Captured := Captured + ALine + #10;
+  Inc(FakeNow, 3000);
+end;
+
 type
   TPushSuite = class(TTestSuite)
   private
@@ -880,6 +906,9 @@ type
     procedure TestNoReplayCursorAndHasMore;
     procedure TestScheduleFromCheckCompletion;
     procedure TestTerminatedDataIsAnObject;
+    procedure TestCutoffAnchoredWhileDraining;
+    procedure TestNoIntervalIsTheDefault;
+    procedure TestIntervalNotDelayedByWrites;
   end;
 
 procedure TPushSuite.BeforeEach;
@@ -898,6 +927,8 @@ begin
     ObjectSchema.AddInteger('n').Build, PushCheck);
   RegisterEvent(FServer, 'pulse', 'No replay', ObjectSchema,
     ObjectSchema.AddInteger('n'), NoReplayPushCheck);
+  RegisterEvent(FServer, 'quiet', 'No interval', ObjectSchema, ObjectSchema,
+    QuietCheck, 0);
   FSession := FServer.CreateSession;
   FHost := TMCPStreamHost.Create;
   FSession.StreamHost := FHost;
@@ -1140,10 +1171,12 @@ begin
   Expect<Boolean>(Pos('"eventId" : "e6"', Captured) >
     Pos('notifications/events/active', Captured)).ToBe(True);
   Expect<Boolean>(Pos('"cursor" : "6", ' + SUB, Captured) > 0).ToBe(True);
+  // Without a GapCursor the cursor is the fresh one, after the event:
+  // the event is part of the gap truncated signals.
   PushFault := 'gapevent0';
   UpstreamHead := 8;
   Step(2000);
-  Expect<Boolean>(Pos('"cursor" : "6", "truncated" : true', Captured) > 0)
+  Expect<Boolean>(Pos('"cursor" : "8", "truncated" : true', Captured) > 0)
     .ToBe(True);
   // Reconnecting from the gap's position delivers the occurrence.
   FreeAndNil(FStream);
@@ -1187,23 +1220,13 @@ begin
     Open('"name":"tick","cursor":"3",');
     FStream.CancelProbe := Probe.Cancelled;
     Step(0);
+    // The probe turns true only once the check is running.
     PushFault := 'wait';
-    ProbeCancelled := True;
-    FakeNow := 1000;
-    Captured := '';
-    FStream.Step(CaptureSink, nil);
-    Expect<Boolean>(FStream.Finished).ToBe(True);
+    UpstreamHead := 4;
+    Step(1000);
+    Expect<Boolean>(SawCancel).ToBe(True);
     Expect<string>(Captured).ToBe('');
-    ProbeCancelled := False;
-    PushFault := '';
-    Open('"name":"tick","cursor":"3",', '9');
-    FStream.CancelProbe := Probe.Cancelled;
-    Step(0);
-    PushFault := 'wait';
-    FakeNow := 1000;
-    ProbeCancelled := True;
-    FStream.Step(CaptureSink, nil);
-    Expect<Boolean>(SawCancel or FStream.Finished).ToBe(True);
+    Expect<Boolean>(FStream.Finished).ToBe(True);
   finally
     FStream.CancelProbe := nil;
     Probe.Free;
@@ -1270,6 +1293,40 @@ begin
     '"Forbidden" }', Captured) > 0).ToBe(True);
 end;
 
+// The replay cutoff holds where replay began: a page drained later
+// gets an age grown by the time since (#126 review).
+procedure TPushSuite.TestCutoffAnchoredWhileDraining;
+begin
+  PushFault := 'stall';
+  Open('"name":"tick","cursor":"0","maxAgeMs":60000,');
+  Step(0);
+  Step(500);
+  Expect<Boolean>(Pos('60500,', AgeLog) > 0).ToBe(True);
+  Expect<Integer>(Pos('-1,', AgeLog)).ToBe(0);
+end;
+
+// A registration and a check with no interval do not make a quiet
+// stream ask again at once (#126 review).
+procedure TPushSuite.TestNoIntervalIsTheDefault;
+begin
+  Open('"name":"quiet",');
+  Expect<Int64>(Step(0)).ToBe(30000);
+end;
+
+// Writes that take time do not delay the next check: it is timed from
+// the check's return (#126 review).
+procedure TPushSuite.TestIntervalNotDelayedByWrites;
+begin
+  Open('"name":"tick","cursor":"3",');
+  Step(0);
+  UpstreamHead := 4;
+  PushFault := 'interval5';
+  FakeNow := 1000;
+  Captured := '';
+  Expect<Int64>(FStream.Step(SlowSink, nil)).ToBe(6000);
+  Expect<Boolean>(Pos('"eventId" : "e4"', Captured) > 0).ToBe(True);
+end;
+
 procedure TPushSuite.SetupTests;
 begin
   Test('a stream opens with active, then the backlog one cursor each',
@@ -1302,6 +1359,10 @@ begin
   Test('the next check is timed from the check''s return',
     TestScheduleFromCheckCompletion);
   Test('terminated carries object data only', TestTerminatedDataIsAnObject);
+  Test('the replay cutoff holds while the backlog drains',
+    TestCutoffAnchoredWhileDraining);
+  Test('no interval is the default one', TestNoIntervalIsTheDefault);
+  Test('writes do not delay the next check', TestIntervalNotDelayedByWrites);
 end;
 
 begin

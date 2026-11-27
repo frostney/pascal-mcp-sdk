@@ -587,8 +587,8 @@ returns, such as `events/stream` (#126):
 ```pascal
 type TMCPStream = class
   constructor Create(ARequestId: TJSONData);   // copied
-  function Step(ANowMs: Int64; ASink: TMCPLineSink;
-    ASinkData: Pointer): Int64; virtual; abstract;
+  function Step(ASink: TMCPLineSink;
+    ASinkData: Pointer): Int64; virtual; abstract;   // due, on its clock
   procedure Cancel; virtual;
   procedure Close(ASink: TMCPLineSink; ASinkData: Pointer); virtual; abstract;
   property Id: TJSONData;
@@ -600,6 +600,8 @@ type TMCPStreamHost = class
   function TakeParked: TMCPStream;       // the caller's, or nil
 end;
 
+function MCPTakeStream(AHost: TMCPStreamHost; AProduced: Boolean;
+  const AResponse: string): TMCPStream;   // the stream to drive, or nil
 property TMCPSession.StreamHost: TObject;   // borrowed; nil for none
 function MCPNowMs: Int64;                   // monotonic milliseconds
 property TMCPStream.Clock: TMCPClock;       // MCPNowMs unless a test sets one
@@ -610,15 +612,21 @@ function TMCPStream.Cancelled: Boolean;
 A transport that can drive streams sets `StreamHost` on its session.
 The core hands it to each 2026-07-28 handler as `ACtx.StreamHost`. A
 handler parks at most one stream and returns a placeholder result, which
-the transport drops; when the core answers nothing, because the request
-was cancelled, the transport cancels and frees the stream instead. The
+the transport drops. After `HandleMessage`, the transport asks
+`MCPTakeStream` for the stream to drive: only a request answered with a
+result hands one over. When the core answered an error, such as a
+handler that parked and then raised, or nothing, because the request was
+cancelled, the stream is cancelled and freed, and the transport sends
+the response as usual. The
 transport then calls `Step` until `Finished`, again by the time `Step`
 returns on the stream's clock. It sets `CancelProbe` to its live check
 for a client that went away, which `Cancelled` asks, between the
 stream's own steps and from the checks the stream runs. It calls
 `Cancel` when the client goes away. Streamable HTTP calls `Close`, for
-the final frame, when the transport stops; the stdio loop cancels every
-stream at the end of input. A sink that raises ends the stream.
+the final frame, when the transport stops, after a check that was
+running returns; the stdio loop ends every stream at the end of input,
+once the lines before it are served, and a check that was running sees
+`IsCancelled`. A sink that raises ends the stream.
 Streamable HTTP steps a stream in the request's thread; the stdio loop
 steps its streams between lines on its one thread.
 

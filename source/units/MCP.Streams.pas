@@ -89,10 +89,21 @@ type
 // A monotonic clock in milliseconds, the one streams run on.
 function MCPNowMs: Int64;
 
+// The stream a request parked with AHost, for the transport to drive,
+// or nil. One rule for every transport (#126 review): only a request
+// whose response AResponse (AProduced) is a result hands its stream
+// over; one the core answered with an error, such as a handler that
+// parked and then raised, or answered nothing for, being cancelled,
+// has its stream cancelled and freed, and the transport sends the
+// response as usual.
+function MCPTakeStream(AHost: TMCPStreamHost; AProduced: Boolean;
+  const AResponse: string): TMCPStream;
+
 implementation
 
 uses
-  MCP.Errors;
+  MCP.Errors,
+  MCP.JSONRPC;
 
 function MCPNowMs: Int64;
 begin
@@ -157,6 +168,41 @@ function TMCPStreamHost.TakeParked: TMCPStream;
 begin
   Result := FParked;
   FParked := nil;
+end;
+
+function MCPTakeStream(AHost: TMCPStreamHost; AProduced: Boolean;
+  const AResponse: string): TMCPStream;
+var
+  Response: TJSONData;
+  IsResult: Boolean;
+begin
+  Result := nil;
+  if AHost = nil then
+    Exit;
+  Result := AHost.TakeParked;
+  if Result = nil then
+    Exit;
+  IsResult := False;
+  if AProduced then
+  begin
+    Response := nil;
+    try
+      Response := MCPParseJSON(AResponse);
+      IsResult := (Response is TJSONObject) and
+        (TJSONObject(Response).Find('result') <> nil);
+    except
+      // A response the core built is JSON; an unreadable one is no
+      // result.
+      on Exception do
+        IsResult := False;
+    end;
+    Response.Free;
+  end;
+  if not IsResult then
+  begin
+    Result.Cancel;
+    FreeAndNil(Result);
+  end;
 end;
 
 end.

@@ -81,6 +81,8 @@ type
     procedure TestStreamCancelledBetweenSteps;
     procedure TestStreamCancelledDuringFirstCheck;
     procedure TestParkedStreamOfCancelledRequestDropped;
+    procedure TestEndOfInputReachesAWaitingCheck;
+    procedure TestParkThenRaiseKeepsTheError;
     procedure TestLastLineWithoutNewline;
   end;
 
@@ -107,6 +109,11 @@ var
   // again after BeatPollMs; on call BeatCloseAt it adds one occurrence
   // and closes PipeWriter, ending the input.
   BeatHead, BeatPollMs, BeatCalls, BeatCloseAt: Integer;
+  // On call BeatGrowAt the check adds one occurrence; with "wait" it
+  // waits for IsCancelled from its second call on, and BeatSawCancel
+  // records that it saw it.
+  BeatGrowAt: Integer;
+  BeatSawCancel: Boolean;
   // 1 while PipeWriter is open, for ClosePipeOnce.
   PipeOpen: LongInt;
 
@@ -171,6 +178,18 @@ begin
     Inc(BeatHead);
     ClosePipeOnce;
   end;
+  if BeatCalls = BeatGrowAt then
+    Inc(BeatHead);
+  if AQuery.Arguments.Get('wait', False) and (BeatCalls >= 2) then
+    for I := 1 to 300 do
+    begin
+      if ACtx.IsCancelled then
+      begin
+        BeatSawCancel := True;
+        Break;
+      end;
+      Sleep(10);
+    end;
   // A check that polls IsCancelled, as a cooperative one does (#126
   // review).
   if AQuery.Arguments.Get('poll', False) then
@@ -204,9 +223,12 @@ type
     procedure Close(ASink: TMCPLineSink; ASinkData: Pointer); override;
   end;
 
-  // test/park: parks a dummy stream, then sees a cancellation waiting.
+  // test/park: parks a dummy stream, then sees a cancellation waiting;
+  // test/parkfail parks one and then raises.
   TParkMethod = class
     function Park(AParams: TJSONObject; const ACtx: TMCPRequestContext;
+      ALegacy: Boolean): TJSONObject;
+    function ParkFail(AParams: TJSONObject; const ACtx: TMCPRequestContext;
       ALegacy: Boolean): TJSONObject;
   end;
 
@@ -228,6 +250,14 @@ begin
   TMCPStreamHost(ACtx.StreamHost).Park(TDummyStream.Create(ACtx.RequestId));
   ACtx.IsCancelled;
   Result := TJSONObject.Create;
+end;
+
+function TParkMethod.ParkFail(AParams: TJSONObject;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+begin
+  TMCPStreamHost(ACtx.StreamHost).Park(TDummyStream.Create(ACtx.RequestId));
+  raise EMCPProtocolError.Create(-32602, 'Invalid params: refused after ' +
+    'parking');
 end;
 
 var
@@ -317,10 +347,13 @@ begin
   RegisterEvent(FServer, 'beat', 'Beats', ObjectSchema, ObjectSchema
     .AddInteger('n'), BeatCheck);
   FServer.RegisterMethod('test/park', ParkMethod.Park);
+  FServer.RegisterMethod('test/parkfail', ParkMethod.ParkFail);
   BeatHead := 2;
   BeatPollMs := 60000;
   BeatCalls := 0;
   BeatCloseAt := 0;
+  BeatGrowAt := 0;
+  BeatSawCancel := False;
   CallLog := '';
   WaiterOutcome := '';
   WaiterOutcomes := '';
@@ -875,7 +908,7 @@ var
 begin
   BeatHead := 0;
   BeatPollMs := 100;
-  BeatCloseAt := 2;
+  BeatGrowAt := 2;
   Request := StreamLine('9', '"cursor":"0",') + #10;
   Script := nil;
   Bytes := TStringStream.Create('');
@@ -895,9 +928,10 @@ begin
   Rewrite(OutFile);
   Started := GetTickCount64;
   try
-    // A bound: if the idle loop never steps the stream, the input still
-    // ends, and the missing occurrence fails the test (#126 review).
-    Script := TPipeScript.Create(3000, '', True);
+    // The input ends after the second check had time to run; if the
+    // idle loop never stepped the stream, the missing occurrence fails
+    // the test rather than hanging it (#126 review).
+    Script := TPipeScript.Create(400, '', True);
     RunMCPStdioLoop(InFile, OutFile, FServer);
   finally
     Close(InFile);
@@ -915,7 +949,8 @@ begin
   finally
     Bytes.Free;
   end;
-  Expect<Integer>(BeatCalls).ToBe(2);
+  // The handler's check, then at least one while stdin was idle.
+  Expect<Boolean>(BeatCalls >= 2).ToBe(True);
   Expect<Boolean>(GetTickCount64 - Started >= 90).ToBe(True);
   Expect<Integer>(Pos('{ "jsonrpc" : "2.0", "method" : ' +
     '"notifications/events/active"', Output)).ToBe(1);
@@ -985,6 +1020,70 @@ begin
   Expect<string>(RunLoop('{"jsonrpc":"2.0","id":7,"method":"test/park",' +
     '"params":{' + META_MODERN + '}}' + #10 + '{"jsonrpc":"2.0","method":' +
     '"notifications/cancelled","params":{"requestId":7}}' + #10)).ToBe('');
+end;
+
+// The end of input reaches a check that waits: it sees IsCancelled,
+// returns, and nothing more is written for its stream (#126 review).
+procedure TStdioLoop.TestEndOfInputReachesAWaitingCheck;
+var
+  InFile, OutFile: Text;
+  PipeReader: THandle;
+  Request, Output: string;
+  Bytes: TStringStream;
+  Closer: TPipeScript;
+begin
+  BeatPollMs := 50;
+  BeatGrowAt := 2;
+  Request := StreamLine('8', '"cursor":"2","arguments":{"wait":true},') +
+    #10;
+  Bytes := TStringStream.Create('');
+  try
+    Bytes.SaveToFile(FDir + 'in.txt');
+  finally
+    Bytes.Free;
+  end;
+  OpenPipe(PipeReader, PipeWriter);
+  PipeOpen := 1;
+  FileWrite(PipeWriter, Request[1], Length(Request));
+  Assign(InFile, FDir + 'in.txt');
+  Reset(InFile);
+  FileClose(TextRec(InFile).Handle);
+  TextRec(InFile).Handle := PipeReader;
+  Assign(OutFile, FDir + 'out.txt');
+  Rewrite(OutFile);
+  Closer := TPipeScript.Create(200, '', True);
+  try
+    RunMCPStdioLoop(InFile, OutFile, FServer);
+  finally
+    Close(InFile);
+    Close(OutFile);
+    Closer.WaitFor;
+    Closer.Free;
+  end;
+  Bytes := TStringStream.Create('');
+  try
+    Bytes.LoadFromFile(FDir + 'out.txt');
+    Output := Bytes.DataString;
+  finally
+    Bytes.Free;
+  end;
+  Expect<Boolean>(BeatSawCancel).ToBe(True);
+  Expect<Boolean>(Pos('notifications/events/active', Output) > 0).ToBe(True);
+  // The occurrence the waiting check found is not sent after the end.
+  Expect<Integer>(Pos('"eventId" : "e3"', Output)).ToBe(0);
+end;
+
+// A handler that parks a stream and then fails keeps its error
+// response, and the stream is not driven (#126 review).
+procedure TStdioLoop.TestParkThenRaiseKeepsTheError;
+var
+  Output: string;
+begin
+  Output := RunLoop('{"jsonrpc":"2.0","id":7,"method":"test/parkfail",' +
+    '"params":{' + META_MODERN + '}}' + #10);
+  Expect<Boolean>(Pos('"id" : 7, "error" : { "code" : -32602', Output) > 0)
+    .ToBe(True);
+  Expect<Integer>(Pos('dummy', Output)).ToBe(0);
 end;
 
 // A Text with its own I/O driver cannot be waited on, so the loop
@@ -1088,6 +1187,10 @@ begin
     TestStreamCancelledDuringFirstCheck);
   Test('a stream parked by a cancelled request is dropped',
     TestParkedStreamOfCancelledRequestDropped);
+  Test('the end of input reaches a check that waits',
+    TestEndOfInputReachesAWaitingCheck);
+  Test('a handler that parks and fails keeps its error',
+    TestParkThenRaiseKeepsTheError);
 end;
 
 begin

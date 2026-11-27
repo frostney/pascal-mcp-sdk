@@ -41,6 +41,8 @@ begin
   Result := MCPEventPoll(Page.NextPosition, TJSONArray.Create);
   Result.HasMore := Page.HasMore;      // more mail after this page
   Result.Truncated := Page.Skipped;    // the cursor was too old
+  if Page.Skipped then                 // where reading resumed, before
+    Result.GapCursor := Page.Start;    // this page's mail
   for Mail in Page.Items do
     Result.Events.Add(MCPEventOccurrence(Mail.Id, Mail.ReceivedAt,
       TJSONObject.Create(['from', Mail.From, 'subject', Mail.Subject])));
@@ -82,6 +84,9 @@ It returns a `TMCPEventPoll`, built with `MCPEventPoll(Cursor, Events)`:
   null.
 - `NextPollMs`: when the client should poll next. Zero takes the
   registration's interval, 30 seconds by default.
+- `GapCursor`: with `Truncated` and events, the position reading
+  resumed from, before them. Polls ignore it; a push stream sends it
+  after a gap (see Push delivery).
 
 Occurrences that break these rules, such as data that does not match
 the payload schema, are the server's mistake: the poll answers
@@ -116,7 +121,8 @@ ASCII must be base64-encoded.
 The server polls the check on the stream's behalf, asking for one
 occurrence at a time (`MaxEvents` 1), so each event carries the exact
 cursor after it. `HasMore` reads on at once, and otherwise the next
-call waits `NextPollMs`, or the registration's interval. The check
+call waits `NextPollMs`, or the registration's interval, or 30 seconds
+when both are zero. The check
 needs nothing new; a type without replay keeps its position for the
 stream's lifetime and sends `cursor: null`.
 
@@ -128,9 +134,10 @@ name and bad arguments. Then the stream sends, each message tagged with
 - `notifications/events/active` first, with the client's cursor (or a
   fresh one), `truncated` and the granted `heartbeatMs`, and again with
   `truncated: true` after a gap. When an occurrence follows the gap,
-  the cursor is the position before it: the check's `GapCursor`, or the
-  cursor the stream had, so a client that reconnects from it is sent the
-  occurrence again rather than past it.
+  the cursor is the check's `GapCursor`, the position before it, so a
+  client that reconnects from it is sent the occurrence again. Without
+  one it is the position after the occurrence, which is then part of
+  the gap the flag signals.
 - `notifications/events/event` for each occurrence, with its cursor.
 - `notifications/events/heartbeat` whenever `heartbeatMs` passes
   without another message, with the position checked up to. The grant

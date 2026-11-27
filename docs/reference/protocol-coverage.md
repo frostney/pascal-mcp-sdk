@@ -66,9 +66,13 @@ outside Pascal, and by `mcpsmoke`, which reads `mcpdemo`'s skill back
 over stdio and checks its digest and size, and does the same for a
 skill `mcpdemo --skills-dir` loads from disk. The `MCP.Frontmatter`
 suite's expectations are what PyYAML (YAML 1.1) and the `yaml` package
-(YAML 1.2) read from the same text. Events is covered by the `MCP.Events` unit suite, the HTTP binding
-suite for its routing headers, and `mcpsmoke`, which polls `mcpdemo`'s
-minute clock over stdio. MCP Apps and extension negotiation are covered
+(YAML 1.2) read from the same text. Events is covered by the `MCP.Events` unit suite, poll and push
+(each notification's exact line, gaps, cancellation in a running check,
+the replay floor and the schedule on a test clock), the HTTP binding
+suite for the routing headers, the SSE stream, a client close and
+`Stop`, the stdio loop suite for streams beside requests, cancellation,
+the end of input and an idle stdin, and `mcpsmoke`, which polls
+`mcpdemo`'s minute clock over stdio and streams it over real pipes. MCP Apps and extension negotiation are covered
 by the
 `MCP.Apps` unit suite and the `mcpsmoke` checks of `mcpdemo`'s card
 over stdio: the wire data and the served HTML. No host renders the card

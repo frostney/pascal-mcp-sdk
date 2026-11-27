@@ -192,6 +192,7 @@ type
     // The client's maxAgeMs, passed on while the first backlog drains.
     FMaxAgeMs: Int64;
     FCatchingUp: Boolean;
+    FReplayStart: Int64;
     FProtocolVersion, FClientName, FClientVersion, FLogLevel: string;
     FCapabilities, FMeta: TJSONObject; // owned copies of the request's
     function IsCancelled: Boolean;
@@ -202,7 +203,8 @@ type
     procedure Terminate(ACode: Integer; const AMessage: string;
       AData: TJSONData; ASink: TMCPLineSink; ASinkData: Pointer);
     procedure SendPage(APage: TJSONObject; const AAfter, AGap: string;
-      ANoReplay, AFirst: Boolean; ASink: TMCPLineSink; ASinkData: Pointer);
+      ANoReplay, AFirst: Boolean; ACompleted: Int64; ASink: TMCPLineSink;
+      ASinkData: Pointer);
     procedure CheckAgain(ASink: TMCPLineSink; ASinkData: Pointer);
     procedure LogStreamFailure(E: Exception);
   public
@@ -698,6 +700,8 @@ begin
   FPendingGap := AGap;
   FPendingNoReplay := ANoReplay;
   FInterval := ACatalog.FTypes[AType].NextPollMs;
+  if FInterval <= 0 then
+    FInterval := MCP_EVENT_DEFAULT_POLL_MS;
   // The replay floor holds while the backlog drains (#126 review).
   FMaxAgeMs := AQuery.MaxAgeMs;
   FCatchingUp := True;
@@ -830,14 +834,15 @@ begin
     Close(ASink, ASinkData);
 end;
 
-// One page from the check (at most one occurrence). The first page and
-// a gap send active: the client's own cursor before a first event, the
-// gap's resume position (GapCursor, else the cursor the stream had)
+// One page from the check (at most one occurrence), which returned at
+// ACompleted. The first page and a gap send active: the client's own
+// cursor before a first event, the gap's resume position (GapCursor)
 // before an event after a gap, the fresh cursor otherwise, and null for
 // a type without replay. The occurrence goes out with the cursor after
 // it, and hasMore reads on at once.
 procedure TEventStream.SendPage(APage: TJSONObject; const AAfter, AGap: string;
-  ANoReplay, AFirst: Boolean; ASink: TMCPLineSink; ASinkData: Pointer);
+  ANoReplay, AFirst: Boolean; ACompleted: Int64; ASink: TMCPLineSink;
+  ASinkData: Pointer);
 var
   Events: TJSONArray;
   Truncated, HasEvents: Boolean;
@@ -853,10 +858,13 @@ begin
       Position := TJSONNull.Create
     else if HasEvents and Truncated and (AGap <> '') then
       Position := TJSONString.Create(AGap)
-    else if HasEvents then
-      // Resuming here delivers the event again, never skips it.
+    else if HasEvents and not Truncated then
+      // The client's own cursor: resuming there delivers the event.
       Position := WireCursor
     else
+      // Fresh, as a gap requires (events.mdx, Cursor Lifecycle); with
+      // no GapCursor, an event right after it is part of the gap that
+      // truncated signals (#126 review).
       Position := TJSONString.Create(AAfter);
     Active := TJSONObject.Create(['cursor', Position, 'truncated',
       Truncated and not ANoReplay, 'heartbeatMs', FHeartbeatMs]);
@@ -872,12 +880,16 @@ begin
     Send('notifications/events/event', Active, ASink, ASinkData);
   end;
   FInterval := APage.Get('nextPollMs', FInterval);
+  // A quiet stream never asks again at once: no interval is the
+  // default one (#126 review).
+  if FInterval <= 0 then
+    FInterval := MCP_EVENT_DEFAULT_POLL_MS;
   FCatchingUp := FCatchingUp and APage.Get('hasMore', False);
-  // From when the check returned (#126 review).
+  // From when the check returned, not after the writes (#126 review).
   if APage.Get('hasMore', False) then
-    FNextCheck := Now
+    FNextCheck := ACompleted
   else
-    FNextCheck := Now + FInterval;
+    FNextCheck := ACompleted + FInterval;
 end;
 
 // The check again, from the stream's own cursor: a protocol error it
@@ -890,17 +902,21 @@ var
   Page: TJSONObject;
   After, Gap: string;
   NoReplay: Boolean;
+  Completed: Int64;
 begin
   Query := Default(TMCPEventQuery);
   Query.Arguments := FArguments;
   Query.Cursor := FCursor;
-  if FCatchingUp then
-    Query.MaxAgeMs := FMaxAgeMs
+  // The cutoff stays where replay began: the age grows by the time since
+  // (#126 review).
+  if FCatchingUp and (FMaxAgeMs >= 0) then
+    Query.MaxAgeMs := FMaxAgeMs + (Now - FReplayStart)
   else
     Query.MaxAgeMs := -1;
   Query.MaxEvents := 1;
   try
     Page := FCatalog.CheckPage(FType, Query, Context, After, Gap, NoReplay);
+    Completed := Now;
   except
     on E: EMCPProtocolError do
     begin
@@ -928,7 +944,7 @@ begin
     end;
   end;
   try
-    SendPage(Page, After, Gap, NoReplay, False, ASink, ASinkData);
+    SendPage(Page, After, Gap, NoReplay, False, Completed, ASink, ASinkData);
   finally
     Page.Free;
   end;
@@ -960,9 +976,11 @@ begin
   begin
     Page := FPending;
     FPending := nil;
+    // The replay began with the handler's check, just before this.
+    FReplayStart := Now;
     try
       SendPage(Page, FPendingCursor, FPendingGap, FPendingNoReplay, True,
-        ASink, ASinkData);
+        FReplayStart, ASink, ASinkData);
     finally
       Page.Free;
     end;

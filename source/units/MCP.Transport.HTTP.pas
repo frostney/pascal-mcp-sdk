@@ -1152,14 +1152,23 @@ type
   // (#126 review).
   THTTPStreamProbe = class
   private
-    FSession: TMCPSession; // borrowed
-    FPoll: Pointer;        // borrowed: the request's THTTPDisconnectPoll
+    FServer: TMCPHTTPServer; // borrowed
+    FSession: TMCPSession;   // borrowed
+    FPoll: Pointer;          // borrowed: the request's THTTPDisconnectPoll
+    FStopSeen: Boolean;
   public
     function Cancelled: Boolean;
   end;
 
+// The client went away, or Stop was called: a check that waits stops
+// either way, and on Stop the final frame follows (#126 review).
 function THTTPStreamProbe.Cancelled: Boolean;
 begin
+  if FServer.FStopPending then
+  begin
+    FStopSeen := True;
+    Exit(True);
+  end;
   Result := HTTPDisconnectPoll(FSession, FPoll);
 end;
 
@@ -1178,6 +1187,7 @@ var
 begin
   Probe := THTTPStreamProbe.Create;
   try
+    Probe.FServer := Self;
     Probe.FSession := ASession;
     Probe.FPoll := APoll;
     AStream.CancelProbe := Probe.Cancelled;
@@ -1206,6 +1216,10 @@ begin
           end;
         end;
       until AStream.Finished;
+      // Stop seen from inside a check: the final frame, once it has
+      // returned, to a client still connected.
+      if Probe.FStopSeen and not PHTTPDisconnectPoll(APoll)^.Closed then
+        AStream.Close(@SSESink, ASSE);
     except
       // A write to a client that went away: the end of the stream.
       on EStreamError do
@@ -1272,15 +1286,8 @@ begin
       Produced := FServer.HandleMessage(Session, ABody, nil, nil,
         ResponseLine);
     // A push stream's handler answers with a placeholder: the stream
-    // writes its own frames from here on, unless the request was
-    // cancelled and the core answers nothing (#126 review).
-    Parked := Host.TakeParked;
-    if (Parked <> nil) and not Produced then
-    begin
-      Parked.Cancel;
-      Parked.Free;
-      Parked := nil;
-    end;
+    // writes its own frames from here on (MCPTakeStream's rule).
+    Parked := MCPTakeStream(Host, Produced, ResponseLine);
     if Parked <> nil then
     begin
       DriveStream(Parked, Session, @Stream, @Poll);

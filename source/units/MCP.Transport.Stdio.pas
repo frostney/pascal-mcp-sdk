@@ -140,6 +140,11 @@ type
     FQueue: array of TQueuedLine;
     FHead: Integer;
     FClassified: Integer; // entries before this index are classified
+    // The line NextLine returned last, and its cancellation target
+    // (owned; nil for none), classified once (LastCancelTarget).
+    FLastLine: string;
+    FLastOverflow, FLastClassified: Boolean;
+    FLastCancel: TJSONData;
     FCancelCount: Integer;
     FQueuedBytes: Int64;
     FPartial: string;
@@ -177,6 +182,13 @@ type
     // stream's request id, borrowed) out of the input: True when one
     // was there (#126 review).
     function TakeCancellationOf(AId: TJSONData): Boolean;
+    // The requestId of the line NextLine returned last when it is a
+    // notifications/cancelled the core accepts (borrowed until the next
+    // NextLine), else nil.
+    function LastCancelTarget: TJSONData;
+    // The raw input has ended (EOF or a failed read) and every line
+    // before the end has been taken.
+    function InputEnded: Boolean;
     // Removes and returns the first queued notifications/cancelled line
     // the core would accept for the request ASession is running.
     function TakeActiveCancellation(ASession: TMCPSession;
@@ -249,6 +261,7 @@ var
 begin
   for I := FHead to High(FQueue) do
     FQueue[I].CancelId.Free;
+  FLastCancel.Free;
   inherited Destroy;
 end;
 
@@ -538,9 +551,15 @@ begin
   // Released as it is taken: a long queue keeps no served lines.
   FQueue[FHead].Line := '';
   Dec(FQueuedBytes, Length(ALine) + QUEUE_ENTRY_COST);
+  // Its classification, if it has one, is kept for LastCancelTarget.
+  FreeAndNil(FLastCancel);
+  FLastLine := ALine;
+  FLastOverflow := AOverflow;
+  FLastClassified := FHead < FClassified;
   if FQueue[FHead].CancelId <> nil then
   begin
-    FreeAndNil(FQueue[FHead].CancelId);
+    FLastCancel := FQueue[FHead].CancelId;
+    FQueue[FHead].CancelId := nil;
     Dec(FCancelCount);
   end;
   Inc(FHead);
@@ -579,13 +598,20 @@ end;
 // (MCPCancellationTarget, the core's rule, method compared decoded, so
 // an escaped spelling counts). The cheap text check only skips lines
 // with neither the plain name nor any escape.
+// The one prefilter: only a line that names notifications/cancelled,
+// or escapes something, is parsed for a cancellation target.
+function MayBeCancellation(const ALine: string): Boolean;
+begin
+  Result := (Pos('notifications/cancelled', ALine) > 0) or
+    (Pos('\', ALine) > 0);
+end;
+
 procedure TStdioReader.ClassifyQueued;
 begin
   while FClassified < Length(FQueue) do
   begin
     with FQueue[FClassified] do
-      if not Overflow and ((Pos('notifications/cancelled', Line) > 0) or
-        (Pos('\', Line) > 0)) then
+      if not Overflow and MayBeCancellation(Line) then
       begin
         CancelId := MCPCancellationTarget(Line);
         if CancelId <> nil then
@@ -593,6 +619,25 @@ begin
       end;
     Inc(FClassified);
   end;
+end;
+
+function TStdioReader.LastCancelTarget: TJSONData;
+begin
+  // Classified once: by the cancellation poll while a handler ran, or
+  // here (#126 review).
+  if not FLastClassified then
+  begin
+    FLastClassified := True;
+    if not FLastOverflow and MayBeCancellation(FLastLine) then
+      FLastCancel := MCPCancellationTarget(FLastLine);
+  end;
+  Result := FLastCancel;
+end;
+
+function TStdioReader.InputEnded: Boolean;
+begin
+  // Lines still queued are served first, streams included.
+  Result := FEOF and (FHead >= Length(FQueue));
 end;
 
 procedure TStdioReader.RemoveAt(AIndex: Integer);
@@ -722,8 +767,10 @@ type
     // Milliseconds until the next stream is due (0 when one is).
     function NextWait: Int64;
     // A notifications/cancelled for an open stream ends it, and nothing
-    // more is sent (events.mdx, Lifecycle); True when ALine was one.
-    function Cancels(const ALine: string): Boolean;
+    // more is sent (events.mdx, Lifecycle); ATarget is the line's
+    // requestId (Reader.LastCancelTarget, borrowed; nil for none). True
+    // when the line was one.
+    function Cancels(ATarget: TJSONData): Boolean;
   end;
 
 constructor TStdioStreamProbe.Create(AReader: TStdioReader; AId: TJSONData);
@@ -733,9 +780,11 @@ begin
   FId := AId;
 end;
 
+// A cancellation for the stream, or the end of input, which ends every
+// stream (#126 review).
 function TStdioStreamProbe.Cancelled: Boolean;
 begin
-  Result := FReader.TakeCancellationOf(FId);
+  Result := FReader.TakeCancellationOf(FId) or FReader.InputEnded;
 end;
 
 constructor TStdioStreams.Create(AReader: TStdioReader);
@@ -810,7 +859,9 @@ begin
           raise;
         on E: Exception do
         begin
-          MCPLogToStderr('events stream ended: ' + E.ClassName + ': ' +
+          // Best effort: a closed stderr cannot end the loop (#126
+          // review).
+          MCPLogDiagnostic('events stream ended: ' + E.ClassName + ': ' +
             E.Message);
           FStreams[I].Cancel;
         end;
@@ -839,31 +890,20 @@ begin
     Result := 0;
 end;
 
-function TStdioStreams.Cancels(const ALine: string): Boolean;
+function TStdioStreams.Cancels(ATarget: TJSONData): Boolean;
 var
-  Target: TJSONData;
   I: Integer;
 begin
   Result := False;
-  // The reader's own filter: only a line that may be a cancellation is
-  // parsed twice (#126 review).
-  if (Length(FStreams) = 0) or ((Pos('notifications/cancelled', ALine) = 0)
-    and (Pos('\', ALine) = 0)) then
+  if ATarget = nil then
     Exit;
-  Target := MCPCancellationTarget(ALine);
-  if Target = nil then
-    Exit;
-  try
-    for I := 0 to High(FStreams) do
-      if SameRequestId(FStreams[I].Id, Target) then
-      begin
-        FStreams[I].Cancel;
-        Drop(I);
-        Exit(True);
-      end;
-  finally
-    Target.Free;
-  end;
+  for I := 0 to High(FStreams) do
+    if SameRequestId(FStreams[I].Id, ATarget) then
+    begin
+      FStreams[I].Cancel;
+      Drop(I);
+      Exit(True);
+    end;
 end;
 
 procedure RunMCPStdioLoop(var AInput, AOutput: Text; AServer: TMCPServer;
@@ -926,23 +966,17 @@ begin
         // non-Windows reads; it is insignificant whitespace either way.
         while (Line <> '') and (Line[Length(Line)] in [#13, #10]) do
           SetLength(Line, Length(Line) - 1);
-        if (Line = '') or Streams.Cancels(Line) then
+        if Line = '' then
+          Continue;
+        if (Streams.Count > 0) and Streams.Cancels(Reader.LastCancelTarget) then
           Continue;
         Produced := AServer.HandleMessage(Session, Line,
           StdioNotificationSink, @AOutput, Response);
-        Parked := nil;
-        if Host <> nil then
-          Parked := Host.TakeParked;
         // A stream's handler answers with a placeholder: the stream
-        // writes its own frames from here on, unless the request was
-        // cancelled and the core answers nothing (#126 review).
-        if (Parked <> nil) and Produced then
+        // writes its own frames from here on (MCPTakeStream's rule).
+        Parked := MCPTakeStream(Host, Produced, Response);
+        if Parked <> nil then
           Streams.Add(Parked, AOutput)
-        else if Parked <> nil then
-        begin
-          Parked.Cancel;
-          Parked.Free;
-        end
         else if Produced then
         begin
           Write(AOutput, Response, #10);
