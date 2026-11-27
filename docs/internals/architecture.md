@@ -91,7 +91,7 @@ sequenceDiagram
     Core->>Handler: dispatch (era-blind TMCPRequestContext)
     Handler--)Transport: MCPReportProgress / MCPLogMessage → sink
     Note over Transport: stdio writes notification lines…<br/>…HTTP emits SSE events on the POST response
-    Handler->>Core: result (exception → isError result; EMCPProtocolError → JSON-RPC error)
+    Handler->>Core: result (exception → isError result, EMCPProtocolError → JSON-RPC error)
     Core->>Transport: at most one response line
     Transport->>Client: notifications first, then the response
 ```

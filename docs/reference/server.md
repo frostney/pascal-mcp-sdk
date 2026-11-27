@@ -22,7 +22,7 @@ is created, and later mutation raises `EMCPServer`.
 | `Instructions` | `string` | `''` | Usage guidance surfaced via `server/discover` / classic `initialize` |
 | `CacheTtlMs` | `Integer` | `300000` | SEP-2549 `ttlMs` caching hint on discover/list/read results; must be ≥ 0 |
 | `CacheScope` | `string` | `'private'` | SEP-2549 `cacheScope`; `'private'` or `'public'` |
-| `RedactErrorDetails` | `Boolean` | `False` | `True` replaces exception detail with a correlation reference, logging the full error to stderr |
+| `RedactErrorDetails` | `Boolean` | `False` | `True` replaces escaped exception detail with a correlation reference, logging the full error to stderr; deliberate errors (`MCPErrorResult`, `EMCPProtocolError`) are sent as written |
 | `DualEra` | `Boolean` | `True` | Answer the classic `initialize` handshake alongside stateless 2026-07-28 requests |
 | `Name`, `Version` | `string` | — | Read-only, from `Create` |
 
@@ -274,10 +274,11 @@ Any other code is reserved, by the
 [specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/index#error-codes)
 or for legacy use, and the constructor raises `EMCPServer` for it.
 
-A resource that does not exist is not an error to raise: return `nil`
-from the reader, and the server answers with the code the client's
-protocol revision expects (`-32602`, or `-32002` for classic-handshake
-clients) and the URI as data.
+A URI that matches a resource template but names nothing that exists
+is not an error to raise either: return `nil` from the template reader,
+and the server answers with the code the client's protocol revision
+expects (`-32602`, or `-32002` for classic-handshake clients) and the
+URI as data. (An exact resource's reader must return contents.)
 
 On the Streamable HTTP binding the status follows the code, so a
 handler-raised `-32021` answers 400, as long as nothing has been

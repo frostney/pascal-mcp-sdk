@@ -4969,6 +4969,16 @@ begin
       Raised := True;
   end;
   Expect<Boolean>(Raised).ToBe(True);
+  // Each capability must be an object, as the schema has it.
+  Raised := False;
+  try
+    EMCPProtocolError.Create(-32021, 'missing',
+      TJSONObject(GetJSON('{"requiredCapabilities":{"sampling":true}}'))).Free;
+  except
+    on E2: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
   MCPMissingCapabilityError('roots').Free;
 end;
 

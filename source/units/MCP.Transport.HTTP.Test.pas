@@ -431,7 +431,9 @@ var
   Status: Integer;
 begin
   // Once progress has opened the stream the status is 200 for good:
-  // the error is its last event (documented; check capabilities first).
+  // the error is its last event. This is the late fallback, not the
+  // spec's 400: a handler (or, with #84, a declared capability) checks
+  // before its first notification to get the 400.
   Status := Exchange('POST', '/mcp',
     CallLine(3, 'late_refusal', META_MODERN_STREAMING),
     [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
@@ -439,7 +441,15 @@ begin
      HeaderPair('Mcp-Name', 'late_refusal')], Body, ContentType);
   Expect<Integer>(Status).ToBe(200);
   Expect<string>(ContentType).ToBe('text/event-stream');
-  Expect<Boolean>(Pos('"code" : -32021', Body) > 0).ToBe(True);
+  // Ordered frames: the progress event, then the error as the final,
+  // terminated event.
+  Expect<Boolean>(Pos('notifications/progress', Body) > 0).ToBe(True);
+  Expect<Boolean>(Pos('notifications/progress', Body) <
+    Pos('"code" : -32021', Body)).ToBe(True);
+  Expect<string>(Copy(Body, Length(Body) - 1, 2)).ToBe(#10#10);
+  Expect<Boolean>(Pos('"code" : -32021', Copy(Body,
+    LastDelimiter(#10, Copy(Body, 1, Length(Body) - 2)) + 1, MaxInt)) > 0)
+    .ToBe(True);
 end;
 
 procedure THTTPBinding.TestBareDiscoverProbe;

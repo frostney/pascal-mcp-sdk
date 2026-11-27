@@ -445,7 +445,8 @@ type
 
     // False by default: escaped handler/dispatch exceptions retain the
     // v1 in-band detail used by trusted local clients. True replaces
-    // exception details with a correlation reference and logs the full
+    // exception details with a correlation reference (deliberate errors,
+    // MCPErrorResult and EMCPProtocolError, are sent as written) and logs the full
     // exception to stderr under that reference (best-effort: on UNIX
     // the first emission upgrades a default SIGPIPE disposition to
     // ignore so a closed stderr cannot kill the process; a host's own
@@ -1590,6 +1591,7 @@ end;
 function IsCapabilityErrorData(AData: TJSONData): Boolean;
 var
   Required: TJSONData;
+  I: Integer;
 begin
   Result := (AData <> nil) and (AData.JSONType = jtObject);
   if not Result then
@@ -1597,6 +1599,12 @@ begin
   Required := TJSONObject(AData).Find('requiredCapabilities');
   Result := (Required <> nil) and (Required.JSONType = jtObject) and
     (Required.Count > 0);
+  // Each named capability is an object in the ClientCapabilities schema
+  // (sampling, elicitation, roots, experimental and extensions alike).
+  if Result then
+    for I := 0 to Required.Count - 1 do
+      if Required.Items[I].JSONType <> jtObject then
+        Exit(False);
 end;
 
 constructor EMCPProtocolError.Create(ACode: Integer; const AMessage: string;
