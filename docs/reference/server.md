@@ -291,9 +291,9 @@ function MCPSerialize(AObj: TMCPArgs): TJSONObject;
 | --- | --- |
 | `AddArray`, `AddObject` | The nested `TMCPSchema` is built and consumed by the call |
 | `WithDefault` | Applies to the primitive property added last and makes it optional; raises `EMCPSchema` when the default does not fit it or it already has one |
-| `SchemaFrom` | Published properties to a schema: scalars, enums, field-backed dynamic arrays of `string`, `Integer`, `Int64`, `Double` or `Boolean`, and field-backed `TMCPArgs` descendants as nested objects (at most 16 levels, as binding and `MCPSerialize` also enforce); raises `EMCPSchema` for anything else |
+| `SchemaFrom` | Published properties to a schema: scalars, enums, dynamic arrays of `string`, `Integer`, `Int64`, `Double` or `Boolean` and `TMCPArgs` descendants as nested objects, each read and written through the same field (at most 16 levels, as binding and `MCPSerialize` also enforce); raises `EMCPSchema` for anything else |
 | `MCPBindArguments` | Creates an `AClass` instance from `AArguments` (borrowed), nested objects and arrays included; `False` with an in-band message naming the path on a missing or mistyped argument; the caller owns `AInstance` on success |
-| `MCPSerialize` | The reverse, as a new object the caller owns; a nil nested object is left out; raises `EMCPSchema` for an unmapped property, a class property that is not a field-backed `TMCPArgs`, or a value with no JSON form (NaN) |
+| `MCPSerialize` | The reverse, as a new object the caller owns; a nil nested object is left out; raises `EMCPSchema` for an unmapped property, a class property that is not a `TMCPArgs` read and written through the same field, or a value with no JSON form (NaN) |
 
 ### Schema checks
 

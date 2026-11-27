@@ -118,6 +118,50 @@ type
     property bytes: TBytes read FBytes write FBytes;
   end;
 
+  // A nested property read through a getter, which cleanup must not
+  // call: it raises.
+  TProbeGetterNested = class(TMCPArgs)
+  private
+    FOpts: TCountedLimits;
+    function GetOpts: TCountedLimits;
+  published
+    property opts: TCountedLimits read GetOpts write FOpts;
+  end;
+
+  // Reads one field and writes another.
+  TProbeSplitNested = class(TMCPArgs)
+  private
+    FOpts: TCountedLimits;
+    FReplacement: TCountedLimits;
+  published
+    property opts: TCountedLimits read FOpts write FReplacement;
+  end;
+
+  TProbeSplitArray = class(TMCPArgs)
+  private
+    FTags: TStringArray;
+    FReplacement: TStringArray;
+  published
+    property tags: TStringArray read FTags write FReplacement;
+  end;
+
+  // Integer subranges, as elements and as a flat Int64 property.
+  TProbeWide = -100000..100000;
+  TProbeWide64 = -5000000000..5000000000;
+  TProbeWides = array of TProbeWide;
+  TProbeWide64s = array of TProbeWide64;
+
+  TProbeSubranges = class(TMCPArgs)
+  private
+    FWides: TProbeWides;
+    FWide64s: TProbeWide64s;
+    FWide64: TProbeWide64;
+  published
+    property wides: TProbeWides read FWides write FWides;
+    property wide64s: TProbeWide64s read FWide64s write FWide64s;
+    property wide64: TProbeWide64 read FWide64 write FWide64;
+  end;
+
   TProbeArgs = class(TMCPArgs)
   private
     FLabelText: string;
@@ -208,6 +252,9 @@ type
     procedure TestSerializeRoundTrip;
     procedure TestUnsafeArrayAccessRefused;
     procedure TestNestedOwnership;
+    procedure TestCleanupOfAliasesAndAccessors;
+    procedure TestSplitFieldsRefused;
+    procedure TestIntegerSubranges;
     procedure TestNullNestedAndIntegralFloats;
     procedure TestDefaultsFitTheirProperty;
   end;
@@ -1385,6 +1432,11 @@ begin
   FSecond := FFirst;
 end;
 
+function TProbeGetterNested.GetOpts: TCountedLimits;
+begin
+  raise EInvalidOperation.Create('getter must not run');
+end;
+
 procedure TProbeRefusingSetter.SetOpts(AValue: TCountedLimits);
 begin
   raise EMCPSchema.Create('setter refuses');
@@ -1657,6 +1709,117 @@ begin
   Expect<Integer>(CountedLive).ToBe(Before);
 end;
 
+procedure FreeIntactAliases;
+begin
+  TProbeShared.Create.Free;
+end;
+
+procedure SchemaOfShared;
+begin
+  SchemaFrom(TProbeShared).Build.Free;
+end;
+
+procedure SchemaOfGetterNested;
+begin
+  SchemaFrom(TProbeGetterNested).Build.Free;
+end;
+
+// Two properties holding one child, never rebound, free it once and
+// read nothing of it after; a getter-backed nested property is
+// neither read nor freed by cleanup, so its own refusal stands (#95
+// review).
+procedure TNestedSchemas.TestCleanupOfAliasesAndAccessors;
+var
+  Before: Integer;
+begin
+  Before := CountedLive;
+  Expect<Boolean>(Raises(FreeIntactAliases)).ToBe(False);
+  Expect<Integer>(CountedLive).ToBe(Before);
+  Expect<Boolean>(Raises(SchemaOfShared)).ToBe(False);
+  Expect<Integer>(CountedLive).ToBe(Before);
+  // Raises passes on anything but EMCPSchema, so the getter's
+  // EInvalidOperation would fail this test.
+  Expect<Boolean>(Raises(SchemaOfGetterNested)).ToBe(True);
+end;
+
+procedure SchemaOfSplitNested;
+begin
+  SchemaFrom(TProbeSplitNested).Build.Free;
+end;
+
+procedure BindSplitNested;
+var
+  Instance: TMCPArgs;
+begin
+  BindJson(TProbeSplitNested, '{"opts":{"limit":2,"tags":[]}}', Instance);
+  Instance.Free;
+end;
+
+procedure SchemaOfSplitArray;
+begin
+  SchemaFrom(TProbeSplitArray).Build.Free;
+end;
+
+procedure BindSplitArray;
+var
+  Instance: TMCPArgs;
+begin
+  BindJson(TProbeSplitArray, '{"tags":["a"]}', Instance);
+  Instance.Free;
+end;
+
+procedure SerializeSplitArray;
+var
+  Probe: TProbeSplitArray;
+begin
+  Probe := TProbeSplitArray.Create;
+  try
+    MCPSerialize(Probe).Free;
+  finally
+    Probe.Free;
+  end;
+end;
+
+// A property that writes another field than it reads would hand the
+// handler the old value, so every use refuses it (#95 review).
+procedure TNestedSchemas.TestSplitFieldsRefused;
+begin
+  Expect<Boolean>(Raises(SchemaOfSplitNested)).ToBe(True);
+  Expect<Boolean>(Raises(BindSplitNested)).ToBe(True);
+  Expect<Boolean>(Raises(SchemaOfSplitArray)).ToBe(True);
+  Expect<Boolean>(Raises(BindSplitArray)).ToBe(True);
+  Expect<Boolean>(Raises(SerializeSplitArray)).ToBe(True);
+end;
+
+// Elements of a subrange type bind only inside it, as a flat integer
+// property does; so does a flat Int64 subrange (#95 review).
+procedure TNestedSchemas.TestIntegerSubranges;
+var
+  Instance: TMCPArgs;
+const
+  REST = '"wide64s":[],"wide64":0}';
+begin
+  Expect<string>(BindJson(TProbeSubranges, '{"wides":[-100000,100000],' +
+    REST, Instance)).ToBe('');
+  Expect<Integer>(TProbeSubranges(Instance).wides[1]).ToBe(100000);
+  Instance.Free;
+  Expect<string>(BindJson(TProbeSubranges, '{"wides":[0,100001],' + REST,
+    Instance)).ToBe('Argument "wides[1]" must be an integer');
+  Expect<string>(BindJson(TProbeSubranges, '{"wides":[-100001],' + REST,
+    Instance)).ToBe('Argument "wides[0]" must be an integer');
+  Expect<string>(BindJson(TProbeSubranges, '{"wides":[],' +
+    '"wide64s":[5000000000],"wide64":-5000000000}', Instance)).ToBe('');
+  Expect<Boolean>(TProbeSubranges(Instance).wide64s[0] = 5000000000)
+    .ToBe(True);
+  Instance.Free;
+  Expect<string>(BindJson(TProbeSubranges, '{"wides":[],' +
+    '"wide64s":[5000000001],"wide64":0}', Instance))
+    .ToBe('Argument "wide64s[0]" must be an integer');
+  Expect<string>(BindJson(TProbeSubranges, '{"wides":[],' +
+    '"wide64s":[],"wide64":-5000000001}', Instance))
+    .ToBe('Argument "wide64" must be an integer');
+end;
+
 // Binds AArguments (consumed) to AClass; '' on success, else the error.
 function BindBuilt(AClass: TMCPArgsClass; AArguments: TJSONObject): string;
 var
@@ -1790,6 +1953,12 @@ begin
     TestUnsafeArrayAccessRefused);
   Test('a bound nested object replaces and frees the old one',
     TestNestedOwnership);
+  Test('cleanup frees aliased children once and calls no getter',
+    TestCleanupOfAliasesAndAccessors);
+  Test('properties that read and write different fields are refused',
+    TestSplitFieldsRefused);
+  Test('integer subranges bind only inside their bounds',
+    TestIntegerSubranges);
   Test('null nested objects refused; integral floats bind as integers',
     TestNullNestedAndIntegralFloats);
   Test('WithDefault checks the default against its property',

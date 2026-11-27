@@ -323,12 +323,22 @@ end;
 // mapping.
 function ArrayItemType(AArrayType: PTypeInfo): string; forward;
 
+// Whether AProp reads and writes one and the same field: no accessor
+// method runs, and what binding writes is what a handler reads (#95
+// review).
+function ReadsAndWritesOneField(AProp: PPropInfo): Boolean;
+begin
+  Result := ((AProp^.PropProcs and 3) = ptField) and
+    (((AProp^.PropProcs shr 2) and 3) = ptField) and
+    (AProp^.GetProc = AProp^.SetProc);
+end;
+
 // The JSON item type of the published dynamic-array property AProp,
 // checked for every use (schema, binding, serialization, #95 review):
 // the element type must have a mapping, and the property must read and
-// write a field, since a getter method's fresh array is finalized
-// before its pointer can be used (FPC 3.2.2 GetDynArrayProp). Raises
-// EMCPSchema otherwise.
+// write the same field (ReadsAndWritesOneField), since a getter method's
+// fresh array is finalized before its pointer can be used (FPC 3.2.2
+// GetDynArrayProp). Raises EMCPSchema otherwise.
 function CheckedArrayItemType(AProp: PPropInfo;
   const AClassName: string): string;
 begin
@@ -337,10 +347,9 @@ begin
     raise EMCPSchema.CreateFmt('Array property "%s" of %s has no JSON ' +
       'Schema mapping (element types: string, Integer, Int64, Double, ' +
       'Boolean)', [AProp^.Name, AClassName]);
-  if ((AProp^.PropProcs and 3) <> ptField) or
-    (((AProp^.PropProcs shr 2) and 3) <> ptField) then
+  if not ReadsAndWritesOneField(AProp) then
     raise EMCPSchema.CreateFmt('Array property "%s" of %s must read and ' +
-      'write a field, not a method', [AProp^.Name, AClassName]);
+      'write the same field, not a method', [AProp^.Name, AClassName]);
 end;
 
 // The nested argument class of the published class property AProp;
@@ -356,10 +365,9 @@ begin
       'TMCPArgs descendant', [AProp^.Name, AClassName]);
   // The instance owns its nested objects; a field read and written
   // directly keeps replacement and destruction to one rule (#95 review).
-  if ((AProp^.PropProcs and 3) <> ptField) or
-    (((AProp^.PropProcs shr 2) and 3) <> ptField) then
+  if not ReadsAndWritesOneField(AProp) then
     raise EMCPSchema.CreateFmt('Object property "%s" of %s must read and ' +
-      'write a field, not a method', [AProp^.Name, AClassName]);
+      'write the same field, not a method', [AProp^.Name, AClassName]);
   Result := TMCPArgsClass(PropClass);
 end;
 
@@ -388,20 +396,33 @@ begin
   end;
 end;
 
-// Whether a class property of AInstance before AIndex holds AObject.
+// Whether AProp holds a nested argument object its instance owns: a
+// TMCPArgs-descendant property backed by one field (CheckedArgsClass's
+// rule). Only these are read during ownership scans, so no getter runs
+// and no foreign object is freed (#95 review).
+function OwnsNested(AProp: PPropInfo): Boolean;
+begin
+  Result := (AProp^.PropType^.Kind = tkClass) and
+    GetTypeData(AProp^.PropType)^.ClassType.InheritsFrom(TMCPArgs) and
+    ReadsAndWritesOneField(AProp);
+end;
+
+// Whether an owned nested property of AInstance before AIndex holds
+// AObject. Compares references only: AObject may already be freed.
 function HeldByEarlier(AInstance: TObject; AProps: PPropList; AIndex: Integer;
   AObject: TObject): Boolean;
 var
   I: Integer;
 begin
   for I := 0 to AIndex - 1 do
-    if (AProps^[I]^.PropType^.Kind = tkClass) and
+    if OwnsNested(AProps^[I]) and
       (GetObjectProp(AInstance, AProps^[I]) = AObject) then
       Exit(True);
   Result := False;
 end;
 
-// Whether a class property of AInstance other than AProp holds AObject.
+// Whether an owned nested property of AInstance other than AProp holds
+// AObject.
 function HeldElsewhere(AInstance: TObject; AProp: PPropInfo;
   AObject: TObject): Boolean;
 var
@@ -416,7 +437,7 @@ begin
   try
     GetPropInfos(Info, Props);
     for I := 0 to Count - 1 do
-      if (Props^[I] <> AProp) and (Props^[I]^.PropType^.Kind = tkClass) and
+      if (Props^[I] <> AProp) and OwnsNested(Props^[I]) and
         (GetObjectProp(AInstance, Props^[I]) = AObject) then
         Exit(True);
   finally
@@ -441,11 +462,13 @@ begin
     try
       GetPropInfos(Info, Props);
       for I := 0 to Count - 1 do
-        if Props^[I]^.PropType^.Kind = tkClass then
+        if OwnsNested(Props^[I]) then
         begin
           Nested := GetObjectProp(Self, Props^[I]);
-          // Freed once even when two properties hold the same object.
-          if (Nested is TMCPArgs) and not HeldByEarlier(Self, Props, I,
+          // Freed once even when two properties hold the same object:
+          // the earlier-reference check runs first, on the reference
+          // alone, before anything touches the object.
+          if (Nested <> nil) and not HeldByEarlier(Self, Props, I,
             Nested) then
             Nested.Free;
         end;
@@ -1387,15 +1410,38 @@ end;
 // integer item's value comes back in ASigned. An item stored as nil is a
 // null: wrong for every element type.
 function ItemAccepted(AItem: TJSONData; const AItemType: string;
-  out ASigned: Int64): Boolean;
+  const AMinimum, AMaximum: Int64; out ASigned: Int64): Boolean;
 begin
   ASigned := 0;
   if AItem = nil then
     Exit(False);
   if (AItemType <> 'integer') and (AItemType <> 'int64') then
     Exit(MatchesType(AItem, AItemType));
-  Result := ReadSignedInteger(AItem, ASigned) and ((AItemType = 'int64') or
-    ((ASigned >= Low(LongInt)) and (ASigned <= High(LongInt))));
+  Result := ReadSignedInteger(AItem, ASigned) and (ASigned >= AMinimum) and
+    (ASigned <= AMaximum);
+end;
+
+// The declared bounds of an integer element type, so a subrange such as
+// -100..100 binds only values inside it, as a flat property does (#95
+// review).
+procedure ElementBounds(AProp: PPropInfo; const AItemType: string;
+  out AMinimum, AMaximum: Int64);
+var
+  Element: PTypeData;
+begin
+  AMinimum := Low(Int64);
+  AMaximum := High(Int64);
+  Element := GetTypeData(GetTypeData(AProp^.PropType)^.ElType2);
+  if AItemType = 'integer' then
+  begin
+    AMinimum := Element^.MinValue;
+    AMaximum := Element^.MaxValue;
+  end
+  else if AItemType = 'int64' then
+  begin
+    AMinimum := Element^.MinInt64Value;
+    AMaximum := Element^.MaxInt64Value;
+  end;
 end;
 
 type
@@ -1462,16 +1508,18 @@ function BindArray(AInstance: TMCPArgs; AProp: PPropInfo; AValue: TJSONData;
 var
   Items: TBoundItems;
   I: Integer;
-  Signed: Int64;
+  Signed, Minimum, Maximum: Int64;
 begin
   Result := True;
   Items.ItemType := CheckedArrayItemType(AProp, AInstance.ClassName);
   if AValue.JSONType <> jtArray then
     Exit(Mismatch(APath, 'an array', AError));
+  ElementBounds(AProp, Items.ItemType, Minimum, Maximum);
   SizeItems(Items, AValue.Count);
   for I := 0 to AValue.Count - 1 do
   begin
-    if not ItemAccepted(AValue.Items[I], Items.ItemType, Signed) then
+    if not ItemAccepted(AValue.Items[I], Items.ItemType, Minimum, Maximum,
+      Signed) then
       Exit(Mismatch(Format('%s[%d]', [APath, I]), ItemPhrase(Items.ItemType),
         AError));
     StoreItem(Items, I, AValue.Items[I], Signed);
@@ -1490,32 +1538,16 @@ begin
   SetInt64Prop(AInstance, AProp, SignedBits);
 end;
 
-// Populate one published property from its JSON argument. False (with
-// AError set) on a type mismatch. APath names the argument in errors.
-function BindProperty(AInstance: TMCPArgs; AProp: PPropInfo;
-  AValue: TJSONData; const APath: string; ADepth: Integer;
-  out AError: string): Boolean;
+// An integer property of any width, inside its declared range.
+function BindInteger(AInstance: TMCPArgs; AProp: PPropInfo; AValue: TJSONData;
+  const APath: string; out AError: string): Boolean;
 var
   TypeData: PTypeData;
   SignedValue: Int64;
   UnsignedValue, Minimum, Maximum: QWord;
-  Nested: TMCPArgs;
-  NestedClass: TMCPArgsClass;
-  Previous: TObject;
 begin
   Result := True;
   case AProp^.PropType^.Kind of
-    tkSString, tkLString, tkAString, tkWString, tkUString:
-      if AValue.JSONType = jtString then
-        SetStrProp(AInstance, AProp, AValue.AsString)
-      else
-        Exit(Mismatch(APath, 'a string', AError));
-    tkFloat:
-      // A built NaN or infinity is no JSON number (#95 review).
-      if (AValue.JSONType = jtNumber) and IsFiniteNumber(AValue) then
-        SetFloatProp(AInstance, AProp, AValue.AsFloat)
-      else
-        Exit(Mismatch(APath, 'a number', AError));
     tkInteger:
       begin
         TypeData := GetTypeData(AProp^.PropType);
@@ -1539,7 +1571,10 @@ begin
         end;
       end;
     tkInt64:
-      if ReadSignedInteger(AValue, SignedValue) then
+      // Inside the declared range, as tkInteger is (#95 review).
+      if ReadSignedInteger(AValue, SignedValue) and
+        (SignedValue >= GetTypeData(AProp^.PropType)^.MinInt64Value) and
+        (SignedValue <= GetTypeData(AProp^.PropType)^.MaxInt64Value) then
         SetInt64Prop(AInstance, AProp, SignedValue)
       else
         Exit(Mismatch(APath, 'an integer', AError));
@@ -1548,6 +1583,34 @@ begin
         SetQWordProperty(AInstance, AProp, UnsignedValue)
       else
         Exit(Mismatch(APath, 'an integer', AError));
+  end;
+end;
+
+// Populate one published property from its JSON argument. False (with
+// AError set) on a type mismatch. APath names the argument in errors.
+function BindProperty(AInstance: TMCPArgs; AProp: PPropInfo;
+  AValue: TJSONData; const APath: string; ADepth: Integer;
+  out AError: string): Boolean;
+var
+  Nested: TMCPArgs;
+  NestedClass: TMCPArgsClass;
+  Previous: TObject;
+begin
+  Result := True;
+  case AProp^.PropType^.Kind of
+    tkSString, tkLString, tkAString, tkWString, tkUString:
+      if AValue.JSONType = jtString then
+        SetStrProp(AInstance, AProp, AValue.AsString)
+      else
+        Exit(Mismatch(APath, 'a string', AError));
+    tkFloat:
+      // A built NaN or infinity is no JSON number (#95 review).
+      if (AValue.JSONType = jtNumber) and IsFiniteNumber(AValue) then
+        SetFloatProp(AInstance, AProp, AValue.AsFloat)
+      else
+        Exit(Mismatch(APath, 'a number', AError));
+    tkInteger, tkInt64, tkQWord:
+      Exit(BindInteger(AInstance, AProp, AValue, APath, AError));
     tkBool:
       if AValue.JSONType = jtBoolean then
         SetOrdProp(AInstance, AProp, Ord(AValue.AsBoolean))
@@ -1575,7 +1638,7 @@ begin
         // neither the read nor the write runs code that could raise.
         Previous := GetObjectProp(AInstance, AProp);
         SetObjectProp(AInstance, AProp, Nested);
-        if (Previous <> Nested) and (Previous is TMCPArgs) and
+        if (Previous <> nil) and (Previous <> Nested) and
           not HeldElsewhere(AInstance, AProp, Previous) then
           Previous.Free;
       end;

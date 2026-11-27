@@ -125,8 +125,10 @@ type
 ```
 
 The instance owns its nested objects and frees them. Array and nested
-object properties must read and write a field (`read FTags write
-FTags`), not a method. Binding replaces a nested object your
+object properties must read and write the same field (`read FTags write
+FTags`), not a method or two different fields. Integer elements of a
+subrange type (`-100..100`) bind only inside it, as integer properties
+do. Binding replaces a nested object your
 constructor made, freeing it unless another property still holds it;
 an optional nested property the client left out keeps what your
 constructor put there, which is `nil` unless it made one. An explicit
