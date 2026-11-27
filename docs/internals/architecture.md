@@ -7,13 +7,20 @@
 
 ## Executive Summary
 
-pascal-mcp-sdk is seven units layered strictly bottom-up. Four form the
+pascal-mcp-sdk is eleven units layered strictly bottom-up. Four form the
 request chain — `MCP.JSONRPC` (the JSON-RPC 2.0 profile MCP mandates),
 `MCP.Protocol` (the stateless per-request `_meta` model of spec
 revision 2026-07-28), `MCP.Server` (the sans-I/O dispatch core), and a
 transport shell (`MCP.Transport.Stdio` or `MCP.Transport.HTTP`) — and
 `MCP.Schema` and `MCP.Content` sit beside the chain as the schema and
-content-block helpers `MCP.Server` consumes. The core performs no I/O: `CreateSession` binds connection
+content-block helpers `MCP.Server` consumes, `MCP.Completion` and
+`MCP.UriTemplate` read completion requests and match resource templates
+for it, and `MCP.RequestState` with `MCP.Crypto` seal the MRTR
+`requestState` for it. The core performs no I/O, with one scoped exception: when no
+`requestState` keys are set, the first `CreateSession` reads 32 bytes
+from the operating system's random source for the instance's sealing
+key (#89), and fails to start if that source is unavailable; setting
+keys with `SetRequestStateKeys` avoids the read. `CreateSession` binds connection
 state and `HandleMessage` maps one inbound line to at most one
 response line, so both transports wrap the same tested core without
 touching it. The runtime dependency set is packages that ship inside
@@ -29,6 +36,8 @@ flowchart TB
     HTTP["MCP.Transport.HTTP<br/>POST + SSE, header mirroring"]
     SCHEMA["MCP.Schema<br/>fluent builder +<br/>RTTI argument classes"]
     CONTENT["MCP.Content<br/>content blocks for<br/>results and messages"]
+    SEAL["MCP.RequestState + MCP.Crypto<br/>requestState sealing,<br/>in-tree SHA-256 / HMAC"]
+    HELPERS["MCP.Completion + MCP.UriTemplate<br/>completion requests,<br/>resource templates"]
     SERVER["MCP.Server<br/>frozen registries + sessions<br/>HandleMessage(session, line) → line"]
     PROTOCOL["MCP.Protocol<br/>_meta validation, version<br/>negotiation, result stamping"]
     JSONRPC["MCP.JSONRPC<br/>JSON-RPC 2.0 parse/build<br/>MCP profile + error codes"]
@@ -37,26 +46,33 @@ flowchart TB
     HTTP --> SERVER
     SCHEMA -. "consumed by,<br/>off the request chain" .-> SERVER
     CONTENT -. "consumed by,<br/>off the request chain" .-> SERVER
+    SEAL -. "consumed by,<br/>off the request chain" .-> SERVER
+    HELPERS -. "consumed by,<br/>off the request chain" .-> SERVER
     SERVER --> PROTOCOL
     PROTOCOL --> JSONRPC
     JSONRPC --> RTL
 ```
 
 The strict bottom-up request chain is `MCP.JSONRPC` → `MCP.Protocol` →
-`MCP.Server` → transport. `MCP.Schema` and `MCP.Content` sit to the
-side of that chain: helpers `MCP.Server` consumes to build and enforce
-tool schemas and to build content blocks, not layers a request passes
-through.
+`MCP.Server` → transport. `MCP.Schema`, `MCP.Content`,
+`MCP.Completion` and `MCP.UriTemplate` sit to the side of that chain:
+helpers `MCP.Server` consumes to build and enforce tool schemas, build
+content blocks, read completion requests and match resource templates,
+not layers a request passes through.
 
 Rules live in the layer that owns them and nowhere else:
 
 | Unit | Owns | Knows nothing about |
 | --- | --- | --- |
 | `MCP.JSONRPC` | Message classification (request / notification / invalid), MCP's tightened id rules (string or number, never null), batch rejection, params-must-be-object, id preservation into error replies, compact single-line serialization | MCP methods |
-| `MCP.Protocol` | The reserved `_meta` keys, the two required per-request fields (`protocolVersion`, `clientCapabilities`), `-32602` for their absence, `-32022` (+ `supported` list) for version mismatch, response-side stamping (`resultType: "complete"`, `serverInfo`) | Tools and resources |
-| `MCP.Server` | Method dispatch (`server/discover`, `tools/*`, `resources/*`, `prompts/*`), frozen registries and request-visible configuration, per-connection legacy state, cooperative cancellation, in-band vs. protocol error policy (handler exceptions → `isError: true` results; dispatch faults → JSON-RPC errors), the legacy-`initialize` rejection that names supported versions | Bytes and streams |
+| `MCP.Protocol` | The reserved `_meta` keys, the two required per-request fields (`protocolVersion`, `clientCapabilities`), `-32602` for their absence, `-32022` (+ `supported` list) for version mismatch, the `-32021` data payload and its shape check, response-side stamping (`resultType: "complete"`, `serverInfo`) | Tools and resources |
+| `MCP.Server` | Method dispatch (`server/discover`, `tools/*`, `resources/*`, `prompts/*`, `completion/complete`), capabilities computed from the registrations, frozen registries and request-visible configuration, per-connection legacy state, cooperative cancellation, in-band vs. protocol error policy (handler exceptions → `isError: true` results; a handler's `EMCPProtocolError` and dispatch faults → JSON-RPC errors), the legacy-`initialize` rejection that names supported versions | Bytes and streams |
 | `MCP.Schema` | The fluent builder (`ObjectSchema.AddString(...)`) and the RTTI-derived `TMCPArgs` argument classes, both emitting the JSON Schema 2020-12 subset the server enforces | Dispatch, bytes, streams |
 | `MCP.Content` | The five content block shapes tool results and prompt messages carry (text, image, audio, resource link, embedded resource) and the base64 encoding of raw-bytes payloads | Dispatch, registries, bytes and streams |
+| `MCP.RequestState` | Sealing and verifying the MRTR `requestState` envelope (expiry, method, target, argument digest, audience) | Dispatch, transports |
+| `MCP.Completion` | The `completion/complete` request parameters, the target check, the static-list matcher and the capped `CompleteResult` | Registries, dispatch |
+| `MCP.UriTemplate` | RFC 6570 level-1 template validation and URI matching | Registries, readers |
+| `MCP.Crypto` | SHA-256, HMAC-SHA-256, constant-time comparison, the OS random source and base64url, in-tree because FPC 3.2.2 ships no SHA-256 | Everything MCP |
 | `MCP.Transport.Stdio` | LF-terminated writes on every platform, CR tolerance on reads, blank-line skipping, stderr-only logging, EOF as the graceful-shutdown signal | Protocol decisions — it contains not a single one |
 
 ## The sans-I/O core
@@ -77,8 +93,10 @@ errors.
 
 The one addition to line-in/line-out is the **per-call notification
 sink**: the sink and its user data are arguments to the
-`HandleMessage` overload, so neither shared server state nor a session
-retains transport state.
+`HandleMessage` overload, so shared server state retains no transport
+state. A session keeps one transport hook: the cancellation poll and
+its borrowed user data (#93), installed for the connection and
+consulted only while one of its requests runs.
 
 ```mermaid
 sequenceDiagram
@@ -91,7 +109,7 @@ sequenceDiagram
     Core->>Handler: dispatch (era-blind TMCPRequestContext)
     Handler--)Transport: MCPReportProgress / MCPLogMessage → sink
     Note over Transport: stdio writes notification lines…<br/>…HTTP emits SSE events on the POST response
-    Handler->>Core: result (exception → isError result)
+    Handler->>Core: result (exception → isError result, EMCPProtocolError → JSON-RPC error)
     Core->>Transport: at most one response line
     Transport->>Client: notifications first, then the response
 ```
@@ -111,7 +129,8 @@ Modern 2026-07-28 requests remain **stateless**: every request
 validates its own `_meta`, and the session contributes no negotiated
 identity to that path. The session exists for two things only —
 isolating legacy lifecycle/identity, and exposing the one currently
-active cooperative-cancellation token.
+active cooperative-cancellation token, together with the transport's
+cancellation poll.
 
 ```mermaid
 stateDiagram-v2
@@ -120,16 +139,36 @@ stateDiagram-v2
     Running --> Running: handler polls IsCancelled → false
     Running --> Idle: handler completes<br/>response written
     Running --> Cancelled: notifications/cancelled<br/>matches the active request id
+    Running --> Cancelled: transport poll reports cancellation<br/>(closed HTTP connection)
     Cancelled --> Idle: handler observes IsCancelled<br/>server suppresses notifications + response
 ```
 
 `notifications/cancelled` validates its payload, matches string ids by
 decoded value and numeric ids by value, and flips that token; handlers
 poll `TMCPRequestContext.IsCancelled`, after which the server
-suppresses notifications and the final response. The synchronous stdio
-read-handle-write loop cannot receive a cancellation while a handler
-is running, so stdio handlers should stay short; a future transport
-with mid-request delivery points can use the same session entry point.
+suppresses notifications and the final response.
+
+A cancellation can arrive while the handler runs (#93). Each transport
+installs a cancellation poll on its session
+(`TMCPSession.SetCancellationPoll`), which the request consults
+whenever the handler asks `IsCancelled` and before each in-request
+notification, on the handler's own thread. On a plain file input the
+stdio loop reads stdin into its own buffer; its poll checks the lines
+already queued, then reads at most one chunk that is waiting, without
+blocking. A `notifications/cancelled` the core accepts for the running
+request (`MCPCancellationTarget`, classified once per line, matched
+with `TMCPSession.IsActiveRequestId`) is taken out of the queue and the
+poll reports it, which cancels the request; it is not dispatched, so no
+reason is logged from inside the handler's `IsCancelled`. Other
+lines, cancellations for queued requests included, stay queued in
+order, and once about one line's budget is queued the poll stops
+reading, so a cancellation behind that backlog waits its turn. The
+HTTP binding's poll reports a closed or reset connection, checked at
+most every 50 ms. No thread is involved, so a stdio-only program needs
+no thread driver; cancellation stays cooperative, as handlers already
+code it. The poll lives on the session rather than arriving with each
+call, as [ADR-0001](../adr/0001-sans-io-core.md#amendment-2026-11-27-93)
+records.
 
 ## Registration and handler model
 
@@ -160,8 +199,8 @@ and class-based hosts (lantaarn) register naturally.
 Tool schemas come from `MCP.Schema` in two forms:
 
 - **The fluent builder** — `ObjectSchema.AddString(...)...`, a JSON
-  Schema 2020-12 subset covering the flat object schemas most tools
-  need, with input and output schema overloads.
+  Schema 2020-12 subset covering scalars, enums, defaults, arrays and
+  nested objects, with input and output schema overloads.
 - **Argument classes** — `TMCPArgs` descendants whose published
   properties expand into the schema via RTTI (`SchemaFrom`), with the
   server binding, validating, and populating a typed instance per call
@@ -181,7 +220,12 @@ server-initiated requests:
   returns `MCPInputRequired(...)` / `MCPPromptInputRequired(...)` — an
   `input_required` result carrying an `inputRequests` map (entry
   builders for elicitation form/url, `sampling/createMessage`,
-  `roots/list`) and the handler's opaque `requestState`.
+  `roots/list`) and the handler's opaque `requestState`, which leaves
+  the server sealed: a `v1` token whose HMAC-SHA-256 covers the state,
+  an expiry, the method, the tool or prompt name, a digest of the
+  canonical arguments and the server's name (`MCP.RequestState`, #89).
+  The retry is verified before the handler runs again; a token that
+  fails is answered `-32602`.
 - The client retries the original request with `inputResponses` plus
   the echoed state, and the library re-enters the *same handler* with
   both exposed on `TMCPRequestContext` — each round is one ordinary
@@ -199,12 +243,15 @@ three interop batteries and by `mcpsmoke`.
 
 Since the HTTP era inverted the trust boundary (#23), **every
 raw-handler tool call is validated against its registered schema's
-enforceable subset before the handler runs** — `type`, `description`,
-`title`, `properties`, `required`, `enum`, `default`, exactly the
-dialect the builders emit (the fluent builder stamps non-empty
-`description`s, which the server accepts without
-`.ApplicationValidated`) — with violations returned as in-band
-`isError` results, the same shape the typed path produces.
+enforceable subset before the handler runs** — the recursive JSON
+Schema 2020-12 subset `MCP.Schema` defines (`type`, `properties`,
+`required`, `items`, `enum`, `default`, `description`, `title`; see
+[the enforced subset](../guides/schemas.md#the-enforced-subset)), which
+covers everything the builders emit — with violations returned as
+in-band `isError` results, the same shape the typed path produces.
+Since #91 the same subset also checks **structured output** against a
+tool's `outputSchema` before the result is sent (any root type), and a
+mismatch becomes an `isError` result.
 
 - Absent optional arguments are seeded with their schema `default`.
 - Unknown argument properties are ignored (the same tolerance the
@@ -234,6 +281,9 @@ against the published final text
   [`_meta` + error codes](https://modelcontextprotocol.io/specification/2026-07-28/basic/index),
   [versioning](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning),
   [server/discover](https://modelcontextprotocol.io/specification/2026-07-28/server/discover),
+  [cancellation](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation),
+  [Streamable HTTP](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
+  (cancellation pages verified 2026-11-27),
   [tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools),
   [resources](https://modelcontextprotocol.io/specification/2026-07-28/server/resources).
 - The 2026-08-08 re-verification diffed the
@@ -336,8 +386,12 @@ The binding's rules, all transport-owned:
   mapped status, so clients handle both response types.
   Notifications answer `202`.
 - The mirrored metadata headers (`MCP-Protocol-Version`, `Mcp-Method`,
-  `Mcp-Name` with the base64 sentinel) are validated against the body
-  before dispatch (`-32020` on mismatch).
+  `Mcp-Name` with the base64 sentinel, and `Mcp-Param-*` for the
+  parameters a tool marks with `x-mcp-header`) are validated against
+  the body before dispatch (`-32020` on mismatch). Which parameters a
+  tool marks is a schema fact (`MCPHeaderParameters` in `MCP.Schema`,
+  exposed as `TMCPServer.ToolHeaderParameters`); comparing header text
+  is the binding's job.
 - JSON-RPC outcomes map onto HTTP statuses: `-32601` → 404;
   parse/invalid/`-32020..-32022` → 400; `-32602` → 400 when the
   request lacks a required `_meta` field (`MissingRequiredMeta` in

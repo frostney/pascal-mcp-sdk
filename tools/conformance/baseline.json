@@ -8,22 +8,13 @@
       "expected": "pass"
     },
     "completion-complete": {
-      "expected": "fail",
-      "issue": 81,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "dns-rebinding-protection": {
       "expected": "pass"
     },
     "http-custom-header-server-validation": {
-      "expected": "fail",
-      "issue": 90,
-      "passingChecks": [
-        "sep-2243-server-decode-base64",
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "http-header-validation": {
       "expected": "pass"
@@ -62,11 +53,7 @@
       "expected": "pass"
     },
     "input-required-result-tampered-state": {
-      "expected": "fail",
-      "issue": 89,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "input-required-result-unsupported-methods": {
       "expected": "pass"

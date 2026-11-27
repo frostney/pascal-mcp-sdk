@@ -9,15 +9,158 @@ program MCP.Schema.Test;
 {$I MCP.inc}
 
 uses
+  Classes,
   Math,
   SysUtils,
 
   fpjson,
+  jsonparser,
+  // UTF-8 string conversion (cwstring), as every program using the
+  // library gets it through MCP.Server.
+  MCP.JSONRPC,
   MCP.Schema,
   TestingPascalLibrary;
 
 type
   TProbeColor = (pcRed, pcGreen, pcBlue);
+
+  // #95: nested argument objects and arrays.
+  TProbeLimits = class(TMCPArgs)
+  private
+    FLimit: Integer;
+    FTags: TStringArray;
+  published
+    property limit: Integer read FLimit write FLimit;
+    property tags: TStringArray read FTags write FTags;
+  end;
+
+  TProbeNumbers = array of Double;
+  TProbeFlags = array of Boolean;
+  TProbeCounts = array of Int64;
+
+  TProbeNested = class(TMCPArgs)
+  private
+    FName: string;
+    FOpts: TProbeLimits;
+    FScores: TProbeNumbers;
+    FFlags: TProbeFlags;
+    FCounts: TProbeCounts;
+    FExtra: TProbeLimits;
+  published
+    property name: string read FName write FName;
+    property opts: TProbeLimits read FOpts write FOpts;
+    property scores: TProbeNumbers read FScores write FScores;
+    property flags: TProbeFlags read FFlags write FFlags;
+    property counts: TProbeCounts read FCounts write FCounts;
+    property extra: TProbeLimits read FExtra write FExtra stored False;
+  end;
+
+  // Counts its instances, to see that the binder frees what it
+  // replaces (#95 review).
+  TCountedLimits = class(TProbeLimits)
+  public
+    constructor Create; override;
+    destructor Destroy; override;
+  end;
+
+  // Its constructor makes the nested object the binder replaces.
+  TProbeOwned = class(TMCPArgs)
+  private
+    FOpts: TCountedLimits;
+  public
+    constructor Create; override;
+  published
+    property opts: TCountedLimits read FOpts write FOpts;
+  end;
+
+  // A setter that refuses the bound nested object.
+  TProbeRefusingSetter = class(TMCPArgs)
+  private
+    FOpts: TCountedLimits;
+    procedure SetOpts(AValue: TCountedLimits);
+  published
+    property opts: TCountedLimits read FOpts write SetOpts;
+  end;
+
+  // An array read through a method: a fresh copy each read.
+  TProbeMethodArray = class(TMCPArgs)
+  private
+    FTags: TStringArray;
+    function GetTags: TStringArray;
+  published
+    property tags: TStringArray read GetTags write FTags;
+  end;
+
+  // Two properties holding one object its constructor made.
+  TProbeShared = class(TMCPArgs)
+  private
+    FFirst: TCountedLimits;
+    FSecond: TCountedLimits;
+  public
+    constructor Create; override;
+  published
+    property first: TCountedLimits read FFirst write FFirst;
+    property second: TCountedLimits read FSecond write FSecond stored False;
+  end;
+
+  // A class property that is no TMCPArgs.
+  TProbeForeignObject = class(TMCPArgs)
+  private
+    FList: TStringList;
+  published
+    property list: TStringList read FList write FList;
+  end;
+
+  TProbeBadArray = class(TMCPArgs)
+  private
+    FBytes: array of Byte;
+  published
+    property bytes: TBytes read FBytes write FBytes;
+  end;
+
+  // A nested property read through a getter, which cleanup must not
+  // call: it raises.
+  TProbeGetterNested = class(TMCPArgs)
+  private
+    FOpts: TCountedLimits;
+    function GetOpts: TCountedLimits;
+  published
+    property opts: TCountedLimits read GetOpts write FOpts;
+  end;
+
+  // Reads one field and writes another.
+  TProbeSplitNested = class(TMCPArgs)
+  private
+    FOpts: TCountedLimits;
+    FReplacement: TCountedLimits;
+  published
+    property opts: TCountedLimits read FOpts write FReplacement;
+  end;
+
+  TProbeSplitArray = class(TMCPArgs)
+  private
+    FTags: TStringArray;
+    FReplacement: TStringArray;
+  published
+    property tags: TStringArray read FTags write FReplacement;
+  end;
+
+  // Integer subranges, as elements and as a flat Int64 property.
+  TProbeWide = -100000..100000;
+  TProbeWide64 = -5000000000..5000000000;
+  TProbeWides = array of TProbeWide;
+  TProbeWide64s = array of TProbeWide64;
+
+  TProbeSubranges = class(TMCPArgs)
+  private
+    FWides: TProbeWides;
+    FWide64s: TProbeWide64s;
+    FWide64: TProbeWide64;
+  published
+    property wides: TProbeWides read FWides write FWides;
+    property wide64s: TProbeWide64s read FWide64s write FWide64s;
+    property wide64: TProbeWide64 read FWide64 write FWide64;
+  end;
 
   TProbeArgs = class(TMCPArgs)
   private
@@ -96,6 +239,61 @@ type
   end;
 
   // MCPWireNumber: the number text the wire carries.
+  TNestedSchemas = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestFluentEnumArrayObject;
+    procedure TestWithDefault;
+    procedure TestBuilderGuards;
+    procedure TestSchemaFromNestedClass;
+    procedure TestUnsupportedArrayElement;
+    procedure TestBindNestedAndArrays;
+    procedure TestBindErrorsNamePaths;
+    procedure TestSerializeRoundTrip;
+    procedure TestUnsafeArrayAccessRefused;
+    procedure TestNestedOwnership;
+    procedure TestCleanupOfAliasesAndAccessors;
+    procedure TestSplitFieldsRefused;
+    procedure TestIntegerSubranges;
+    procedure TestNullNestedAndIntegralFloats;
+    procedure TestDefaultsFitTheirProperty;
+  end;
+
+  // #91: the enforced subset, recursive, and value validation against
+  // it. Messages asserted byte-exact, non-ASCII names included.
+  TSubsetSchemas = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestAcceptedSchemas;
+    procedure TestRejectedKeywords;
+    procedure TestObjectRootRequired;
+    procedure TestTypes;
+    procedure TestNestedPathsInMessages;
+    procedure TestArrayItems;
+    procedure TestEnumsOfAnyPrimitive;
+    procedure TestDefaultsSeededOnlyWhenAsked;
+    procedure TestRootValueMessages;
+    procedure TestIntegralFloats;
+    procedure TestExactNumericEnums;
+    procedure TestDeclaredDialect;
+    procedure TestBuiltValues;
+    procedure TestKeywordShapes;
+    procedure TestOnlyConformingDefaultsSeeded;
+    procedure TestUnconstrainedNonFiniteRefused;
+    procedure TestLargeIntegralFloatsInEnums;
+    procedure TestEnumEntriesOfOtherTypes;
+  end;
+
+  // #90: x-mcp-header annotations and their constraints.
+  THeaderAnnotations = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestValidAnnotations;
+    procedure TestNoAnnotations;
+    procedure TestRejected;
+    procedure TestDataIsNotAnnotation;
+  end;
+
   TWireNumber = class(TTestSuite)
   public
     procedure SetupTests; override;
@@ -647,10 +845,1137 @@ begin
     TestAssignedFloatNodeStaysValid);
 end;
 
+{ ───────── the enforced subset (#91) ───────── }
+
+function ObjectOf(const AJson: string): TJSONObject;
+begin
+  Result := TJSONObject(GetJSON(AJson));
+end;
+
+function Violation(const ASchema: string; AObjectRoot: Boolean = False): string;
+var
+  Schema: TJSONObject;
+begin
+  Schema := ObjectOf(ASchema);
+  try
+    Result := MCPSchemaSubsetViolation(Schema, AObjectRoot);
+  finally
+    Schema.Free;
+  end;
+end;
+
+// '' when AValue conforms to ASchema, else the error.
+function Check(const ASchema, AValue: string; const AKind: string = 'argument';
+  ASeed: Boolean = False): string;
+var
+  Schema: TJSONObject;
+  Value: TJSONData;
+begin
+  Schema := ObjectOf(ASchema);
+  Value := GetJSON(AValue);
+  try
+    if MCPValidateAgainstSchema(Schema, Value, AKind, ASeed, Result) then
+      Result := '';
+  finally
+    Value.Free;
+    Schema.Free;
+  end;
+end;
+
+procedure TSubsetSchemas.TestAcceptedSchemas;
+begin
+  Expect<string>(Violation('{"$schema":"https://json-schema.org/draft/2020-12/schema",' +
+    '"type":"object","title":"t","description":"d","properties":{' +
+    '"a":{"type":"array","items":{"type":"object","properties":{' +
+    '"b":{"type":"integer","enum":[1,2],"default":1}},"required":["b"]}},' +
+    '"n":{"type":"null"}},"required":["a"]}')).ToBe('');
+  Expect<string>(Violation('{"type":"array","items":{"type":"string"}}')).ToBe('');
+  Expect<string>(Violation('{"type":"boolean"}')).ToBe('');
+end;
+
+procedure TSubsetSchemas.TestRejectedKeywords;
+begin
+  Expect<string>(Violation('{"type":"object","properties":{"a":{"type":"string",' +
+    '"format":"uri"}}}')).ToBe('property "a" uses unsupported keyword "format"');
+  Expect<string>(Violation('{"type":"object","properties":{"x":{"type":"array",' +
+    '"items":{"type":"object","properties":{"y":{"$ref":"#"}}}}}}'))
+    .ToBe('property "x[].y" needs a single "type"');
+  Expect<string>(Violation('{"type":["string","null"]}')).ToBe('needs a single "type"');
+  Expect<string>(Violation('{"type":"date"}')).ToBe('has unsupported type "date"');
+  Expect<string>(Violation('{"type":"object","properties":{"a":{"type":"string"}},' +
+    '"additionalProperties":false}')).ToBe('uses unsupported keyword "additionalProperties"');
+  // Keywords belong to their type: items on a string, enum on an object.
+  Expect<string>(Violation('{"type":"string","items":{"type":"string"}}'))
+    .ToBe('uses unsupported keyword "items"');
+  Expect<string>(Violation('{"type":"object","enum":[1]}'))
+    .ToBe('uses unsupported keyword "enum"');
+  Expect<string>(Violation('{"type":"object","properties":{"a":{"type":"string",' +
+    '"default":{}}}}')).ToBe('property "a" default must be a primitive');
+  Expect<string>(Violation('{"type":"object","properties":{"z":{"type":"string",' +
+    '"$schema":"x"}}}')).ToBe('property "z" uses unsupported keyword "$schema"');
+end;
+
+procedure TSubsetSchemas.TestObjectRootRequired;
+begin
+  Expect<string>(Violation('{"type":"array","items":{"type":"string"}}', True))
+    .ToBe('must have root type "object"');
+  Expect<string>(Violation('{"type":"object"}', True)).ToBe('');
+end;
+
+procedure TSubsetSchemas.TestTypes;
+begin
+  Expect<string>(Check('{"type":"integer"}', '2')).ToBe('');
+  Expect<string>(Check('{"type":"integer"}', '2.5')).ToBe('Argument must be an integer');
+  Expect<string>(Check('{"type":"number"}', '2')).ToBe('');
+  Expect<string>(Check('{"type":"string"}', '2')).ToBe('Argument must be a string');
+  Expect<string>(Check('{"type":"boolean"}', 'null')).ToBe('Argument must be a boolean');
+  Expect<string>(Check('{"type":"null"}', 'null')).ToBe('');
+  Expect<string>(Check('{"type":"object"}', '[]')).ToBe('Argument must be an object');
+  Expect<string>(Check('{"type":"array"}', '{}')).ToBe('Argument must be an array');
+end;
+
+procedure TSubsetSchemas.TestNestedPathsInMessages;
+const
+  NAME = 'gr' + #$C3#$B6 + #$C3#$9F + 'e';
+begin
+  Expect<string>(Check('{"type":"object","properties":{"' + NAME +
+    '":{"type":"object","properties":{"w":{"type":"number"}},"required":["w"]}}}',
+    '{"' + NAME + '":{}}')).ToBe('Missing required argument "' + NAME + '.w"');
+  Expect<string>(Check('{"type":"object","properties":{"' + NAME +
+    '":{"type":"object","properties":{"w":{"type":"number"}}}}}',
+    '{"' + NAME + '":{"w":"x"}}', 'structured output'))
+    .ToBe('Structured output "' + NAME + '.w" must be a number');
+end;
+
+procedure TSubsetSchemas.TestArrayItems;
+begin
+  Expect<string>(Check('{"type":"array","items":{"type":"object",' +
+    '"properties":{"id":{"type":"string"}},"required":["id"]}}',
+    '[{"id":"1"},{"id":2}]', 'structured output'))
+    .ToBe('Structured output "[1].id" must be a string');
+  Expect<string>(Check('{"type":"array","items":{"type":"integer"}}', '[1,2,3]'))
+    .ToBe('');
+end;
+
+procedure TSubsetSchemas.TestEnumsOfAnyPrimitive;
+begin
+  Expect<string>(Check('{"type":"string","enum":["a","b"]}', '"c"'))
+    .ToBe('Argument must be a string from the declared enum values');
+  Expect<string>(Check('{"type":"integer","enum":[1,3]}', '3')).ToBe('');
+  Expect<string>(Check('{"type":"integer","enum":[1,3]}', '2'))
+    .ToBe('Argument must be an integer from the declared enum values');
+  Expect<string>(Check('{"type":"boolean","enum":[true]}', 'false'))
+    .ToBe('Argument must be a boolean from the declared enum values');
+end;
+
+procedure TSubsetSchemas.TestDefaultsSeededOnlyWhenAsked;
+var
+  Schema, Value: TJSONObject;
+  Error: string;
+begin
+  Schema := ObjectOf('{"type":"object","properties":{"o":{"type":"object",' +
+    '"properties":{"n":{"type":"integer","default":7}}}}}');
+  Value := ObjectOf('{"o":{}}');
+  try
+    Expect<Boolean>(MCPValidateAgainstSchema(Schema, Value, 'argument', False,
+      Error)).ToBe(True);
+    Expect<Boolean>(Value.FindPath('o.n') = nil).ToBe(True);
+    Expect<Boolean>(MCPValidateAgainstSchema(Schema, Value, 'argument', True,
+      Error)).ToBe(True);
+    Expect<Integer>(TJSONData(Value.FindPath('o.n')).AsInteger).ToBe(7);
+  finally
+    Value.Free;
+    Schema.Free;
+  end;
+end;
+
+procedure TSubsetSchemas.TestRootValueMessages;
+begin
+  Expect<string>(Check('{"type":"array"}', '"x"', 'structured output'))
+    .ToBe('Structured output must be an array');
+  Expect<string>(Check('{"type":"object","required":["a"]}', '{}',
+    'structured output')).ToBe('Missing required structured output "a"');
+end;
+
+// JSON Schema 2020-12 validation §6.1.1 (verified 2026-11-27,
+// https://json-schema.org/draft/2020-12/json-schema-validation#name-type):
+// an integer is any number with a zero fractional part.
+procedure TSubsetSchemas.TestIntegralFloats;
+begin
+  Expect<string>(Check('{"type":"integer"}', '2.0')).ToBe('');
+  Expect<string>(Check('{"type":"integer"}', '2e0')).ToBe('');
+  Expect<string>(Check('{"type":"integer"}', '-0.0')).ToBe('');
+  Expect<string>(Check('{"type":"integer"}', '2.000001'))
+    .ToBe('Argument must be an integer');
+  // Past 2^53 a float cannot be known to be integral.
+  Expect<string>(Check('{"type":"integer"}', '1e300'))
+    .ToBe('Argument must be an integer');
+end;
+
+procedure TSubsetSchemas.TestExactNumericEnums;
+begin
+  // 2^53 and 2^53 + 1 are the same double but different integers.
+  Expect<Boolean>(Check('{"type":"integer","enum":[9007199254740992]}',
+    '9007199254740993') <> '').ToBe(True);
+  Expect<string>(Check('{"type":"integer","enum":[9007199254740993]}',
+    '9007199254740993')).ToBe('');
+  Expect<Boolean>(Check('{"type":"integer","enum":[18446744073709551615]}',
+    '-1') <> '').ToBe(True);
+  Expect<string>(Check('{"type":"integer","enum":[18446744073709551615]}',
+    '18446744073709551615')).ToBe('');
+  // An integral float equals the integer it spells.
+  Expect<string>(Check('{"type":"number","enum":[1]}', '1.0')).ToBe('');
+  Expect<string>(Check('{"type":"number","enum":[1.5]}', '1.5')).ToBe('');
+  Expect<Boolean>(Check('{"type":"number","enum":[1]}', '1.5') <> '')
+    .ToBe(True);
+end;
+
+// A schema declaring another dialect is not enforced by 2020-12 rules
+// (verified 2026-11-27 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic#json-schema-usage).
+procedure TSubsetSchemas.TestDeclaredDialect;
+begin
+  Expect<string>(Violation(
+    '{"$schema":"https://json-schema.org/draft/2020-12/schema#","type":"string"}'))
+    .ToBe('');
+  Expect<string>(Violation(
+    '{"$schema":"http://json-schema.org/draft-07/schema#","type":"string"}'))
+    .ToBe('declares $schema other than JSON Schema 2020-12');
+  Expect<string>(Violation('{"$schema":7,"type":"string"}'))
+    .ToBe('declares $schema other than JSON Schema 2020-12');
+end;
+
+// '' when the built AValue (consumed) conforms to ASchema, else the
+// error. Built values reach shapes parsing never produces: QWord nodes
+// for small values, nil members and items, non-finite floats.
+function CheckBuilt(const ASchema: string; AValue: TJSONData): string;
+var
+  Schema: TJSONObject;
+begin
+  Schema := ObjectOf(ASchema);
+  try
+    if MCPValidateAgainstSchema(Schema, AValue, 'structured output', False,
+      Result) then
+      Result := '';
+  finally
+    AValue.Free;
+    Schema.Free;
+  end;
+end;
+
+function WithNilMember(const AName: string): TJSONObject;
+begin
+  Result := TJSONObject.Create;
+  Result.Add(AName, TJSONData(nil));
+end;
+
+function NilItemArray: TJSONArray;
+begin
+  Result := TJSONArray.Create;
+  Result.Add(TJSONData(nil));
+end;
+
+procedure TSubsetSchemas.TestBuiltValues;
+begin
+  // A small value in a QWord node equals the integral float 2.0.
+  Expect<string>(CheckBuilt('{"type":"integer","enum":[2.0]}',
+    TJSONQWordNumber.Create(2))).ToBe('');
+  Expect<Boolean>(CheckBuilt('{"type":"integer","enum":[3.0]}',
+    TJSONQWordNumber.Create(2)) <> '').ToBe(True);
+  // A nil member is a present null, not an absent one.
+  Expect<string>(CheckBuilt('{"type":"object","properties":{"a":{"type":' +
+    '"null"}},"required":["a"]}', WithNilMember('a'))).ToBe('');
+  Expect<string>(CheckBuilt('{"type":"object","properties":{"a":{"type":' +
+    '"string"}}}', WithNilMember('a')))
+    .ToBe('Structured output "a" must be a string');
+  // A nil item is null: checked, not dereferenced.
+  Expect<string>(CheckBuilt('{"type":"array","items":{"type":"null"}}',
+    NilItemArray)).ToBe('');
+  Expect<string>(CheckBuilt('{"type":"array","items":{"type":"string"}}',
+    NilItemArray)).ToBe('Structured output "[0]" must be a string');
+  // NaN and infinities have no JSON form.
+  Expect<string>(CheckBuilt('{"type":"number"}',
+    TJSONFloatNumber.Create(NaN))).ToBe('Structured output must be a number');
+  Expect<string>(CheckBuilt('{"type":"number"}',
+    TJSONFloatNumber.Create(Infinity))).ToBe('Structured output must be a number');
+end;
+
+procedure TSubsetSchemas.TestKeywordShapes;
+begin
+  Expect<string>(Violation('{"type":"object","required":[7]}'))
+    .ToBe('required must list property names');
+  Expect<string>(Violation('{"type":"string","title":7}'))
+    .ToBe('title must be a string');
+  Expect<string>(Violation('{"type":"object","properties":{"a":{"type":' +
+    '"string","description":true}}}'))
+    .ToBe('property "a" description must be a string');
+end;
+
+// A default that breaks its own schema is not seeded: omitting the
+// property stays valid, and the handler never sees the bad value.
+procedure TSubsetSchemas.TestOnlyConformingDefaultsSeeded;
+var
+  Schema, Value: TJSONObject;
+  Error: string;
+begin
+  Schema := ObjectOf('{"type":"object","properties":{' +
+    '"a":{"type":"string","default":null},' +
+    '"b":{"type":"string","enum":["x"],"default":"y"},' +
+    '"c":{"type":"string","default":"ok"}}}');
+  Value := ObjectOf('{}');
+  try
+    Expect<Boolean>(MCPValidateAgainstSchema(Schema, Value, 'argument', True,
+      Error)).ToBe(True);
+    Expect<string>(Value.AsJSON).ToBe('{ "c" : "ok" }');
+  finally
+    Value.Free;
+    Schema.Free;
+  end;
+end;
+
+function NaNInArray: TJSONArray;
+begin
+  Result := TJSONArray.Create;
+  Result.Add(TJSONFloatNumber.Create(NaN));
+end;
+
+procedure TSubsetSchemas.TestUnconstrainedNonFiniteRefused;
+var
+  Obj: TJSONObject;
+begin
+  // No "items" and no named property constrain these, yet NaN has no
+  // JSON form.
+  Expect<string>(CheckBuilt('{"type":"array"}', NaNInArray))
+    .ToBe('Structured output contains a NaN or infinite number');
+  Obj := TJSONObject.Create;
+  Obj.Add('x', TJSONFloatNumber.Create(Infinity));
+  Expect<string>(CheckBuilt('{"type":"object"}', Obj))
+    .ToBe('Structured output contains a NaN or infinite number');
+end;
+
+// An integral double is an exact integer past 2^53 too.
+procedure TSubsetSchemas.TestLargeIntegralFloatsInEnums;
+begin
+  Expect<string>(CheckBuilt('{"type":"number","enum":[10000000000000000]}',
+    TJSONFloatNumber.Create(1e16))).ToBe('');
+  Expect<Boolean>(CheckBuilt(
+    '{"type":"number","enum":[10000000000000001]}',
+    TJSONFloatNumber.Create(1e16)) <> '').ToBe(True);
+  // 2^64 - 2048, the largest double below 2^64, against a QWord node.
+  Expect<string>(CheckBuilt(
+    '{"type":"number","enum":[18446744073709549568]}',
+    TJSONFloatNumber.Create(18446744073709549568.0))).ToBe('');
+  Expect<Boolean>(CheckBuilt(
+    '{"type":"number","enum":[18446744073709549569]}',
+    TJSONFloatNumber.Create(18446744073709549568.0)) <> '').ToBe(True);
+end;
+
+// Accepted before #91: entries of another type simply never match.
+procedure TSubsetSchemas.TestEnumEntriesOfOtherTypes;
+begin
+  Expect<string>(Violation('{"type":"string","enum":[{},"ok"]}')).ToBe('');
+  Expect<string>(Check('{"type":"string","enum":[{},"ok"]}', '"ok"')).ToBe('');
+  Expect<string>(Check('{"type":"string","enum":[{},"ok"]}', '{}'))
+    .ToBe('Argument must be a string');
+end;
+
+procedure TSubsetSchemas.SetupTests;
+begin
+  Test('nested objects, arrays, enums, defaults and null accepted',
+    TestAcceptedSchemas);
+  Test('keywords outside the subset named with their path',
+    TestRejectedKeywords);
+  Test('input schemas need an object root', TestObjectRootRequired);
+  Test('each type checked; integer means an integral number', TestTypes);
+  Test('nested paths in messages, non-ASCII byte-exact',
+    TestNestedPathsInMessages);
+  Test('array items checked with their index', TestArrayItems);
+  Test('enums of strings, integers and booleans', TestEnumsOfAnyPrimitive);
+  Test('defaults seeded into nested objects only when asked',
+    TestDefaultsSeededOnlyWhenAsked);
+  Test('root-level messages for output values', TestRootValueMessages);
+  Test('integral floats are integers; fractions and huge floats are not',
+    TestIntegralFloats);
+  Test('numeric enums compare exactly, integers without rounding',
+    TestExactNumericEnums);
+  Test('only a 2020-12 $schema is inside the subset', TestDeclaredDialect);
+  Test('built values: small QWords, nil members and items, non-finite',
+    TestBuiltValues);
+  Test('required names, title and description need their shapes',
+    TestKeywordShapes);
+  Test('only defaults that conform are seeded',
+    TestOnlyConformingDefaultsSeeded);
+  Test('NaN or infinity anywhere in a value is refused',
+    TestUnconstrainedNonFiniteRefused);
+  Test('integral floats past 2^53 match the integers they hold',
+    TestLargeIntegralFloatsInEnums);
+  Test('enum entries of another type are allowed and never match',
+    TestEnumEntriesOfOtherTypes);
+end;
+
+{ ───────── x-mcp-header annotations (#90) ───────── }
+
+// Constraints verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
+
+function HeaderViolation(const ASchema: string): string;
+var
+  Schema: TJSONObject;
+  Params: TMCPHeaderParameters;
+begin
+  Schema := TJSONObject(GetJSON(ASchema));
+  try
+    Result := MCPHeaderParameters(Schema, Params);
+  finally
+    Schema.Free;
+  end;
+end;
+
+procedure THeaderAnnotations.TestValidAnnotations;
+var
+  Schema: TJSONObject;
+  Params: TMCPHeaderParameters;
+begin
+  Schema := TJSONObject(GetJSON('{"type":"object","properties":{' +
+    '"region":{"type":"string","x-mcp-header":"Region"},' +
+    '"opts":{"type":"object","properties":{"dry":{"type":"boolean",' +
+    '"x-mcp-header":"Dry-Run"},"n":{"type":"integer","x-mcp-header":"N"}}}}}'));
+  try
+    Expect<string>(MCPHeaderParameters(Schema, Params)).ToBe('');
+    Expect<Integer>(Length(Params)).ToBe(3);
+    Expect<string>(Params[0].Header).ToBe('Region');
+    Expect<string>(Params[1].Header).ToBe('Dry-Run');
+    Expect<string>(Params[1].Path[0] + '.' + Params[1].Path[1]).ToBe('opts.dry');
+    Expect<string>(Params[2].ParamType).ToBe('integer');
+  finally
+    Schema.Free;
+  end;
+end;
+
+procedure THeaderAnnotations.TestNoAnnotations;
+begin
+  Expect<string>(HeaderViolation('{"type":"object","properties":' +
+    '{"a":{"type":"string"}}}')).ToBe('');
+end;
+
+procedure THeaderAnnotations.TestRejected;
+begin
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"a":' +
+    '{"type":"string","x-mcp-header":""}}}'))
+    .ToBe('x-mcp-header of "a" must be a non-empty HTTP token');
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"a":' +
+    '{"type":"string","x-mcp-header":"Re gion"}}}'))
+    .ToBe('x-mcp-header of "a" must be a non-empty HTTP token');
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"a":' +
+    '{"type":"number","x-mcp-header":"A"}}}'))
+    .ToBe('x-mcp-header of "a" needs type string, integer or boolean, not "number"');
+  Expect<string>(HeaderViolation('{"type":"object","properties":{' +
+    '"a":{"type":"string","x-mcp-header":"Key"},' +
+    '"b":{"type":"string","x-mcp-header":"KEY"}}}'))
+    .ToBe('x-mcp-header "KEY" is used twice, at "a" and "b" (headers compare ' +
+    'case-insensitively)');
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"list":' +
+    '{"type":"array","items":{"type":"string","x-mcp-header":"Item"}}}}'))
+    .ToBe('x-mcp-header at "list.items" is not on a property reachable ' +
+    'through "properties" from the root');
+  Expect<string>(HeaderViolation('{"type":"object","anyOf":[{"properties":' +
+    '{"a":{"type":"string","x-mcp-header":"A"}}}]}'))
+    .ToBe('x-mcp-header at "anyOf[0].properties.a" is not on a property ' +
+    'reachable through "properties" from the root');
+  Expect<string>(HeaderViolation('{"type":"object","x-mcp-header":"Root"}'))
+    .ToBe('x-mcp-header at "" is not on a property reachable through ' +
+    '"properties" from the root');
+end;
+
+// Only subschemas can carry an annotation: an instance in examples or a
+// $defs entry merely named x-mcp-header is data (#90 review). Verified
+// 2026-11-27 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
+procedure THeaderAnnotations.TestDataIsNotAnnotation;
+var
+  Schema, Prop: TJSONObject;
+  Params: TMCPHeaderParameters;
+begin
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"a":' +
+    '{"type":"object","examples":[{"x-mcp-header":"x"}]}},' +
+    '"examples":[{"x-mcp-header":7}]}')).ToBe('');
+  Expect<string>(HeaderViolation('{"type":"object","$defs":{' +
+    '"x-mcp-header":{"type":"string"}}}')).ToBe('');
+  // The subset admits the annotation in input schemas only; in an
+  // output schema it is an unsupported keyword, so output stays
+  // unchecked as before.
+  Expect<string>(Violation('{"type":"object","properties":{"a":' +
+    '{"type":"string","x-mcp-header":"A"}}}', True)).ToBe('');
+  Expect<string>(Violation('{"type":"object","properties":{"a":' +
+    '{"type":"string","x-mcp-header":"A"}}}', False))
+    .ToBe('property "a" uses unsupported keyword "x-mcp-header"');
+  // contentSchema (2020-12) and draft-07 dependencies hold subschemas:
+  // an annotation there is out of place. A dependencies entry that
+  // lists property names is data.
+  Expect<string>(HeaderViolation('{"type":"object","properties":{"blob":' +
+    '{"type":"string","contentSchema":{"type":"object","properties":{' +
+    '"k":{"type":"string","x-mcp-header":"K"}}}}}}'))
+    .ToBe('x-mcp-header at "blob.contentSchema.properties.k" is not on a ' +
+    'property reachable through "properties" from the root');
+  Expect<string>(HeaderViolation('{"type":"object","dependencies":{"a":' +
+    '{"properties":{"b":{"type":"string","x-mcp-header":"B"}}}}}'))
+    .ToBe('x-mcp-header at "dependencies.a.properties.b" is not on a ' +
+    'property reachable through "properties" from the root');
+  Expect<string>(HeaderViolation('{"type":"object","dependencies":{"a":' +
+    '["b","x-mcp-header"]}}')).ToBe('');
+  // A literal key with a dot is quoted, so it differs from nesting.
+  Expect<string>(HeaderViolation('{"type":"object","properties":{' +
+    '"a.b":{"type":"string","x-mcp-header":"Key"},' +
+    '"a":{"type":"object","properties":{"b":{"type":"string",' +
+    '"x-mcp-header":"KEY"}}}}}'))
+    .ToBe('x-mcp-header "KEY" is used twice, at "["a.b"]" and "a.b" ' +
+    '(headers compare case-insensitively)');
+  // An annotation inside a $defs schema is still out of place.
+  Expect<string>(HeaderViolation('{"type":"object","$defs":{"d":' +
+    '{"type":"string","x-mcp-header":"D"}}}'))
+    .ToBe('x-mcp-header at "$defs.d" is not on a property reachable ' +
+    'through "properties" from the root');
+  // A nil child (programmatic schemas) is skipped, not dereferenced.
+  Prop := TJSONObject.Create;
+  Prop.Add('type', 'string');
+  Prop.Add('x-mcp-header', 'Region');
+  Schema := TJSONObject.Create;
+  try
+    Schema.Add('type', 'object');
+    Schema.Add('items', TJSONData(nil));
+    Schema.Add('properties', TJSONObject.Create(['region', Prop]));
+    Expect<string>(MCPHeaderParameters(Schema, Params)).ToBe('');
+    Expect<Integer>(Length(Params)).ToBe(1);
+  finally
+    Schema.Free;
+  end;
+end;
+
+procedure THeaderAnnotations.SetupTests;
+begin
+  Test('annotations along properties, nested, three types',
+    TestValidAnnotations);
+  Test('a schema without annotations has none', TestNoAnnotations);
+  Test('each constraint violation named', TestRejected);
+  Test('examples and $defs names are data, not annotations',
+    TestDataIsNotAnnotation);
+end;
+
+{ ───────── nested schemas and arrays (#95) ───────── }
+
+function Built(ASchema: TMCPSchema): string;
+var
+  Schema: TJSONObject;
+begin
+  Schema := ASchema.Build;
+  try
+    Result := Schema.AsJSON;
+  finally
+    Schema.Free;
+  end;
+end;
+
+procedure TNestedSchemas.TestFluentEnumArrayObject;
+begin
+  Expect<string>(Built(ObjectSchema
+    .AddEnum('mode', ['fast', 'b' + #$C3#$BC + 'ndig'], 'How')
+    .AddArray('tags', 'string')
+    .AddArray('points', ObjectSchema.AddNumber('x').AddNumber('y'))
+    .AddObject('opts', ObjectSchema.AddBoolean('dry', '', False), 'Options')))
+    .ToBe('{ "type" : "object", "properties" : { "mode" : { "type" : "string", ' +
+    '"enum" : ["fast", "b' + #$C3#$BC + 'ndig"], "description" : "How" }, ' +
+    '"tags" : { "type" : "array", "items" : { "type" : "string" } }, ' +
+    '"points" : { "type" : "array", "items" : { "type" : "object", ' +
+    '"properties" : { "x" : { "type" : "number" }, "y" : { "type" : "number" } }, ' +
+    '"required" : ["x", "y"] } }, "opts" : { "type" : "object", "properties" : ' +
+    '{ "dry" : { "type" : "boolean" } }, "description" : "Options" } }, ' +
+    '"required" : ["mode", "tags", "points", "opts"] }');
+end;
+
+procedure TNestedSchemas.TestWithDefault;
+begin
+  // A default makes the property optional.
+  Expect<string>(Built(ObjectSchema.AddString('a').AddInteger('n').WithDefault(3)
+    .AddNumber('r').WithDefault(0.5).AddBoolean('b').WithDefault(True)
+    .AddString('s').WithDefault('x')))
+    .ToBe('{ "type" : "object", "properties" : { "a" : { "type" : "string" }, ' +
+    '"n" : { "type" : "integer", "default" : 3 }, "r" : { "type" : "number", ' +
+    '"default" : 0.5 }, "b" : { "type" : "boolean", "default" : true }, ' +
+    '"s" : { "type" : "string", "default" : "x" } }, "required" : ["a"] }');
+end;
+
+var
+  CountedLive: Integer = 0;
+
+constructor TCountedLimits.Create;
+begin
+  inherited Create;
+  Inc(CountedLive);
+end;
+
+destructor TCountedLimits.Destroy;
+begin
+  Dec(CountedLive);
+  inherited Destroy;
+end;
+
+constructor TProbeOwned.Create;
+begin
+  inherited Create;
+  FOpts := TCountedLimits.Create;
+end;
+
+constructor TProbeShared.Create;
+begin
+  inherited Create;
+  FFirst := TCountedLimits.Create;
+  FSecond := FFirst;
+end;
+
+function TProbeGetterNested.GetOpts: TCountedLimits;
+begin
+  raise EInvalidOperation.Create('getter must not run');
+end;
+
+procedure TProbeRefusingSetter.SetOpts(AValue: TCountedLimits);
+begin
+  raise EMCPSchema.Create('setter refuses');
+end;
+
+function TProbeMethodArray.GetTags: TStringArray;
+begin
+  Result := Copy(FTags);
+end;
+
+
+procedure TNestedSchemas.TestBuilderGuards;
+var
+  Raised: Boolean;
+begin
+  Raised := False;
+  try
+    ObjectSchema.WithDefault('x').Build.Free;
+  except
+    on E: EMCPSchema do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  Raised := False;
+  try
+    ObjectSchema.AddArray('a', 'date').Build.Free;
+  except
+    on E: EMCPSchema do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  Raised := False;
+  try
+    ObjectSchema.AddEnum('e', []).Build.Free;
+  except
+    on E: EMCPSchema do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+end;
+
+procedure TNestedSchemas.TestSchemaFromNestedClass;
+begin
+  Expect<string>(Built(SchemaFrom(TProbeNested)))
+    .ToBe('{ "type" : "object", "properties" : { "name" : { "type" : "string" }, ' +
+    '"opts" : { "type" : "object", "properties" : { "limit" : { "type" : ' +
+    '"integer" }, "tags" : { "type" : "array", "items" : { "type" : "string" } } }, ' +
+    '"required" : ["limit", "tags"] }, "scores" : { "type" : "array", "items" : ' +
+    '{ "type" : "number" } }, "flags" : { "type" : "array", "items" : { "type" : ' +
+    '"boolean" } }, "counts" : { "type" : "array", "items" : { "type" : ' +
+    '"integer" } }, "extra" : { "type" : "object", "properties" : { "limit" : ' +
+    '{ "type" : "integer" }, "tags" : { "type" : "array", "items" : { "type" : ' +
+    '"string" } } }, "required" : ["limit", "tags"] } }, "required" : ["name", ' +
+    '"opts", "scores", "flags", "counts"] }');
+end;
+
+procedure TNestedSchemas.TestUnsupportedArrayElement;
+var
+  Message: string;
+begin
+  Message := '';
+  try
+    SchemaFrom(TProbeBadArray).Build.Free;
+  except
+    on E: EMCPSchema do
+      Message := E.Message;
+  end;
+  Expect<Boolean>(Pos('Array property "bytes"', Message) = 1).ToBe(True);
+end;
+
+function BindJson(AClass: TMCPArgsClass; const AJson: string;
+  out AInstance: TMCPArgs): string;
+var
+  Arguments: TJSONObject;
+begin
+  Arguments := TJSONObject(GetJSON(AJson));
+  try
+    if MCPBindArguments(AClass, Arguments, AInstance, Result) then
+      Result := '';
+  finally
+    Arguments.Free;
+  end;
+end;
+
+procedure TNestedSchemas.TestBindNestedAndArrays;
+var
+  Instance: TMCPArgs;
+  Probe: TProbeNested;
+begin
+  Expect<string>(BindJson(TProbeNested, '{"name":"größ",' +
+    '"opts":{"limit":7,"tags":["a","é"]},"scores":[0.5,2],' +
+    '"flags":[true,false],"counts":[9007199254740993]}', Instance)).ToBe('');
+  Probe := Instance as TProbeNested;
+  try
+    Expect<string>(Probe.name).ToBe('gr' + #$C3#$B6 + #$C3#$9F);
+    Expect<Integer>(Probe.opts.limit).ToBe(7);
+    Expect<string>(Probe.opts.tags[1]).ToBe(#$C3#$A9);
+    Expect<Integer>(Length(Probe.scores)).ToBe(2);
+    Expect<Boolean>(Probe.flags[1]).ToBe(False);
+    Expect<Boolean>(Probe.counts[0] = 9007199254740993).ToBe(True);
+    // Optional nested object, absent: nil.
+    Expect<Boolean>(Probe.extra = nil).ToBe(True);
+  finally
+    Instance.Free;
+  end;
+end;
+
+procedure TNestedSchemas.TestBindErrorsNamePaths;
+var
+  Instance: TMCPArgs;
+const
+  BASE = '"name":"n","scores":[],"flags":[],"counts":[]';
+begin
+  Expect<string>(BindJson(TProbeNested, '{' + BASE + ',"opts":{"tags":[]}}',
+    Instance)).ToBe('Missing required argument "opts.limit"');
+  Expect<string>(BindJson(TProbeNested, '{' + BASE +
+    ',"opts":{"limit":"x","tags":[]}}', Instance))
+    .ToBe('Argument "opts.limit" must be an integer');
+  Expect<string>(BindJson(TProbeNested, '{' + BASE +
+    ',"opts":{"limit":1,"tags":["a",2]}}', Instance))
+    .ToBe('Argument "opts.tags[1]" must be a string');
+  Expect<string>(BindJson(TProbeNested, '{' + BASE + ',"opts":[]}', Instance))
+    .ToBe('Argument "opts" must be an object');
+  Expect<string>(BindJson(TProbeNested, '{"name":"n","opts":{"limit":1,' +
+    '"tags":[]},"scores":"x","flags":[],"counts":[]}', Instance))
+    .ToBe('Argument "scores" must be an array');
+  Expect<string>(BindJson(TProbeNested, '{"name":"n","opts":{"limit":1,' +
+    '"tags":[]},"scores":[],"flags":[],"counts":[1.5]}', Instance))
+    .ToBe('Argument "counts[0]" must be an integer');
+  Expect<Boolean>(Instance = nil).ToBe(True);
+end;
+
+procedure TNestedSchemas.TestSerializeRoundTrip;
+var
+  Instance: TMCPArgs;
+  Serialized: TJSONObject;
+begin
+  // \u escapes keep the source ASCII; the nested string carries a two-
+  // and a three-byte sequence. They are not adjacent: GetJSON here is
+  // fpjson's own scanner, which garbles adjacent escapes (FPC 3.2.2;
+  // the library's parser works around it).
+  Expect<string>(BindJson(TProbeNested, '{"name":"n","opts":{"limit":7,' +
+    '"tags":["\u00e9-\u4e16"]},"scores":[0.25],"flags":[true],"counts":[3]}',
+    Instance)).ToBe('');
+  Serialized := MCPSerialize(Instance);
+  try
+    Expect<string>(Serialized.AsJSON).ToBe('{ "name" : "n", "opts" : ' +
+      '{ "limit" : 7, "tags" : ["' + #$C3#$A9 + '-' + #$E4#$B8#$96 + '"] }, ' +
+      '"scores" : [0.25], "flags" : [true], "counts" : [3] }');
+  finally
+    Serialized.Free;
+    Instance.Free;
+  end;
+end;
+
+function Raises(AProc: TProcedure): Boolean;
+begin
+  Result := False;
+  try
+    AProc();
+  except
+    on E: EMCPSchema do
+      Result := True;
+  end;
+end;
+
+procedure SchemaOfMethodArray;
+begin
+  SchemaFrom(TProbeMethodArray).Build.Free;
+end;
+
+procedure SerializeMethodArray;
+var
+  Probe: TProbeMethodArray;
+begin
+  Probe := TProbeMethodArray.Create;
+  try
+    MCPSerialize(Probe).Free;
+  finally
+    Probe.Free;
+  end;
+end;
+
+procedure SerializeBadArray;
+var
+  Probe: TProbeBadArray;
+begin
+  Probe := TProbeBadArray.Create;
+  try
+    Probe.bytes := TBytes.Create(1, 2, 3);
+    MCPSerialize(Probe).Free;
+  finally
+    Probe.Free;
+  end;
+end;
+
+procedure BindBadArray;
+var
+  Instance: TMCPArgs;
+begin
+  BindJson(TProbeBadArray, '{"bytes":[1]}', Instance);
+  Instance.Free;
+end;
+
+procedure SerializeForeignObject;
+var
+  Probe: TProbeForeignObject;
+begin
+  Probe := TProbeForeignObject.Create;
+  try
+    MCPSerialize(Probe).Free;
+  finally
+    Probe.Free;
+  end;
+end;
+
+procedure BindSetterBacked;
+var
+  Instance: TMCPArgs;
+begin
+  BindJson(TProbeRefusingSetter, '{"opts":{"limit":2,"tags":[]}}', Instance);
+  Instance.Free;
+end;
+
+procedure BindForeignObject;
+var
+  Instance: TMCPArgs;
+begin
+  BindJson(TProbeForeignObject, '{"list":{}}', Instance);
+  Instance.Free;
+end;
+
+// An array read through a method, or with no element mapping, is
+// refused at every use instead of reading released or foreign memory;
+// so is a class property that is no TMCPArgs (#95 review).
+procedure TNestedSchemas.TestUnsafeArrayAccessRefused;
+begin
+  Expect<Boolean>(Raises(SchemaOfMethodArray)).ToBe(True);
+  Expect<Boolean>(Raises(SerializeMethodArray)).ToBe(True);
+  Expect<Boolean>(Raises(SerializeBadArray)).ToBe(True);
+  Expect<Boolean>(Raises(BindBadArray)).ToBe(True);
+  Expect<Boolean>(Raises(BindForeignObject)).ToBe(True);
+  // Serialization checks the class too, instead of leaving it out.
+  Expect<Boolean>(Raises(SerializeForeignObject)).ToBe(True);
+  // A nested object behind a setter method is refused like an array.
+  Expect<Boolean>(Raises(BindSetterBacked)).ToBe(True);
+end;
+
+// The bound child replaces the one the constructor made, which is
+// freed; a setter that raises does not strand the new child.
+procedure TNestedSchemas.TestNestedOwnership;
+var
+  Instance: TMCPArgs;
+  Before: Integer;
+begin
+  Before := CountedLive;
+  Expect<string>(BindJson(TProbeOwned, '{"opts":{"limit":2,"tags":[]}}',
+    Instance)).ToBe('');
+  Expect<Integer>(CountedLive).ToBe(Before + 1);
+  Expect<Integer>(TProbeOwned(Instance).opts.limit).ToBe(2);
+  Instance.Free;
+  Expect<Integer>(CountedLive).ToBe(Before);
+  // A child two properties hold: kept while the other holds it, and
+  // freed once at the end.
+  Expect<string>(BindJson(TProbeShared, '{"first":{"limit":3,"tags":[]}}',
+    Instance)).ToBe('');
+  Expect<Integer>(TProbeShared(Instance).first.limit).ToBe(3);
+  Expect<Integer>(TProbeShared(Instance).second.limit).ToBe(0);
+  Instance.Free;
+  Expect<Integer>(CountedLive).ToBe(Before);
+end;
+
+procedure FreeIntactAliases;
+begin
+  TProbeShared.Create.Free;
+end;
+
+procedure SchemaOfShared;
+begin
+  SchemaFrom(TProbeShared).Build.Free;
+end;
+
+procedure SchemaOfGetterNested;
+begin
+  SchemaFrom(TProbeGetterNested).Build.Free;
+end;
+
+// Two properties holding one child, never rebound, free it once and
+// read nothing of it after; a getter-backed nested property is
+// neither read nor freed by cleanup, so its own refusal stands (#95
+// review).
+procedure TNestedSchemas.TestCleanupOfAliasesAndAccessors;
+var
+  Before: Integer;
+begin
+  Before := CountedLive;
+  Expect<Boolean>(Raises(FreeIntactAliases)).ToBe(False);
+  Expect<Integer>(CountedLive).ToBe(Before);
+  Expect<Boolean>(Raises(SchemaOfShared)).ToBe(False);
+  Expect<Integer>(CountedLive).ToBe(Before);
+  // Raises passes on anything but EMCPSchema, so the getter's
+  // EInvalidOperation would fail this test.
+  Expect<Boolean>(Raises(SchemaOfGetterNested)).ToBe(True);
+end;
+
+procedure SchemaOfSplitNested;
+begin
+  SchemaFrom(TProbeSplitNested).Build.Free;
+end;
+
+procedure BindSplitNested;
+var
+  Instance: TMCPArgs;
+begin
+  BindJson(TProbeSplitNested, '{"opts":{"limit":2,"tags":[]}}', Instance);
+  Instance.Free;
+end;
+
+procedure SchemaOfSplitArray;
+begin
+  SchemaFrom(TProbeSplitArray).Build.Free;
+end;
+
+procedure BindSplitArray;
+var
+  Instance: TMCPArgs;
+begin
+  BindJson(TProbeSplitArray, '{"tags":["a"]}', Instance);
+  Instance.Free;
+end;
+
+procedure SerializeSplitArray;
+var
+  Probe: TProbeSplitArray;
+begin
+  Probe := TProbeSplitArray.Create;
+  try
+    MCPSerialize(Probe).Free;
+  finally
+    Probe.Free;
+  end;
+end;
+
+// A property that writes another field than it reads would hand the
+// handler the old value, so every use refuses it (#95 review).
+procedure TNestedSchemas.TestSplitFieldsRefused;
+begin
+  Expect<Boolean>(Raises(SchemaOfSplitNested)).ToBe(True);
+  Expect<Boolean>(Raises(BindSplitNested)).ToBe(True);
+  Expect<Boolean>(Raises(SchemaOfSplitArray)).ToBe(True);
+  Expect<Boolean>(Raises(BindSplitArray)).ToBe(True);
+  Expect<Boolean>(Raises(SerializeSplitArray)).ToBe(True);
+end;
+
+// Elements of a subrange type bind only inside it, as a flat integer
+// property does; so does a flat Int64 subrange (#95 review).
+procedure TNestedSchemas.TestIntegerSubranges;
+var
+  Instance: TMCPArgs;
+const
+  REST = '"wide64s":[],"wide64":0}';
+begin
+  Expect<string>(BindJson(TProbeSubranges, '{"wides":[-100000,100000],' +
+    REST, Instance)).ToBe('');
+  Expect<Integer>(TProbeSubranges(Instance).wides[1]).ToBe(100000);
+  Instance.Free;
+  Expect<string>(BindJson(TProbeSubranges, '{"wides":[0,100001],' + REST,
+    Instance)).ToBe('Argument "wides[1]" must be an integer');
+  Expect<string>(BindJson(TProbeSubranges, '{"wides":[-100001],' + REST,
+    Instance)).ToBe('Argument "wides[0]" must be an integer');
+  Expect<string>(BindJson(TProbeSubranges, '{"wides":[],' +
+    '"wide64s":[5000000000],"wide64":-5000000000}', Instance)).ToBe('');
+  Expect<Boolean>(TProbeSubranges(Instance).wide64s[0] = 5000000000)
+    .ToBe(True);
+  Instance.Free;
+  Expect<string>(BindJson(TProbeSubranges, '{"wides":[],' +
+    '"wide64s":[5000000001],"wide64":0}', Instance))
+    .ToBe('Argument "wide64s[0]" must be an integer');
+  Expect<string>(BindJson(TProbeSubranges, '{"wides":[],' +
+    '"wide64s":[],"wide64":-5000000001}', Instance))
+    .ToBe('Argument "wide64" must be an integer');
+end;
+
+// Binds AArguments (consumed) to AClass; '' on success, else the error.
+function BindBuilt(AClass: TMCPArgsClass; AArguments: TJSONObject): string;
+var
+  Instance: TMCPArgs;
+begin
+  try
+    if MCPBindArguments(AClass, AArguments, Instance, Result) then
+    begin
+      Result := '';
+      Instance.Free;
+    end;
+  finally
+    AArguments.Free;
+  end;
+end;
+
+function BuiltNested: TJSONObject;
+begin
+  Result := TJSONObject(GetJSON('{"name":"n","scores":[],"flags":[],' +
+    '"counts":[],"opts":{"limit":1,"tags":[]}}'));
+end;
+
+function BuiltWithNilExtra: TJSONObject;
+begin
+  Result := BuiltNested;
+  Result.Add('extra', TJSONData(nil));
+end;
+
+function BuiltWithNilTag: TJSONObject;
+var
+  Tags: TJSONArray;
+begin
+  Tags := TJSONArray.Create;
+  Tags.Add(TJSONData(nil));
+  Result := TJSONObject.Create;
+  Result.Add('limit', 1);
+  Result.Add('tags', Tags);
+end;
+
+function BuiltWithNaNScore: TJSONObject;
+begin
+  Result := BuiltNested;
+  TJSONArray(Result.Find('scores')).Add(TJSONFloatNumber.Create(NaN));
+end;
+
+procedure TNestedSchemas.TestNullNestedAndIntegralFloats;
+var
+  Instance: TMCPArgs;
+const
+  BASE = '"name":"n","scores":[],"flags":[],"opts":{"limit":1,"tags":[]}';
+begin
+  // A present null is not an omission: it is no object.
+  Expect<string>(BindJson(TProbeNested, '{' + BASE +
+    ',"counts":[],"extra":null}', Instance))
+    .ToBe('Argument "extra" must be an object');
+  // Integral floats are integers, as the subset validator has them.
+  Expect<string>(BindJson(TProbeNested, '{' + BASE + ',"counts":[2.0,2e0]}',
+    Instance)).ToBe('');
+  Expect<Boolean>(TProbeNested(Instance).counts[1] = 2).ToBe(True);
+  Instance.Free;
+  Expect<string>(BindJson(TProbeLimits, '{"limit":7.0,"tags":[]}',
+    Instance)).ToBe('');
+  Expect<Integer>(TProbeLimits(Instance).limit).ToBe(7);
+  Instance.Free;
+  // Built values: a member and an item stored as nil are nulls, and a
+  // NaN is no number; each fails with its path instead of slipping by.
+  Expect<string>(BindBuilt(TProbeNested, BuiltWithNilExtra))
+    .ToBe('Argument "extra" must be an object');
+  Expect<string>(BindBuilt(TProbeLimits, BuiltWithNilTag))
+    .ToBe('Argument "tags[0]" must be a string');
+  Expect<string>(BindBuilt(TProbeNested, BuiltWithNaNScore))
+    .ToBe('Argument "scores[0]" must be a number');
+end;
+
+procedure DefaultOnArray;
+begin
+  ObjectSchema.AddArray('tags', 'string').WithDefault('a').Build.Free;
+end;
+
+procedure WrongTypeDefault;
+begin
+  ObjectSchema.AddString('s').WithDefault(Int64(1)).Build.Free;
+end;
+
+procedure DefaultOutsideEnum;
+begin
+  ObjectSchema.AddEnum('e', ['a', 'b']).WithDefault('c').Build.Free;
+end;
+
+procedure SecondDefault;
+begin
+  ObjectSchema.AddString('s').WithDefault('x').WithDefault('y').Build.Free;
+end;
+
+procedure EnumDefaultInside;
+begin
+  ObjectSchema.AddEnum('e', ['a', 'b']).WithDefault('b').Build.Free;
+end;
+
+procedure IntegerDefaultForNumber;
+begin
+  ObjectSchema.AddNumber('n').WithDefault(Int64(2)).Build.Free;
+end;
+
+// WithDefault checks the default against the property it follows.
+procedure TNestedSchemas.TestDefaultsFitTheirProperty;
+begin
+  Expect<Boolean>(Raises(DefaultOnArray)).ToBe(True);
+  Expect<Boolean>(Raises(WrongTypeDefault)).ToBe(True);
+  Expect<Boolean>(Raises(DefaultOutsideEnum)).ToBe(True);
+  Expect<Boolean>(Raises(SecondDefault)).ToBe(True);
+  Expect<Boolean>(Raises(EnumDefaultInside)).ToBe(False);
+  Expect<Boolean>(Raises(IntegerDefaultForNumber)).ToBe(False);
+end;
+
+procedure TNestedSchemas.SetupTests;
+begin
+  Test('fluent enum, arrays and nested object, byte-exact',
+    TestFluentEnumArrayObject);
+  Test('WithDefault for each type makes the property optional',
+    TestWithDefault);
+  Test('builder guards: default first, unknown item type, empty enum',
+    TestBuilderGuards);
+  Test('SchemaFrom maps nested classes and arrays', TestSchemaFromNestedClass);
+  Test('an unsupported array element type is refused',
+    TestUnsupportedArrayElement);
+  Test('binding fills nested objects and arrays, UTF-8 byte-exact',
+    TestBindNestedAndArrays);
+  Test('binding errors name the nested path', TestBindErrorsNamePaths);
+  Test('arrays read by method or unmapped, and foreign objects, refused',
+    TestUnsafeArrayAccessRefused);
+  Test('a bound nested object replaces and frees the old one',
+    TestNestedOwnership);
+  Test('cleanup frees aliased children once and calls no getter',
+    TestCleanupOfAliasesAndAccessors);
+  Test('properties that read and write different fields are refused',
+    TestSplitFieldsRefused);
+  Test('integer subranges bind only inside their bounds',
+    TestIntegerSubranges);
+  Test('null nested objects refused; integral floats bind as integers',
+    TestNullNestedAndIntegralFloats);
+  Test('WithDefault checks the default against its property',
+    TestDefaultsFitTheirProperty);
+  Test('MCPSerialize writes nested objects and arrays',
+    TestSerializeRoundTrip);
+end;
+
 begin
   TestRunnerProgram.AddSuite(TSchemaBuilder.Create('Schema: fluent builder'));
   TestRunnerProgram.AddSuite(
     TSchemaFromClass.Create('Schema: derived from classes'));
   TestRunnerProgram.AddSuite(TWireNumber.Create('Schema: wire numbers'));
+  TestRunnerProgram.AddSuite(
+    TNestedSchemas.Create('Schema: nested objects and arrays'));
+  TestRunnerProgram.AddSuite(TSubsetSchemas.Create('Schema: enforced subset'));
+  TestRunnerProgram.AddSuite(
+    THeaderAnnotations.Create('Schema: x-mcp-header annotations'));
   TestRunnerProgram.Run;
 end.
