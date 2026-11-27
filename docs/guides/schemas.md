@@ -144,7 +144,7 @@ schema node has one `type` (`object`, `array`, `string`, `number`,
 | `object` | `properties` (each a node), `required` |
 | `array` | `items` (a node) |
 | primitives | `enum` (entries of another type never match), `default` (a primitive) |
-| any | `description`, `title`; `$schema` at the root, naming JSON Schema 2020-12 |
+| any | `description`, `title`, `x-mcp-header` (see [Routing headers](tools.md#routing-headers-x-mcp-header)); `$schema` at the root, naming JSON Schema 2020-12 |
 
 Objects and arrays nest to any depth. `integer` means a number with no
 fractional part, so `2.0` counts, for floats up to 2^53 in magnitude

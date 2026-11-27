@@ -133,8 +133,11 @@ Server.RegisterTool('execute_sql', 'Run SQL in a region',
   '{"type":"object","properties":{' +
   '"region":{"type":"string","x-mcp-header":"Region"},' +
   '"query":{"type":"string"}},"required":["region","query"]}',
-  SqlHandler).ApplicationValidated;
+  SqlHandler);
 ```
+
+`x-mcp-header` is part of the enforced subset, so the server still
+validates the arguments.
 
 Over Streamable HTTP the client then sends `Mcp-Param-Region:
 us-west1` with the call, and the server checks that the header matches

@@ -132,6 +132,7 @@ type
     procedure TestWrongInputSchemaRoot;
     procedure TestNonObjectOutputSchema;
     procedure TestBadHeaderAnnotationRejected;
+    procedure TestHeaderAnnotatedToolValidated;
     procedure TestWrongOutputSchemaRoot;
     procedure TestValidInputAndOutputSchemaRoots;
     procedure TestDuplicateResource;
@@ -1910,6 +1911,34 @@ begin
   end;
 end;
 
+// x-mcp-header is inside the enforced subset: a header-routed tool
+// keeps server-side argument validation (#90).
+procedure TRegistrationGuards.TestHeaderAnnotatedToolValidated;
+var
+  Server: TMCPServer;
+  Session: TMCPSession;
+  Line: string;
+begin
+  Server := TMCPServer.Create('t', '1');
+  try
+    Server.RegisterTool('routed', 'Routed', '{"type":"object","properties":' +
+      '{"region":{"type":"string","x-mcp-header":"Region"}},' +
+      '"required":["region"]}', EchoHandler);
+    Session := Server.CreateSession;
+    try
+      Server.HandleMessage(Session, '{"jsonrpc":"2.0","id":1,"method":' +
+        '"tools/call","params":{"name":"routed","arguments":{"region":7},' +
+        META_MODERN + '}}', Line);
+      Expect<Boolean>(Pos('Argument \"region\" must be a string', Line) > 0)
+        .ToBe(True);
+    finally
+      Session.Free;
+    end;
+  finally
+    Server.Free;
+  end;
+end;
+
 procedure TRegistrationGuards.TestWrongOutputSchemaRoot;
 var
   Definition: TJSONObject;
@@ -2536,6 +2565,8 @@ begin
   Test('inputSchema without root type rejected', TestMissingInputSchemaRoot);
   Test('invalid x-mcp-header annotation rejected at registration',
     TestBadHeaderAnnotationRejected);
+  Test('a header-annotated tool keeps server-side argument checks',
+    TestHeaderAnnotatedToolValidated);
   Test('inputSchema array root rejected', TestWrongInputSchemaRoot);
   Test('non-object outputSchema rejected', TestNonObjectOutputSchema);
   Test('outputSchema with an array root accepted',

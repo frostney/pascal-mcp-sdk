@@ -188,7 +188,8 @@ function MCPWireNumber(AValue: Double): TJSONData;
 //   array       items (a node)
 //   primitives  enum (entries of another type never match), default
 //               (a primitive)
-//   any node    description, title; $schema at the root, naming
+//   any node    description, title, x-mcp-header (checked by
+//               MCPHeaderParameters); $schema at the root, naming
 //               2020-12 (the default dialect; a schema declaring
 //               another is outside the subset)
 // Nesting is unlimited. Verified 2026-11-26 against the structured
@@ -1003,7 +1004,9 @@ begin
       AViolation := 'declares $schema other than JSON Schema 2020-12';
   end
   else
-    Result := AKey = 'type';
+    // x-mcp-header names a routing header; it does not constrain the
+    // value, and MCPHeaderParameters checks its own rules (#90).
+    Result := (AKey = 'type') or (AKey = 'x-mcp-header');
 end;
 
 const
