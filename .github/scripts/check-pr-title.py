@@ -88,20 +88,28 @@ def comment_prefix():
     return b'#'
 
 
+def verbose_config():
+    """Whether commit.verbose asks for the diff below a scissors line."""
+    value = git_output(['config', '--get', 'commit.verbose']).strip()
+    value = value.decode('utf-8', 'replace').lower()
+    return value in ('true', 'yes', 'on') or (value.isdigit()
+                                              and int(value) > 0)
+
+
 def recorded_subject(message, editing):
     """The subject git records for MESSAGE (bytes), the text the
     commit-msg hook gets before git cleans it up, under git's own
-    cleanup (git-commit(1), --cleanup): with EDITING, nothing from the
-    scissors line on counts; comments go under `strip`, and under
-    `default` when an editor opened; `verbatim` keeps the text as it is.
-    The subject is the first line that is not blank, split at LF as
-    git splits it. A
-    --cleanup option on the command line is not visible to the hook,
-    and core.commentChar=auto is resolved by git, not as the editor's
-    template chose it."""
+    cleanup (git-commit(1), --cleanup): in an editor, the scissors line
+    and everything after it go under `scissors` or with commit.verbose;
+    comments go under `strip`, and under `default` when an editor
+    opened; `verbatim` keeps the text as it is. The subject is the
+    first line, split at LF, that git does not count as blank (git's
+    whitespace is space, tab, CR and LF only). Options on the command
+    line (--cleanup, -v) are not visible to the hook; with -v, an
+    empty message is refused here rather than aborted by git."""
     mode = git_output(['config', '--get', 'commit.cleanup']).strip()
     mode = mode.decode('utf-8', 'replace') or 'default'
-    if editing:
+    if editing and (mode == 'scissors' or verbose_config()):
         scissors = (comment_prefix() + b' ' + b'-' * 24 + b' >8 ' +
                     b'-' * 24 + b'\n')
         cut = (b'\n' + message).find(b'\n' + scissors)
@@ -114,10 +122,8 @@ def recorded_subject(message, editing):
     else:
         cleaned = git_output(['stripspace'], message)
     for line in cleaned.split(b'\n'):
-        # Blank as git counts it: ASCII whitespace only, so a line of a
-        # non-breaking space is a subject.
-        if line.strip():
-            return line.rstrip().decode('utf-8', 'replace')
+        if line.strip(b' \t\r'):
+            return line.rstrip(b' \t\r').decode('utf-8', 'replace')
     return ''
 
 
@@ -250,10 +256,11 @@ def main(argv=None):
         saved = shlex.quote(os.path.abspath(argv[1]))
         print()
         print(f'The commit was not made. Its message is saved in {saved}.')
-        print('Run the same commit again with its message option (-m, -F,')
-        print('-C, ...) replaced by -e -F and that file, keeping its other')
-        print('options and paths, for example:')
+        print('Run the same commit again with -m or -F replaced by -e -F')
+        print('and that file, keeping its other options and paths:')
         print(f'  git commit -e -F {saved}')
+        print('A commit made with -C <commit> keeps that commit\'s author')
+        print('when run again with -c <commit>, which opens the editor.')
     return 1
 
 

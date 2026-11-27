@@ -70,6 +70,16 @@ def subject(message, editing=False, config=None):
 SCISSORS = '# ' + '-' * 24 + ' >8 ' + '-' * 24
 
 
+def git_has_comment_string():
+    """core.commentString arrived in git 2.45; older git ignores it."""
+    with isolated(git_settings(config={'core.commentString': '//'})):
+        return checker.comment_prefix() == b'//'
+
+
+COMMENT_STRING = unittest.skipUnless(
+    git_has_comment_string(), 'git without core.commentString (< 2.45)')
+
+
 class RecordedSubject(unittest.TestCase):
     def test_first_line(self):
         self.assertEqual(subject('fix: x\n\nbody\n'), 'fix: x')
@@ -81,6 +91,7 @@ class RecordedSubject(unittest.TestCase):
         text = '\n# Please enter the commit message\n\nfeat: y  \n# end\n'
         self.assertEqual(subject(text, editing=True), 'feat: y')
 
+    @COMMENT_STRING
     def test_comment_string_and_its_alias(self):
         # The alias set last wins, as git resolves it.
         text = '// c\n; d\nfeat: z\n'
@@ -91,6 +102,7 @@ class RecordedSubject(unittest.TestCase):
                     {'core.commentString': '//', 'core.commentChar': ';'}),
             'feat: z')
 
+    @COMMENT_STRING
     def test_comment_string_with_a_space(self):
         text = '// c\n//x\n'
         self.assertEqual(subject(text, True, {'core.commentString': '// '}),
@@ -105,22 +117,39 @@ class RecordedSubject(unittest.TestCase):
                                  {'commit.cleanup': 'verbatim'}),
                          'bad subject')
 
-    def test_scissors_only_when_an_editor_opened(self):
+    def test_scissors_cut_with_verbose_or_scissors_cleanup(self):
         text = '\n' + SCISSORS + '\nbad subject\n'
-        self.assertEqual(subject(text, editing=True), '')
+        self.assertEqual(subject(text, True, {'commit.verbose': 'true'}), '')
+        self.assertEqual(subject(text, True, {'commit.cleanup': 'scissors'}),
+                         '')
+
+    def test_scissors_line_is_only_a_comment_otherwise(self):
+        # git 2.56: a plain editor commit strips the line as a comment
+        # and records what follows (#124 review).
+        text = '\n' + SCISSORS + '\nbad subject\n'
+        self.assertEqual(subject(text, editing=True), 'bad subject')
         self.assertEqual(subject(text, False, {'commit.cleanup': 'strip'}),
                          'bad subject')
+        self.assertEqual(subject(text, False, {'commit.verbose': 'true'}),
+                         SCISSORS)
 
+    @COMMENT_STRING
     def test_scissors_with_another_comment_string(self):
         text = '\n//' + SCISSORS[1:] + '\nbad subject\n'
-        self.assertEqual(subject(text, True, {'core.commentString': '//'}),
-                         '')
+        self.assertEqual(subject(text, True, {'core.commentString': '//',
+                                              'commit.verbose': 'true'}), '')
 
     def test_lines_split_at_lf_only(self):
         self.assertEqual(subject('fix: a\u2028b\n'), 'fix: a\u2028b')
 
     def test_non_breaking_space_is_not_blank(self):
         self.assertEqual(subject('\u00a0\nfix: x\n'), '\u00a0')
+
+    def test_vertical_tab_and_form_feed_are_not_blank(self):
+        # git's whitespace is space, tab, CR and LF (#124 review).
+        self.assertEqual(subject('\v\nfix: x\n'), '\v')
+        self.assertEqual(subject('\n  \n\f\nfix: x\n', True,
+                                 {'commit.cleanup': 'verbatim'}), '\f')
 
     def test_empty(self):
         self.assertEqual(subject('# only\n\n', editing=True), '')
@@ -153,6 +182,7 @@ class CommitMsgMode(unittest.TestCase):
         self.assertIn('git commit -e -F ' +
                       shlex.quote(os.path.abspath(self.path)), output)
         self.assertIn('replaced by -e -F', output)
+        self.assertIn('-c <commit>', output)
 
     def test_comment_line_kept_by_git_commit_m(self):
         # git commit -m keeps "# ..." lines, so that is the subject.
@@ -164,6 +194,7 @@ class CommitMsgMode(unittest.TestCase):
         status, _ = self.commit('# lead\nfeat: edited\n', editing=True)
         self.assertEqual(status, 0)
 
+    @COMMENT_STRING
     def test_comment_string_from_git_config(self):
         config = {'core.commentString': '//'}
         status, _ = self.commit('// lead\nfeat: slash\n', True, config)

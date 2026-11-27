@@ -40,5 +40,7 @@ commit-msg:
 
     conventional-subject:
       # {1} is the file holding the message git is about to record.
-      # Quoted: a linked worktree can pass an absolute path with spaces.
-      run: python3 .github/scripts/check-pr-title.py --commit-msg "{1}"
+      # Single-quoted: lefthook pastes {1} into a shell command as it is,
+      # and a linked worktree passes an absolute path, which may hold
+      # spaces or a `$`. A path holding a `'` is not supported.
+      run: python3 .github/scripts/check-pr-title.py --commit-msg '{1}'
