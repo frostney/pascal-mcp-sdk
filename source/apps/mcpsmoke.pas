@@ -567,7 +567,8 @@ begin
     Response.Free;
 
     // completion/complete (#81): the demo's static name list, by
-    // case-insensitive prefix.
+    // prefix ignoring case; verified 2026-11-26 against
+    // https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/completion
     Response := RoundTrip(Demo,
       '{"jsonrpc":"2.0","id":34,"method":"completion/complete","params":{' +
       '"ref":{"type":"ref/prompt","name":"greet"},' +

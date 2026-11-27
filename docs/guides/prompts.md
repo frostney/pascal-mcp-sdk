@@ -127,7 +127,8 @@ Server.RegisterPromptCompletion('greet', 'name',
   ['Ada', 'Alan', 'Grace', 'Niklaus']);
 ```
 
-A list completes by case-insensitive prefix. A handler receives the
+A list completes by prefix, ignoring case for Latin, Greek and
+Cyrillic letters. A handler receives the
 typed value and the arguments already filled in, so one argument's
 suggestions can depend on another's (see
 [Argument completion](../reference/server.md#argument-completion)).

@@ -26,11 +26,31 @@ uses
 function TryValidateUriTemplate(const ATemplate: string;
   out AError: string): Boolean;
 
+// True when ATemplate (valid) has a variable named exactly AName.
+function UriTemplateHasVariable(const ATemplate, AName: string): Boolean;
+
 // On success AVars carries the captured variables (caller frees).
 function MatchUriTemplate(const ATemplate, AUri: string;
   out AVars: TJSONObject): Boolean;
 
 implementation
+
+function UriTemplateHasVariable(const ATemplate, AName: string): Boolean;
+var
+  Open, Close: Integer;
+begin
+  Result := False;
+  Open := Pos('{', ATemplate);
+  while Open > 0 do
+  begin
+    Close := Pos('}', ATemplate, Open + 1);
+    if Close = 0 then
+      Exit;
+    if Copy(ATemplate, Open + 1, Close - Open - 1) = AName then
+      Exit(True);
+    Open := Pos('{', ATemplate, Close + 1);
+  end;
+end;
 
 function IsUriTemplateVariableCharacter(ACharacter: Char): Boolean; inline;
 begin

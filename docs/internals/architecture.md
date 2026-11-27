@@ -7,14 +7,16 @@
 
 ## Executive Summary
 
-pascal-mcp-sdk is nine units layered strictly bottom-up. Four form the
+pascal-mcp-sdk is eleven units layered strictly bottom-up. Four form the
 request chain — `MCP.JSONRPC` (the JSON-RPC 2.0 profile MCP mandates),
 `MCP.Protocol` (the stateless per-request `_meta` model of spec
 revision 2026-07-28), `MCP.Server` (the sans-I/O dispatch core), and a
 transport shell (`MCP.Transport.Stdio` or `MCP.Transport.HTTP`) — and
 `MCP.Schema` and `MCP.Content` sit beside the chain as the schema and
-content-block helpers `MCP.Server` consumes, and `MCP.RequestState`
-with `MCP.Crypto` seal the MRTR `requestState` for it. The core performs no I/O, with one scoped exception: when no
+content-block helpers `MCP.Server` consumes, `MCP.Completion` and
+`MCP.UriTemplate` read completion requests and match resource templates
+for it, and `MCP.RequestState` with `MCP.Crypto` seal the MRTR
+`requestState` for it. The core performs no I/O, with one scoped exception: when no
 `requestState` keys are set, the first `CreateSession` reads 32 bytes
 from the operating system's random source for the instance's sealing
 key (#89), and fails to start if that source is unavailable; setting

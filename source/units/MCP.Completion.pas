@@ -49,8 +49,10 @@ type
     Context: TJSONObject;  // context.arguments, borrowed; nil when none
   end;
 
-// The candidates that start with AValue, compared case-insensitively,
-// in their given order: the completion a static list gives.
+// The candidates that start with AValue, in their given order: the
+// completion a static list gives. Case is ignored for ASCII, Latin-1,
+// Latin Extended-A, Greek and Cyrillic letters, by a fixed simple fold
+// that does not depend on the locale.
 function MCPCompleteFrom(const AValue: string;
   const ACandidates: array of string): TMCPCompletion;
 
@@ -74,18 +76,62 @@ function CompletionObject(const ACompletion: TMCPCompletion): TJSONObject;
 implementation
 
 uses
-  Math;
+  Math,
+
+  MCP.UriTemplate;
+
+// A simple, locale-independent case fold of one code point: ASCII,
+// Latin-1, Latin Extended-A, Greek and Cyrillic capitals to their small
+// letters; anything else unchanged.
+function FoldCodePoint(C: Cardinal): Cardinal;
+begin
+  Result := C;
+  case C of
+    $41..$5A, $C0..$D6, $D8..$DE, $391..$3A1, $3A3..$3AB, $410..$42F:
+      Result := C + $20;
+    $400..$40F:
+      Result := C + $50;
+    $100..$12F, $132..$137, $14A..$177:
+      Result := C or 1;
+    $130: // dotted capital I: its simple lowercase is i
+      Result := $69;
+    $139..$148, $179..$17E:
+      if Odd(C) then
+        Result := C + 1;
+  end;
+end;
+
+// AText (UTF-8) with every code point folded by FoldCodePoint, as code
+// points; ill-formed bytes are kept as themselves.
+function FoldedCodePoints(const AText: string): UnicodeString;
+var
+  Wide: UnicodeString;
+  I: Integer;
+  C: Cardinal;
+begin
+  // UTF8Decode reads bytes, not the system code page, so the fold is
+  // the same on any locale.
+  Wide := UTF8Decode(AText);
+  SetLength(Result, Length(Wide));
+  for I := 1 to Length(Wide) do
+  begin
+    C := Ord(Wide[I]);
+    // Surrogate halves pass through: none of the folded ranges is
+    // outside the Basic Multilingual Plane.
+    Result[I] := WideChar(FoldCodePoint(C));
+  end;
+end;
 
 function MCPCompleteFrom(const AValue: string;
   const ACandidates: array of string): TMCPCompletion;
 var
   I: Integer;
-  Prefix: string;
+  Prefix: UnicodeString;
 begin
   Result := Default(TMCPCompletion);
-  Prefix := LowerCase(AValue);
+  Prefix := FoldedCodePoints(AValue);
   for I := 0 to High(ACandidates) do
-    if Copy(LowerCase(ACandidates[I]), 1, Length(Prefix)) = Prefix then
+    if Copy(FoldedCodePoints(ACandidates[I]), 1, Length(Prefix)) = Prefix then
     begin
       SetLength(Result.Values, Length(Result.Values) + 1);
       Result.Values[High(Result.Values)] := ACandidates[I];
@@ -110,18 +156,31 @@ begin
     AValue := Data.AsString;
 end;
 
-// context.arguments as an object, or nil.
-function ContextArguments(AParams: TJSONObject): TJSONObject;
+// context.arguments in AArguments (nil when context or its arguments
+// are omitted). '' or the -32602 message: a supplied context must be an
+// object, and its arguments an object of strings (CompleteRequestParams).
+function ContextArguments(AParams: TJSONObject;
+  out AArguments: TJSONObject): string;
 var
   ContextData, Arguments: TJSONData;
+  I: Integer;
 begin
-  Result := nil;
+  Result := '';
+  AArguments := nil;
   ContextData := AParams.Find('context');
-  if (ContextData = nil) or (ContextData.JSONType <> jtObject) then
+  if ContextData = nil then
     Exit;
+  if ContextData.JSONType <> jtObject then
+    Exit('Invalid params: context must be an object');
   Arguments := TJSONObject(ContextData).Find('arguments');
-  if (Arguments <> nil) and (Arguments.JSONType = jtObject) then
-    Result := TJSONObject(Arguments);
+  if Arguments = nil then
+    Exit;
+  if Arguments.JSONType <> jtObject then
+    Exit('Invalid params: context.arguments must be an object');
+  for I := 0 to Arguments.Count - 1 do
+    if Arguments.Items[I].JSONType <> jtString then
+      Exit('Invalid params: context.arguments values must be strings');
+  AArguments := TJSONObject(Arguments);
 end;
 
 function ParseCompleteRequest(AParams: TJSONObject;
@@ -149,8 +208,7 @@ begin
   if not (StringMember(Argument, 'name', ARequest.Argument) and
     StringMember(Argument, 'value', ARequest.Value)) then
     Exit('Invalid params: argument needs a name and a value');
-  ARequest.Context := ContextArguments(AParams);
-  Result := '';
+  Result := ContextArguments(AParams, ARequest.Context);
 end;
 
 // The prompt's declared argument names include AArgument.
@@ -184,7 +242,7 @@ begin
   end
   else if not ATemplateKnown then
     Result := 'unknown resource template "' + ARefName + '"'
-  else if Pos('{' + AArgument + '}', ARefName) = 0 then
+  else if not UriTemplateHasVariable(ARefName, AArgument) then
     Result := 'resource template "' + ARefName + '" has no variable "' +
       AArgument + '"';
 end;
@@ -203,8 +261,11 @@ begin
   Result.Add('values', Values);
   if ACompletion.Total >= 0 then
     Result.Add('total', Max(ACompletion.Total, Length(ACompletion.Values)));
+  // More exist when the handler says so, when values were cut to the
+  // cap, or when a known total exceeds what is sent.
   Result.Add('hasMore', ACompletion.HasMore or
-    (Length(ACompletion.Values) > MAX_VALUES));
+    (Length(ACompletion.Values) > MAX_VALUES) or
+    (ACompletion.Total > Min(Length(ACompletion.Values), MAX_VALUES)));
 end;
 
 end.

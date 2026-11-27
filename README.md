@@ -180,7 +180,8 @@ walkthrough lives in [docs/guides/quick-start.md](docs/guides/quick-start.md).
 ## Protocol coverage
 
 Implemented: tools, resources (including RFC 6570 templates),
-prompts, MRTR, progress/log notifications, caching hints, both
+prompts, argument completion, MRTR, progress/log notifications,
+caching hints, both
 transports, and the classic `initialize` era. Deliberately out:
 `subscriptions/listen` and list-changed notifications — registries
 are static after startup. The authoritative surface-by-surface table,

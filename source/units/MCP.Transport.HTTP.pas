@@ -61,7 +61,8 @@ unit MCP.Transport.HTTP;
 //     protocol errors alike, other -32602s included — is 200;
 //   - a request that opted into request-scoped notifications
 //     (_meta.progressToken or the logLevel key) on a handler-backed
-//     method (tools/call, resources/read, prompts/get) is answered as
+//     method (tools/call, resources/read, prompts/get,
+//     completion/complete) is answered as
 //     an SSE stream *once a notification actually flows*: the stream
 //     headers (200, text/event-stream, Cache-Control: no-cache,
 //     X-Accel-Buffering: no) are deferred until the first event, the
@@ -446,6 +447,14 @@ begin
     (AMethod = 'resources/read');
 end;
 
+// Methods whose handlers can emit request-scoped notifications: the
+// three that name a target, and completion/complete (#81), whose
+// callbacks get the same context but carry no Mcp-Name.
+function RunsHandler(const AMethod: string): Boolean;
+begin
+  Result := NeedsName(AMethod) or (AMethod = 'completion/complete');
+end;
+
 // Whether this request opted into request-scoped notifications and
 // targets a handler-backed method — the streaming policy documented
 // in the unit header.
@@ -454,7 +463,7 @@ var
   Meta: TJSONObject;
 begin
   Result := False;
-  if not NeedsName(AMessage.Method) then
+  if not RunsHandler(AMessage.Method) then
     Exit;
   Meta := MetaObject(AMessage.Params);
   if Meta = nil then

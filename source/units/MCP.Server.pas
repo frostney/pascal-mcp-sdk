@@ -32,7 +32,7 @@ unit MCP.Server;
 //     initialize, ping
 //     tools/list, tools/call
 //     resources/list, resources/read
-//     prompts/list, prompts/get
+//     prompts/list, prompts/get, completion/complete
 //     — responses omit the modern-only stamps (resultType, serverInfo
 //       _meta, ttlMs/cacheScope) and resource-not-found is the legacy
 //       -32002, so each era sees its own wire dialect
@@ -424,9 +424,11 @@ type
       ADescription: string; AReader: TMCPTemplateReader;
       AMethod: TMCPTemplateMethod);
     function ServerCapabilities: TJSONObject;
+    // ACallable: the handler or method overload, so a nil one is a
+    // mistake, not an empty list.
     procedure AddCompletion(const ARefType, ARefName, AArgument: string;
-      const AValues: array of string; AHandler: TMCPCompletionHandler;
-      AMethod: TMCPCompletionMethod);
+      const AValues: array of string; ACallable: Boolean;
+      AHandler: TMCPCompletionHandler; AMethod: TMCPCompletionMethod);
     function FindTemplate(const AUriTemplate: string): Integer;
     // The completion registered for that argument of that target, or -1.
     function FindCompletion(const ARefType, ARefName,
@@ -2092,7 +2094,7 @@ begin
 end;
 
 procedure TMCPServer.AddCompletion(const ARefType, ARefName,
-  AArgument: string; const AValues: array of string;
+  AArgument: string; const AValues: array of string; ACallable: Boolean;
   AHandler: TMCPCompletionHandler; AMethod: TMCPCompletionMethod);
 var
   Problem: string;
@@ -2102,6 +2104,9 @@ begin
   Problem := CompletionTargetProblem(Self, ARefType, ARefName, AArgument);
   if Problem <> '' then
     raise EMCPServer.Create('Cannot register a completion: ' + Problem);
+  if ACallable and not Assigned(AHandler) and not Assigned(AMethod) then
+    raise EMCPServer.CreateFmt('The completion for "%s" of "%s" needs a ' +
+      'non-nil callable', [AArgument, ARefName]);
   if FindCompletion(ARefType, ARefName, AArgument) >= 0 then
     raise EMCPServer.CreateFmt('A completion for "%s" of "%s" is ' +
       'already registered', [AArgument, ARefName]);
@@ -2120,37 +2125,40 @@ end;
 procedure TMCPServer.RegisterPromptCompletion(const APrompt, AArgument: string;
   const AValues: array of string);
 begin
-  AddCompletion('ref/prompt', APrompt, AArgument, AValues, nil, nil);
+  AddCompletion('ref/prompt', APrompt, AArgument, AValues, False, nil, nil);
 end;
 
 procedure TMCPServer.RegisterPromptCompletion(const APrompt, AArgument: string;
   AHandler: TMCPCompletionHandler);
 begin
-  AddCompletion('ref/prompt', APrompt, AArgument, [], AHandler, nil);
+  AddCompletion('ref/prompt', APrompt, AArgument, [], True, AHandler, nil);
 end;
 
 procedure TMCPServer.RegisterPromptCompletion(const APrompt, AArgument: string;
   AMethod: TMCPCompletionMethod);
 begin
-  AddCompletion('ref/prompt', APrompt, AArgument, [], nil, AMethod);
+  AddCompletion('ref/prompt', APrompt, AArgument, [], True, nil, AMethod);
 end;
 
 procedure TMCPServer.RegisterTemplateCompletion(const AUriTemplate,
   AVariable: string; const AValues: array of string);
 begin
-  AddCompletion('ref/resource', AUriTemplate, AVariable, AValues, nil, nil);
+  AddCompletion('ref/resource', AUriTemplate, AVariable, AValues, False, nil,
+    nil);
 end;
 
 procedure TMCPServer.RegisterTemplateCompletion(const AUriTemplate,
   AVariable: string; AHandler: TMCPCompletionHandler);
 begin
-  AddCompletion('ref/resource', AUriTemplate, AVariable, [], AHandler, nil);
+  AddCompletion('ref/resource', AUriTemplate, AVariable, [], True, AHandler,
+    nil);
 end;
 
 procedure TMCPServer.RegisterTemplateCompletion(const AUriTemplate,
   AVariable: string; AMethod: TMCPCompletionMethod);
 begin
-  AddCompletion('ref/resource', AUriTemplate, AVariable, [], nil, AMethod);
+  AddCompletion('ref/resource', AUriTemplate, AVariable, [], True, nil,
+    AMethod);
 end;
 
 // completion/complete: verified 2026-11-26 against
@@ -2909,7 +2917,6 @@ procedure TMCPServer.AddTemplate(const AUriTemplate, AName, AMimeType,
   ADescription: string; AReader: TMCPTemplateReader;
   AMethod: TMCPTemplateMethod);
 var
-  I: Integer;
   Definition: TJSONObject;
   ValidationError: string;
 begin
@@ -2924,10 +2931,9 @@ begin
       [AUriTemplate]);
   if not TryValidateUriTemplate(AUriTemplate, ValidationError) then
     raise EMCPServer.Create(ValidationError);
-  for I := 0 to High(FTemplates) do
-    if FTemplates[I].UriTemplate = AUriTemplate then
-      raise EMCPServer.CreateFmt(
-        'Resource template "%s" is already registered', [AUriTemplate]);
+  if FindTemplate(AUriTemplate) >= 0 then
+    raise EMCPServer.CreateFmt(
+      'Resource template "%s" is already registered', [AUriTemplate]);
   Definition := TJSONObject.Create;
   Definition.Add('uriTemplate', AUriTemplate);
   Definition.Add('name', AName);

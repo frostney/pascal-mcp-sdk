@@ -190,15 +190,23 @@ function MCPCompleteFrom(const AValue: string;
   const ACandidates: array of string): TMCPCompletion;
 ```
 
-A static list completes by case-insensitive prefix, in the order given
-(`MCPCompleteFrom`, which a handler can call too). A handler gets the
-value typed so far and, in `AContext`, the arguments the client has
-already resolved (`nil` when none). More than 100 values are cut to
-100 with `hasMore: true`. An unknown prompt or template, or an argument
-it does not declare, is refused with `EMCPServer` at registration and
-answered `-32602` on the wire; an argument with no completion
-registered answers an empty list. Registering any completion declares
-the `completions` capability.
+A static list completes by prefix, in the order given (`MCPCompleteFrom`,
+which a handler can call too). Case is ignored for ASCII, Latin-1,
+Latin Extended-A, Greek and Cyrillic letters, by a fixed simple fold
+that does not depend on the locale; other scripts compare exactly. A
+handler gets the value typed so far and, in `AContext`, the arguments
+the client has already resolved (`nil` when none); a supplied `context`
+that is not an object, or whose `arguments` are not strings, is
+answered `-32602` before any handler runs. More than 100 values are cut
+to 100; `hasMore` is true then, when the handler sets `HasMore`, or when
+its known `Total` exceeds the values sent. An unknown prompt or
+template, an argument it does not declare, or a nil handler is refused
+with `EMCPServer` at registration, and the first two are answered
+`-32602` on the wire; an argument with no completion registered
+answers an empty list. Registering any completion declares the
+`completions` capability. Over Streamable HTTP a request that opts
+into notifications streams them, as for the other handler-backed
+methods.
 
 ### Capabilities
 

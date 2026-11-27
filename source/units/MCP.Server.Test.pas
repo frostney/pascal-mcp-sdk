@@ -4247,7 +4247,10 @@ begin
   Server := TMCPServer.Create('wire-server', '1.0');
   try
     // Capabilities follow the registrations (#81): a tool and a
-    // resource here, no prompts and no completions.
+    // resource here, no prompts and no completions. Schema
+    // ServerCapabilities ("Present if the server offers ..."), verified
+    // 2026-11-26 against
+    // https://modelcontextprotocol.io/specification/2026-07-28/schema#servercapabilities
     Server.RegisterTool('echo', 'Echo', '{"type":"object"}', EchoHandler);
     Server.RegisterTextResource('mem://w', 'w', 'text/plain', 'w');
     Session := Server.CreateSession;
@@ -6114,6 +6117,19 @@ begin
     Result := MCPCompleteFrom(AValue, ['Paris', 'Pau']);
 end;
 
+// Pre-trimmed to 100 values with the total known: hasMore follows.
+function TrimmedCompletion(const AArgument, AValue: string;
+  AContext: TJSONObject; const ACtx: TMCPRequestContext): TMCPCompletion;
+var
+  I: Integer;
+begin
+  Result := Default(TMCPCompletion);
+  SetLength(Result.Values, 100);
+  for I := 0 to 99 do
+    Result.Values[I] := 'w' + IntToStr(I);
+  Result.Total := 150;
+end;
+
 function ManyCompletion(const AArgument, AValue: string; AContext: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPCompletion;
 var
@@ -6139,6 +6155,9 @@ begin
     CityCompletion);
   FServer.RegisterTemplateCompletion('geo://{country}/{city}', 'country',
     ManyCompletion);
+  FServer.RegisterResourceTemplate('page://{n}', 'page', 'text/plain',
+    TextReader);
+  FServer.RegisterTemplateCompletion('page://{n}', 'n', TrimmedCompletion);
 end;
 
 function CompleteLine(const ARef, AArgument, AValue: string;
@@ -6149,6 +6168,10 @@ begin
     '","value":"' + AValue + '"},' + AExtra + META_MODERN + '}}';
 end;
 
+// completion/complete, verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/completion
+// (CompleteRequest, CompleteResult at most 100 values, the completions
+// capability).
 procedure TCompletionDispatch.TestStaticPromptCompletion;
 var
   Response: string;
@@ -6163,12 +6186,22 @@ end;
 procedure TCompletionDispatch.TestCallableTemplateCompletion;
 var
   Response: TJSONObject;
+  Line: string;
 begin
+  // A non-ASCII prefix in another case still matches, and the
+  // suggestion goes out byte-exact.
+  Expect<Boolean>(Dispatch(CompleteLine(
+    '{"type":"ref/resource","uri":"geo://{country}/{city}"}', 'city',
+    'k' + #$C3#$96, '"context":{"arguments":{"country":"de"}},'), Line))
+    .ToBe(True);
+  Expect<Boolean>(Pos('"values" : ["K' + #$C3#$B6 + 'ln"]', Line) > 0)
+    .ToBe(True);
+  // An empty context is as good as none.
   Response := Call(CompleteLine(
-    '{"type":"ref/resource","uri":"geo://{country}/{city}"}', 'city', 'k',
-    '"context":{"arguments":{"country":"de"}},'));
-  Expect<string>(TJSONData(Response.FindPath('result.completion.values[0]'))
-    .AsString).ToBe('K' + #$C3#$B6 + 'ln');
+    '{"type":"ref/resource","uri":"geo://{country}/{city}"}', 'city', 'pa',
+    '"context":{},'));
+  Expect<Integer>(TJSONArray(Response.FindPath('result.completion.values'))
+    .Count).ToBe(2);
   Response.Free;
   Response := Call(CompleteLine(
     '{"type":"ref/resource","uri":"geo://{country}/{city}"}', 'city', 'pa'));
@@ -6185,10 +6218,24 @@ begin
     '{"type":"ref/resource","uri":"geo://{country}/{city}"}', 'country', ''));
   Expect<Integer>(TJSONArray(Response.FindPath('result.completion.values'))
     .Count).ToBe(100);
+  // The first 100, in order.
+  Expect<string>(TJSONData(Response.FindPath('result.completion.values[0]'))
+    .AsString).ToBe('v0');
+  Expect<string>(TJSONData(Response.FindPath('result.completion.values[99]'))
+    .AsString).ToBe('v99');
   Expect<Boolean>(TJSONData(Response.FindPath('result.completion.hasMore'))
     .AsBoolean).ToBe(True);
   // Total unknown (-1): left out.
   Expect<Boolean>(Response.FindPath('result.completion.total') = nil).ToBe(True);
+  Response.Free;
+  // A handler that trimmed to 100 itself, total 150, HasMore unset:
+  // more exist, so hasMore is true.
+  Response := Call(CompleteLine('{"type":"ref/resource","uri":"page://{n}"}',
+    'n', ''));
+  Expect<Integer>(TJSONData(Response.FindPath('result.completion.total'))
+    .AsInteger).ToBe(150);
+  Expect<Boolean>(TJSONData(Response.FindPath('result.completion.hasMore'))
+    .AsBoolean).ToBe(True);
   Response.Free;
 end;
 
@@ -6229,6 +6276,21 @@ begin
     '"method":"completion/complete","params":{"ref":' +
     '{"type":"ref/prompt","name":"code_review"},' + META_MODERN + '}}'))
     .ToBe(-32602);
+  // A name spanning two variables is no variable of the template.
+  Expect<Integer>(ErrorCode(Self, CompleteLine(
+    '{"type":"ref/resource","uri":"geo://{country}/{city}"}',
+    'country}/{city', ''))).ToBe(-32602);
+  // Supplied context must be an object whose arguments map strings to
+  // strings (CompleteRequestParams.context).
+  Expect<Integer>(ErrorCode(Self, CompleteLine(
+    '{"type":"ref/prompt","name":"code_review"}', 'language', '',
+    '"context":"de",'))).ToBe(-32602);
+  Expect<Integer>(ErrorCode(Self, CompleteLine(
+    '{"type":"ref/prompt","name":"code_review"}', 'language', '',
+    '"context":{"arguments":["de"]},'))).ToBe(-32602);
+  Expect<Integer>(ErrorCode(Self, CompleteLine(
+    '{"type":"ref/prompt","name":"code_review"}', 'language', '',
+    '"context":{"arguments":{"country":1}},'))).ToBe(-32602);
 end;
 
 function RegistrationRefused(AServer: TMCPServer; const APrompt,
@@ -6260,6 +6322,28 @@ begin
       Raised := True;
   end;
   Expect<Boolean>(Raised).ToBe(True);
+  // A name spanning two variables.
+  Raised := False;
+  try
+    FServer.RegisterTemplateCompletion('geo://{country}/{city}',
+      'country}/{city', ['a']);
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  // A nil callable is a mistake, not an empty list; the argument stays
+  // free for a real registration.
+  Raised := False;
+  try
+    FServer.RegisterPromptCompletion('code_review', 'style',
+      TMCPCompletionHandler(nil));
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  FServer.RegisterPromptCompletion('code_review', 'style', ['terse']);
 end;
 
 procedure TCompletionDispatch.TestCapabilities;

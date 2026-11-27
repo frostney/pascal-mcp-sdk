@@ -143,6 +143,7 @@ type
     procedure TestSessionHeaderIgnored;
     procedure TestOversizedBody;
     procedure TestSSEStream;
+    procedure TestCompletionStreams;
     procedure TestStreamingProtocolErrorIsJSON;
     procedure TestStreamingWithoutNotificationsIsJSON;
     procedure TestStopBeforeRunReturns;
@@ -163,6 +164,21 @@ begin
   MCPReportProgress(ACtx, 0.5, 1.0, 'halfway');
   MCPLogMessage(ACtx, 'info', 'echo invoked');
   Result := MCPTextResult(AArguments.Get('message', ''));
+end;
+
+// A completion callback that reports progress: completion/complete
+// runs a handler too, so an opted-in HTTP request streams (#81).
+function NoisyCompletion(const AArgument, AValue: string;
+  AContext: TJSONObject; const ACtx: TMCPRequestContext): TMCPCompletion;
+begin
+  MCPReportProgress(ACtx, 1, 1, 'looked up');
+  Result := MCPCompleteFrom(AValue, ['alpha', 'beta']);
+end;
+
+function HintPrompt(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPMessages([MCPUserMessage('hint')]);
 end;
 
 // Emits nothing while it runs: a streaming-opted call to this tool
@@ -256,6 +272,9 @@ begin
   FServer.RegisterTool('echo', 'Echo',
     ObjectSchema.AddString('message', 'Text to echo'), NoisyEchoHandler);
   FServer.RegisterTool('quiet', 'Quiet', '{"type":"object"}', QuietHandler);
+  FServer.RegisterPrompt('hint', 'Hint', PromptArguments.Add('topic'),
+    HintPrompt);
+  FServer.RegisterPromptCompletion('hint', 'topic', NoisyCompletion);
   FServer.RegisterTool('needs_sampling', 'Needs sampling', '{"type":"object"}',
     NeedsSamplingHandler);
   FServer.RegisterTool('late_refusal', 'Refuses late', '{"type":"object"}',
@@ -1037,6 +1056,24 @@ begin
   Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32700);
 end;
 
+// completion/complete has no Mcp-Name, yet its callback can notify: an
+// opted-in request streams like the handler-backed methods.
+procedure THTTPBinding.TestCompletionStreams;
+var
+  Body, ContentType: string;
+begin
+  Expect<Integer>(Exchange('POST', '/mcp',
+    '{"jsonrpc":"2.0","id":5,"method":"completion/complete","params":{' +
+    '"ref":{"type":"ref/prompt","name":"hint"},"argument":{"name":"topic",' +
+    '"value":"a"},' + META_MODERN_STREAMING + '}}',
+    [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+     HeaderPair('Mcp-Method', 'completion/complete')], Body, ContentType))
+    .ToBe(200);
+  Expect<string>(ContentType).ToBe('text/event-stream');
+  Expect<Boolean>(Pos('notifications/progress', Body) > 0).ToBe(True);
+  Expect<Boolean>(Pos('"values" : ["alpha"]', Body) > 0).ToBe(True);
+end;
+
 procedure THTTPBinding.TestSSEStream;
 var
   Body, ContentType, LastEvent: string;
@@ -1197,6 +1234,8 @@ end;
 
 procedure THTTPBinding.SetupTests;
 begin
+  Test('completion/complete streams when its callback notifies',
+    TestCompletionStreams);
   Test('request → single application/json response',
     TestSingleJSONResponse);
   Test('bare server/discover probe → 400, -32602 (not -32020)',
