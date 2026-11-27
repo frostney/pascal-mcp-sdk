@@ -504,6 +504,10 @@ type
     FCompletions: array of TMCPCompletionRegistration;
 
     procedure EnsureMutable;
+    // ASettings for extension AId, {} for nil and nil children as nulls;
+    // refuses (freeing ASettings) a bad id or a started server.
+    function ExtensionSettings(const AId: string;
+      ASettings: TJSONObject): TJSONObject;
     procedure FreezeConfiguration;
     procedure CheckRequiredResources;
     procedure SetInstructions(const AValue: string);
@@ -679,8 +683,8 @@ type
     // Declares nothing on the classic initialize for extension AId,
     // whose methods only 2026-07-28 requests reach (#118 review).
     procedure RestrictExtensionToModern(const AId: string);
-    // Extension AId is declared with ASettings (owned) whatever
-    // DeclareExtension set before or after, for settings an extension
+    // Declares extension AId with ASettings (owned; nil for {}) whatever
+    // DeclareExtension sets before or after, for settings an extension
     // unit must keep true (#118 review).
     procedure PinExtensionSettings(const AId: string; ASettings: TJSONObject);
     // On Streamable HTTP, a request for AMethod (registered with
@@ -2550,7 +2554,8 @@ begin
   end;
 end;
 
-procedure TMCPServer.DeclareExtension(const AId: string; ASettings: TJSONObject);
+function TMCPServer.ExtensionSettings(const AId: string;
+  ASettings: TJSONObject): TJSONObject;
 begin
   try
     EnsureMutable;
@@ -2561,10 +2566,16 @@ begin
     ASettings.Free;
     raise;
   end;
-  if ASettings = nil then
-    ASettings := TJSONObject.Create;
+  Result := ASettings;
+  if Result = nil then
+    Result := TJSONObject.Create;
   // Cloned for every capabilities answer, so no child stays nil.
-  NilChildrenToNull(ASettings);
+  NilChildrenToNull(Result);
+end;
+
+procedure TMCPServer.DeclareExtension(const AId: string; ASettings: TJSONObject);
+begin
+  ASettings := ExtensionSettings(AId, ASettings);
   FExtensions.Delete(AId);
   FExtensions.Add(AId, ASettings);
 end;
@@ -2617,10 +2628,8 @@ end;
 procedure TMCPServer.PinExtensionSettings(const AId: string;
   ASettings: TJSONObject);
 begin
-  if FFrozen then
-    ASettings.Free;
-  EnsureMutable;
-  FHooks.PinSettings(AId, ASettings);
+  FHooks.PinSettings(AId, ExtensionSettings(AId, ASettings));
+  EnsureExtension(AId);
 end;
 
 procedure TMCPServer.RegisterRoute(const AMethod, ANameParam: string;

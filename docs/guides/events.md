@@ -15,7 +15,7 @@ holds no state per client, which fits this library's stateless design.
 ## Register an event type
 
 ```pascal
-uses MCP.Events, MCP.Protocol, MCP.Schema, MCP.Server;
+uses fpjson, MCP.Events, MCP.Protocol, MCP.Schema, MCP.Server;
 
 function NewMail(const AQuery: TMCPEventQuery;
   const ACtx: TMCPRequestContext): TMCPEventPoll;
@@ -41,8 +41,7 @@ end;
 
 RegisterEvent(Server, 'email.received', 'Fires when an email arrives',
   // folder is optional: without it, the inbox is watched.
-  TJSONObject(GetJSON('{"type":"object","properties":{"folder":' +
-    '{"type":"string","description":"Folder to watch"}}}')),
+  ObjectSchema.AddString('folder', 'Folder to watch', False),
   ObjectSchema.AddString('from').AddString('subject'),
   NewMail);
 ```
@@ -100,7 +99,8 @@ The extension is defined for the 2026-07-28 revision, so the classic
 that calls these methods anyway gets `-32601`. On Streamable HTTP, `events/poll`
 carries the `Mcp-Name` header for the event name and an `Mcp-Param-*`
 header for each argument marked `x-mcp-header`. Both are checked as for
-`tools/call`.
+`tools/call`. `Mcp-Name` must arrive once, and a name that is not plain
+ASCII must be base64-encoded.
 
 ## Not served
 

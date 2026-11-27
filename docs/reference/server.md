@@ -376,8 +376,8 @@ object of a class; adopting the same object again changes nothing.
 `RestrictExtensionToModern` leaves extension `AId` out of the classic
 `initialize` capabilities, for an extension whose methods answer
 2026-07-28 requests only. `PinExtensionSettings` declares `AId` with
-`ASettings` (owned) whatever `DeclareExtension` sets before or after,
-for settings an extension unit must keep true. `RegisterRoute` makes a registered method routable on Streamable HTTP:
+`ASettings` (owned; nil for `{}`) whatever `DeclareExtension` sets
+before or after, for settings an extension unit must keep true. `RegisterRoute` makes a registered method routable on Streamable HTTP:
 its requests carry an `Mcp-Name` header mirroring `params.ANameParam`
 and, when `AHeaders` (a `TMCPHeaderLookup`, from `MCP.Extensions`) is
 given, the `Mcp-Param-*` headers it names for that value, checked as for

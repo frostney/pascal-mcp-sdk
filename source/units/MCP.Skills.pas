@@ -574,8 +574,8 @@ begin
     if AFrontmatter = nil then
       raise EMCPServer.Create('A skill needs its frontmatter');
     // A member stored as nil is a null, checked as one (#115 review).
-    // The clone rebuilds fpjson's name lookup, which (FPC 3.2.2) still
-    // misses a member replaced through Items[].
+    // The clone rebuilds fpjson's name lookup, which (FPC 3.2.2) misses
+    // a member stored as nil even after Items[] replaces it.
     NilChildrenToNull(AFrontmatter);
     Normalized := TJSONObject(AFrontmatter.Clone);
     AFrontmatter.Free;

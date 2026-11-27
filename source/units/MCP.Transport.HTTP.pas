@@ -581,16 +581,17 @@ type
   // (#90 review).
   TMCPHTTPRequest = class(TFPHTTPConnectionRequest)
   private
-    // One entry per Mcp-Param-* field name, ASCII-lowercased: its last
-    // value and how many times it arrived. Other fields are not kept.
+    // One entry per Mcp-Param-* field name and for Mcp-Name,
+    // ASCII-lowercased: its last value and how many times it arrived.
+    // Other fields are not kept.
     FParamNames: array of string;
     FParamValues: array of string;
     FParamCounts: array of Integer;
     function ParamIndex(const AKey: string): Integer;
   public
     procedure SetCustomHeader(const AName, AValue: string); override;
-    // How many times the Mcp-Param-* field AName (any ASCII case)
-    // arrived, and its last value. fcl-web's own lookup compares names
+    // How many times the Mcp-Param-* or Mcp-Name field AName (any ASCII
+    // case) arrived, and its last value. fcl-web's own lookup compares names
     // by the locale's rules, so the binding reads these instead.
     function ParamFieldCount(const AName: string): Integer;
     function ParamFieldValue(const AName: string): string;
@@ -617,6 +618,7 @@ const
 
 const
   PARAM_FIELD_PREFIX = 'mcp-param-';
+  NAME_FIELD = 'mcp-name';
 
 function TMCPHTTPRequest.ParamIndex(const AKey: string): Integer;
 begin
@@ -633,7 +635,8 @@ var
 begin
   // LowerCase folds ASCII only, whatever the locale.
   Key := LowerCase(AName);
-  if Copy(Key, 1, Length(PARAM_FIELD_PREFIX)) = PARAM_FIELD_PREFIX then
+  if (Key = NAME_FIELD) or
+    (Copy(Key, 1, Length(PARAM_FIELD_PREFIX)) = PARAM_FIELD_PREFIX) then
   begin
     Index := ParamIndex(Key);
     if Index < 0 then
@@ -806,11 +809,30 @@ begin
     (FAllowedOrigins.IndexOf(AOrigin) >= 0);
 end;
 
+// How many times the Mcp-Param-* or Mcp-Name field AName arrived on ARequest, and
+// its value: from a TMCPHTTPRequest (the listener makes every request
+// one), else from fcl-web's own storage, which keeps one value and
+// compares names by the locale.
+function ParamField(ARequest: TFPHTTPConnectionRequest; const AName: string;
+  out AValue: string): Integer;
+begin
+  if ARequest is TMCPHTTPRequest then
+  begin
+    AValue := TMCPHTTPRequest(ARequest).ParamFieldValue(AName);
+    Exit(TMCPHTTPRequest(ARequest).ParamFieldCount(AName));
+  end;
+  AValue := ARequest.GetFieldByName(AName);
+  if ARequest.CustomHeaders.IndexOfName(AName) >= 0 then
+    Result := 1
+  else
+    Result := 0;
+end;
+
 function TMCPHTTPServer.HeaderFailure(ARequest: TFPHTTPConnectionRequest;
   const AMessage: TJSONRPCMessage; out AFailure: string): Boolean;
 var
   HeaderVersion, BodyVersion, HeaderMethod: string;
-  HeaderName, DecodedName, BodyName, NameParam: string;
+  HeaderName, DecodedName, BodyName, NameParam, Raw: string;
   Routed: Boolean;
   Headers: TMCPHeaderLookup;
   Meta: TJSONObject;
@@ -876,6 +898,13 @@ begin
     else
       BodyName := BodyNameFor(AMessage.Method, AMessage.Params);
     HeaderName := ARequest.GetFieldByName('Mcp-Name');
+    // A routed method's Mcp-Name must arrive once: an intermediary may
+    // have routed on another occurrence (#118 review).
+    if Routed and (ParamField(ARequest, 'Mcp-Name', Raw) > 1) then
+    begin
+      AFailure := 'Header mismatch: Mcp-Name header sent more than once';
+      Exit;
+    end;
     if HeaderName = '' then
     begin
       if BodyName <> '' then
@@ -892,10 +921,12 @@ begin
           'decodable base64';
         Exit;
       end;
-      // A name that is not plain ASCII must come base64-encoded
-      // (events.mdx, Streamable HTTP: Routing Headers; the transport's
-      // Value Encoding), so raw bytes are refused (#118 review).
-      if (DecodedName = HeaderName) and not IsPlainHeaderValue(HeaderName) then
+      // A routed method's name that is not plain ASCII must come
+      // base64-encoded (events.mdx, Streamable HTTP: Routing Headers),
+      // so raw bytes are refused (#118 review). The core methods keep
+      // their behaviour.
+      if Routed and (DecodedName = HeaderName) and
+        not IsPlainHeaderValue(HeaderName) then
       begin
         AFailure := 'Header mismatch: Mcp-Name header value is not plain ' +
           'ASCII; send it base64-encoded';
@@ -923,25 +954,6 @@ end;
 // decoded, equals the body value; a header for an absent or null value
 // does not match either. Verified 2026-11-26 against
 // https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-behavior-for-custom-headers
-// How many times the Mcp-Param field AName arrived on ARequest, and
-// its value: from a TMCPHTTPRequest (the listener makes every request
-// one), else from fcl-web's own storage, which keeps one value and
-// compares names by the locale.
-function ParamField(ARequest: TFPHTTPConnectionRequest; const AName: string;
-  out AValue: string): Integer;
-begin
-  if ARequest is TMCPHTTPRequest then
-  begin
-    AValue := TMCPHTTPRequest(ARequest).ParamFieldValue(AName);
-    Exit(TMCPHTTPRequest(ARequest).ParamFieldCount(AName));
-  end;
-  AValue := ARequest.GetFieldByName(AName);
-  if ARequest.CustomHeaders.IndexOfName(AName) >= 0 then
-    Result := 1
-  else
-    Result := 0;
-end;
-
 function TMCPHTTPServer.ParamHeaderFailure(
   ARequest: TFPHTTPConnectionRequest; const AMessage: TJSONRPCMessage;
   AHeaders: TMCPHeaderLookup; const ATarget: string;

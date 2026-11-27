@@ -227,17 +227,10 @@ begin
     if ANextPollMs < 0 then
       raise EMCPServer.CreateFmt('Event type "%s": nextPollMs must not be ' +
         'negative', [AName]);
-    // inputSchema "mirrors the inputSchema/arguments pairing on tools"
-    // (events.mdx, Listing Available Events): an object root, and
-    // x-mcp-header annotations a client accepts.
-    RootType := AInputSchema.Find('type');
-    if (RootType = nil) or (RootType.JSONType <> jtString) or
-      (RootType.AsString <> 'object') then
-      raise EMCPServer.CreateFmt('Event type "%s" inputSchema must have ' +
-        'root type "object"', [AName]);
     // Children stored as nil are nulls, and the clones rebuild fpjson's
-    // name lookup, which misses a member replaced through Items[], so
-    // every check below sees what goes out (#118 review).
+    // name lookup, which (FPC 3.2.2) misses a member stored as nil even
+    // after Items[] replaces it, so every check below sees what goes
+    // out (#118 review).
     NilChildrenToNull(AInputSchema);
     NilChildrenToNull(APayloadSchema);
     Swap := TJSONObject(AInputSchema.Clone);
@@ -246,6 +239,15 @@ begin
     Swap := TJSONObject(APayloadSchema.Clone);
     APayloadSchema.Free;
     APayloadSchema := Swap;
+    // inputSchema "mirrors the inputSchema/arguments pairing on tools"
+    // (events.mdx, Listing Available Events): an object root, and
+    // x-mcp-header annotations a client accepts. Read after the clone,
+    // whose lookup sees every member (#118 review).
+    RootType := AInputSchema.Find('type');
+    if (RootType = nil) or (RootType.JSONType <> jtString) or
+      (RootType.AsString <> 'object') then
+      raise EMCPServer.CreateFmt('Event type "%s" inputSchema must have ' +
+        'root type "object"', [AName]);
     // Arguments are checked as for tools: an input schema outside the
     // subset the server enforces is refused, not left unchecked.
     Problem := MCPSchemaSubsetViolation(AInputSchema, True);
@@ -387,6 +389,11 @@ begin
   if AQuery.FromNow and (APoll.Events.Count > 0) then
     raise EMCPServer.CreateFmt('Event type "%s" returned events for a poll ' +
       'from now', [FTypes[AType].Name]);
+  // A null cursor starts from now, so it cannot lead to the next page
+  // that hasMore promises (events.mdx, Poll-Based Delivery).
+  if APoll.NoReplay and APoll.HasMore then
+    raise EMCPServer.CreateFmt('Event type "%s" returned hasMore without ' +
+      'replay', [FTypes[AType].Name]);
   if (AQuery.MaxEvents >= 0) and (APoll.Events.Count > AQuery.MaxEvents) then
     raise EMCPServer.CreateFmt('Event type "%s" returned more than ' +
       'maxEvents events', [FTypes[AType].Name]);

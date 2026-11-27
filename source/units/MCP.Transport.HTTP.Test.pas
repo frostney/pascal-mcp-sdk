@@ -107,6 +107,8 @@ type
       out ABody: string): Integer;
     // An events/poll with params AParamsJson (each member followed by a
     // comma), Mcp-Name AName ('' sends none) and AHeaders.
+    function PostPollRaw(const AHeaderLines: string;
+      out ABody: string): Integer;
     function PostPoll(const AName, AParamsJson: string;
       const AHeaders: array of THeaderPair; out ABody: string): Integer;
     function PostWithUnsentBody(ADeclaredLength: Integer;
@@ -981,6 +983,41 @@ begin
   Expect<Integer>(PostPoll('ti' + #$C3#$A9 + 'ck', '"name":"tick",', [], Body))
     .ToBe(400);
   Expect<Boolean>(Pos('not plain ASCII', Body) > 0).ToBe(True);
+  // Core methods keep their behaviour: a raw name that matches the body
+  // passes the header check (the tool is then unknown).
+  Expect<Integer>(Exchange('POST', '/mcp', '{"jsonrpc":"2.0","id":8,' +
+    '"method":"tools/call","params":{"name":"ti' + #$C3#$A9 + 'ck",' +
+    '"arguments":{},' + META_MODERN + '}}', [HeaderPair('MCP-Protocol-Version',
+    MCP_PROTOCOL_VERSION), HeaderPair('Mcp-Method', 'tools/call'),
+    HeaderPair('Mcp-Name', 'ti' + #$C3#$A9 + 'ck')], Body, ContentType))
+    .ToBe(200);
+  // A routed method's Mcp-Name must arrive once (#118 review).
+  Expect<Integer>(PostPollRaw('Mcp-Name: tock'#13#10'Mcp-Name: tick', Body))
+    .ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  Expect<Boolean>(Pos('Mcp-Name header sent more than once', Body) > 0)
+    .ToBe(True);
+  Expect<Integer>(PostPollRaw('Mcp-Name: tick', Body)).ToBe(200);
+end;
+
+// events/poll for "tick" with the raw header lines AHeaderLines, so a
+// field can repeat.
+function THTTPBinding.PostPollRaw(const AHeaderLines: string;
+  out ABody: string): Integer;
+var
+  Payload, Request: string;
+begin
+  Payload := '{"jsonrpc":"2.0","id":9,"method":"events/poll","params":{' +
+    '"name":"tick",' + META_MODERN + '}}';
+  Request := 'POST /mcp HTTP/1.1'#13#10 +
+    'Host: 127.0.0.1:' + IntToStr(FTransport.Port) + #13#10 +
+    'Content-Type: application/json'#13#10 +
+    'Accept: application/json, text/event-stream'#13#10 +
+    'MCP-Protocol-Version: ' + MCP_PROTOCOL_VERSION + #13#10 +
+    'Mcp-Method: events/poll'#13#10 + AHeaderLines + #13#10 +
+    'Connection: close'#13#10 +
+    'Content-Length: ' + IntToStr(Length(Payload)) + #13#10#13#10 + Payload;
+  Result := RawExchange(FTransport.Port, Request, ABody);
 end;
 
 procedure THTTPBinding.TestParamHeaderMissing;

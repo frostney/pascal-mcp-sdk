@@ -47,6 +47,7 @@ type
     procedure SetupTests; override;
     procedure TestDeclaration;
     procedure TestList;
+    procedure TestListLine;
     procedure TestPollFromNow;
     procedure TestPollFromCursor;
     procedure TestTruncatedAndNoReplay;
@@ -194,6 +195,9 @@ begin
   if Text <> '' then
     Exit(MCPEventPoll('1', TJSONArray(MCPParseJSON(Text))));
   Result := MCPEventPoll('1', TJSONArray.Create);
+  // A null cursor cannot lead to the next page (#118 review).
+  Result.NoReplay := Kind = 'noreplaymore';
+  Result.HasMore := Result.NoReplay;
   Built := NilFault(Kind);
   if Built <> nil then
     Result.Events.Add(Built);
@@ -284,6 +288,22 @@ begin
     '{ "name" : "no.replay"', Line) >
     0).ToBe(True);
   Expect<Boolean>(Pos('"resultType" : "complete"', Line) > 0).ToBe(True);
+end;
+
+// One type alone: the whole events/list line (#118 review).
+procedure TEventsSuite.TestListLine;
+begin
+  RegisterEvent(FServer, 'one', 'One event', ObjectSchema.Build,
+    ObjectSchema.AddInteger('n').Build, ClockCheck);
+  Expect<string>(Send('{"jsonrpc":"2.0","id":2,"method":"events/list",' +
+    '"params":{' + META + '}}')).ToBe('{ "jsonrpc" : "2.0", "id" : 2, ' +
+    '"result" : { "events" : [{ "name" : "one", "description" : ' +
+    '"One event", "delivery" : ["poll"], "inputSchema" : { "type" : ' +
+    '"object", "properties" : {} }, "payloadSchema" : { "type" : "object", ' +
+    '"properties" : { "n" : { "type" : "integer" } }, "required" : ["n"] } }' +
+    '], "resultType" : "complete", "_meta" : { ' +
+    '"io.modelcontextprotocol/serverInfo" : { "name" : "events", ' +
+    '"version" : "1.0" } } } }');
 end;
 
 // "null means start from now: the server returns no events and a fresh
@@ -478,6 +498,9 @@ begin
   Expect<Boolean>(Pos('"extra" : null', Send('{"jsonrpc":"2.0","id":8,' +
     '"method":"events/poll","params":{"name":"faulty","cursor":"0",' +
     '"arguments":{"fault":"nildata"},' + META + '}}')) > 0).ToBe(True);
+  // hasMore with a null cursor promises a page no poll can reach.
+  Expect<Boolean>(Pos('-32603', ErrorOf(Poll('"name":"faulty","cursor":"0",' +
+    '"arguments":{"fault":"noreplaymore"}'))) = 1).ToBe(True);
 end;
 
 // The extension is defined for 2026-07-28: a classic client is told the
@@ -510,14 +533,20 @@ procedure TEventsSuite.TestSettingsPinned;
 const
   DISCOVER = '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{' +
     META + '}}';
+var
+  Line: string;
 begin
   FServer.DeclareExtension('io.modelcontextprotocol/events',
     TJSONObject.Create(['listChanged', True]));
   RegisterFixture;
   FServer.DeclareExtension('io.modelcontextprotocol/events',
     TJSONObject.Create(['listChanged', True]));
-  Expect<Boolean>(Pos('"io.modelcontextprotocol/events" : {}', Send(DISCOVER))
-    > 0).ToBe(True);
+  // A pin declares on its own, nil settings as {}.
+  FServer.PinExtensionSettings('com.example/pinned', nil);
+  Line := Send(DISCOVER);
+  Expect<Boolean>(Pos('"io.modelcontextprotocol/events" : {}', Line) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Pos('"com.example/pinned" : {}', Line) > 0).ToBe(True);
 end;
 
 // events/list pages with PageSize; the cursor leads to the last page.
@@ -622,6 +651,13 @@ begin
         Raised := True;
     end;
     Expect<Boolean>(Raised).ToBe(True);
+    // A root type stored as nil, then set through Items[], is read
+    // after the clone that rebuilds the lookup (#118 review).
+    Built := TJSONObject.Create;
+    Built.Add('type', TJSONData(nil));
+    Built.Items[0] := TJSONString.Create('object');
+    RegisterEvent(FServer, 'replaced', 'd', Built, ObjectSchema.Build,
+      ClockCheck);
     Expect<Boolean>(Refused('a', '{"type":"object"}')).ToBe(False);
     Expect<Boolean>(Refused('a', '{"type":"object"}')).ToBe(True);
     Raised := False;
@@ -661,6 +697,7 @@ begin
   Test('a route''s header parameters are a copy', TestRouteCopy);
   Test('the Events declaration stays {} whatever else declares it',
     TestSettingsPinned);
+  Test('events/list for one type is one exact line', TestListLine);
 end;
 
 begin

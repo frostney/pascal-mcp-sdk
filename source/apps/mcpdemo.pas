@@ -239,11 +239,15 @@ var
   ClockAtMs: Int64 = -1;
 
 function ClockNowMs: Int64;
+var
+  Utc: TDateTime;
 begin
   if ClockAtMs >= 0 then
     Exit(ClockAtMs);
-  Result := DateTimeToUnix(LocalTimeToUniversal(SysUtils.Now)) * 1000 +
-    MilliSecondOf(SysUtils.Now);
+  // One sample: DateTimeToUnix drops its milliseconds, which are added
+  // back from the same instant.
+  Utc := LocalTimeToUniversal(SysUtils.Now);
+  Result := DateTimeToUnix(Utc) * 1000 + MilliSecondOf(Utc);
 end;
 
 // The Events demo (#118): one occurrence per minute of UTC time, the
