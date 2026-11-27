@@ -22,7 +22,7 @@ flowchart LR
     OWN["Implement in the<br/>unit that owns the rule"]
     GATE["Local gate:<br/>lwpt install --frozen · build ·<br/>test · run smoke · format --check"]
     PR["PR with Conventional<br/>Commit title"]
-    CI["CI: 3-platform battery,<br/>interop, docs + format gates"]
+    CI["CI: 3-platform battery,<br/>interop, conformance,<br/>docs + format gates"]
     MERGE["Squash merge —<br/>title becomes the<br/>changelog entry"]
     IDEA --> TEST --> OWN --> GATE --> PR --> CI --> MERGE
 ```
@@ -175,20 +175,24 @@ registry.
   `docs: …`). The repo squash-merges, so the title becomes the commit
   subject and the changelog entry — `pr-title.yml` gates it, with
   allowed types read from `cliff.toml`.
-- CI must be green across the board. What runs
+- The `main` branch ruleset requires
+  seven checks before a PR can merge: `build-and-test (linux-x64)`,
+  `build-and-test (macos-arm64)`, `build-and-test (win64)`, `docs`,
+  `interop`, `conformance` and `conventional-title`. A red one blocks
+  the merge. What each covers
   (see [Tooling § CI](tooling.md#ci)):
 
-| Gate | Proves |
+| Required check | Proves |
 | --- | --- |
-| Linux / macOS / Windows legs | checksum-verified lwpt install, `install --frozen`, build, unit suites, mcpsmoke on every platform |
-| `fpc @lwpt.cfg` leg | the zero-install path still works |
-| `interop` (required) | the official TypeScript clients still talk to `mcpdemo` — a red interop job is a real cross-implementation regression |
-| `conformance` (required) | the official conformance suite's 2026-07-28 requirement set, run against `mcpconformance`, still matches `tools/conformance/baseline.json` |
-| format / agents `--check` | formatter and AGENTS.md command block have not drifted |
-| `check-reference-docs.sh` | every `MCP*`/`Register*` routine in the interface of `MCP.Server` and `MCP.Content` is documented in `docs/reference/` |
-| health / duplication | complexity and token-clone ceilings in `lwpt.toml` hold — ratchets set just above the adoption-day baseline, so they shrink but never grow unnoticed |
-| markdownlint | docs follow `.markdownlint-cli2.jsonc` |
-| pages.yml (on `docs/`/`website/` changes) | the website still builds; broken internal doc links fail here |
+| `build-and-test (…)`, all three | checksum-verified lwpt install, `install --frozen`, build, unit suites, mcpsmoke on every platform; on the Linux leg also the `fpc @lwpt.cfg` zero-install path, `format --check` and `agents --check` (no formatter or AGENTS.md drift), `check-reference-docs.sh` (every `MCP*`/`Register*` routine in the interface of `MCP.Server` and `MCP.Content` is documented in `docs/reference/`), and health / duplication (the complexity and token-clone ceilings in `lwpt.toml`, ratchets set just above the adoption-day baseline, so they shrink but never grow unnoticed) |
+| `docs` | markdownlint: docs follow `.markdownlint-cli2.jsonc` |
+| `interop` | the official TypeScript clients still talk to `mcpdemo` — a red interop job is a real cross-implementation regression |
+| `conformance` | the official conformance suite's 2026-07-28 requirement set, run against `mcpconformance`, still matches `tools/conformance/baseline.json` |
+| `conventional-title` | the PR title is a Conventional Commit (`pr-title.yml`) |
+
+- Not required: `pages.yml` builds the website when a PR touches
+  `docs/` or `website/`, and fails on broken internal doc links, so
+  fix a red build there before merging.
 
 - Reverting via GitHub's Revert button produces a `Revert "..."`
   title git-cliff cannot parse — retitle it

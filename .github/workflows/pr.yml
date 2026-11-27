@@ -1,7 +1,8 @@
 name: PR
 
 # Fast PR gate. Mirrors the duetto / lwpt pattern: ci.yml runs only on
-# push to main, so pr.yml is the sole pre-merge signal a PR sees.
+# push to main, so pr.yml runs a PR's build, test, docs, interop and
+# conformance checks; pr-title.yml adds its conventional-title check.
 #
 #   pr.yml — every PR: native install --frozen + format --check + build
 #            + test + the mcpsmoke E2E battery on Linux, macOS, and
@@ -245,7 +246,7 @@ jobs:
   # exact npm pin in tools/conformance/baseline.json) against the
   # conformance fixture (build/mcpconformance: the suite's reference
   # surface, registered through the public API) over Streamable HTTP.
-  # A required PR gate (#122): every scored scenario passes (#81).
+  # A required PR gate (#81, #122).
   # run.mjs compares each scenario with the committed baseline and fails
   # when they differ (a regression, a stale expected failure or skip, a
   # scenario added or removed, an unreadable result), and on usage
