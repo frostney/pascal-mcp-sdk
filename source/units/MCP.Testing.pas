@@ -118,7 +118,7 @@ type
     // Owned by the client; cleared when the next call starts.
     property Notifications: TStringList read FNotifications;
     // The raw response line of the last round, as the server wrote it,
-    // for byte-exact assertions.
+    // for byte-exact assertions; '' when that round got no response.
     property LastResponseLine: string read FLastResponseLine;
     // The client's own session (owned), for calls into the server that
     // need one, such as HandleMessage with a hand-written line.
@@ -267,6 +267,9 @@ begin
   finally
     Message.Free;
   end;
+  // Recorded before anything raises: a round with no response, such as
+  // a cancelled one, leaves LastResponseLine empty (#97 review).
+  FLastResponseLine := '';
   if not FServer.HandleMessage(FSession, Line, CollectNotification,
     FNotifications, Response) then
     raise EMCPTesting.CreateFmt('%s produced no response', [AMethod]);

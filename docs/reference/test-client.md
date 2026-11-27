@@ -44,7 +44,7 @@ property Session: TMCPSession;             // owned by the client
 | `CallTool`, `GetPrompt` | Answer `input_required` rounds from the canned responses and retry with the echoed `requestState`, while every requested key has an answer, at most ten times; then, or without an answer, they return the latest response. A round that asks for nothing is retried with its `requestState` alone |
 | `Discover`, the list methods, `ReadResource`, `Complete` | One request each |
 | `Notifications` | The notification lines the last call emitted, in order, across every round it answered; cleared when a call starts, before it checks its arguments |
-| `LastResponseLine` | The raw response line of the last round, for byte-exact assertions |
+| `LastResponseLine` | The raw response line of the last round, for byte-exact assertions; `''` when that round got no response, such as a cancelled one |
 | `Session` | The client's session, for a hand-written `HandleMessage` line |
 
 Every call returns the whole parsed JSON-RPC response, a `result` or an

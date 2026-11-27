@@ -46,6 +46,7 @@ type
     procedure TestFailedCallLeavesNoNotifications;
     procedure TestLogAndProgressInOrder;
     procedure TestStateOnlyRound;
+    procedure TestCancelledRoundLeavesNoLine;
   end;
 
 function EchoHandler(AArguments: TJSONObject;
@@ -104,6 +105,21 @@ begin
     '|' + ACtx.RequestState);
 end;
 
+// A poll that cancels whatever runs, as a closed connection would.
+function CancelEverything(ASession: TMCPSession; AUserData: Pointer): Boolean;
+begin
+  Result := True;
+end;
+
+// A polling handler.
+function PollingHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  if ACtx.IsCancelled then
+    Exit(MCPTextResult('cancelled'));
+  Result := MCPTextResult('ran');
+end;
+
 function GreetPrompt(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TJSONArray;
 begin
@@ -119,6 +135,7 @@ begin
   FServer.RegisterTool('ask_name', 'Asks', '{"type":"object"}', AskNameHandler);
   FServer.RegisterTool('chatty', 'Chatty', '{"type":"object"}', ChattyHandler);
   FServer.RegisterTool('later', 'Later', '{"type":"object"}', LaterHandler);
+  FServer.RegisterTool('polling', 'Polls', '{"type":"object"}', PollingHandler);
   FServer.RegisterPrompt('greet', 'Greet', PromptArguments.Add('name'),
     GreetPrompt);
   FServer.RegisterPromptCompletion('greet', 'name', ['Ada', 'Alan', 'Grace']);
@@ -212,7 +229,7 @@ procedure TTestClientSuite.TestDiscoverAndLists;
 begin
   Expect<string>(StringAt(FClient.Discover, 'result.serverInfo.name'))
     .ToBe('fixture');
-  Expect<Integer>(CountOf(FClient.ListTools, 'result.tools')).ToBe(5);
+  Expect<Integer>(CountOf(FClient.ListTools, 'result.tools')).ToBe(6);
   Expect<Integer>(CountOf(FClient.ListPrompts, 'result.prompts')).ToBe(1);
   Expect<Integer>(CountOf(FClient.ListResources, 'result.resources')).ToBe(1);
 end;
@@ -419,6 +436,27 @@ begin
     .ToBe(True);
 end;
 
+// A cancelled round gets no response: the call raises and
+// LastResponseLine no longer shows the call before it (#97 review).
+procedure TTestClientSuite.TestCancelledRoundLeavesNoLine;
+var
+  Raised: Boolean;
+begin
+  TextOf(FClient.CallTool('echo', '{"message":"before"}'));
+  Expect<Boolean>(Pos('before', FClient.LastResponseLine) > 0).ToBe(True);
+  FClient.Session.SetCancellationPoll(CancelEverything, nil);
+  Raised := False;
+  try
+    FClient.CallTool('polling').Free;
+  except
+    on E: EMCPTesting do
+      Raised := True;
+  end;
+  FClient.Session.SetCancellationPoll(nil, nil);
+  Expect<Boolean>(Raised).ToBe(True);
+  Expect<string>(FClient.LastResponseLine).ToBe('');
+end;
+
 // A round that asks for nothing is retried with its state alone, no
 // inputResponses, as a client would (#97 review).
 procedure TTestClientSuite.TestStateOnlyRound;
@@ -453,6 +491,8 @@ begin
     TestLogAndProgressInOrder);
   Test('a state-only round is retried without inputResponses',
     TestStateOnlyRound);
+  Test('a cancelled round leaves LastResponseLine empty',
+    TestCancelledRoundLeavesNoLine);
 end;
 
 begin
