@@ -38,11 +38,11 @@ type
   // from the extension.
   TMCPSkillFile = record
     Path: string;
-    Content: string;
+    Content: RawByteString; // never converted: the bytes the digest covers
     MimeType: string;
   end;
 
-function MCPSkillFile(const APath, AContent: string;
+function MCPSkillFile(const APath: string; const AContent: RawByteString;
   const AMimeType: string = ''): TMCPSkillFile;
 
 // Registers the skill at skill://ASkillPath/SKILL.md, before the server
@@ -91,7 +91,8 @@ type
       Frontmatter: TJSONObject; // owned
     end;
     FFiles: array of record
-      Uri, MimeType, Content, Digest: string;
+      Uri, MimeType, Digest: string;
+      Content: RawByteString;
       Skill: Integer; // the skill whose SKILL.md this is, or -1
     end;
     function FileIndex(const AUri: string): Integer;
@@ -113,7 +114,7 @@ type
       const ABody: string; const AFiles: array of TMCPSkillFile);
   end;
 
-function MCPSkillFile(const APath, AContent: string;
+function MCPSkillFile(const APath: string; const AContent: RawByteString;
   const AMimeType: string): TMCPSkillFile;
 begin
   Result.Path := APath;
@@ -169,7 +170,8 @@ begin
   Result := Copy(APath, Slash + 1, MaxInt);
 end;
 
-function GuessMimeType(const APath, AContent: string): string;
+function GuessMimeType(const APath: string;
+  const AContent: RawByteString): string;
 var
   Extension: string;
 begin
@@ -193,7 +195,7 @@ end;
 
 // "sha256:" and 64 lowercase hex characters (skills.mdx, Integrity and
 // Verification).
-function SkillDigest(const AContent: string): string;
+function SkillDigest(const AContent: RawByteString): string;
 var
   Digest: TSHA256Digest;
   I: Integer;
@@ -478,8 +480,9 @@ procedure TSkillCatalog.Add(const ASkillPath: string;
   const AFiles: array of TMCPSkillFile);
 var
   Root, Problem: string;
+  Normalized: TJSONObject;
   Uris: array of string;
-  Contents: array of string;
+  Contents: array of RawByteString;
   I, J, Skill, Slot: Integer;
 begin
   try
@@ -488,6 +491,13 @@ begin
         'segments of letters, digits, "-", ".", "_" and "~"', [ASkillPath]);
     if AFrontmatter = nil then
       raise EMCPServer.Create('A skill needs its frontmatter');
+    // A member stored as nil is a null, checked as one (#115 review).
+    // The clone rebuilds fpjson's name lookup, which (FPC 3.2.2) still
+    // misses a member replaced through Items[].
+    NilChildrenToNull(AFrontmatter);
+    Normalized := TJSONObject(AFrontmatter.Clone);
+    AFrontmatter.Free;
+    AFrontmatter := Normalized;
     Problem := FrontmatterProblem(AFrontmatter, LastSegment(ASkillPath));
     if Problem <> '' then
       raise EMCPServer.CreateFmt('Skill "%s": %s', [ASkillPath, Problem]);
@@ -789,12 +799,20 @@ function TSkillCatalog.ReadFile(const AUri: string;
 var
   Index: Integer;
   Bytes: TBytes;
+  Text: string;
 begin
   Index := FileIndex(AUri);
   if Index < 0 then
     Exit(nil);
   if InvalidUTF8Offset(FFiles[Index].Content) = 0 then
-    Exit(MCPTextContents(AUri, FFiles[Index].MimeType, FFiles[Index].Content));
+  begin
+    // The validated bytes, copied as they are into the server's UTF-8
+    // text.
+    SetLength(Text, Length(FFiles[Index].Content));
+    if Length(Text) > 0 then
+      Move(FFiles[Index].Content[1], Text[1], Length(Text));
+    Exit(MCPTextContents(AUri, FFiles[Index].MimeType, Text));
+  end;
   SetLength(Bytes, Length(FFiles[Index].Content));
   if Length(Bytes) > 0 then
     Move(FFiles[Index].Content[1], Bytes[0], Length(Bytes));

@@ -350,15 +350,16 @@ TMCPResourceResolver = function(const AUri: string;
 the server's own methods. The handler gets the request's `params`
 (borrowed; `nil` when absent) and returns a new result object, which
 the server stamps for the request's era and sends. `ACacheable` adds
-the registry's `ttlMs` and `cacheScope` to a 2026-07-28 result that
-has none. An `EMCPProtocolError` it raises is answered as written, and
+the registry's `ttlMs` and `cacheScope` to a 2026-07-28 result, each
+one the handler left out. An `EMCPProtocolError` it raises is answered as written, and
 any other exception as `-32603`. A core method, one already
 registered, an empty name or a nil handler raises `EMCPServer`.
 `RegisterResourceResolver` serves `resources/read` for URIs that start
 with `AUriPrefix`, after the registered resources and before the
-templates. Its resources are not listed, its reads carry the
-registry's `ttlMs`, and it makes the server declare the `resources`
-capability. A resolver returns new contents, or `nil` for a URI that
+templates. A URI under the prefix that the resolver does not know is
+not found: templates are not consulted for it. Its resources are not
+listed, its reads carry the registry's `ttlMs`, and it makes the
+server declare the `resources` capability. A resolver returns new contents, or `nil` for a URI that
 is none of its resources. Prefixes may not overlap, and a registered
 resource under a resolver's prefix fails startup, since it would hide
 what the extension serves there. `Adopt` hands the
@@ -412,10 +413,12 @@ const MCP_SKILL_MAX_FILES = 512;
 const MCP_SKILL_MAX_BYTES = 16777216;
 
 type TMCPSkillFile = record
-  Path, Content, MimeType: string;
+  Path: string;
+  Content: RawByteString;
+  MimeType: string;
 end;
 
-function MCPSkillFile(const APath, AContent: string;
+function MCPSkillFile(const APath: string; const AContent: RawByteString;
   const AMimeType: string = ''): TMCPSkillFile;
 procedure RegisterSkill(AServer: TMCPServer; const ASkillPath: string;
   AFrontmatter: TJSONObject; const ABody: string;
@@ -426,7 +429,7 @@ function MCPSkillMarkdown(AFrontmatter: TJSONObject;
 
 | Member | Meaning |
 | --- | --- |
-| `MCPSkillFile` | A supporting file: its path relative to the skill root, its raw bytes, and a media type (`''` picks one from the extension, or `text/plain` for other UTF-8 text and `application/octet-stream` otherwise) |
+| `MCPSkillFile` | A supporting file: its path relative to the skill root, its raw bytes (`RawByteString`, so no code page conversion touches them), and a media type (`''` picks one from the extension, or `text/plain` for other UTF-8 text and `application/octet-stream` otherwise) |
 | `RegisterSkill` | The skill at `skill://ASkillPath/SKILL.md`, written from `AFrontmatter` (owned, also on failure) and `ABody`, with `AFiles`. The frontmatter's `name` must equal the path's last segment, and the Agent Skills fields are checked. A bad name, path or field, files that clash (the same URI, one under another, or a file with the directory media type), a URI already served, or a skill over `MCP_SKILL_MAX_FILES` or `MCP_SKILL_MAX_BYTES` with its nested skills' files raises `EMCPServer`, as does a call after the server started, and the server is left as it was. The first call declares the extension with `directoryRead` unless it is declared already, and serves `skills/list`, `skills/get`, `resources/directory/read` and the files |
 | `MCPSkillMarkdown` | The `SKILL.md` text `RegisterSkill` writes: a YAML frontmatter block for `AFrontmatter` (borrowed), then `ABody`. Strings are double-quoted with escapes YAML 1.1 and 1.2 share; a fractional number, a key written longer than the 1024 characters YAML parsers read, or text that is not UTF-8 raises `EMCPServer` |
 

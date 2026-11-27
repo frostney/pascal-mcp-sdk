@@ -9,8 +9,10 @@ Skills is the official extension for publishing
 A skill is a `SKILL.md` with YAML frontmatter, plus any supporting
 files. The server serves each file as a `skill://` resource and lists
 every skill with the SHA-256 digest and size of each file. A host
-that supports the extension discovers the skills and checks each file
-against its digest before it loads the skill. `MCP.Skills` gives you
+that supports the extension discovers the skills from the listing,
+fetches a skill's `SKILL.md` when it loads the skill and each
+supporting file when it is read, and checks every file it fetches
+against the listed digest and size. `MCP.Skills` gives you
 the server side for skills you define in code.
 
 ## Register a skill

@@ -663,7 +663,7 @@ type
     // Extension hooks (#115; MCP.Extensions has the handler types).
     // RegisterMethod answers requests for AMethod, in both eras, after
     // the server's own methods; ACacheable adds the registry's ttlMs and
-    // cacheScope to a 2026-07-28 result that has none. A core method,
+    // cacheScope to a 2026-07-28 result, each one it lacks. A core method,
     // one already registered, an empty name or a nil handler raises
     // EMCPServer.
     procedure RegisterMethod(const AMethod: string;
@@ -2669,7 +2669,8 @@ end;
 
 procedure TMCPServer.Adopt(AObject: TObject);
 begin
-  if FFrozen then
+  // A refused object is freed, unless the server owns it already.
+  if FFrozen and not FHooks.Owns(AObject) then
     AObject.Free;
   EnsureMutable;
   FHooks.Adopt(AObject);
@@ -3776,8 +3777,9 @@ begin
   if HookResult = nil then
     raise EMCPServer.CreateFmt('The handler for "%s" returned no result',
       [AMessage.Method]);
-  if ACacheable and not ALegacy and (HookResult.Find('ttlMs') = nil) then
-    AddCacheFields(HookResult, FCacheTtlMs);
+  // Each cache field the handler left out, from the registry.
+  if ACacheable and not ALegacy then
+    AddMissingCacheFields(HookResult, FCacheTtlMs, FCacheScope);
   Result := ResultResponse(AMessage, HookResult, ALegacy);
 end;
 
@@ -4357,10 +4359,13 @@ begin
       ReadTtlMs := FCacheTtlMs;
     end;
   end
+  // A URI under a resolver's prefix is the extension's alone: templates
+  // never serve one it does not know (#115 review).
   else if Contents = nil then
   begin
-    for Index := 0 to High(FTemplates) do
-      if MatchUriTemplate(FTemplates[Index].UriTemplate, Uri, Vars) then
+    if not FHooks.Covers(Uri) then
+      for Index := 0 to High(FTemplates) do
+        if MatchUriTemplate(FTemplates[Index].UriTemplate, Uri, Vars) then
       begin
         try
           if Assigned(FTemplates[Index].Method) then

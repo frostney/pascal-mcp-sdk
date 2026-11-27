@@ -38,6 +38,10 @@ type
       ALegacy: Boolean): TJSONObject;
     function OwnTtl(AParams: TJSONObject; const ACtx: TMCPRequestContext;
       ALegacy: Boolean): TJSONObject;
+    function TtlOnly(AParams: TJSONObject; const ACtx: TMCPRequestContext;
+      ALegacy: Boolean): TJSONObject;
+    function ScopeOnly(AParams: TJSONObject; const ACtx: TMCPRequestContext;
+      ALegacy: Boolean): TJSONObject;
     function Read(const AUri: string;
       const ACtx: TMCPRequestContext): TJSONArray;
   end;
@@ -108,6 +112,18 @@ begin
   Result := TJSONObject.Create(['ttlMs', 5, 'cacheScope', 'public']);
 end;
 
+function THookFixture.TtlOnly(AParams: TJSONObject;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+begin
+  Result := TJSONObject.Create(['ttlMs', 7]);
+end;
+
+function THookFixture.ScopeOnly(AParams: TJSONObject;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+begin
+  Result := TJSONObject.Create(['cacheScope', 'public']);
+end;
+
 function THookFixture.Read(const AUri: string;
   const ACtx: TMCPRequestContext): TJSONArray;
 begin
@@ -173,6 +189,21 @@ begin
   Expect<Boolean>(Pos('"ttlMs" : 5, "cacheScope" : "public"', Line) > 0)
     .ToBe(True);
   Expect<Boolean>(Pos('1234', Line) = 0).ToBe(True);
+  // Each missing field from the registry, the given one kept.
+  FreeAndNil(FSession);
+  FreeAndNil(FServer);
+  FServer := TMCPServer.Create('hooks', '1.0');
+  FServer.CacheTtlMs := 1234;
+  FServer.RegisterMethod('example/ttl', FFixture.TtlOnly, True);
+  FServer.RegisterMethod('example/scope', FFixture.ScopeOnly, True);
+  Line := Send('{"jsonrpc":"2.0","id":3,"method":"example/ttl",' +
+    '"params":{' + META + '}}');
+  Expect<Boolean>(Pos('"ttlMs" : 7, "cacheScope" : "private"', Line) > 0)
+    .ToBe(True);
+  Line := Send('{"jsonrpc":"2.0","id":4,"method":"example/scope",' +
+    '"params":{' + META + '}}');
+  Expect<Boolean>(Pos('"cacheScope" : "public", "ttlMs" : 1234', Line) > 0)
+    .ToBe(True);
 end;
 
 // A protocol error as written; anything else, and no result, -32603;
@@ -249,6 +280,25 @@ begin
   end;
   Expect<Integer>(FreedProbes).ToBe(2);
   Expect<Boolean>(FServer.Adopted(TFreeProbe) = nil).ToBe(True);
+  // An object the server owns, offered again after the start: refused,
+  // not freed, and freed once with the server (#115 review).
+  FreeAndNil(FSession);
+  FreeAndNil(FServer);
+  FServer := TMCPServer.Create('hooks', '1.0');
+  Probe := TFreeProbe.Create;
+  FServer.Adopt(Probe);
+  Send('{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{' +
+    META + '}}');
+  try
+    FServer.Adopt(Probe);
+  except
+    on E: EMCPServer do
+      ;
+  end;
+  Expect<Integer>(FreedProbes).ToBe(2);
+  FreeAndNil(FSession);
+  FreeAndNil(FServer);
+  Expect<Integer>(FreedProbes).ToBe(3);
 end;
 
 var

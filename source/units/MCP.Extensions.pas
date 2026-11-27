@@ -74,6 +74,8 @@ type
     function HasResolvers: Boolean;
     // Whether some resolver's prefix starts AUri.
     function Covers(const AUri: string): Boolean;
+    // Whether AObject is adopted already.
+    function Owns(AObject: TObject): Boolean;
     // AObject (owned from here) is freed with the hooks, after every
     // handler is gone; adopting it again changes nothing. Adopted finds
     // the first one of class AClass.
@@ -86,6 +88,11 @@ function FindCoreMethod(const AName: string;
   out AMethod: TMCPCoreMethod): Boolean;
 // Whether AName is a core method, so no extension may add it.
 function IsBuiltInMethod(const AName: string): Boolean;
+
+// Adds ttlMs (ATtlMs) and cacheScope (AScope) to AResult (borrowed),
+// each only when it is missing, so a handler's own values stay.
+procedure AddMissingCacheFields(AResult: TJSONObject; ATtlMs: Integer;
+  const AScope: string);
 
 implementation
 
@@ -238,6 +245,25 @@ begin
   Result := Length(FResolvers) > 0;
 end;
 
+procedure AddMissingCacheFields(AResult: TJSONObject; ATtlMs: Integer;
+  const AScope: string);
+begin
+  if AResult.Find('ttlMs') = nil then
+    AResult.Add('ttlMs', ATtlMs);
+  if AResult.Find('cacheScope') = nil then
+    AResult.Add('cacheScope', AScope);
+end;
+
+function TMCPExtensionHooks.Owns(AObject: TObject): Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to High(FAdopted) do
+    if FAdopted[I] = AObject then
+      Exit(True);
+  Result := False;
+end;
+
 function TMCPExtensionHooks.Covers(const AUri: string): Boolean;
 var
   I: Integer;
@@ -249,14 +275,9 @@ begin
 end;
 
 procedure TMCPExtensionHooks.Adopt(AObject: TObject);
-var
-  I: Integer;
 begin
-  if AObject = nil then
+  if (AObject = nil) or Owns(AObject) then
     Exit;
-  for I := 0 to High(FAdopted) do
-    if FAdopted[I] = AObject then
-      Exit;
   SetLength(FAdopted, Length(FAdopted) + 1);
   FAdopted[High(FAdopted)] := AObject;
 end;

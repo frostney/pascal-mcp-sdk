@@ -20,6 +20,7 @@ uses
   MCP.Protocol,
   MCP.Server,
   MCP.Skills,
+  MCP.Testing,
   TestingPascalLibrary;
 
 const
@@ -39,6 +40,7 @@ type
   private
     FServer: TMCPServer;
     FSession: TMCPSession;
+    FClient: TMCPTestClient;
     function Send(const ALine: string): string;
     function Call(const AMethod, AParams: string): TJSONObject;
     procedure RegisterFixture;
@@ -64,6 +66,9 @@ type
     procedure TestByteLimit;
     procedure TestAtomicFirstCall;
     procedure TestShadowingResource;
+    procedure TestRawBytes;
+    procedure TestTemplateCannotAddFiles;
+    procedure TestNilFrontmatterMember;
   end;
 
   // A handler that takes skills/get first.
@@ -72,6 +77,12 @@ type
     function Answer(AParams: TJSONObject; const ACtx: TMCPRequestContext;
       ALegacy: Boolean): TJSONObject;
   end;
+
+function ExtraReader(const AUri: string; AVariables: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPTextContents(AUri, 'text/plain', 'extra');
+end;
 
 function Body(const AText: string): string;
 begin
@@ -107,10 +118,12 @@ procedure TSkillsSuite.BeforeEach;
 begin
   FServer := TMCPServer.Create('skills', '1.0');
   FSession := nil;
+  FClient := nil;
 end;
 
 procedure TSkillsSuite.AfterEach;
 begin
+  FreeAndNil(FClient);
   FreeAndNil(FSession);
   FreeAndNil(FServer);
 end;
@@ -122,15 +135,14 @@ begin
   FServer.HandleMessage(FSession, ALine, Result);
 end;
 
+// Parsed answers through the test client (MCP.Testing), which adds the
+// request metadata and parses as the server does; exact wire lines and
+// the classic handshake use Send.
 function TSkillsSuite.Call(const AMethod, AParams: string): TJSONObject;
-var
-  Separator: string;
 begin
-  Separator := '';
-  if AParams <> '' then
-    Separator := ',';
-  Result := TJSONObject(GetJSON(Send('{"jsonrpc":"2.0","id":1,"method":"' +
-    AMethod + '","params":{' + AParams + Separator + META + '}}')));
+  if FClient = nil then
+    FClient := TMCPTestClient.Create(FServer);
+  Result := FClient.Request(AMethod, '{' + AParams + '}');
 end;
 
 function Str(AResponse: TJSONObject; const APath: string): string;
@@ -631,7 +643,8 @@ begin
     StringOfChar('x', MCP_SKILL_MAX_BYTES - SKILL_MD_BYTES))]);
   GuardServer := FServer;
   try
-    Expect<Boolean>(Refused('big2', '{"name":"big2","description":"d"}',
+    // A name of the same length, so its SKILL.md is the same size too.
+    Expect<Boolean>(Refused('bog', '{"name":"bog","description":"d"}',
       [MCPSkillFile('blob.bin', StringOfChar('x', MCP_SKILL_MAX_BYTES -
       SKILL_MD_BYTES + 1))])).ToBe(True);
   finally
@@ -690,6 +703,80 @@ begin
     'URI prefix an extension serves');
 end;
 
+// The bytes as given, whatever code page a string carries: a $E9 tagged
+// Windows-1252 is one byte, hashed and served as a blob, not converted
+// to UTF-8 on the way (#115 review). Digest from Python's hashlib.
+procedure TSkillsSuite.TestRawBytes;
+var
+  Latin: RawByteString;
+  Response: TJSONObject;
+begin
+  Latin := 'x';
+  Latin[1] := Chr($E9);
+  SetCodePage(Latin, 1252, False);
+  RegisterSkill(FServer, 'raw', TJSONObject.Create(['name', 'raw',
+    'description', 'd']), 'Body', [MCPSkillFile('latin.txt', Latin)]);
+  Response := Call('skills/get', '"uri":"skill://raw/SKILL.md"');
+  try
+    Expect<string>(Str(Response, 'result.skill.resources[1].digest'))
+      .ToBe('sha256:de2e331d891ae267a7009cb45b4e8830f170e0c937288ea2731a1941c7a53b0d');
+    Expect<Integer>(TJSONData(Response.FindPath(
+      'result.skill.resources[1].size')).AsInteger).ToBe(1);
+  finally
+    Response.Free;
+  end;
+  Response := Call('resources/read', '"uri":"skill://raw/latin.txt"');
+  try
+    Expect<string>(Str(Response, 'result.contents[0].blob')).ToBe('6Q==');
+  finally
+    Response.Free;
+  end;
+end;
+
+// Under skill:// only the catalog answers: a template there does not
+// serve a file the manifest leaves out (#115 review).
+procedure TSkillsSuite.TestTemplateCannotAddFiles;
+var
+  Response: TJSONObject;
+begin
+  FServer.RegisterResourceTemplate('skill://x/{name}', 'extra',
+    'text/plain', ExtraReader);
+  RegisterSkill(FServer, 'x', TJSONObject.Create(['name', 'x',
+    'description', 'd']), 'Body', []);
+  Response := Call('resources/read', '"uri":"skill://x/extra.md"');
+  try
+    Expect<Integer>(TJSONData(Response.FindPath('error.code')).AsInteger)
+      .ToBe(-32602);
+  finally
+    Response.Free;
+  end;
+  Response := Call('resources/read', '"uri":"skill://x/SKILL.md"');
+  try
+    Expect<string>(Str(Response, 'result.contents[0].mimeType'))
+      .ToBe('text/markdown');
+  finally
+    Response.Free;
+  end;
+end;
+
+// A member stored as nil is a null, and checked as one (#115 review).
+procedure TSkillsSuite.TestNilFrontmatterMember;
+var
+  Frontmatter: TJSONObject;
+  Raised: Boolean;
+begin
+  Frontmatter := TJSONObject.Create(['name', 'n', 'description', 'd']);
+  Frontmatter.Add('license', TJSONData(nil));
+  Raised := False;
+  try
+    RegisterSkill(FServer, 'n', Frontmatter, 'Body', []);
+  except
+    on E: EMCPServer do
+      Raised := Pos('"license" must be a string', E.Message) > 0;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+end;
+
 // Settings declared first survive the opt-in, as for MCP Apps.
 procedure TSkillsSuite.TestExplicitSettingsKept;
 begin
@@ -727,6 +814,11 @@ begin
     TestByteLimit);
   Test('a refused first call installs nothing', TestAtomicFirstCall);
   Test('a resource under skill:// fails startup', TestShadowingResource);
+  Test('file bytes are kept whatever their code page', TestRawBytes);
+  Test('a template under skill:// serves no file of a skill',
+    TestTemplateCannotAddFiles);
+  Test('a frontmatter member stored as nil is checked as null',
+    TestNilFrontmatterMember);
 end;
 
 begin
