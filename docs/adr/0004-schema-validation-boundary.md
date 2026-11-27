@@ -16,3 +16,14 @@ engine (violating the dependency posture of
 third-party dependency, and either would still leave semantic
 validation to handlers. Enforcing exactly what we emit keeps the
 guarantee honest: everything the server advertises, it checks.
+
+## Amendment (2026-11-27, #91)
+
+The enforced subset is now recursive (`items` and nested `properties`
+added, `null` as a type) and lives in `MCP.Schema`, and it also checks
+structured output against a tool's `outputSchema`, whose root can be
+any type since the 2026-07-28 revision (SEP-2106). An output schema
+outside the subset is published and left to the handler, like an
+`.ApplicationValidated` input schema. A schema whose `$schema` names a
+dialect other than 2020-12 is outside the subset. The boundary itself
+stands: still no general JSON Schema engine.

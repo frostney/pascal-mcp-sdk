@@ -26,7 +26,8 @@ uses
 
   fpjson,
   jsonparser,
-  jsonscanner;
+  jsonscanner,
+  MCP.Crypto;
 
 const
   META_MODERN =
@@ -226,6 +227,118 @@ end;
 // https://modelcontextprotocol.io/specification/2026-07-28/server/tools#tool-result
 // and .../server/prompts#embedded-resources (an embedded resource in a
 // prompt message MUST carry a URI and a MIME type).
+var
+  // The demo's tools/list names, unpaged, for the paged run to match.
+  DemoToolNames: string;
+
+// The comma-separated names of a tools/list result's tools.
+function ToolNames(AResponse: TJSONObject): string;
+var
+  Tools: TJSONData;
+  I: Integer;
+begin
+  Result := '';
+  Tools := FindPath(AResponse, 'result.tools');
+  if (Tools = nil) or (Tools.JSONType <> jtArray) then
+    Exit;
+  for I := 0 to Tools.Count - 1 do
+    Result := Result + TJSONObject(Tools.Items[I]).Get('name', '') + ',';
+end;
+
+// Pagination over stdio (#94; spec verified 2026-11-26:
+// https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/pagination):
+// mcpdemo --page-size 2 hands tools/list out in pages whose names, in
+// order, are the unpaged list's, the last without a nextCursor, and
+// refuses another list's cursor.
+procedure PagedDemoBattery;
+var
+  Paged: TProcess;
+  Response: TJSONObject;
+  Tools: TJSONData;
+  Cursor, Names, FirstCursor: string;
+  Pages: Integer;
+  PageOk, PagesOk, Answered: Boolean;
+begin
+  Paged := TProcess.Create(nil);
+  try
+    Paged.Executable := DemoBinary;
+    Paged.Parameters.Add('--page-size');
+    Paged.Parameters.Add('2');
+    Paged.Options := [poUsePipes];
+    try
+      Paged.Execute;
+    except
+      on E: Exception do
+      begin
+        Check(False, 'pagination: launch ' + DemoBinary + ': ' + E.Message);
+        Exit;
+      end;
+    end;
+    try
+      Cursor := '';
+      FirstCursor := '';
+      Names := '';
+      Pages := 0;
+      PagesOk := True;
+      Answered := True;
+      repeat
+        if Cursor = '' then
+          Response := RoundTrip(Paged, '{"jsonrpc":"2.0","id":1,' +
+            '"method":"tools/list","params":{' + META_MODERN + '}}')
+        else
+          Response := RoundTrip(Paged, '{"jsonrpc":"2.0","id":1,' +
+            '"method":"tools/list","params":{"cursor":"' + Cursor + '",' +
+            META_MODERN + '}}');
+        if Response = nil then
+        begin
+          Answered := False;
+          Break;
+        end;
+        try
+          // An error reply has no result.tools: the walk stops there.
+          Tools := FindPath(Response, 'result.tools');
+          PageOk := (Tools <> nil) and (Tools.JSONType = jtArray) and
+            (Tools.Count > 0) and (Tools.Count <= 2) and
+            (FindPath(Response, 'result.ttlMs') <> nil) and
+            (FindPath(Response, 'result.cacheScope') <> nil);
+          PagesOk := PagesOk and PageOk;
+          if PageOk then
+            Names := Names + ToolNames(Response);
+          if FindPath(Response, 'result.nextCursor') <> nil then
+            Cursor := PathString(Response, 'result.nextCursor')
+          else
+            Cursor := '';
+        finally
+          Response.Free;
+        end;
+        if Pages = 0 then
+          FirstCursor := Cursor;
+        Inc(Pages);
+      until (Cursor = '') or not PageOk or (Pages > 50);
+      Check(Answered, 'pagination: every tools/list page answered');
+      Check(PagesOk and (Pages > 1),
+        'pagination: pages of one or two tools, with caching fields');
+      Check(Answered and PagesOk and (Cursor = ''),
+        'pagination: the walk ends on a page without nextCursor');
+      Check((DemoToolNames <> '') and (Names = DemoToolNames),
+        'pagination: the pages concatenate to the unpaged list, in order');
+      Response := RoundTrip(Paged, '{"jsonrpc":"2.0","id":2,' +
+        '"method":"prompts/list","params":{"cursor":"' + FirstCursor + '",' +
+        META_MODERN + '}}');
+      try
+        Check(PathInt(Response, 'error.code') = -32602,
+          'pagination: another list''s cursor → -32602');
+      finally
+        Response.Free;
+      end;
+    finally
+      Shutdown(Paged, 'pagination');
+    end;
+  finally
+    Paged.Free;
+  end;
+end;
+
 procedure FixtureContentBattery;
 const
   // The fixture's complete one-frame WAV, written out literally.
@@ -281,6 +394,26 @@ begin
       'content: resource link (MCPResourceLink), UTF-8 byte-exact');
     Response.Free;
 
+    // Non-object structured output and its JSON text block (#91).
+    Response := RoundTripWithLine(Fixture,
+      '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{' +
+      '"name":"fixture_array_output",' + META_MODERN + '}}', ResponseLine);
+    Check(Pos('"content" : [{ "type" : "text", "text" : "[\"Gr' +
+      #$C3#$BC + #$C3#$9F + 'e\", \"' + #$F0#$9F#$98#$80 + '\"]" }], ' +
+      '"isError" : false, "structuredContent" : ["Gr' + #$C3#$BC + #$C3#$9F +
+      'e", "' + #$F0#$9F#$98#$80 + '"]', ResponseLine) > 0,
+      'output: array structuredContent and its JSON text, UTF-8 byte-exact');
+    Response.Free;
+
+    Response := RoundTripWithLine(Fixture,
+      '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{' +
+      '"name":"fixture_bad_output",' + META_MODERN + '}}', ResponseLine);
+    Check(Pos('"text" : "Tool \"fixture_bad_output\" produced output that ' +
+      'does not match its outputSchema: Structured output must be an ' +
+      'integer" }], "isError" : true', ResponseLine) > 0,
+      'output: output breaking its schema becomes isError');
+    Response.Free;
+
     Response := RoundTripWithLine(Fixture,
       '{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{' +
       '"name":"test_prompt_with_embedded_resource","arguments":{' +
@@ -292,6 +425,18 @@ begin
       (PathString(Response, 'result.messages[0].content.resource.mimeType') =
       'text/plain'),
       'content: prompt message with an embedded resource and its MIME type');
+    Response.Free;
+
+    // A handler's deliberate JSON-RPC error (#88) reaches stdout with its
+    // code, message and data.
+    Response := RoundTripWithLine(Fixture,
+      '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{' +
+      '"name":"fixture_protocol_error",' + META_MODERN + '}}', ResponseLine);
+    Check((PathInt(Response, 'error.code') = 4290) and
+      (Pos('"message" : "Quota exhausted: ' + #$E2#$82#$AC + '0 left"',
+      ResponseLine) > 0) and
+      (PathInt(Response, 'error.data.retryAfterSeconds') = 60),
+      'content: handler-raised protocol error, code, message and data');
     Response.Free;
 
     // The fixture's ApplicationValidated tools check their own arguments.
@@ -331,11 +476,35 @@ begin
   end;
 end;
 
+
+// The "a" field (argument digest) of a sealed requestState's envelope,
+// '' when the token does not decode.
+function EnvelopeArgumentsDigest(const AToken: string): string;
+var
+  Parts: TStringArray;
+  Envelope: RawByteString;
+  Data: TJSONData;
+begin
+  Result := '';
+  Parts := AToken.Split(['.']);
+  if (Length(Parts) <> 3) or not TryBase64UrlDecode(Parts[1], Envelope) then
+    Exit;
+  Data := GetJSON(Envelope);
+  try
+    if (Data.JSONType = jtObject) and (TJSONObject(Data).Find('a') <> nil) then
+      Result := TJSONObject(Data).Get('a', '');
+  finally
+    Data.Free;
+  end;
+end;
+
 var
   Demo: TProcess;
   Response: TJSONObject;
-  ResponseLine: string;
+  ResponseLine, SealedState: string;
   ServerInfo: TJSONData;
+  StartedAt: QWord;
+  WaitedMs: Integer;
 
 begin
   Demo := TProcess.Create(nil);
@@ -377,6 +546,8 @@ begin
       'discover: top-level serverInfo (required by RC wire schema)');
     Check(FindPath(Response, 'result.ttlMs') <> nil,
       'discover: ttlMs present (SEP-2549)');
+    Check(FindPath(Response, 'result.capabilities.completions') <> nil,
+      'discover: completions capability (a completion is registered)');
     Check(PathString(Response, 'result.serverInfo.title') = 'pascal-mcp-sdk demo',
       'discover: serverInfo title (#96)');
     Response.Free;
@@ -393,6 +564,7 @@ begin
       'tools/list: add carries outputSchema');
     Check(PathString(Response, 'result.cacheScope') = 'private',
       'tools/list: cacheScope present (SEP-2549)');
+    DemoToolNames := ToolNames(Response);
     Response.Free;
 
     // tools/call echo.
@@ -476,13 +648,34 @@ begin
       'MRTR round 1: resultType input_required');
     Check(PathString(Response, 'result.inputRequests.who.method') =
       'elicitation/create', 'MRTR round 1: elicitation request present');
-    Check(PathString(Response, 'result.requestState') = 'greet-round-1',
-      'MRTR round 1: requestState carried');
+    // The handler's state leaves sealed (#89), never as plain text: the
+    // MRTR page makes requestState attacker-controlled input whose
+    // integrity a server MUST protect (verified 2026-11-26,
+    // https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr).
+    SealedState := PathString(Response, 'result.requestState');
+    Check((Pos('v1.', SealedState) = 1) and
+      (Pos('greet-round-1', SealedState) = 0),
+      'MRTR round 1: requestState sealed');
+    // The envelope binds the arguments by the SHA-256 of their canonical
+    // form: {} here, whose digest is fixed. CI runs this battery under
+    // LC_ALL=C too, where a code page conversion once changed it.
+    Check(EnvelopeArgumentsDigest(SealedState) =
+      'RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o',
+      'MRTR round 1: argument digest is SHA-256 of {} on any locale');
+    Response.Free;
+    // A forged state is refused before the handler runs.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{' +
+      '"name":"greet_user","inputResponses":{"who":{"action":"accept",' +
+      '"content":{"name":"Ada"}}},"requestState":"greet-round-1",' +
+      META_MRTR + '}}');
+    Check(PathInt(Response, 'error.code') = -32602,
+      'MRTR retry: forged requestState → -32602');
     Response.Free;
     Response := RoundTrip(Demo,
       '{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{' +
       '"name":"greet_user","inputResponses":{"who":{"action":"accept",' +
-      '"content":{"name":"Ada"}}},"requestState":"greet-round-1",' +
+      '"content":{"name":"Ada"}}},"requestState":"' + SealedState + '",' +
       META_MRTR + '}}');
     Check(PathString(Response, 'result.resultType') = 'complete',
       'MRTR retry: resultType complete');
@@ -490,13 +683,63 @@ begin
       'MRTR retry: elicited name woven into the result');
     Response.Free;
 
+    // completion/complete (#81): the demo's static name list, by
+    // prefix ignoring case; verified 2026-11-26 against
+    // https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/completion
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":34,"method":"completion/complete","params":{' +
+      '"ref":{"type":"ref/prompt","name":"greet"},' +
+      '"argument":{"name":"name","value":"a"},' + META_MODERN + '}}');
+    Check((PathString(Response, 'result.completion.values[0]') = 'Ada') and
+      (PathString(Response, 'result.completion.values[1]') = 'Alan') and
+      (PathInt(Response, 'result.completion.total') = 2),
+      'completion/complete: prefix matches from the prompt argument');
+    Response.Free;
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":35,"method":"completion/complete","params":{' +
+      '"ref":{"type":"ref/prompt","name":"nope"},' +
+      '"argument":{"name":"name","value":"a"},' + META_MODERN + '}}');
+    Check(PathInt(Response, 'error.code') = -32602,
+      'completion/complete: unknown prompt → -32602');
+    Response.Free;
+
+    // Cancellation reaches a running handler (#93; spec verified
+    // 2026-11-27: the receiver SHOULD stop and not respond,
+    // https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation).
+    // countdown's first progress event shows it is running before the
+    // cancellation is sent; the next request is then answered long
+    // before the countdown would end, with nothing for the cancelled one.
+    StartedAt := GetTickCount64;
+    SendLine(Demo, '{"jsonrpc":"2.0","id":40,"method":"tools/call",' +
+      '"params":{"name":"countdown","arguments":{"seconds":5},' +
+      '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+      '"io.modelcontextprotocol/clientCapabilities":{},' +
+      '"progressToken":"cd"}}}');
+    Response := NextJson(Demo);
+    Check(PathString(Response, 'method') = 'notifications/progress',
+      'cancellation: countdown running (first progress event)');
+    Response.Free;
+    SendLine(Demo, '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+      '"params":{"requestId":40,"reason":"smoke"}}');
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":41,"method":"tools/list","params":{' +
+      META_MODERN + '}}');
+    Check((PathInt(Response, 'id') = 41) and
+      (GetTickCount64 - StartedAt < 3500),
+      'cancellation: running countdown cancelled, its response withheld');
+    Response.Free;
+
     // MRTR without the declared capability — the spec forbids sending
-    // the request kind, so the call fails with -32021.
+    // the request kind, so the call fails with -32021 and its data
+    // names what the client lacks (spec verified 2026-11-27:
+    // https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta).
     Response := RoundTrip(Demo,
       '{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{' +
       '"name":"greet_user",' + META_MODERN + '}}');
     Check(PathInt(Response, 'error.code') = -32021,
       'MRTR without capability: -32021');
+    Check(FindPath(Response, 'error.data.requiredCapabilities.elicitation') <>
+      nil, 'MRTR without capability: error data names elicitation');
     Response.Free;
 
     // resources/list + read.
@@ -654,9 +897,9 @@ begin
       'legacy: tools/call result unstamped');
     Response.Free;
 
-    // Serial stdio observes cancellation only after the target has
-    // finished. The notification is accepted silently and does not
-    // disturb the next request on the same session.
+    // A cancellation for a request that has already finished is
+    // accepted silently and does not disturb the next request on the
+    // same session.
     SendLine(Demo,
       '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
       '"params":{"requestId":13,"reason":"finished already"}}');
@@ -701,6 +944,7 @@ begin
   end;
 
   FixtureContentBattery;
+  PagedDemoBattery;
 
   WriteLn;
   if Failures = 0 then
