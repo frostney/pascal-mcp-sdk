@@ -105,9 +105,10 @@ The checks a PR needs to merge are listed in
 - **ci.yml** — push to main: the wider native matrix (Linux x64 and
   arm64, macOS arm64 and x64, Win64 and Win32) as the post-merge
   confirmation signal; it does not run the conformance job.
-- **pr-title.yml** — Conventional Commit PR-title gate, the required
-  `conventional-title` check (squash-merge titles become the
-  changelog).
+- **pr-title.yml** — the required `conventional-title` check: the PR
+  title, and on a single-commit PR the commit subject, must be a
+  Conventional Commit (squash-merge subjects become the changelog; see
+  [Contributing § Open the PR](contributing.md#open-the-pr)).
 - **pages.yml** — website build/deploy; see the Website section.
 - **lwpt-bump.yml** — weekly (Mondays) and on demand: opens a PR
   when the Homebrew tap's lwpt is newer than the pin, carrying the
@@ -152,8 +153,7 @@ every scenario with `initialize`, which the binding rejects, so 1 of
 its 31 checks passes. The runner runs the suite's requirement set for
 2026-07-28 (`--requirements 2026-07-28`): the scenarios that revision
 requires, at its stateless wire, plus the extension and pending
-scenarios the suite runs without scoring. It runs in CI as the
-**required** `conformance` job on every PR. Run it locally with
+scenarios the suite runs without scoring. Run it locally with
 `lwpt build && lwpt run conformance` (Node 22 or later; npx fetches the
 suite from the npm registry). Each run writes its per-scenario
 `checks.json` files into a new directory of its own under

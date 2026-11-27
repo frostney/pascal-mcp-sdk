@@ -4,13 +4,15 @@ name: PR
 # push to main, so pr.yml runs a PR's build, test, docs, interop and
 # conformance checks; pr-title.yml adds its conventional-title check.
 #
-#   pr.yml — every PR: native install --frozen + format --check + build
-#            + test + the mcpsmoke E2E battery on Linux, macOS, and
-#            win64 (the stdio transport is pure RTL, so unlike duetto
-#            there are no platform-specific transport legs to stage —
-#            all three OSes run the full battery pre-merge).
-#   ci.yml — push to main only: the wider per-arch matrix as the
-#            post-merge confirmation signal.
+#   pr.yml — every PR: native install --frozen + build + test + the
+#            mcpsmoke E2E battery on Linux, macOS, and win64 (the stdio
+#            transport is pure RTL, so unlike duetto there are no
+#            platform-specific transport legs to stage — all three OSes
+#            run the full battery pre-merge). The Linux leg alone adds
+#            format --check, agents --check, the reference-docs check,
+#            health and duplication.
+#   ci.yml — push to main and manual dispatch: the wider per-arch
+#            matrix as the post-merge confirmation signal.
 #
 # The lwpt toolchain comes from its published release (checksum-
 # verified tarball, no sibling checkout, no bootstrap); dependencies
