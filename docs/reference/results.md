@@ -27,6 +27,8 @@ function MCPContentResult(const ABlocks: array of TJSONObject): TMCPToolResult;
 ```
 
 - `MCPTextResult` — one text content block.
+- Any result: set `Result.Meta` to an object (owned) to add keys to the
+  result's `_meta`; the server adds its `serverInfo` stamp beside them.
 - `MCPErrorResult` — the same shape with `isError: true`: the in-band
   error channel a model reads and corrects against. Use it for
   everything the *caller* did wrong; reserve exceptions for what went

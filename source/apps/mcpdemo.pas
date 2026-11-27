@@ -186,6 +186,9 @@ var
 begin
   Server := TMCPServer.Create('pascal-mcp-sdk-demo', '0.1.0');
   try
+    // Display metadata clients show for the server (serverInfo).
+    Server.Title := 'pascal-mcp-sdk demo';
+    Server.WebsiteUrl := 'https://frostney.github.io/pascal-mcp-sdk/';
     Server.Instructions :=
       'Demo server for the pascal-mcp-sdk library. Use "echo" to mirror a ' +
       'message, "add" to add two numbers, "pixel" for a sample image; ' +
@@ -212,7 +215,7 @@ begin
 
     Server.RegisterTextResource('mcp://pascal-mcp-sdk/greeting', 'greeting',
       'text/plain', 'Hello from pascal-mcp-sdk, a FreePascal MCP server.',
-      'A static greeting resource');
+      'A static greeting resource').Title('Greeting');
 
     Server.RegisterResourceTemplate('mcp://pascal-mcp-sdk/shout/{text}',
       'shout', 'text/plain', ShoutReader, 'Uppercase echo of {text}');

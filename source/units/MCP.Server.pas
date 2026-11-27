@@ -121,6 +121,9 @@ type
     InputRequired: Boolean;
     InputRequests: TJSONObject;
     RequestState: string;
+    // Owned extra keys for the result's _meta (#96), merged beside the
+    // serverInfo stamp; nil for none.
+    Meta: TJSONObject;
   end;
 
   TMCPToolHandler = function(AArguments: TJSONObject;
@@ -166,6 +169,7 @@ type
     Uri: string;
     StaticText: string;      // used only when HasStaticText is true
     HasStaticText: Boolean;
+    TtlMs: Integer;          // reader results' ttlMs; < 0 = 0 (#96)
     Reader: TMCPResourceReader;
     Method: TMCPResourceMethod;
   end;
@@ -254,6 +258,41 @@ type
     function Build: TJSONArray;
   end;
 
+  TMCPDefinitionKind = (dkResource, dkTemplate, dkPrompt);
+
+  // Returned by the resource, template and prompt registrations for
+  // optional fluent decoration (#96):
+  //
+  //   Server.RegisterTextResource('mcp://x', 'x', 'text/plain', Text)
+  //     .Title('X').Icon('https://example.com/x.png', 'image/png')
+  //     .Annotations(['user'], 0.8);
+  //
+  // Annotations, Size and CacheTtlMs apply to resources only.
+  TMCPDefinitionOptions = record
+  private
+    FDefinition: TJSONObject; // borrowed: owned by the registry
+    FServer: TMCPServer;       // borrowed: guards post-freeze mutation
+    FKind: TMCPDefinitionKind;
+    FIndex: Integer;
+    procedure RequireResource(const AOption: string);
+  public
+    function Title(const ATitle: string): TMCPDefinitionOptions;
+    // ASrc must be https: or data:; ASizes is space-separated
+    // ('48x48 96x96'); ATheme is '', 'light' or 'dark'.
+    function Icon(const ASrc: string; const AMimeType: string = '';
+      const ASizes: string = ''; const ATheme: string = ''): TMCPDefinitionOptions;
+    // AKey under the definition's _meta; takes ownership of AValue.
+    function Meta(const AKey: string; AValue: TJSONData): TMCPDefinitionOptions;
+    // AAudience: 'user' and/or 'assistant'; APriority 0..1 (< 0 =
+    // unset); ALastModified an ISO 8601 timestamp ('' = unset).
+    function Annotations(const AAudience: array of string;
+      APriority: Double = -1; const ALastModified: string = ''): TMCPDefinitionOptions;
+    function Size(ABytes: Int64): TMCPDefinitionOptions;
+    // ttlMs on reads served by this resource's reader (default 0:
+    // revalidate); static text uses the server's CacheTtlMs.
+    function CacheTtlMs(AValue: Integer): TMCPDefinitionOptions;
+  end;
+
   // Returned by every RegisterTool overload for optional fluent
   // decoration of the just-registered tool — display title and the
   // spec's behavior-hint annotations:
@@ -281,6 +320,10 @@ type
     // keywords outside the server-enforced subset (type/properties/
     // required/enum/default); such tools skip call-time validation.
     function ApplicationValidated: TMCPToolOptions;
+    // Icons and _meta, as on TMCPDefinitionOptions (#96).
+    function Icon(const ASrc: string; const AMimeType: string = '';
+      const ASizes: string = ''; const ATheme: string = ''): TMCPToolOptions;
+    function Meta(const AKey: string; AValue: TJSONData): TMCPToolOptions;
   end;
 
   // Where the server writes server-to-client notification lines
@@ -334,6 +377,10 @@ type
   private
     FName: string;
     FVersion: string;
+    FTitle: string;
+    FDescription: string;
+    FWebsiteUrl: string;
+    FIdentity: TJSONObject; // owned: holds the server's icons (#96)
     FInstructions: string;
     FCacheTtlMs: Integer;
     FCacheScope: string;
@@ -348,6 +395,12 @@ type
     procedure EnsureMutable;
     procedure FreezeConfiguration;
     procedure SetInstructions(const AValue: string);
+    procedure SetTitle(const AValue: string);
+    procedure SetDescription(const AValue: string);
+    procedure SetWebsiteUrl(const AValue: string);
+    function ServerInfoObject: TJSONObject;
+    function DefinitionOptions(AKind: TMCPDefinitionKind; AIndex: Integer;
+      ADefinition: TJSONObject): TMCPDefinitionOptions;
     procedure SetCacheTtlMs(AValue: Integer);
     procedure SetCacheScope(const AValue: string);
     procedure SetRedactErrorDetails(AValue: Boolean);
@@ -432,6 +485,14 @@ type
     property Instructions: string read FInstructions write SetInstructions;
     property Name: string read FName;
     property Version: string read FVersion;
+    // Optional serverInfo fields on server/discover and initialize
+    // (schema Implementation, #96).
+    property Title: string read FTitle write SetTitle;
+    property Description: string read FDescription write SetDescription;
+    property WebsiteUrl: string read FWebsiteUrl write SetWebsiteUrl;
+    // An icon for serverInfo; ASrc must be https: or data:.
+    procedure AddIcon(const ASrc: string; const AMimeType: string = '';
+      const ASizes: string = ''; const ATheme: string = '');
 
     // CacheableResult fields (SEP-2549), required on discover/list/read
     // results. Registries are fixed after startup, so registry metadata
@@ -520,48 +581,48 @@ type
       AArgsClass, AOutputClass: TMCPArgsClass;
       AMethod: TMCPArgsMethod): TMCPToolOptions; overload;
 
-    procedure RegisterTextResource(const AUri, AName, AMimeType, AText: string;
-      const ADescription: string = '');
-    procedure RegisterResource(const AUri, AName, AMimeType: string;
-      AReader: TMCPResourceReader; const ADescription: string = ''); overload;
-    procedure RegisterResource(const AUri, AName, AMimeType: string;
-      AMethod: TMCPResourceMethod; const ADescription: string = ''); overload;
+    function RegisterTextResource(const AUri, AName, AMimeType, AText: string;
+      const ADescription: string = ''): TMCPDefinitionOptions;
+    function RegisterResource(const AUri, AName, AMimeType: string;
+      AReader: TMCPResourceReader; const ADescription: string = ''): TMCPDefinitionOptions; overload;
+    function RegisterResource(const AUri, AName, AMimeType: string;
+      AMethod: TMCPResourceMethod; const ADescription: string = ''): TMCPDefinitionOptions; overload;
 
     // Resource templates (resources/templates/list + matching in
     // resources/read; exact resources win over templates).
-    procedure RegisterResourceTemplate(const AUriTemplate, AName,
+    function RegisterResourceTemplate(const AUriTemplate, AName,
       AMimeType: string; AReader: TMCPTemplateReader;
-      const ADescription: string = ''); overload;
-    procedure RegisterResourceTemplate(const AUriTemplate, AName,
+      const ADescription: string = ''): TMCPDefinitionOptions; overload;
+    function RegisterResourceTemplate(const AUriTemplate, AName,
       AMimeType: string; AMethod: TMCPTemplateMethod;
-      const ADescription: string = ''); overload;
+      const ADescription: string = ''): TMCPDefinitionOptions; overload;
 
     // Prompts (prompts/list + prompts/get). Argument-less overloads
     // and overloads with a fluent argument list; registration takes
     // ownership of the built arguments.
-    procedure RegisterPrompt(const AName, ADescription: string;
-      AHandler: TMCPPromptHandler); overload;
-    procedure RegisterPrompt(const AName, ADescription: string;
-      AMethod: TMCPPromptMethod); overload;
-    procedure RegisterPrompt(const AName, ADescription: string;
+    function RegisterPrompt(const AName, ADescription: string;
+      AHandler: TMCPPromptHandler): TMCPDefinitionOptions; overload;
+    function RegisterPrompt(const AName, ADescription: string;
+      AMethod: TMCPPromptMethod): TMCPDefinitionOptions; overload;
+    function RegisterPrompt(const AName, ADescription: string;
       constref AArguments: TMCPPromptArguments;
-      AHandler: TMCPPromptHandler); overload;
-    procedure RegisterPrompt(const AName, ADescription: string;
+      AHandler: TMCPPromptHandler): TMCPDefinitionOptions; overload;
+    function RegisterPrompt(const AName, ADescription: string;
       constref AArguments: TMCPPromptArguments;
-      AMethod: TMCPPromptMethod); overload;
+      AMethod: TMCPPromptMethod): TMCPDefinitionOptions; overload;
     // MRTR-capable prompt overloads: the handler returns a
     // TMCPPromptResult and may answer with an input_required round
     // (see the MRTR notes in the unit header).
-    procedure RegisterPrompt(const AName, ADescription: string;
-      AHandler: TMCPPromptResultHandler); overload;
-    procedure RegisterPrompt(const AName, ADescription: string;
-      AMethod: TMCPPromptResultMethod); overload;
-    procedure RegisterPrompt(const AName, ADescription: string;
+    function RegisterPrompt(const AName, ADescription: string;
+      AHandler: TMCPPromptResultHandler): TMCPDefinitionOptions; overload;
+    function RegisterPrompt(const AName, ADescription: string;
+      AMethod: TMCPPromptResultMethod): TMCPDefinitionOptions; overload;
+    function RegisterPrompt(const AName, ADescription: string;
       constref AArguments: TMCPPromptArguments;
-      AHandler: TMCPPromptResultHandler); overload;
-    procedure RegisterPrompt(const AName, ADescription: string;
+      AHandler: TMCPPromptResultHandler): TMCPDefinitionOptions; overload;
+    function RegisterPrompt(const AName, ADescription: string;
       constref AArguments: TMCPPromptArguments;
-      AMethod: TMCPPromptResultMethod); overload;
+      AMethod: TMCPPromptResultMethod): TMCPDefinitionOptions; overload;
 
     // The core entry point: one inbound line in, at most one response
     // line out. The sink overload binds server-to-client notifications
@@ -1651,6 +1712,246 @@ begin
   Result.Add(Item);
 end;
 
+{ ───────── metadata: icons, titles, _meta (#96) ───────── }
+
+// An icon object for ADefinition's "icons" array (schema Icon). Clients
+// reject icon URIs other than https: and data:, so registration does
+// too. ASizes is space-separated ('48x48 96x96').
+procedure AddIconTo(ADefinition: TJSONObject; const ASrc, AMimeType, ASizes,
+  ATheme: string);
+var
+  Icons: TJSONData;
+  Icon: TJSONObject;
+  Sizes: TJSONArray;
+  Parts: TStringArray;
+  I: Integer;
+begin
+  if not (SameText(Copy(ASrc, 1, 8), 'https://') or
+    SameText(Copy(ASrc, 1, 5), 'data:')) then
+    raise EMCPServer.CreateFmt('Icon "%s" must be an https: or data: URI',
+      [ASrc]);
+  if (ATheme <> '') and (ATheme <> 'light') and (ATheme <> 'dark') then
+    raise EMCPServer.CreateFmt('Icon theme "%s" must be light or dark',
+      [ATheme]);
+  Icon := TJSONObject.Create;
+  Icon.Add('src', ASrc);
+  if AMimeType <> '' then
+    Icon.Add('mimeType', AMimeType);
+  if ASizes <> '' then
+  begin
+    Sizes := TJSONArray.Create;
+    Parts := ASizes.Split([' '], TStringSplitOptions.ExcludeEmpty);
+    for I := 0 to High(Parts) do
+      Sizes.Add(Parts[I]);
+    Icon.Add('sizes', Sizes);
+  end;
+  if ATheme <> '' then
+    Icon.Add('theme', ATheme);
+  Icons := ADefinition.Find('icons');
+  if Icons = nil then
+  begin
+    Icons := TJSONArray.Create;
+    ADefinition.Add('icons', Icons);
+  end;
+  TJSONArray(Icons).Add(Icon);
+end;
+
+// AKey under ADefinition's "_meta" (ownership of AValue transfers).
+procedure AddMetaTo(ADefinition: TJSONObject; const AKey: string;
+  AValue: TJSONData);
+var
+  Meta: TJSONData;
+begin
+  if (AKey = '') or (AValue = nil) then
+  begin
+    AValue.Free;
+    raise EMCPServer.Create('_meta needs a key and a value');
+  end;
+  Meta := ADefinition.Find('_meta');
+  if Meta = nil then
+  begin
+    Meta := TJSONObject.Create;
+    ADefinition.Add('_meta', Meta);
+  end;
+  TJSONObject(Meta).Delete(AKey);
+  TJSONObject(Meta).Add(AKey, AValue);
+end;
+
+procedure SetStringMember(ADefinition: TJSONObject; const AName,
+  AValue: string);
+begin
+  ADefinition.Delete(AName);
+  ADefinition.Add(AName, AValue);
+end;
+
+function TMCPDefinitionOptions.Title(const ATitle: string): TMCPDefinitionOptions;
+begin
+  FServer.EnsureMutable;
+  SetStringMember(FDefinition, 'title', ATitle);
+  Result := Self;
+end;
+
+function TMCPDefinitionOptions.Icon(const ASrc: string; const AMimeType: string;
+  const ASizes: string; const ATheme: string): TMCPDefinitionOptions;
+begin
+  FServer.EnsureMutable;
+  AddIconTo(FDefinition, ASrc, AMimeType, ASizes, ATheme);
+  Result := Self;
+end;
+
+function TMCPDefinitionOptions.Meta(const AKey: string;
+  AValue: TJSONData): TMCPDefinitionOptions;
+begin
+  try
+    FServer.EnsureMutable;
+  except
+    AValue.Free;
+    raise;
+  end;
+  AddMetaTo(FDefinition, AKey, AValue);
+  Result := Self;
+end;
+
+procedure TMCPDefinitionOptions.RequireResource(const AOption: string);
+begin
+  FServer.EnsureMutable;
+  if FKind <> dkResource then
+    raise EMCPServer.CreateFmt('%s applies to resources only', [AOption]);
+end;
+
+function TMCPDefinitionOptions.Annotations(const AAudience: array of string;
+  APriority: Double; const ALastModified: string): TMCPDefinitionOptions;
+var
+  Value: TJSONObject;
+  Audience: TJSONArray;
+  I: Integer;
+begin
+  RequireResource('Annotations');
+  Value := TJSONObject.Create;
+  if Length(AAudience) > 0 then
+  begin
+    Audience := TJSONArray.Create;
+    for I := 0 to High(AAudience) do
+    begin
+      if (AAudience[I] <> 'user') and (AAudience[I] <> 'assistant') then
+      begin
+        Audience.Free;
+        Value.Free;
+        raise EMCPServer.CreateFmt('Audience "%s" must be user or assistant',
+          [AAudience[I]]);
+      end;
+      Audience.Add(AAudience[I]);
+    end;
+    Value.Add('audience', Audience);
+  end;
+  if APriority >= 0 then
+  begin
+    if APriority > 1 then
+    begin
+      Value.Free;
+      raise EMCPServer.Create('Annotation priority must be between 0 and 1');
+    end;
+    Value.Add('priority', MCPWireNumber(APriority));
+  end;
+  if ALastModified <> '' then
+    Value.Add('lastModified', ALastModified);
+  FDefinition.Delete('annotations');
+  FDefinition.Add('annotations', Value);
+  Result := Self;
+end;
+
+function TMCPDefinitionOptions.Size(ABytes: Int64): TMCPDefinitionOptions;
+begin
+  RequireResource('Size');
+  if ABytes < 0 then
+    raise EMCPServer.Create('Resource size must not be negative');
+  FDefinition.Delete('size');
+  FDefinition.Add('size', ABytes);
+  Result := Self;
+end;
+
+function TMCPDefinitionOptions.CacheTtlMs(AValue: Integer): TMCPDefinitionOptions;
+begin
+  RequireResource('CacheTtlMs');
+  if AValue < 0 then
+    raise EMCPServer.Create('CacheTtlMs must not be negative');
+  FServer.FResources[FIndex].TtlMs := AValue;
+  Result := Self;
+end;
+
+function TMCPToolOptions.Icon(const ASrc: string; const AMimeType: string;
+  const ASizes: string; const ATheme: string): TMCPToolOptions;
+begin
+  FServer.EnsureMutable;
+  AddIconTo(FDefinition, ASrc, AMimeType, ASizes, ATheme);
+  Result := Self;
+end;
+
+function TMCPToolOptions.Meta(const AKey: string;
+  AValue: TJSONData): TMCPToolOptions;
+begin
+  try
+    FServer.EnsureMutable;
+  except
+    AValue.Free;
+    raise;
+  end;
+  AddMetaTo(FDefinition, AKey, AValue);
+  Result := Self;
+end;
+
+procedure TMCPServer.SetTitle(const AValue: string);
+begin
+  EnsureMutable;
+  FTitle := AValue;
+end;
+
+procedure TMCPServer.SetDescription(const AValue: string);
+begin
+  EnsureMutable;
+  FDescription := AValue;
+end;
+
+procedure TMCPServer.SetWebsiteUrl(const AValue: string);
+begin
+  EnsureMutable;
+  FWebsiteUrl := AValue;
+end;
+
+procedure TMCPServer.AddIcon(const ASrc: string; const AMimeType: string;
+  const ASizes: string; const ATheme: string);
+begin
+  EnsureMutable;
+  AddIconTo(FIdentity, ASrc, AMimeType, ASizes, ATheme);
+end;
+
+// The serverInfo object of discover and initialize results: name and
+// version plus the optional Implementation fields set on the server.
+function TMCPServer.ServerInfoObject: TJSONObject;
+var
+  Icons: TJSONData;
+begin
+  Result := BuildServerInfo(FName, FVersion);
+  if FTitle <> '' then
+    Result.Add('title', FTitle);
+  if FDescription <> '' then
+    Result.Add('description', FDescription);
+  if FWebsiteUrl <> '' then
+    Result.Add('websiteUrl', FWebsiteUrl);
+  Icons := FIdentity.Find('icons');
+  if Icons <> nil then
+    Result.Add('icons', Icons.Clone);
+end;
+
+function TMCPServer.DefinitionOptions(AKind: TMCPDefinitionKind;
+  AIndex: Integer; ADefinition: TJSONObject): TMCPDefinitionOptions;
+begin
+  Result.FDefinition := ADefinition;
+  Result.FServer := Self;
+  Result.FKind := AKind;
+  Result.FIndex := AIndex;
+end;
+
 { ───────── TMCPSession: legacy lifecycle ───────── }
 
 constructor TMCPSession.Create(AOwner: TMCPServer);
@@ -1741,7 +2042,10 @@ begin
   begin
     MetaData := AParams.Find('_meta');
     if (MetaData <> nil) and (MetaData.JSONType = jtObject) then
+    begin
       ExtractProgressToken(TJSONObject(MetaData), Result);
+      Result.Meta := TJSONObject(MetaData);
+    end;
   end;
 end;
 
@@ -1756,6 +2060,7 @@ begin
     raise EMCPServer.Create('Server version must not be empty');
   FName := AName;
   FVersion := AVersion;
+  FIdentity := TJSONObject.Create;
   FCacheTtlMs := 300000;
   FCacheScope := CACHE_SCOPE_PRIVATE;
   FRedactErrorDetails := False;
@@ -2083,6 +2388,7 @@ begin
     FTemplates[I].Definition.Free;
   for I := 0 to High(FPrompts) do
     FPrompts[I].Definition.Free;
+  FIdentity.Free;
   inherited Destroy;
 end;
 
@@ -2724,24 +3030,28 @@ begin
   FResources[High(FResources)].HasStaticText := AHasStaticText;
   FResources[High(FResources)].Reader := AReader;
   FResources[High(FResources)].Method := AMethod;
+  FResources[High(FResources)].TtlMs := -1;
 end;
 
-procedure TMCPServer.RegisterTextResource(const AUri, AName, AMimeType,
-  AText: string; const ADescription: string);
+function TMCPServer.RegisterTextResource(const AUri, AName, AMimeType,
+  AText: string; const ADescription: string): TMCPDefinitionOptions;
 begin
   AddResource(AUri, AName, AMimeType, ADescription, nil, nil, AText, True);
+  Result := DefinitionOptions(dkResource, High(FResources), FResources[High(FResources)].Definition);
 end;
 
-procedure TMCPServer.RegisterResource(const AUri, AName, AMimeType: string;
-  AReader: TMCPResourceReader; const ADescription: string);
+function TMCPServer.RegisterResource(const AUri, AName, AMimeType: string;
+  AReader: TMCPResourceReader; const ADescription: string): TMCPDefinitionOptions;
 begin
   AddResource(AUri, AName, AMimeType, ADescription, AReader, nil, '', False);
+  Result := DefinitionOptions(dkResource, High(FResources), FResources[High(FResources)].Definition);
 end;
 
-procedure TMCPServer.RegisterResource(const AUri, AName, AMimeType: string;
-  AMethod: TMCPResourceMethod; const ADescription: string);
+function TMCPServer.RegisterResource(const AUri, AName, AMimeType: string;
+  AMethod: TMCPResourceMethod; const ADescription: string): TMCPDefinitionOptions;
 begin
   AddResource(AUri, AName, AMimeType, ADescription, nil, AMethod, '', False);
+  Result := DefinitionOptions(dkResource, High(FResources), FResources[High(FResources)].Definition);
 end;
 
 function TMCPServer.FindTool(const AName: string): Integer;
@@ -2801,18 +3111,20 @@ begin
   FTemplates[High(FTemplates)].Method := AMethod;
 end;
 
-procedure TMCPServer.RegisterResourceTemplate(const AUriTemplate, AName,
+function TMCPServer.RegisterResourceTemplate(const AUriTemplate, AName,
   AMimeType: string; AReader: TMCPTemplateReader;
-  const ADescription: string);
+  const ADescription: string): TMCPDefinitionOptions;
 begin
   AddTemplate(AUriTemplate, AName, AMimeType, ADescription, AReader, nil);
+  Result := DefinitionOptions(dkTemplate, High(FTemplates), FTemplates[High(FTemplates)].Definition);
 end;
 
-procedure TMCPServer.RegisterResourceTemplate(const AUriTemplate, AName,
+function TMCPServer.RegisterResourceTemplate(const AUriTemplate, AName,
   AMimeType: string; AMethod: TMCPTemplateMethod;
-  const ADescription: string);
+  const ADescription: string): TMCPDefinitionOptions;
 begin
   AddTemplate(AUriTemplate, AName, AMimeType, ADescription, nil, AMethod);
+  Result := DefinitionOptions(dkTemplate, High(FTemplates), FTemplates[High(FTemplates)].Definition);
 end;
 
 function TMCPServer.FindPrompt(const AName: string): Integer;
@@ -2872,54 +3184,62 @@ begin
   FPrompts[High(FPrompts)].ResultMethod := AResultMethod;
 end;
 
-procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
-  AHandler: TMCPPromptHandler);
+function TMCPServer.RegisterPrompt(const AName, ADescription: string;
+  AHandler: TMCPPromptHandler): TMCPDefinitionOptions;
 begin
   AddPrompt(AName, ADescription, nil, AHandler, nil);
+  Result := DefinitionOptions(dkPrompt, High(FPrompts), FPrompts[High(FPrompts)].Definition);
 end;
 
-procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
-  AMethod: TMCPPromptMethod);
+function TMCPServer.RegisterPrompt(const AName, ADescription: string;
+  AMethod: TMCPPromptMethod): TMCPDefinitionOptions;
 begin
   AddPrompt(AName, ADescription, nil, nil, AMethod);
+  Result := DefinitionOptions(dkPrompt, High(FPrompts), FPrompts[High(FPrompts)].Definition);
 end;
 
-procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
-  constref AArguments: TMCPPromptArguments; AHandler: TMCPPromptHandler);
+function TMCPServer.RegisterPrompt(const AName, ADescription: string;
+  constref AArguments: TMCPPromptArguments; AHandler: TMCPPromptHandler): TMCPDefinitionOptions;
 begin
   AddPrompt(AName, ADescription, AArguments.Build, AHandler, nil);
+  Result := DefinitionOptions(dkPrompt, High(FPrompts), FPrompts[High(FPrompts)].Definition);
 end;
 
-procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
-  constref AArguments: TMCPPromptArguments; AMethod: TMCPPromptMethod);
+function TMCPServer.RegisterPrompt(const AName, ADescription: string;
+  constref AArguments: TMCPPromptArguments; AMethod: TMCPPromptMethod): TMCPDefinitionOptions;
 begin
   AddPrompt(AName, ADescription, AArguments.Build, nil, AMethod);
+  Result := DefinitionOptions(dkPrompt, High(FPrompts), FPrompts[High(FPrompts)].Definition);
 end;
 
-procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
-  AHandler: TMCPPromptResultHandler);
+function TMCPServer.RegisterPrompt(const AName, ADescription: string;
+  AHandler: TMCPPromptResultHandler): TMCPDefinitionOptions;
 begin
   AddPrompt(AName, ADescription, nil, nil, nil, AHandler, nil);
+  Result := DefinitionOptions(dkPrompt, High(FPrompts), FPrompts[High(FPrompts)].Definition);
 end;
 
-procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
-  AMethod: TMCPPromptResultMethod);
+function TMCPServer.RegisterPrompt(const AName, ADescription: string;
+  AMethod: TMCPPromptResultMethod): TMCPDefinitionOptions;
 begin
   AddPrompt(AName, ADescription, nil, nil, nil, nil, AMethod);
+  Result := DefinitionOptions(dkPrompt, High(FPrompts), FPrompts[High(FPrompts)].Definition);
 end;
 
-procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
+function TMCPServer.RegisterPrompt(const AName, ADescription: string;
   constref AArguments: TMCPPromptArguments;
-  AHandler: TMCPPromptResultHandler);
+  AHandler: TMCPPromptResultHandler): TMCPDefinitionOptions;
 begin
   AddPrompt(AName, ADescription, AArguments.Build, nil, nil, AHandler, nil);
+  Result := DefinitionOptions(dkPrompt, High(FPrompts), FPrompts[High(FPrompts)].Definition);
 end;
 
-procedure TMCPServer.RegisterPrompt(const AName, ADescription: string;
+function TMCPServer.RegisterPrompt(const AName, ADescription: string;
   constref AArguments: TMCPPromptArguments;
-  AMethod: TMCPPromptResultMethod);
+  AMethod: TMCPPromptResultMethod): TMCPDefinitionOptions;
 begin
   AddPrompt(AName, ADescription, AArguments.Build, nil, nil, nil, AMethod);
+  Result := DefinitionOptions(dkPrompt, High(FPrompts), FPrompts[High(FPrompts)].Definition);
 end;
 
 function TMCPServer.ToolCount: Integer;
@@ -3249,7 +3569,7 @@ begin
   try
     ClientCapabilities := TJSONObject(CapsData.Clone);
     Capabilities := ServerCapabilities;
-    ServerInfo := BuildServerInfo(FName, FVersion);
+    ServerInfo := ServerInfoObject;
 
     InitResult := TJSONObject.Create;
     InitResult.Add('protocolVersion', NegotiatedVersion);
@@ -3315,7 +3635,7 @@ begin
   // client classifies a server without it as legacy. Discovered on
   // the RC client (2.0.0-beta.4) and unchanged in stable: verified
   // 2026-08-08 against @modelcontextprotocol/client 2.0.0.
-  ServerInfo := BuildServerInfo(FName, FVersion);
+  ServerInfo := ServerInfoObject;
 
   DiscoverResult := TJSONObject.Create;
   DiscoverResult.Add('supportedVersions', Versions);
@@ -3498,6 +3818,7 @@ begin
     // client's declared capabilities.
     ToolResult.Content.Free;
     ToolResult.StructuredContent.Free;
+    ToolResult.Meta.Free;
     if ALegacy then
     begin
       ToolResult.InputRequests.Free;
@@ -3518,6 +3839,9 @@ begin
   CallResult.Add('isError', ToolResult.IsError);
   if ToolResult.StructuredContent <> nil then
     CallResult.Add('structuredContent', ToolResult.StructuredContent);
+  // The handler's own _meta keys; the serverInfo stamp joins them (#96).
+  if ToolResult.Meta <> nil then
+    CallResult.Add('_meta', ToolResult.Meta);
 
   Result := ResultResponse(AMessage, CallResult, ALegacy);
 end;
@@ -3564,15 +3888,17 @@ begin
   Index := FindResource(Uri);
   if Index >= 0 then
   begin
-    // Dynamic readers advertise ttl 0 (always revalidate) — the
-    // library cannot know how fresh a callback's data stays; static
-    // text is fixed for the process lifetime and uses the registry
-    // ttl.
+    // Dynamic readers advertise ttl 0 (always revalidate) unless the
+    // registration declared a TTL (.CacheTtlMs, #96) — the library
+    // cannot know how fresh a callback's data stays; static text is
+    // fixed for the process lifetime and uses the registry ttl.
     if Assigned(FResources[Index].Method) then
       Contents := FResources[Index].Method(Uri, ACtx)
     else if Assigned(FResources[Index].Reader) then
-      Contents := FResources[Index].Reader(Uri, ACtx)
-    else if FResources[Index].HasStaticText then
+      Contents := FResources[Index].Reader(Uri, ACtx);
+    if not FResources[Index].HasStaticText and (FResources[Index].TtlMs >= 0) then
+      ReadTtlMs := FResources[Index].TtlMs;
+    if FResources[Index].HasStaticText then
     begin
       MimeType := FResources[Index].Definition.Get('mimeType', 'text/plain');
       Contents := MCPTextContents(Uri, MimeType,

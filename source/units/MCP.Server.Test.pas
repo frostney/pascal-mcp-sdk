@@ -361,6 +361,20 @@ type
     procedure TestRepeatedBlockRejected;
   end;
 
+  // Metadata fields and handler _meta (#96).
+  TMetadataFields = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestServerInfoFields;
+    procedure TestResourceAndPromptFields;
+    procedure TestToolIconAndMeta;
+    procedure TestHandlerMetaInAndOut;
+    procedure TestReaderTtl;
+    procedure TestGuards;
+  end;
+
   // MCPImageResult: the spec's image content block, the raw-bytes
   // overload's base64 encoding (asserted against literal fixtures, not
   // against a decode of what we just encoded), mimeType passthrough,
@@ -4713,6 +4727,173 @@ begin
     TestApplicationValidatedSkipsChecks);
 end;
 
+{ ───────── metadata fields (#96) ───────── }
+
+function MetaEchoHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPTextResult(ACtx.Meta.Get('traceparent', 'none'));
+  Result.Meta := TJSONObject(GetJSON('{"com.example/elapsedMs":12}'));
+end;
+
+function FreshReader(const AUri: string;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPTextContents(AUri, 'text/plain', 'fresh');
+end;
+
+function PlainPrompt(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := MCPMessages([MCPUserMessage('p')]);
+end;
+
+procedure TMetadataFields.BeforeEach;
+begin
+  inherited BeforeEach;
+  FServer.Title := 'Test ' + #$C3#$9C + 'ber Server';
+  FServer.Description := 'Serves tests';
+  FServer.WebsiteUrl := 'https://example.com';
+  FServer.AddIcon('https://example.com/i.png', 'image/png', '48x48 96x96', 'dark');
+  FServer.RegisterTextResource('mem://titled', 'titled', 'text/plain', 'x')
+    .Title('Betitelt ' + #$E2#$9C#$93).Icon('data:image/png;base64,AA==')
+    .Annotations(['user', 'assistant'], 0.25, '2026-11-26T00:00:00Z')
+    .Size(1)
+    .Meta('com.example/tag', TJSONString.Create('t'));
+  FServer.RegisterResource('mem://fresh', 'fresh', 'text/plain', FreshReader)
+    .CacheTtlMs(60000);
+  FServer.RegisterPrompt('titled_prompt', 'A prompt', PlainPrompt)
+    .Title('Prompt ' + #$C3#$A9).Icon('https://example.com/p.svg');
+  FServer.RegisterTool('meta_echo', 'Echoes trace', '{"type":"object"}',
+    MetaEchoHandler).Icon('https://example.com/t.png')
+    .Meta('com.example/x', TJSONIntegerNumber.Create(1));
+end;
+
+procedure TMetadataFields.TestServerInfoFields;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"server/discover",' +
+    '"params":{' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"serverInfo" : { "name" : "test-server", "version" : ' +
+    '"9.9.9", "title" : "Test ' + #$C3#$9C + 'ber Server", "description" : ' +
+    '"Serves tests", "websiteUrl" : "https://example.com", "icons" : [{ "src" : ' +
+    '"https://example.com/i.png", "mimeType" : "image/png", "sizes" : ["48x48", ' +
+    '"96x96"], "theme" : "dark" }] }', Response) > 0).ToBe(True);
+end;
+
+procedure TMetadataFields.TestResourceAndPromptFields;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"resources/list",' +
+    '"params":{' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"uri" : "mem://titled", "name" : "titled", "mimeType" : ' +
+    '"text/plain", "title" : "Betitelt ' + #$E2#$9C#$93 + '", "icons" : [{ "src" : ' +
+    '"data:image/png;base64,AA==" }], "annotations" : { "audience" : ["user", ' +
+    '"assistant"], "priority" : 0.25, "lastModified" : "2026-11-26T00:00:00Z" }, ' +
+    '"size" : 1, "_meta" : { "com.example/tag" : "t" }', Response) > 0).ToBe(True);
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":2,"method":"prompts/list",' +
+    '"params":{' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"title" : "Prompt ' + #$C3#$A9 + '", "icons" : [{ "src" : ' +
+    '"https://example.com/p.svg" }]', Response) > 0).ToBe(True);
+end;
+
+procedure TMetadataFields.TestToolIconAndMeta;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"tools/list",' +
+    '"params":{' + META_MODERN + '}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"icons" : [{ "src" : "https://example.com/t.png" }], ' +
+    '"_meta" : { "com.example/x" : 1 }', Response) > 0).ToBe(True);
+end;
+
+procedure TMetadataFields.TestHandlerMetaInAndOut;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":1,"method":"tools/call",' +
+    '"params":{"name":"meta_echo","_meta":{' +
+    '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientCapabilities":{},' +
+    '"traceparent":"00-abc-def-01"}}}', Response)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "00-abc-def-01"', Response) > 0).ToBe(True);
+  // Handler keys first, then the serverInfo stamp, in one _meta.
+  Expect<Boolean>(Pos('"_meta" : { "com.example/elapsedMs" : 12, ' +
+    '"io.modelcontextprotocol/serverInfo" : {', Response) > 0).ToBe(True);
+end;
+
+procedure TMetadataFields.TestReaderTtl;
+var
+  Response: TJSONObject;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"resources/read",' +
+    '"params":{"uri":"mem://fresh",' + META_MODERN + '}}');
+  Expect<Integer>(TJSONData(Response.FindPath('result.ttlMs')).AsInteger)
+    .ToBe(60000);
+  Response.Free;
+end;
+
+function RefusedBy(AProc: TProcedure): Boolean;
+begin
+  Result := False;
+  try
+    AProc();
+  except
+    on E: EMCPServer do
+      Result := True;
+  end;
+end;
+
+var
+  GuardServer: TMCPServer;
+
+procedure BadIcon;
+begin
+  GuardServer.AddIcon('http://example.com/i.png');
+end;
+
+procedure BadTheme;
+begin
+  GuardServer.AddIcon('https://example.com/i.png', '', '', 'sepia');
+end;
+
+procedure PromptSize;
+begin
+  GuardServer.RegisterPrompt('p2', 'x', PlainPrompt).Size(3);
+end;
+
+procedure BadAudience;
+begin
+  GuardServer.RegisterTextResource('mem://a', 'a', 'text/plain', 'a')
+    .Annotations(['robot']);
+end;
+
+procedure TMetadataFields.TestGuards;
+begin
+  GuardServer := FServer;
+  Expect<Boolean>(RefusedBy(BadIcon)).ToBe(True);
+  Expect<Boolean>(RefusedBy(BadTheme)).ToBe(True);
+  Expect<Boolean>(RefusedBy(PromptSize)).ToBe(True);
+  Expect<Boolean>(RefusedBy(BadAudience)).ToBe(True);
+  GuardServer := nil;
+end;
+
+procedure TMetadataFields.SetupTests;
+begin
+  Test('serverInfo carries title, description, websiteUrl and icons',
+    TestServerInfoFields);
+  Test('resources and prompts carry title, icons, annotations, size, _meta',
+    TestResourceAndPromptFields);
+  Test('tools carry icons and _meta', TestToolIconAndMeta);
+  Test('handlers read request _meta and add result _meta',
+    TestHandlerMetaInAndOut);
+  Test('a reader''s declared TTL is advertised', TestReaderTtl);
+  Test('bad icon URIs, themes, audiences and misapplied options refused',
+    TestGuards);
+end;
+
 { ───────── image results ───────── }
 
 const
@@ -5051,6 +5232,7 @@ begin
     TMRTRDispatch.Create('Server: MRTR input_required'));
   TestRunnerProgram.AddSuite(
     TImageResults.Create('Server: image tool results'));
+  TestRunnerProgram.AddSuite(TMetadataFields.Create('Server: metadata fields'));
   TestRunnerProgram.AddSuite(
     TContentResults.Create('Server: content tool results and prompt messages'));
   TestRunnerProgram.Run;

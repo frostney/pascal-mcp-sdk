@@ -121,6 +121,10 @@ type
     // authorization or business logic.
     InputResponses: TJSONObject;
     RequestState: string;
+    // The request's whole params._meta object, borrowed for the handler
+    // call (nil when absent), for keys the library does not interpret,
+    // such as W3C trace context (#96). Do not keep or free it.
+    Meta: TJSONObject;
     // Set by the dispatching server, not by ExtractRequestContext.
     Notifier: TMCPNotifier;
     // Set by the dispatching server. The serial stdio transport cannot
@@ -297,6 +301,7 @@ begin
   end;
 
   ExtractProgressToken(Meta, ACtx);
+  ACtx.Meta := Meta;
 
   // MRTR retry payload: top-level params fields on the supported
   // client requests (InputResponseRequestParams in the schema anchor).
