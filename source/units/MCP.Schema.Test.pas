@@ -120,6 +120,9 @@ type
     procedure TestBuiltValues;
     procedure TestKeywordShapes;
     procedure TestOnlyConformingDefaultsSeeded;
+    procedure TestUnconstrainedNonFiniteRefused;
+    procedure TestLargeIntegralFloatsInEnums;
+    procedure TestEnumEntriesOfOtherTypes;
   end;
 
   TWireNumber = class(TTestSuite)
@@ -961,6 +964,52 @@ begin
   end;
 end;
 
+function NaNInArray: TJSONArray;
+begin
+  Result := TJSONArray.Create;
+  Result.Add(TJSONFloatNumber.Create(NaN));
+end;
+
+procedure TSubsetSchemas.TestUnconstrainedNonFiniteRefused;
+var
+  Obj: TJSONObject;
+begin
+  // No "items" and no named property constrain these, yet NaN has no
+  // JSON form.
+  Expect<string>(CheckBuilt('{"type":"array"}', NaNInArray))
+    .ToBe('Structured output contains a NaN or infinite number');
+  Obj := TJSONObject.Create;
+  Obj.Add('x', TJSONFloatNumber.Create(Infinity));
+  Expect<string>(CheckBuilt('{"type":"object"}', Obj))
+    .ToBe('Structured output contains a NaN or infinite number');
+end;
+
+// An integral double is an exact integer past 2^53 too.
+procedure TSubsetSchemas.TestLargeIntegralFloatsInEnums;
+begin
+  Expect<string>(CheckBuilt('{"type":"number","enum":[10000000000000000]}',
+    TJSONFloatNumber.Create(1e16))).ToBe('');
+  Expect<Boolean>(CheckBuilt(
+    '{"type":"number","enum":[10000000000000001]}',
+    TJSONFloatNumber.Create(1e16)) <> '').ToBe(True);
+  // 2^64 - 2048, the largest double below 2^64, against a QWord node.
+  Expect<string>(CheckBuilt(
+    '{"type":"number","enum":[18446744073709549568]}',
+    TJSONFloatNumber.Create(18446744073709549568.0))).ToBe('');
+  Expect<Boolean>(CheckBuilt(
+    '{"type":"number","enum":[18446744073709549569]}',
+    TJSONFloatNumber.Create(18446744073709549568.0)) <> '').ToBe(True);
+end;
+
+// Accepted before #91: entries of another type simply never match.
+procedure TSubsetSchemas.TestEnumEntriesOfOtherTypes;
+begin
+  Expect<string>(Violation('{"type":"string","enum":[{},"ok"]}')).ToBe('');
+  Expect<string>(Check('{"type":"string","enum":[{},"ok"]}', '"ok"')).ToBe('');
+  Expect<string>(Check('{"type":"string","enum":[{},"ok"]}', '{}'))
+    .ToBe('Argument must be a string');
+end;
+
 procedure TSubsetSchemas.SetupTests;
 begin
   Test('nested objects, arrays, enums, defaults and null accepted',
@@ -987,6 +1036,12 @@ begin
     TestKeywordShapes);
   Test('only defaults that conform are seeded',
     TestOnlyConformingDefaultsSeeded);
+  Test('NaN or infinity anywhere in a value is refused',
+    TestUnconstrainedNonFiniteRefused);
+  Test('integral floats past 2^53 match the integers they hold',
+    TestLargeIntegralFloatsInEnums);
+  Test('enum entries of another type are allowed and never match',
+    TestEnumEntriesOfOtherTypes);
 end;
 
 begin

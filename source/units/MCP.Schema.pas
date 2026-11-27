@@ -176,7 +176,8 @@ function MCPWireNumber(AValue: Double): TJSONData;
 // and may use:
 //   object      properties (each a node), required (names)
 //   array       items (a node)
-//   primitives  enum (primitive values), default (a primitive)
+//   primitives  enum (entries of another type never match), default
+//               (a primitive)
 //   any node    description, title; $schema at the root, naming
 //               2020-12 (the default dialect; a schema declaring
 //               another is outside the subset)
@@ -1017,10 +1018,10 @@ begin
   end
   else if (Key = 'enum') and IsPrimitiveType(AType) then
   begin
+    // Entries of another type are allowed, as before #91: they can
+    // never match a value of the declared type.
     if Value.JSONType <> jtArray then
-      Result := NodeLabel(APath) + 'enum must be an array'
-    else if not ItemsOfTypes(Value, PRIMITIVE_JSON, True) then
-      Result := NodeLabel(APath) + 'enum values must be primitives';
+      Result := NodeLabel(APath) + 'enum must be an array';
   end
   else if (Key = 'default') and IsPrimitiveType(AType) then
   begin
@@ -1099,11 +1100,15 @@ end;
 
 // Exact equality of two JSON numbers: integers compare as integers
 // (no rounding through a double), floats as floats, and a float equals
-// an integer only when it is integral within +-2^53 and the same value.
+// an integer when it is integral and the same value.
 function SameNumber(A, B: TJSONData): Boolean;
+const
+  TWO_POW_63 = 9223372036854775808.0;
+  TWO_POW_64 = 18446744073709551616.0;
 var
   IntA, IntB: Boolean;
   Integral, Other: TJSONData;
+  F: Double;
 begin
   IntA := TJSONNumber(A).NumberType in [ntInteger, ntInt64, ntQWord];
   IntB := TJSONNumber(B).NumberType in [ntInteger, ntInt64, ntQWord];
@@ -1127,13 +1132,26 @@ begin
     Integral := B;
     Other := A;
   end;
-  if not IsIntegralNumber(Other) then
+  F := Other.AsFloat;
+  if IsNan(F) or IsInfinite(F) or (Frac(F) <> 0) then
     Exit(False);
-  // A QWord node holds small values too (CreateJSON(QWord(2))).
+  // An integral double is an exact integer at any magnitude; compare it
+  // within the integer node's range, without rounding the integer.
   if TJSONNumber(Integral).NumberType = ntQWord then
-    Exit((Other.AsFloat >= 0) and
-      (Integral.AsQWord = QWord(Trunc(Other.AsFloat))));
-  Result := Integral.AsInt64 = Trunc(Other.AsFloat);
+  begin
+    // A QWord node holds small values too (CreateJSON(QWord(2))).
+    if (F < 0) or (F >= TWO_POW_64) then
+      Exit(False);
+    if F < TWO_POW_63 then
+      Exit(Integral.AsQWord = QWord(Trunc(F)));
+    // F - 2^63 is exact here: doubles in [2^63, 2^64) are 2048 apart.
+    Exit((Integral.AsQWord >= QWord(9223372036854775808)) and
+      (Integral.AsQWord - QWord(9223372036854775808) =
+      QWord(Trunc(F - TWO_POW_63))));
+  end;
+  if (F < -TWO_POW_63) or (F >= TWO_POW_63) then
+    Exit(False);
+  Result := Integral.AsInt64 = Trunc(F);
 end;
 
 // A float node can hold NaN or an infinity, which has no JSON form.
@@ -1301,10 +1319,36 @@ begin
   Result := True;
 end;
 
+// True when AValue holds a NaN or infinite float anywhere, which no
+// JSON text can carry.
+function HasNonFiniteNumber(AValue: TJSONData): Boolean;
+var
+  I: Integer;
+begin
+  if AValue = nil then
+    Exit(False);
+  case AValue.JSONType of
+    jtNumber:
+      Exit(not IsFiniteNumber(AValue));
+    jtObject, jtArray:
+      for I := 0 to AValue.Count - 1 do
+        if HasNonFiniteNumber(AValue.Items[I]) then
+          Exit(True);
+  end;
+  Result := False;
+end;
+
 function MCPValidateAgainstSchema(ASchema: TJSONObject; AValue: TJSONData;
   const AKind: string; ASeedDefaults: Boolean; out AError: string): Boolean;
 begin
   Result := ValidateNode(ASchema, AValue, AKind, '', ASeedDefaults, AError);
+  // Parts no keyword constrains (items of an array without "items",
+  // members no property names) must still be writable JSON.
+  if Result and HasNonFiniteNumber(AValue) then
+  begin
+    AError := Subject(AKind, '') + ' contains a NaN or infinite number';
+    Result := False;
+  end;
 end;
 
 end.

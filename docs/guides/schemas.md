@@ -143,15 +143,17 @@ schema node has one `type` (`object`, `array`, `string`, `number`,
 | --- | --- |
 | `object` | `properties` (each a node), `required` |
 | `array` | `items` (a node) |
-| primitives | `enum` (primitive values), `default` (a primitive) |
+| primitives | `enum` (entries of another type never match), `default` (a primitive) |
 | any | `description`, `title`; `$schema` at the root, naming JSON Schema 2020-12 |
 
 Objects and arrays nest to any depth. `integer` means a number with no
 fractional part, so `2.0` counts, for floats up to 2^53 in magnitude
 (past that a double cannot tell neighbouring integers apart). Numeric
-`enum` values compare exactly between integers; a value parsed as a
-float compares at double precision. `number` excludes NaN and the
-infinities, which have no JSON form. A default is seeded only when it
+`enum` values compare exactly: integers as integers, and an integral
+float equals the integer it holds at any magnitude; other floats
+compare at double precision. `number` excludes NaN and the infinities,
+which have no JSON form, and a checked value may not hold one anywhere,
+even where no keyword constrains it. A default is seeded only when it
 fits its own property schema. A schema whose `$schema` names another
 dialect is outside the subset, since the server could only check it by
 2020-12 rules

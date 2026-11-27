@@ -405,6 +405,7 @@ type
     procedure TestRicherSchemaPublishedUnchanged;
     procedure TestNonFiniteOutputRefused;
     procedure TestNonFiniteClassicIsAnError;
+    procedure TestNilSchemaChildListedInBothEras;
   end;
 
   // MCPImageResult: the spec's image content block, the raw-bytes
@@ -5419,6 +5420,44 @@ begin
   Response.Free;
 end;
 
+// A raw definition whose enum holds a nil item (null on the wire):
+// listing clones every definition, which fpjson cannot do with a nil
+// child, so registration stores a JSON null instead.
+procedure TStructuredOutput.TestNilSchemaChildListedInBothEras;
+var
+  Definition, Schema, Prop, Props: TJSONObject;
+  Enum: TJSONArray;
+  Response: TJSONObject;
+begin
+  Enum := TJSONArray.Create;
+  Enum.Add(TJSONData(nil));
+  Prop := TJSONObject.Create;
+  Prop.Add('type', 'null');
+  Prop.Add('enum', Enum);
+  Props := TJSONObject.Create;
+  Props.Add('n', Prop);
+  Schema := TJSONObject.Create;
+  Schema.Add('type', 'object');
+  Schema.Add('properties', Props);
+  Definition := TJSONObject.Create;
+  Definition.Add('name', 'nil_enum');
+  Definition.Add('inputSchema', Schema);
+  FServer.RegisterTool(Definition, NaNHandler);
+  Response := Call('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{' +
+    META_MODERN + '}}');
+  Expect<Boolean>(Pos('"enum" : [null]', Response.AsJSON) > 0).ToBe(True);
+  Response.Free;
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Response := Call('{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}');
+  Expect<Boolean>(Response.FindPath('result.tools') <> nil).ToBe(True);
+  Response.Free;
+end;
+
 procedure TStructuredOutput.SetupTests;
 begin
   Test('array output is sent, with its JSON as the text block',
@@ -5446,6 +5485,8 @@ begin
     TestNonFiniteOutputRefused);
   Test('classic fallback of a NaN value answers -32603',
     TestNonFiniteClassicIsAnError);
+  Test('a nil schema child is listed as null in both eras',
+    TestNilSchemaChildListedInBothEras);
 end;
 
 { ───────── image results ───────── }

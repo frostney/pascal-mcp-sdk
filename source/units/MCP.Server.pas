@@ -2149,6 +2149,22 @@ begin
       'Tool "%s" is already registered', [AToolName]);
 end;
 
+// Replaces every child stored as nil (which fpjson writes as null but
+// cannot clone, FPC 3.2.2) with a JSON null, so a definition can be
+// cloned for every tools/list.
+procedure NilChildrenToNull(AData: TJSONData);
+var
+  I: Integer;
+begin
+  if (AData = nil) or not (AData.JSONType in [jtObject, jtArray]) then
+    Exit;
+  for I := 0 to AData.Count - 1 do
+    if AData.Items[I] = nil then
+      AData.Items[I] := TJSONNull.Create
+    else
+      NilChildrenToNull(AData.Items[I]);
+end;
+
 function TMCPServer.AddTool(ADefinition: TJSONObject;
   AHandler: TMCPToolHandler; AMethod: TMCPToolMethod): TMCPToolOptions;
 var
@@ -2156,6 +2172,7 @@ var
 begin
   try
     EnsureMutable;
+    NilChildrenToNull(ADefinition);
     ValidateToolDefinition(ADefinition, ToolName);
     if Assigned(AHandler) = Assigned(AMethod) then
       raise EMCPServer.CreateFmt(
@@ -3277,6 +3294,7 @@ begin
   // Whole list, registration order: deterministic ordering is what the
   // spec asks for, and without pagination there is no cursor to honor.
   Tools := TJSONArray.Create;
+  try
   for I := 0 to High(FTools) do
   begin
     Definition := TJSONObject(FTools[I].Definition.Clone);
@@ -3290,6 +3308,10 @@ begin
       (TJSONObject(OutputSchema).Get('type', '') <> 'object') then
       Definition.Delete('outputSchema');
     Tools.Add(Definition);
+  end;
+  except
+    Tools.Free;
+    raise;
   end;
   ListResult := TJSONObject.Create;
   ListResult.Add('tools', Tools);
