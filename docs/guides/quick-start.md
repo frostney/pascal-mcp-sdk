@@ -101,7 +101,10 @@ Key behaviours you get for free:
 - **Handler exceptions** become `isError: true` tool results — the
   in-band error channel models can self-correct against — except an
   `EMCPProtocolError`, which answers with the JSON-RPC error it carries.
-- **`resultType` and `serverInfo`** are stamped on every result.
+- **`resultType` and `serverInfo`** are stamped on every 2026-07-28
+  result (`serverInfo` under `_meta`, as
+  `io.modelcontextprotocol/serverInfo`); classic-handshake responses
+  keep their revision's shape without them.
 - **Today's clients work out of the box over stdio**: the server is
   dual-era by default, so a client opening with the classic
   `initialize` handshake, as Codex 0.171.0 does (see

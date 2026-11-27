@@ -27,14 +27,16 @@ claude mcp add demo /path/to/build/mcpdemo
 claude mcp list        # → demo: … - ✔ Connected
 ```
 
-## The same session on the wire
+## Claude Code on the wire
 
-Claude Code 2.1.332 was asked the same, on 2026-11-27. Five requests
-travelled over the server's stdin and stdout, all at the stateless
-`2026-07-28` revision: there is no handshake, and every request carries
-its own `_meta`. Everything below your handler's one line of
-arithmetic was produced by the library. The excerpts are abridged:
-`"…"` marks what is left out, and the client's `_meta` is shown once.
+Claude Code 2.1.332 was asked the same, on 2026-11-27. It sent five
+requests over the server's stdin, all at the stateless `2026-07-28`
+revision: there is no handshake, and every request carries its own
+`_meta`. The demo supplies the instructions, the tool declarations and
+the handler's text; the library checks each request, validates the
+arguments against the schema, and builds every response around them.
+The excerpts are abridged: `"…"` marks what is left out, and the
+client's `_meta` is shown once.
 
 **1. The client asks what the server is** — `server/discover`, with
 its identity and capabilities in `_meta`:
@@ -59,10 +61,9 @@ set — the text the model reads to learn when to use your server:
   "ttlMs":300000,"cacheScope":"private","resultType":"complete","_meta":{"…":"…"}}}
 ```
 
-**2. Discovery** — `prompts/list`, `resources/list` and `tools/list`,
-and the client hands the catalog to the model. Note that your
-`RegisterTool` call became a JSON Schema the model uses to shape its
-arguments:
+**2. Discovery** — Claude Code sent `prompts/list`, `resources/list`
+and `tools/list`. Your `RegisterTool` call became the JSON Schema the
+client reads to shape its arguments:
 
 ```json
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"…":"…"}}}
@@ -149,8 +150,9 @@ surface this way.
 
 ## Takeaways
 
-- Your handler ran **once**, with validated typed arguments; the
-  library produced every other byte on this page.
+- Your handler ran **once**, with validated typed arguments. The demo
+  supplied the instructions, the tool declarations and the result text;
+  the library checked the requests and built the responses around them.
 - Model-facing text matters: the tool `description` and the server
   `Instructions` are what the model reads when it chooses a tool.
 - Clients move between protocol revisions at their own pace — the
