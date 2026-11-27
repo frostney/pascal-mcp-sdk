@@ -709,8 +709,9 @@ begin
     raise EMCPSchema.Create('NaN and infinite numbers have no JSON form');
   // Every integer below 2^53 is an exact Double and fits an Int64;
   // integral values beyond it keep the float node, which writes them
-  // the way JavaScript does.
-  if (Frac(AValue) = 0) and (Abs(AValue) < 9007199254740992.0) then
+  // the way JavaScript does. The range test comes first: Frac past 2^63
+  // overflows on AArch64 (FPC 3.2.2).
+  if (Abs(AValue) < 9007199254740992.0) and (Frac(AValue) = 0) then
     Result := TJSONInt64Number.Create(Trunc(AValue))
   else
     Result := TMCPWireFloat.Create(AValue);
@@ -1084,6 +1085,17 @@ const
   // there cannot be told apart from its neighbours.
   MAX_EXACT_FLOAT_INTEGER = 9007199254740992.0;
 
+// True for a finite double with no fractional part. Every double of
+// magnitude 2^52 or more is integral, and Frac is not called on those:
+// on AArch64 (FPC 3.2.2) it truncates through a 64-bit integer and
+// raises an arithmetic overflow past 2^63.
+function IsIntegralDouble(F: Double): Boolean;
+begin
+  if IsNan(F) or IsInfinite(F) then
+    Exit(False);
+  Result := (Abs(F) >= 4503599627370496.0) or (Frac(F) = 0);
+end;
+
 // JSON Schema's integer is a number with a zero fractional part
 // (json-schema-validation 2020-12 §6.1.1, verified 2026-11-27), so 2.0
 // and 2e0 count. Floats are accepted within +-2^53, where that is exact.
@@ -1094,8 +1106,7 @@ begin
   if TJSONNumber(AValue).NumberType in [ntInteger, ntInt64, ntQWord] then
     Exit(True);
   F := AValue.AsFloat;
-  Result := not IsNan(F) and not IsInfinite(F) and
-    (Abs(F) <= MAX_EXACT_FLOAT_INTEGER) and (Frac(F) = 0);
+  Result := (Abs(F) <= MAX_EXACT_FLOAT_INTEGER) and IsIntegralDouble(F);
 end;
 
 // Exact equality of two JSON numbers: integers compare as integers
@@ -1133,7 +1144,7 @@ begin
     Other := A;
   end;
   F := Other.AsFloat;
-  if IsNan(F) or IsInfinite(F) or (Frac(F) <> 0) then
+  if not IsIntegralDouble(F) then
     Exit(False);
   // An integral double is an exact integer at any magnitude; compare it
   // within the integer node's range, without rounding the integer.
