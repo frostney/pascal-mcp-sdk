@@ -96,6 +96,8 @@ type
   public
     procedure SetupTests; override;
     procedure TestSingleJSONResponse;
+    procedure TestHandlerRaisedMissingCapability400;
+    procedure TestRefusalAfterProgressEndsTheStream;
     procedure TestBareDiscoverProbe;
     procedure TestMissingProtocolVersion400;
     procedure TestMissingClientCapabilities400;
@@ -160,6 +162,23 @@ function QuietHandler(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
   Result := MCPTextResult('quiet');
+end;
+
+// Reports progress, then raises -32021: the stream is open by then.
+function ProgressThenRefuseHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  MCPReportProgress(ACtx, 0.5, 1.0, 'halfway');
+  Result := Default(TMCPToolResult);
+  raise MCPMissingCapabilityError('sampling');
+end;
+
+// Raises the -32021 a handler decides itself (#88).
+function NeedsSamplingHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := Default(TMCPToolResult);
+  raise MCPMissingCapabilityError('sampling');
 end;
 
 // Ask the kernel for a free localhost port: bind port 0, read the
@@ -228,6 +247,10 @@ begin
   FServer.RegisterTool('echo', 'Echo',
     ObjectSchema.AddString('message', 'Text to echo'), NoisyEchoHandler);
   FServer.RegisterTool('quiet', 'Quiet', '{"type":"object"}', QuietHandler);
+  FServer.RegisterTool('needs_sampling', 'Needs sampling', '{"type":"object"}',
+    NeedsSamplingHandler);
+  FServer.RegisterTool('late_refusal', 'Refuses late', '{"type":"object"}',
+    ProgressThenRefuseHandler);
   // Mirrors region (string), opts.limit (integer) and opts.dry
   // (boolean) into Mcp-Param-* headers (#90).
   FServer.RegisterTool('routed', 'Routed',
@@ -406,6 +429,48 @@ begin
   Expect<string>(ContentType).ToBe('application/json');
   Expect<Boolean>(Pos('pong', Body) > 0).ToBe(True);
   Expect<Boolean>(Pos('"resultType" : "complete"', Body) > 0).ToBe(True);
+end;
+
+procedure THTTPBinding.TestHandlerRaisedMissingCapability400;
+var
+  Body: string;
+  Status: Integer;
+begin
+  // The status follows the code wherever the core decided it, so a
+  // handler-raised -32021 answers 400 like the library's own (spec
+  // verified 2026-11-26:
+  // https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta).
+  Status := Post(CallLine(1, 'needs_sampling'), 'tools/call',
+    'needs_sampling', Body);
+  Expect<Integer>(Status).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32021);
+end;
+
+procedure THTTPBinding.TestRefusalAfterProgressEndsTheStream;
+var
+  Body, ContentType: string;
+  Status: Integer;
+begin
+  // Once progress has opened the stream the status is 200 for good:
+  // the error is its last event. This is the late fallback, not the
+  // spec's 400: a handler (or, with #84, a declared capability) checks
+  // before its first notification to get the 400.
+  Status := Exchange('POST', '/mcp',
+    CallLine(3, 'late_refusal', META_MODERN_STREAMING),
+    [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+     HeaderPair('Mcp-Method', 'tools/call'),
+     HeaderPair('Mcp-Name', 'late_refusal')], Body, ContentType);
+  Expect<Integer>(Status).ToBe(200);
+  Expect<string>(ContentType).ToBe('text/event-stream');
+  // Ordered frames: the progress event, then the error as the final,
+  // terminated event.
+  Expect<Boolean>(Pos('notifications/progress', Body) > 0).ToBe(True);
+  Expect<Boolean>(Pos('notifications/progress', Body) <
+    Pos('"code" : -32021', Body)).ToBe(True);
+  Expect<string>(Copy(Body, Length(Body) - 1, 2)).ToBe(#10#10);
+  Expect<Boolean>(Pos('"code" : -32021', Copy(Body,
+    LastDelimiter(#10, Copy(Body, 1, Length(Body) - 2)) + 1, MaxInt)) > 0)
+    .ToBe(True);
 end;
 
 procedure THTTPBinding.TestBareDiscoverProbe;
@@ -1027,6 +1092,9 @@ begin
   Test('unknown tool → 200, -32602 in-band', TestInBandInvalidParamsStays200);
   Test('progress opt-in without clientCapabilities → 400 JSON, -32602',
     TestStreamingOptInMissingCapabilities400);
+  Test('handler-raised -32021 → 400', TestHandlerRaisedMissingCapability400);
+  Test('refusal after streamed progress → last SSE event under 200',
+    TestRefusalAfterProgressEndsTheStream);
   Test('notification → 202, no body', TestNotificationAccepted);
   Test('malformed notification dropped → 202',
     TestMalformedNotificationAccepted);

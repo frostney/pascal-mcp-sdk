@@ -362,6 +362,29 @@ type
     procedure TestRepeatedBlockRejected;
   end;
 
+  // EMCPProtocolError (#88): a handler's deliberate JSON-RPC error
+  // reaches the wire with its own code, message and data from every
+  // handler kind and both eras, unredacted; reserved codes are refused
+  // at construction.
+  THandlerProtocolErrors = class(TDispatchSuite)
+  protected
+    procedure BeforeEach; override;
+  public
+    procedure SetupTests; override;
+    procedure TestToolErrorLineByteExact;
+    procedure TestRedactionLeavesItAlone;
+    procedure TestTypedToolError;
+    procedure TestPromptError;
+    procedure TestResourceError;
+    procedure TestTemplateError;
+    procedure TestLegacyEraToolError;
+    procedure TestMissingCapabilityHelper;
+    procedure TestReservedCodesRefused;
+    procedure TestAllowedCodesAccepted;
+    procedure TestCapabilityDataShape;
+    procedure TestChangedDataSentAsInternalError;
+  end;
+
   // MCPImageResult: the spec's image content block, the raw-bytes
   // overload's base64 encoding (asserted against literal fixtures, not
   // against a decode of what we just encoded), mimeType passthrough,
@@ -4741,6 +4764,342 @@ begin
     TestApplicationValidatedSkipsChecks);
 end;
 
+{ ───────── handler-raised protocol errors (#88) ───────── }
+
+const
+  PROTOCOL_ERROR_TEXT = 'Ung' + #$C3#$BC + 'ltig: ' + #$F0#$9F#$98#$80;
+
+function ProtocolErrorData: TJSONObject;
+begin
+  // The escape keeps the source ASCII: the parser stores U+00E9 as
+  // the UTF-8 bytes C3 A9, which the wire line must carry unchanged.
+  Result := TJSONObject(GetJSON('{"field":"w\u00e9rt"}'));
+end;
+
+function RefusingToolHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := Default(TMCPToolResult);
+  raise EMCPProtocolError.Create(JSONRPC_INVALID_PARAMS, PROTOCOL_ERROR_TEXT,
+    ProtocolErrorData);
+end;
+
+function RefusingTypedHandler(AArgs: TMCPArgs;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := Default(TMCPToolResult);
+  raise EMCPProtocolError.Create(-1, 'application refusal');
+end;
+
+function NeedsSamplingHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := Default(TMCPToolResult);
+  if not ACtx.HasCapability('sampling') then
+    raise MCPMissingCapabilityError('sampling');
+end;
+
+// Changes the borrowed data after construction, which the dispatch
+// check catches (#88 review round 3).
+function ChangedRefusalHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  E: EMCPProtocolError;
+begin
+  Result := Default(TMCPToolResult);
+  E := MCPMissingCapabilityError('sampling');
+  TJSONObject(E.Data).Clear;
+  raise E;
+end;
+
+function RefusingPromptHandler(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := nil;
+  raise EMCPProtocolError.Create(JSONRPC_INVALID_PARAMS, PROTOCOL_ERROR_TEXT);
+end;
+
+function RefusingReader(const AUri: string;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := nil;
+  raise EMCPProtocolError.Create(4030, 'not shared with you: ' + AUri);
+end;
+
+function RefusingTemplateReader(const AUri: string; AVars: TJSONObject;
+  const ACtx: TMCPRequestContext): TJSONArray;
+begin
+  Result := nil;
+  // An application refusal: a resource that does not exist is the
+  // reader returning nil, which the server answers era-appropriately.
+  raise EMCPProtocolError.Create(4290, 'quota exhausted for ' +
+    AVars.Get('id', ''));
+end;
+
+procedure THandlerProtocolErrors.BeforeEach;
+begin
+  inherited BeforeEach;
+  FServer.RegisterTool('refuse', 'Refuses', '{"type":"object"}',
+    RefusingToolHandler);
+  FServer.RegisterTool('refuse_typed', 'Refuses typed', TScaleArgs,
+    RefusingTypedHandler);
+  FServer.RegisterTool('needs_sampling', 'Needs sampling',
+    '{"type":"object"}', NeedsSamplingHandler);
+  FServer.RegisterTool('changed_refusal', 'Changes its refusal',
+    '{"type":"object"}', ChangedRefusalHandler);
+  FServer.RegisterPrompt('refuse_prompt', 'Refuses', RefusingPromptHandler);
+  FServer.RegisterResource('mem://refuse', 'refuse', 'text/plain',
+    RefusingReader);
+  FServer.RegisterResourceTemplate('mem://item/{id}', 'item', 'text/plain',
+    RefusingTemplateReader);
+end;
+
+function ToolCallLine(const AName, AArguments: string): string;
+begin
+  Result := '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{' +
+    '"name":"' + AName + '","arguments":' + AArguments + ',' +
+    META_MODERN + '}}';
+end;
+
+const
+  REFUSE_LINE =
+    '{ "jsonrpc" : "2.0", "id" : 7, "error" : { "code" : -32602, ' +
+    '"message" : "' + PROTOCOL_ERROR_TEXT + '", "data" : { ' +
+    '"field" : "w' + #$C3#$A9 + 'rt" } } }';
+
+procedure THandlerProtocolErrors.TestToolErrorLineByteExact;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(ToolCallLine('refuse', '{}'), Response)).ToBe(True);
+  Expect<string>(Response).ToBe(REFUSE_LINE);
+end;
+
+procedure THandlerProtocolErrors.TestRedactionLeavesItAlone;
+var
+  Response: string;
+begin
+  FServer.RedactErrorDetails := True;
+  Expect<Boolean>(Dispatch(ToolCallLine('refuse', '{}'), Response)).ToBe(True);
+  Expect<string>(Response).ToBe(REFUSE_LINE);
+end;
+
+procedure THandlerProtocolErrors.TestTypedToolError;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(ToolCallLine('refuse_typed',
+    '{"value":1,"times":2}'), Response)).ToBe(True);
+  Expect<string>(Response).ToBe('{ "jsonrpc" : "2.0", "id" : 7, "error" : ' +
+    '{ "code" : -1, "message" : "application refusal" } }');
+end;
+
+procedure THandlerProtocolErrors.TestPromptError;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":7,"method":"prompts/get",' +
+    '"params":{"name":"refuse_prompt",' + META_MODERN + '}}', Response))
+    .ToBe(True);
+  Expect<string>(Response).ToBe('{ "jsonrpc" : "2.0", "id" : 7, "error" : ' +
+    '{ "code" : -32602, "message" : "' + PROTOCOL_ERROR_TEXT + '" } }');
+end;
+
+procedure THandlerProtocolErrors.TestResourceError;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":7,"method":"resources/read",' +
+    '"params":{"uri":"mem://refuse",' + META_MODERN + '}}', Response))
+    .ToBe(True);
+  Expect<string>(Response).ToBe('{ "jsonrpc" : "2.0", "id" : 7, "error" : ' +
+    '{ "code" : 4030, "message" : "not shared with you: mem://refuse" } }');
+end;
+
+procedure THandlerProtocolErrors.TestTemplateError;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":7,"method":"resources/read",' +
+    '"params":{"uri":"mem://item/42",' + META_MODERN + '}}', Response))
+    .ToBe(True);
+  Expect<string>(Response).ToBe('{ "jsonrpc" : "2.0", "id" : 7, "error" : ' +
+    '{ "code" : 4290, "message" : "quota exhausted for 42" } }');
+end;
+
+procedure THandlerProtocolErrors.TestLegacyEraToolError;
+var
+  Response: TJSONObject;
+  Line: string;
+begin
+  Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+    '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
+    '"clientInfo":{"name":"legacy-client","version":"1.2.3"}}}');
+  Response.Free;
+  SendNotification(
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":7,"method":"tools/call",' +
+    '"params":{"name":"refuse","arguments":{}}}', Line)).ToBe(True);
+  Expect<string>(Line).ToBe(REFUSE_LINE);
+end;
+
+procedure THandlerProtocolErrors.TestMissingCapabilityHelper;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(ToolCallLine('needs_sampling', '{}'), Response))
+    .ToBe(True);
+  Expect<string>(Response).ToBe('{ "jsonrpc" : "2.0", "id" : 7, "error" : ' +
+    '{ "code" : -32021, "message" : "Missing required client capability: ' +
+    'sampling", "data" : { "requiredCapabilities" : { "sampling" : {} } } } }');
+end;
+
+procedure THandlerProtocolErrors.TestReservedCodesRefused;
+const
+  RESERVED: array[0..7] of Integer =
+    (-32768, -32604, -32000, -32002, -32019, -32020, -32022, -32099);
+var
+  I: Integer;
+  Raised: Boolean;
+begin
+  for I := Low(RESERVED) to High(RESERVED) do
+  begin
+    Raised := False;
+    try
+      EMCPProtocolError.Create(RESERVED[I], 'x', ProtocolErrorData).Free;
+    except
+      on E: EMCPServer do
+        Raised := Pos(IntToStr(RESERVED[I]), E.Message) > 0;
+    end;
+    Expect<Boolean>(Raised).ToBe(True);
+  end;
+end;
+
+// Error-code policy verified 2026-11-26 against
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/index#error-codes
+// and the schema's MissingRequiredClientCapabilityError.
+procedure THandlerProtocolErrors.TestAllowedCodesAccepted;
+const
+  ALLOWED: array[0..8] of Integer =
+    (-32700, -32600, -32601, -32602, -32603, -32769, -1, 0, 4040);
+var
+  I: Integer;
+  E: EMCPProtocolError;
+  Raised: Boolean;
+begin
+  for I := Low(ALLOWED) to High(ALLOWED) do
+  begin
+    E := EMCPProtocolError.Create(ALLOWED[I], 'x');
+    try
+      Expect<Integer>(E.Code).ToBe(ALLOWED[I]);
+    finally
+      E.Free;
+    end;
+  end;
+  // -32021 needs its requiredCapabilities data (#88 review).
+  Raised := False;
+  try
+    EMCPProtocolError.Create(-32021, 'missing sampling').Free;
+  except
+    on E2: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  Raised := False;
+  try
+    EMCPProtocolError.Create(-32021, 'missing',
+      TJSONObject(GetJSON('{"requiredCapabilities":{}}'))).Free;
+  except
+    on E2: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  // Each capability must be an object, as the schema has it.
+  Raised := False;
+  try
+    EMCPProtocolError.Create(-32021, 'missing',
+      TJSONObject(GetJSON('{"requiredCapabilities":{"sampling":true}}'))).Free;
+  except
+    on E2: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  MCPMissingCapabilityError('roots').Free;
+end;
+
+// True when constructing -32021 with AData raises EMCPServer (and no
+// other exception: the constructor owns AData on every path).
+function CapabilityDataRefused(AData: TJSONData): Boolean;
+begin
+  Result := False;
+  try
+    EMCPProtocolError.Create(-32021, 'missing', AData).Free;
+  except
+    on E: EMCPServer do
+      Result := True;
+  end;
+end;
+
+// requiredCapabilities is a ClientCapabilities object: the members the
+// schema types must be objects too. Verified 2026-11-27 against
+// schema/2026-07-28/schema.json (ClientCapabilities,
+// MissingRequiredClientCapabilityError).
+procedure THandlerProtocolErrors.TestCapabilityDataShape;
+var
+  WithNil, Capabilities: TJSONObject;
+begin
+  Expect<Boolean>(CapabilityDataRefused(GetJSON(
+    '{"requiredCapabilities":{"sampling":{"tools":false}}}'))).ToBe(True);
+  Expect<Boolean>(CapabilityDataRefused(GetJSON(
+    '{"requiredCapabilities":{"elicitation":{"form":1}}}'))).ToBe(True);
+  Expect<Boolean>(CapabilityDataRefused(GetJSON(
+    '{"requiredCapabilities":{"extensions":{"io.example/x":true}}}')))
+    .ToBe(True);
+  Expect<Boolean>(CapabilityDataRefused(GetJSON(
+    '{"requiredCapabilities":{"experimental":{"x":null}}}'))).ToBe(True);
+  // A nil member serializes as null; it is refused, not dereferenced.
+  Capabilities := TJSONObject.Create;
+  Capabilities.Add('sampling', TJSONData(nil));
+  WithNil := TJSONObject.Create;
+  WithNil.Add('requiredCapabilities', Capabilities);
+  Expect<Boolean>(CapabilityDataRefused(WithNil)).ToBe(True);
+  EMCPProtocolError.Create(-32021, 'missing', GetJSON(
+    '{"requiredCapabilities":{"sampling":{"tools":{}},' +
+    '"extensions":{"io.modelcontextprotocol/ui":{}}}}')).Free;
+end;
+
+procedure THandlerProtocolErrors.TestChangedDataSentAsInternalError;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(ToolCallLine('changed_refusal', '{}'), Response))
+    .ToBe(True);
+  Expect<string>(Response).ToBe('{ "jsonrpc" : "2.0", "id" : 7, "error" : ' +
+    '{ "code" : -32603, "message" : "Internal error" } }');
+end;
+
+procedure THandlerProtocolErrors.SetupTests;
+begin
+  Test('tool error line is byte-exact (code, message, data)',
+    TestToolErrorLineByteExact);
+  Test('RedactErrorDetails leaves a deliberate error alone',
+    TestRedactionLeavesItAlone);
+  Test('typed-argument tool error', TestTypedToolError);
+  Test('prompt handler error keeps its code', TestPromptError);
+  Test('resource reader error keeps its code', TestResourceError);
+  Test('template reader refusal with an application code', TestTemplateError);
+  Test('legacy-era tools/call gets the same error', TestLegacyEraToolError);
+  Test('MCPMissingCapabilityError builds -32021 with requiredCapabilities',
+    TestMissingCapabilityHelper);
+  Test('reserved codes refused at construction', TestReservedCodesRefused);
+  Test('JSON-RPC and application codes accepted; -32021 needs its data',
+    TestAllowedCodesAccepted);
+  Test('-32021 data follows the ClientCapabilities shapes; nil refused',
+    TestCapabilityDataShape);
+  Test('-32021 data changed after construction is sent as -32603',
+    TestChangedDataSentAsInternalError);
+end;
+
 { ───────── image results ───────── }
 
 const
@@ -5081,5 +5440,7 @@ begin
     TImageResults.Create('Server: image tool results'));
   TestRunnerProgram.AddSuite(
     TContentResults.Create('Server: content tool results and prompt messages'));
+  TestRunnerProgram.AddSuite(
+    THandlerProtocolErrors.Create('Server: handler-raised protocol errors'));
   TestRunnerProgram.Run;
 end.
