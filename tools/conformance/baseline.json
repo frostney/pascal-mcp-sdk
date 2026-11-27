@@ -8,11 +8,7 @@
       "expected": "pass"
     },
     "completion-complete": {
-      "expected": "fail",
-      "issue": 81,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "dns-rebinding-protection": {
       "expected": "pass"

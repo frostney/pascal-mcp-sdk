@@ -57,7 +57,7 @@ then mcpconformance, the way a real client does).
 | `source/units/` | Library: `MCP.JSONRPC` (JSON-RPC 2.0 profile), `MCP.Protocol` (per-request `_meta` model), `MCP.Schema` (fluent schema builder + RTTI-derived argument classes), `MCP.Content` (content blocks for tool results and prompt messages), `MCP.Server` (sans-I/O dispatch core; tool/resource/prompt registries), `MCP.Transport.Stdio` (newline-delimited stdio binding), `MCP.Transport.HTTP` (Streamable HTTP binding: single POST endpoint, SSE response streams) |
 | `source/apps/` | Programs: `mcpdemo` (example stdio server), `mcpsmoke` (subprocess E2E battery), `mcpconformance` (conformance fixture: the official suite's reference surface, registered through the public API) |
 | `scripts/` | Self-contained `lwpt run` wrappers (`smoke.pas` → runs the built `mcpsmoke`; `conformance.pas` → runs `tools/conformance/run.mjs`) |
-| `tools/` | Cross-implementation checks: `interop-ts/` (official MCP TypeScript clients vs `mcpdemo` over stdio, the legacy era, and Streamable HTTP); `conformance/` (official MCP conformance suite vs `mcpconformance --http`, non-blocking) |
+| `tools/` | Cross-implementation checks: `interop-ts/` (official MCP TypeScript clients vs `mcpdemo` over stdio, the legacy era, and Streamable HTTP); `conformance/` (official MCP conformance suite vs `mcpconformance --http`, blocking) |
 | `docs/` | Consumer-first tree rendered by the website: `guides/` (quick start, tools, images, schemas, prompts, resources, configuration, notifications, shipping, deployment, troubleshooting, cookbook), `reference/` (public API, gated by `.github/scripts/check-reference-docs.sh`), `internals/` (architecture, contributing, tooling, code style, releasing — contributor pages), `adr/` (decision records, repo-only — excluded from the website), `casts/` (committed terminal recordings served by the site) |
 | `website/` | GitHub Pages site: Fumadocs static export rendering `docs/` directly — contributor/CI tooling, not part of the library |
 
@@ -81,7 +81,7 @@ sans-I/O discipline. See
   types `mcpdemo` does not return.
 - Nothing in the test stack touches the **external** network; everything
   runs against local pipes, loopback (127.0.0.1) sockets, and temp
-  files. The one exception is the non-blocking conformance run
+  files. The one exception is the conformance run
   (`lwpt run conformance`, the `conformance` CI job), whose `npx`
   fetches the pinned suite from the npm registry. The loopback sockets are a recorded maintainer exception for
   the transport binding suites: `MCP.Transport.HTTP.Test.pas`

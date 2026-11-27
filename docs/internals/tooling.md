@@ -96,7 +96,7 @@ Six workflows (see [.github/workflows/](../../.github/workflows/)):
   `MCP*`/`Register*` function or procedure in the interface of
   `MCP.Server` and `MCP.Content` must appear in `docs/reference/`). Plus
   a blocking markdownlint job, the required `interop` job, and the
-  non-blocking `conformance` job (both below).
+  blocking `conformance` job (both below).
 - **ci.yml** — push to main: the wider native matrix (Linux x64 and
   arm64, macOS arm64 and x64, Win64 and Win32) as the post-merge
   confirmation signal; it does not run the conformance job.
@@ -220,9 +220,11 @@ the tools, prompts and resources the suite's reference fixture
 registers, by the same names and through the public API only, so a
 scenario fails only on a gap in the library.
 
-CI runs it as the **non-blocking** `conformance` job on every PR and
-uploads the results as the `conformance-results` artifact. It is not a
-required check, and it is green while the run matches the baseline.
+CI runs it as the **blocking** `conformance` job on every PR and
+uploads the results as the `conformance-results` artifact. The job
+fails the PR workflow whenever the run differs from the baseline, in
+either direction. Every scenario the suite scores passes; the baseline
+still lists the Tasks extension scenarios as expected failures (#82).
 Only the HTTP binding is covered: the stdio binding is not exercised
 here.
 
