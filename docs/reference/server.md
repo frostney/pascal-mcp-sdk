@@ -240,7 +240,15 @@ procedure MCPLogToStderr(const AMessage: string);
 `RunMCPStdioServer` serves stdin/stdout until EOF — the spec's
 graceful shutdown. `RunMCPStdioLoop` is the same loop over arbitrary
 `Text` files, for tests and custom stream transports reusing the
-newline framing.
+newline framing. It writes UTF-8 to `AOutput` whatever that file's code
+page, and puts the code page back exactly when it returns.
+
+`MCPLogToStderr` writes one line to stderr and flushes it, under the
+lock every library diagnostic shares, so lines from different threads
+never mix. The line is UTF-8 unless stderr is a Windows console, which
+keeps the code page the RTL chose for it; `ErrOutput`'s code page is
+restored afterwards, so your own writes are unaffected. I/O errors
+propagate (the server's internal diagnostics ignore them).
 
 ## Streamable HTTP transport
 

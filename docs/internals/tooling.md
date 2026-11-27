@@ -89,7 +89,10 @@ Six workflows (see [.github/workflows/](../../.github/workflows/)):
 
 - **pr.yml** — every PR: Linux + macOS + Windows legs, each doing
   checksum-verified lwpt release install, `lwpt install --frozen`,
-  then `build`, `test`, and the `mcpsmoke` E2E battery.
+  then `build`, `test`, and the `mcpsmoke` E2E battery. The Linux leg
+  runs `test` and `mcpsmoke` a second time under `LC_ALL=C`, where the
+  locale's code page is US-ASCII (#102); reproduce it with
+  `LC_ALL=C lwpt test && LC_ALL=C ./build/mcpsmoke`.
   One leg additionally runs the platform-independent gates:
   `lwpt format --check`, `lwpt agents --check`, and
   `.github/scripts/check-reference-docs.sh` (every

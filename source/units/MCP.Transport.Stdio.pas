@@ -11,7 +11,8 @@ unit MCP.Transport.Stdio;
 // verified 2026-07-21):
 //   - one UTF-8 JSON-RPC message per line, no embedded newlines
 //     (fpjson escapes newlines inside strings, so serialized responses
-//     are single-line by construction); UTF-8 setup lives in MCP.JSONRPC;
+//     are single-line by construction); UTF-8 setup lives in MCP.JSONRPC,
+//     and the loop sets its Text files to UTF-8 (#102);
 //   - stdout carries nothing but MCP messages — diagnostics belong on
 //     stderr (MCPLogToStderr);
 //   - responses are terminated with a bare LF on every platform (a
@@ -73,6 +74,9 @@ procedure MCPLogToStderr(const AMessage: string);
 
 implementation
 
+uses
+  MCP.JSONRPC;
+
 // Read one LF-terminated line, storing at most AMax bytes. True when
 // a line (possibly empty) was read; False on EOF with nothing read.
 // AOverflow reports that the line exceeded AMax — the excess is
@@ -129,32 +133,46 @@ var
   Line, Response: string;
   Overflow: Boolean;
   Session: TMCPSession;
+  SavedCodePage: TSystemCodePage;
 begin
-  Session := AServer.CreateSession;
+  // The wire is UTF-8 whatever the locale: a Text file converts what
+  // it writes to its own code page, which the RTL took from the locale
+  // at startup (US-ASCII under LC_ALL=C, turning every non-ASCII byte
+  // into '?'). AOutput is the caller's, so its code page is restored on
+  // return. AInput needs none: the loop reads it byte by byte.
+  // The raw field: restoring through SetTextCodePage would turn a saved
+  // 0 into DefaultSystemCodePage.
+  SavedCodePage := TextRec(AOutput).CodePage;
+  SetTextCodePage(AOutput, CP_UTF8);
   try
-    while ReadBoundedLine(AInput, AMaxLineLength, Line, Overflow) do
-    begin
-      if Overflow then
+    Session := AServer.CreateSession;
+    try
+      while ReadBoundedLine(AInput, AMaxLineLength, Line, Overflow) do
       begin
-        Write(AOutput, AServer.OversizedLineResponse(AMaxLineLength), #10);
-        Flush(AOutput);
-        Continue;
+        if Overflow then
+        begin
+          Write(AOutput, AServer.OversizedLineResponse(AMaxLineLength), #10);
+          Flush(AOutput);
+          Continue;
+        end;
+        // A client writing CRLF line endings leaves a trailing CR on
+        // non-Windows reads; it is insignificant whitespace either way.
+        while (Line <> '') and (Line[Length(Line)] in [#13, #10]) do
+          SetLength(Line, Length(Line) - 1);
+        if Line = '' then
+          Continue;
+        if AServer.HandleMessage(Session, Line, StdioNotificationSink,
+          @AOutput, Response) then
+        begin
+          Write(AOutput, Response, #10);
+          Flush(AOutput);
+        end;
       end;
-      // A client writing CRLF line endings leaves a trailing CR on
-      // non-Windows reads; it is insignificant whitespace either way.
-      while (Line <> '') and (Line[Length(Line)] in [#13, #10]) do
-        SetLength(Line, Length(Line) - 1);
-      if Line = '' then
-        Continue;
-      if AServer.HandleMessage(Session, Line, StdioNotificationSink,
-        @AOutput, Response) then
-      begin
-        Write(AOutput, Response, #10);
-        Flush(AOutput);
-      end;
+    finally
+      Session.Free;
     end;
   finally
-    Session.Free;
+    TextRec(AOutput).CodePage := SavedCodePage;
   end;
 end;
 
@@ -165,8 +183,9 @@ end;
 
 procedure MCPLogToStderr(const AMessage: string);
 begin
-  Write(ErrOutput, AMessage, #10);
-  Flush(ErrOutput);
+  // The library's one stderr writer: locked, UTF-8 unless stderr is a
+  // Windows console, and the host's code page restored afterwards.
+  MCPWriteStderrLine(AMessage);
 end;
 
 end.
