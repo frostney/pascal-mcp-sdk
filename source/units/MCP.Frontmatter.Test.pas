@@ -10,6 +10,7 @@ program MCP.Frontmatter.Test;
 {$I MCP.inc}
 
 uses
+  StrUtils,
   SysUtils,
 
   fpjson,
@@ -114,14 +115,18 @@ begin
     'a string in every YAML version; quote it');
   Expect<string>(Parsed('x: True^')).ToBe('REFUSED line 2: "True" is not a ' +
     'string in every YAML version; quote it');
-  Expect<string>(Parsed('version: 1.0^')).ToBe('REFUSED line 2: "1.0" is ' +
-    'not a string in every YAML version; quote it');
-  Expect<string>(Parsed('mode: 012^')).ToBe('REFUSED line 2: "012" is not ' +
-    'a string in every YAML version; quote it');
+  Expect<string>(Parsed('version: 1.0^')).ToBe('REFUSED line 2: "1.0" starts ' +
+    'with a digit, a sign or a dot, which is read here only quoted; quote it');
+  Expect<string>(Parsed('mode: 012^')).ToBe('REFUSED line 2: "012" starts ' +
+    'with a digit, a sign or a dot, which is read here only quoted; quote it');
   Expect<string>(Parsed('when: 2026-01-01^')).ToBe('REFUSED line 2: ' +
-    '"2026-01-01" is not a string in every YAML version; quote it');
+    '"2026-01-01" starts with a digit, a sign or a dot, which is read here ' +
+    'only quoted; quote it');
+  // Refused even where both versions read text: simpler than telling
+  // numbers, dates and times apart.
   Expect<string>(Parsed('name: 3d-printing^')).ToBe('REFUSED line 2: ' +
-    '"3d-printing" is not a string in every YAML version; quote it');
+    '"3d-printing" starts with a digit, a sign or a dot, which is read ' +
+    'here only quoted; quote it');
   Expect<string>(Parsed('on: 1^')).ToBe('REFUSED line 2: the key "on" is ' +
     'not a string in every YAML version; quote it');
   Expect<Boolean>(Pos('REFUSED line 2: flow collections',
@@ -130,8 +135,8 @@ begin
     Parsed('a: &x 1^b: *x^')) = 1).ToBe(True);
   Expect<string>(Parsed('name: a # note^')).ToBe('REFUSED line 2: a plain ' +
     'value with ": " or " #"; quote it');
-  Expect<string>(Parsed('metadata:^' + #9 + 'k: v^')).ToBe('REFUSED line 3: ' +
-    'a tab in indentation');
+  Expect<Boolean>(Pos('REFUSED line 3: a tab, control',
+    Parsed('metadata:^' + #9 + 'k: v^')) = 1).ToBe(True);
   Expect<string>(Parsed('a: 1^a: 2^')).ToBe('REFUSED line 3: the key "a" ' +
     'appears twice');
   Expect<string>(Parsed('a: "x\/y"^')).ToBe('REFUSED line 2: the escape \/, ' +
@@ -147,21 +152,32 @@ begin
     'must end on its line');
   // Raw characters YAML 1.1 reads as line breaks, or no parser accepts:
   // written as escapes they pass (#117 review).
-  Expect<Boolean>(Pos('REFUSED line 2: a control, line separator',
+  Expect<Boolean>(Pos('REFUSED line 2: a tab, control, line separator',
     Parsed('d: "first' + #$C2#$85 + 'second"^')) = 1).ToBe(True);
-  Expect<Boolean>(Pos('REFUSED line 2: a control, line separator',
+  Expect<Boolean>(Pos('REFUSED line 2: a tab, control, line separator',
     Parsed('d: a' + #$E2#$80#$A8 + 'b^')) = 1).ToBe(True);
   Expect<string>(Parsed('d: "a\u0085b\u2028c"^')).ToBe('{"d":"a' + #$C2#$85 +
     'b' + #$E2#$80#$A8 + 'c"}');
-  // A tab: separating a comment, or anywhere in a plain value.
-  Expect<string>(Parsed('d: one' + #9 + '# comment^')).ToBe('REFUSED line ' +
-    '2: a tab in a plain value; quote it');
-  Expect<string>(Parsed('d: "a' + #9 + 'b"^')).ToBe('{"d":"a\tb"}');
+  // A raw tab anywhere, a trailing one included, since trimming would
+  // hide it; written as \t it passes (#117 review).
+  Expect<Boolean>(Pos('REFUSED line 2: a tab, control',
+    Parsed('d: one' + #9 + '# comment^')) = 1).ToBe(True);
+  Expect<Boolean>(Pos('REFUSED line 2: a tab, control',
+    Parsed('d: one' + #9 + '^')) = 1).ToBe(True);
+  Expect<Boolean>(Pos('REFUSED line 2: a tab, control',
+    Parsed('d: "a' + #9 + 'b"^')) = 1).ToBe(True);
+  Expect<string>(Parsed('d: "a\tb"^')).ToBe('{"d":"a\tb"}');
+  // The raw key span to its colon counts, in UTF-16 units: 169 escapes
+  // of six and five emoji of two make 1026 with the quotes.
+  Expect<string>(Parsed('"' + DupeString('\u0061', 169) +
+    DupeString(#$F0#$9F#$98#$80, 5) + '": v^')).ToBe('REFUSED line 2: a key ' +
+    'longer than the 1024 characters YAML parsers read');
   // Integers JavaScript parsers keep exactly, and no larger.
   Expect<string>(Parsed('rank: 9007199254740991^')).ToBe(
     '{"rank":9007199254740991}');
   Expect<string>(Parsed('rank: 9007199254740993^')).ToBe('REFUSED line 2: ' +
-    '"9007199254740993" is not a string in every YAML version; quote it');
+    '"9007199254740993" starts with a digit, a sign or a dot, which is read ' +
+    'here only quoted; quote it');
   // An empty flow collection is a whole value.
   Expect<string>(Parsed('d: []^  prose^')).ToBe('REFUSED line 3: unexpected ' +
     'indentation');

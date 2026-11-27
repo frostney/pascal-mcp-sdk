@@ -12,11 +12,13 @@
   - literal (|) and folded (>) block scalars with - or + chomping;
     folded ones without more-indented lines;
   - plain strings, also over several more-indented lines, that neither
-    YAML version reads as anything else;
+    YAML version reads as anything else (quoted when they start with a
+    digit, a sign or a dot);
   - true, false, null, ~, decimal integers without leading zeros, and
     the empty flow mapping and list.
 
-  Refused: tabs in indentation, comments after a value, flow
+  Refused: raw tabs (write \t in a double-quoted string), comments after
+  a value, flow
   collections with content, anchors, aliases, tags, directives,
   duplicate keys, and plain values such as yes, on, 1.0, 012 or a date,
   which the two versions read differently (quote them). Checked
@@ -155,19 +157,26 @@ begin
     ((Text = '-') or (Copy(Text, 1, 2) = '- '));
 end;
 
-// UTF-8 code points in AText.
-function CodePoints(const AText: string): Integer;
+// The UTF-16 code units of UTF-8 AText: one per code point, two for
+// one beyond U+FFFF (four UTF-8 bytes).
+function UTF16Units(const AText: string): Integer;
 var
   I: Integer;
 begin
   Result := 0;
   for I := 1 to Length(AText) do
     if (Ord(AText[I]) and $C0) <> $80 then
+    begin
       Inc(Result);
+      if Ord(AText[I]) >= $F0 then
+        Inc(Result);
+    end;
 end;
 
 // Refuses raw characters YAML parsers read differently or not at all:
-// C0 controls but tab, DEL, the C1 controls (U+0085 is a line break to
+// C0 controls, tab included (PyYAML ends a plain value at a tab and
+// refuses what follows, wherever trimming would hide it), DEL, the C1
+// controls (U+0085 is a line break to
 // YAML 1.1), U+2028 and U+2029 (line breaks to YAML 1.1), U+FEFF,
 // U+FFFE and U+FFFF. Escapes in double-quoted strings write them.
 procedure TFrontmatterReader.CheckCharacters;
@@ -182,7 +191,7 @@ begin
     for I := 1 to Length(Text) do
     begin
       C := Ord(Text[I]);
-      if ((C < $20) and (C <> 9)) or (C = $7F) or
+      if (C < $20) or (C = $7F) or
         ((C = $C2) and (I < Length(Text)) and
         (Ord(Text[I + 1]) in [$80..$9F])) or
         ((C = $E2) and (I + 2 <= Length(Text)) and (Ord(Text[I + 1]) = $80)
@@ -190,9 +199,9 @@ begin
         ((C = $EF) and (I + 2 <= Length(Text)) and
         (((Ord(Text[I + 1]) = $BB) and (Ord(Text[I + 2]) = $BF)) or
         ((Ord(Text[I + 1]) = $BF) and (Ord(Text[I + 2]) in [$BE, $BF])))) then
-        Fail(Line, 'a control, line separator or noncharacter that YAML ' +
-          'parsers read differently; write it as an escape in a ' +
-          'double-quoted string');
+        Fail(Line, 'a tab, control, line separator or noncharacter that ' +
+          'YAML parsers read differently; write it as an escape (\t, \uXXXX) ' +
+          'in a double-quoted string');
     end;
   end;
 end;
@@ -335,19 +344,17 @@ end;
 
 // A plain scalar as both YAML versions read it, or nil when they read
 // it differently or as something other than this (quote it then).
-function PlainValue(const AText: string): TJSONData;
+function PlainValue(const AText: string; out AWhy: string): TJSONData;
 var
   Lower: string;
 begin
   Result := nil;
+  AWhy := Format('"%s" is not a string in every YAML version; quote it',
+    [AText]);
   if (AText = 'true') or (AText = 'false') then
     Exit(TJSONBoolean.Create(AText = 'true'));
   if (AText = 'null') or (AText = '~') then
     Exit(TJSONNull.Create);
-  if AText = '{}' then
-    Exit(TJSONObject.Create);
-  if AText = '[]' then
-    Exit(TJSONArray.Create);
   if IsPlainInteger(AText) then
     Exit(TJSONInt64Number.Create(StrToInt64(AText)));
   // YAML 1.1 booleans and nulls in any case, numbers, dates, floats,
@@ -359,16 +366,23 @@ begin
     (Lower = 'false') or (Lower = 'null') or (AText = '<<') or
     (AText = '=') then
     Exit;
+  // Numbers, dates, times and floats in their many spellings all start
+  // so; refusing every such plain value is simpler than telling them
+  // apart, even where both versions would read text (3d-printing).
   if (AText[1] in ['0'..'9', '.']) or ((AText[1] in ['+', '-']) and
     (Length(AText) > 1) and (AText[2] in ['0'..'9', '.'])) then
+  begin
+    AWhy := Format('"%s" starts with a digit, a sign or a dot, which is ' +
+      'read here only quoted; quote it', [AText]);
     Exit;
+  end;
   Result := TJSONString.Create(AText);
 end;
 
 function TFrontmatterReader.ParseKey(const AText: string; ALine: Integer;
   out ARest: string): string;
 var
-  Close, Colon: Integer;
+  Close, Colon, KeyEnd: Integer;
   Problem: string;
   Value: TJSONData;
 begin
@@ -380,6 +394,7 @@ begin
     Problem := QuotedScalar(Copy(AText, 1, Close), Result);
     if Problem <> '' then
       Fail(ALine, Problem);
+    KeyEnd := Close;
     ARest := Copy(AText, Close + 2, MaxInt);
   end
   else
@@ -388,15 +403,14 @@ begin
     if (Colon = 0) or (AText[1] in INDICATORS) then
       Fail(ALine, 'expected "key: value"');
     Result := TrimRight(Copy(AText, 1, Colon - 1));
-    if (Result = '') or (Pos(' #', Result) > 0) or (Pos(#9 + '#', Result) > 0)
-      or (Pos(':', Result) > 0) or (Pos(#9, Result) > 0) then
-      Fail(ALine, 'a plain key with ":", "#" or a tab; quote it');
+    KeyEnd := Colon - 1;
+    if (Result = '') or (Pos(' #', Result) > 0) or (Pos(':', Result) > 0) then
+      Fail(ALine, 'a plain key with ":" or " #"; quote it');
     // A key YAML 1.1 reads as a boolean, a number or null.
-    Value := PlainValue(Result);
+    Value := PlainValue(Result, Problem);
     try
       if (Value = nil) or (Value.JSONType <> jtString) then
-        Fail(ALine, Format('the key "%s" is not a string in every YAML ' +
-          'version; quote it', [Result]));
+        Fail(ALine, 'the key ' + Problem);
     finally
       Value.Free;
     end;
@@ -405,11 +419,13 @@ begin
   if (ARest <> '') and (ARest[1] <> ' ') then
     Fail(ALine, 'expected a space after ":"');
   ARest := Trim(ARest);
-  // fpjson keeps a key to 255 bytes (FPC 3.2.2), and YAML parsers read
-  // an implicit key of at most 1024 characters: a longer one would not
+  // YAML parsers read an implicit key of at most 1024 characters up to
+  // its colon, quotes and escapes counted (yaml counts UTF-16 units).
+  if UTF16Units(Copy(AText, 1, KeyEnd)) > 1024 then
+    Fail(ALine, 'a key longer than the 1024 characters YAML parsers read');
+  // fpjson keeps a key to 255 bytes (FPC 3.2.2): a longer one would not
   // reach the listing as written.
-  if (Length(Result) > 255) or
-    (CodePoints(Copy(AText, 1, Length(AText) - Length(ARest))) > 1025) then
+  if Length(Result) > 255 then
     Fail(ALine, 'a key longer than 255 bytes, the most the server keeps');
 end;
 
@@ -512,9 +528,8 @@ begin
     Exit(TJSONArray.Create);
   // "-", "?" and ":" start a plain value when no space follows them
   // (-7, ?x); the other indicators never do.
-  if (ARest <> '{}') and (ARest <> '[]') and (ARest[1] in INDICATORS) and
-    not ((ARest[1] in ['-', '?', ':']) and (Length(ARest) > 1) and
-    (ARest[2] <> ' ')) then
+  if (ARest[1] in INDICATORS) and not ((ARest[1] in ['-', '?', ':']) and
+    (Length(ARest) > 1) and (ARest[2] <> ' ')) then
     Fail(ALine, 'flow collections, anchors, aliases, tags, comments and ' +
       'values starting with an indicator are not read here; use block ' +
       'style or quote the value');
@@ -528,16 +543,13 @@ begin
   if (Pos(': ', AText) > 0) or (Pos(' #', AText) > 0) or
     ((AText <> '') and (AText[Length(AText)] = ':')) then
     Fail(ALine, 'a plain value with ": " or " #"; quote it');
-  // PyYAML refuses a tab in a plain value; quoted, it is fine.
-  if Pos(#9, AText) > 0 then
-    Fail(ALine, 'a tab in a plain value; quote it');
 end;
 
 // A plain scalar, continued on more-indented lines joined by spaces.
 function TFrontmatterReader.ParsePlain(AParentIndent: Integer;
   const AFirst: string; ALine: Integer): TJSONData;
 var
-  Text, Part: string;
+  Text, Part, Why: string;
   Next: Integer;
 begin
   Text := AFirst;
@@ -558,10 +570,9 @@ begin
   if (Next > FPos) and (Next <= High(FLines)) and
     (Indent(Next) > AParentIndent) and not IsSkippable(Next) then
     Fail(FPos, 'a blank line inside a plain value; use a block scalar');
-  Result := PlainValue(Text);
+  Result := PlainValue(Text, Why);
   if Result = nil then
-    Fail(ALine, Format('"%s" is not a string in every YAML version; quote ' +
-      'it', [Text]));
+    Fail(ALine, Why);
 end;
 
 // A literal (|) or folded (>) block scalar after its header on line

@@ -522,23 +522,36 @@ var
   Demo: TProcess;
   Response: TJSONObject;
   Digest: string;
+  Attempt: Integer;
 begin
-  // A directory of its own: created new, never reused.
-  repeat
+  // A directory of its own: created new, never reused, a bounded number
+  // of tries; cleanup covers everything after it exists.
+  Dir := '';
+  for Attempt := 1 to 100 do
+  begin
     Dir := IncludeTrailingPathDelimiter(GetTempDir(False)) +
       'mcpsmoke-skills-' + IntToStr(GetProcessID) + '-' +
       IntToStr(Random(1000000));
-  until CreateDir(Dir);
-  CreateDir(Dir + PathDelim + 'from-disk');
-  Stream := TFileStream.Create(Dir + PathDelim + 'from-disk' + PathDelim +
-    'SKILL.md', fmCreate);
-  try
-    Stream.WriteBuffer(SKILL_MD[1], Length(SKILL_MD));
-  finally
-    Stream.Free;
+    if CreateDir(Dir) then
+      Break;
+    Dir := '';
   end;
-  Demo := TProcess.Create(nil);
+  if Dir = '' then
+  begin
+    Check(False, 'skills from disk: a temporary directory');
+    Exit;
+  end;
+  Demo := nil;
   try
+    CreateDir(Dir + PathDelim + 'from-disk');
+    Stream := TFileStream.Create(Dir + PathDelim + 'from-disk' + PathDelim +
+      'SKILL.md', fmCreate);
+    try
+      Stream.WriteBuffer(SKILL_MD[1], Length(SKILL_MD));
+    finally
+      Stream.Free;
+    end;
+    Demo := TProcess.Create(nil);
     Demo.Executable := DemoBinary;
     Demo.Parameters.Add('--skills-dir');
     Demo.Parameters.Add(Dir);

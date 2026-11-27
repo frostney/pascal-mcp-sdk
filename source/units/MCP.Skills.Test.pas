@@ -80,6 +80,7 @@ type
     procedure TestNilFrontmatterMember;
     procedure TestDirectory;
     procedure TestDirectoryRefused;
+    procedure TestDirectoryEnclosingLimit;
     {$IFDEF UNIX}
     procedure TestDirectorySymlink;
     {$ENDIF}
@@ -853,6 +854,39 @@ begin
   raise Exception.Create('No fresh test directory');
 end;
 
+function DirectoryProblem(AServer: TMCPServer; const ARoot: string): string;
+begin
+  Result := '';
+  try
+    RegisterSkillDirectory(AServer, ARoot);
+  except
+    on E: EMCPServer do
+      Result := E.Message;
+  end;
+end;
+
+// An enclosing skill's limit counts its nested skills' files, before
+// they are read (#117 review): 9 MiB here and 9 MiB nested is refused.
+procedure TSkillsSuite.TestDirectoryEnclosingLimit;
+var
+  Root: string;
+begin
+  Root := FreshDir('limit');
+  try
+    WriteFile(Root + '/outer/SKILL.md', '---' + #10 + 'name: outer' + #10 +
+      'description: d' + #10 + '---' + #10);
+    WriteFile(Root + '/outer/big.bin', StringOfChar('x', 9 * 1024 * 1024));
+    WriteFile(Root + '/outer/inner/SKILL.md', '---' + #10 + 'name: inner' +
+      #10 + 'description: d' + #10 + '---' + #10);
+    WriteFile(Root + '/outer/inner/big.bin', StringOfChar('y',
+      9 * 1024 * 1024));
+    Expect<Boolean>(Pos('Skill "outer" goes over', DirectoryProblem(FServer,
+      Root)) = 1).ToBe(True);
+  finally
+    RemoveTree(Root);
+  end;
+end;
+
 // The fixture tree: a skill with a folded description, metadata, a
 // binary and a hidden file; a skill nested in it with CRLF lines; a
 // skill under two folders that are no skills; a stray README outside
@@ -980,17 +1014,6 @@ begin
   end;
 end;
 
-function DirectoryProblem(AServer: TMCPServer; const ARoot: string): string;
-begin
-  Result := '';
-  try
-    RegisterSkillDirectory(AServer, ARoot);
-  except
-    on E: EMCPServer do
-      Result := E.Message;
-  end;
-end;
-
 // A refused tree names its file and line, and registers none of its
 // skills: skills from an earlier call stay as they were.
 procedure TSkillsSuite.TestDirectoryRefused;
@@ -1004,6 +1027,8 @@ begin
   try
     WriteFile(Root + '/aaa/SKILL.md', '---' + #10 + 'name: aaa' + #10 +
       'description: fine' + #10 + '---' + #10);
+    WriteFile(Root + '/aaa/notes.md', 'notes');
+    ForceDirectories(Root + '/aaa/empty');
     WriteFile(Root + '/bad/SKILL.md', '---' + #10 + 'name: bad' + #10 +
       'description: yes' + #10 + '---' + #10);
     Message := DirectoryProblem(FServer, Root);
@@ -1021,6 +1046,21 @@ begin
         .ToBe(1);
       Expect<string>(Str(Response, 'result.skills[0].frontmatter.name'))
         .ToBe('kept');
+    finally
+      Response.Free;
+    end;
+    // Its files and directories went with it (#117 review).
+    Response := Call('resources/read', '"uri":"skill://aaa/notes.md"');
+    try
+      Expect<Integer>(TJSONData(Response.FindPath('error.code')).AsInteger)
+        .ToBe(-32602);
+    finally
+      Response.Free;
+    end;
+    Response := Call('resources/directory/read', '"uri":"skill://aaa/empty"');
+    try
+      Expect<Integer>(TJSONData(Response.FindPath('error.code')).AsInteger)
+        .ToBe(-32602);
     finally
       Response.Free;
     end;
@@ -1121,6 +1161,8 @@ begin
     TestDirectory);
   Test('a refused directory names its file and line and adds nothing',
     TestDirectoryRefused);
+  Test('an enclosing skill''s limit counts nested skills before reading',
+    TestDirectoryEnclosingLimit);
   {$IFDEF UNIX}
   Test('a symbolic link in a skills directory is refused',
     TestDirectorySymlink);
