@@ -82,13 +82,17 @@ tools):
 Server.PageSize := 50;
 ```
 
-Each page then carries at most 50 entries and a `nextCursor` while more
-remain; the client sends it back as `cursor` to get the next page. The
-cursor is opaque and stays valid for the server's life, because the
-registries do not change after startup. A cursor the server did not
-hand out for that list is answered `-32602`, as the
+Each page then carries at most 50 entries, the caching fields on every
+modern page, and a `nextCursor` while more remain; the client sends it
+back as `cursor` to get the next page. The cursor is opaque and stays
+valid for the server's life, because the registries do not change after
+startup. A cursor that is not one of that list's page cursors (garbled,
+from another list, or not at a page boundary inside it) is answered
+`-32602`, as the
 [pagination](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/pagination)
-page asks (verified 2026-11-26).
+page asks (verified 2026-11-26). With `PageSize` 0 there are no pages,
+so a request without a cursor gets the whole list as before, and one
+with a cursor gets `-32602`.
 
 ## requestState sealing
 

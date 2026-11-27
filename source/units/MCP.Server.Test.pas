@@ -508,6 +508,7 @@ type
     procedure TestNoPagingByDefault;
     procedure TestOtherListsPage;
     procedure TestLegacyDialectPages;
+    procedure TestContinuationPageBytes;
   end;
 
   // MCPImageResult: the spec's image content block, the raw-bytes
@@ -7070,14 +7071,31 @@ end;
 // list results MAY carry nextCursor, the page size is the server's to
 // choose, cursors are opaque and stable, and an invalid one SHOULD be
 // -32602.
+const
+  // Two-byte and astral characters, adjacent.
+  PAGED_DESCRIPTION = 'Gr' + #$C3#$B6 + #$C3#$9F + 'e ' + #$F0#$9F#$98#$80;
+
 procedure TPagination.BeforeEach;
 var
   I: Integer;
+  Definition: TJSONObject;
+  Description: string;
 begin
   inherited BeforeEach;
   // Every list spans pages of four: eleven tools, and five resources,
-  // templates and prompts.
-  for I := 1 to 4 do
+  // templates and prompts. extra1, on the second tools page, has a
+  // non-ASCII description and an array outputSchema, which the classic
+  // dialect drops (#91).
+  // Parsed from JSON text, as a definition read from a file would be.
+  // Through a variable: a constant expression passed straight to an
+  // fpjson UTF8String parameter is converted at compile time, which
+  // would re-encode these bytes before the library sees them.
+  Description := PAGED_DESCRIPTION;
+  Definition := TJSONObject(GetJSON('{"name":"extra1","description":"' +
+    Description + '","inputSchema":{"type":"object"},' +
+    '"outputSchema":{"type":"array"}}'));
+  FServer.RegisterTool(Definition, EchoHandler);
+  for I := 2 to 4 do
     FServer.RegisterTool('extra' + IntToStr(I), 'Extra', '{"type":"object"}',
       EchoHandler);
   for I := 1 to 2 do
@@ -7166,8 +7184,8 @@ begin
     'resourceTemplates', 'name', Pages, PagesOk)).ToBe('pair,t1,t2,t3,t4,');
   Expect<Integer>(Pages).ToBe(2);
   Expect<Boolean>(PagesOk).ToBe(True);
-  Expect<Boolean>(Length(WalkList(Self, 'prompts/list', 'prompts', 'name',
-    Pages, PagesOk)) > 0).ToBe(True);
+  Expect<string>(WalkList(Self, 'prompts/list', 'prompts', 'name', Pages,
+    PagesOk)).ToBe('review,hello,promptboom,extra1,extra2,');
   Expect<Integer>(Pages).ToBe(2);
   Expect<Boolean>(PagesOk).ToBe(True);
 end;
@@ -7196,10 +7214,11 @@ begin
   // boundary of resources/list too, yet it is refused there.
   Expect<Integer>(ErrorCode(Self, ListLine('resources/list', ToolsCursor)))
     .ToBe(-32602);
-  // Offsets the server never hands out: past the end
-  // ("tools/list:99"), and inside a page ("tools/list:1") (#94 review).
+  // Offsets that are no page of the list: a page boundary past the end
+  // ("tools/list:12"), and one inside a page ("tools/list:1") (#94
+  // review).
   Expect<Integer>(ErrorCode(Self, ListLine('tools/list',
-    'dG9vbHMvbGlzdDo5OQ=='))).ToBe(-32602);
+    'dG9vbHMvbGlzdDoxMg=='))).ToBe(-32602);
   Expect<Integer>(ErrorCode(Self, ListLine('tools/list',
     'dG9vbHMvbGlzdDox'))).ToBe(-32602);
   // A different spelling of a real cursor ("tools/list:04").
@@ -7238,10 +7257,23 @@ begin
   end;
 end;
 
+// The comma-separated names of a list result's tools.
+function PageNames(AResponse: TJSONObject): string;
+var
+  Tools: TJSONArray;
+  I: Integer;
+begin
+  Result := '';
+  Tools := TJSONArray(AResponse.FindPath('result.tools'));
+  if Tools <> nil then
+    for I := 0 to Tools.Count - 1 do
+      Result := Result + TJSONObject(Tools[I]).Get('name', '') + ',';
+end;
+
 procedure TPagination.TestLegacyDialectPages;
 var
   Response: TJSONObject;
-  Cursor: string;
+  Cursor, Line: string;
 begin
   Response := Call('{"jsonrpc":"2.0","id":1,"method":"initialize",' +
     '"params":{"protocolVersion":"2025-11-25","capabilities":{},' +
@@ -7255,27 +7287,52 @@ begin
   finally
     Response.Free;
   end;
-  Response := Call('{"jsonrpc":"2.0","id":3,"method":"tools/list",' +
-    '"params":{"cursor":"' + Cursor + '"}}');
+  Expect<Boolean>(Dispatch('{"jsonrpc":"2.0","id":3,"method":"tools/list",' +
+    '"params":{"cursor":"' + Cursor + '"}}', Line)).ToBe(True);
+  Response := TJSONObject(GetJSON(Line));
   try
-    Expect<Integer>(TJSONArray(Response.FindPath('result.tools')).Count)
-      .ToBe(4);
+    Expect<string>(PageNames(Response)).ToBe('scale,repeat,noisy,extra1,');
+    Expect<Boolean>(Response.FindPath('result.ttlMs') = nil).ToBe(True);
+    Expect<Boolean>(Response.FindPath('result.cacheScope') = nil).ToBe(True);
+    // extra1 stays listed; its array outputSchema is dropped (#91).
+    Expect<Boolean>(Response.FindPath('result.tools[3].outputSchema') = nil)
+      .ToBe(True);
   finally
     Response.Free;
   end;
+  // The description goes out byte-exact.
+  Expect<Boolean>(Pos('"description" : "' + PAGED_DESCRIPTION + '"', Line) > 0)
+    .ToBe(True);
+end;
+
+// The second modern page carries extra1 whole: its array outputSchema
+// and its description, byte-exact.
+procedure TPagination.TestContinuationPageBytes;
+var
+  Line: string;
+begin
+  Expect<Boolean>(Dispatch(ListLine('tools/list', FirstToolsCursor(Self)),
+    Line)).ToBe(True);
+  Expect<Boolean>(Pos('"description" : "' + PAGED_DESCRIPTION + '"', Line) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Pos('"outputSchema" : { "type" : "array" }', Line) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Pos('"name" : "extra1"', Line) > 0).ToBe(True);
 end;
 
 procedure TPagination.SetupTests;
 begin
   Test('pages concatenate to the whole list in registration order',
     TestPagesConcatenateInOrder);
-  Test('foreign, garbled, unissued and non-string cursors → -32602',
+  Test('foreign, garbled, misplaced and non-string cursors → -32602',
     TestInvalidCursors);
   Test('PageSize 0 lists everything and accepts no cursor',
     TestNoPagingByDefault);
   Test('resources, templates and prompts lists page too', TestOtherListsPage);
   Test('classic dialect pages without caching fields',
     TestLegacyDialectPages);
+  Test('a continuation page carries its entries byte-exact',
+    TestContinuationPageBytes);
 end;
 
 { ───────── image results ───────── }

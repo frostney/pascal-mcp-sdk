@@ -2178,10 +2178,10 @@ begin
 end;
 
 // The offset ACursor points at in AMethod's list of ACount entries
-// paged APageSize at a time, or False for any cursor this server could
-// not have handed out for that list: paging off, an offset that is no
-// interior page boundary, or any spelling other than the one ListCursor
-// gives (#94 review).
+// paged APageSize at a time, or False for a cursor that is not one of
+// that list's page cursors: paging off, an offset that is no page
+// boundary inside the list, or any spelling other than the one
+// ListCursor gives (#94 review).
 function TryCursorOffset(const ACursor, AMethod: string;
   ACount, APageSize: Integer; out AOffset: Integer): Boolean;
 var
