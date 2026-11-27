@@ -71,7 +71,8 @@ recorded reason.
 - PR titles follow Conventional Commits, and on a single-commit PR the
   commit subject must too — a squash merge turns one of them into the
   CHANGELOG entry. Reverts need a `revert:` title. Enforced by the
-  `PR title` workflow.
+  `PR title` workflow, and checked locally for commit subjects by
+  lefthook's commit-msg hook.
 - PR descriptions put each closing keyword on its own line
   (`Closes #N`); comma-separated keywords on one line do not
   auto-close (#25).

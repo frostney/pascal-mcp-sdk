@@ -25,16 +25,23 @@ The accepted types are read from cliff.toml's commit_parsers rather
 than duplicated here, so this gate cannot drift from the generator it
 protects.
 
-Inputs arrive through the environment (never a command line or shell
-interpolation — these strings are attacker controlled):
+In CI, inputs arrive through the environment (never a command line or
+shell interpolation — these strings are attacker controlled):
 
   PR_TITLE            the pull-request title (required)
   PR_COMMIT_COUNT     number of commits on the PR (optional)
   PR_COMMIT_SUBJECT   subject of the sole commit when there is one
+
+Locally, lefthook's commit-msg hook runs it as
+`check-pr-title.py --commit-msg FILE` on the message git is about to
+record (#124), so a bad subject is caught before it is pushed. A
+single-commit PR's title usually starts as that subject. The CI check
+stays the gate: the title is written on GitHub, where no hook runs.
 """
 
 import os
 import re
+import subprocess
 import sys
 
 CLIFF_CONFIG = 'cliff.toml'
@@ -53,17 +60,79 @@ def allowed_types(config_text):
     })
 
 
-def main():
+# Subjects the hook lets through: git's autosquash prefixes, which
+# `git rebase --autosquash` or the squash merge folds away, and merge
+# commits. CI still checks a PR whose only commit carries one.
+PASSED_PREFIXES = ('fixup! ', 'squash! ', 'amend! ', 'Merge ')
+
+
+def message_subject(text, comment_char='#'):
+    """The subject git records for message TEXT: its first line that is
+    neither blank nor a comment. The commit-msg hook sees the message
+    before git strips its comment lines."""
+    for line in text.splitlines():
+        if line.startswith(comment_char):
+            continue
+        if line.strip():
+            return line.rstrip()
+    return ''
+
+
+def comment_char():
+    """git's comment character: core.commentChar, '#' when unset or
+    'auto' (which picks a character the message does not use, after
+    the hook has run)."""
+    try:
+        value = subprocess.run(
+            ['git', 'config', '--get', 'core.commentChar'],
+            capture_output=True, text=True, check=False).stdout.strip()
+    except OSError:
+        value = ''
+    if not value or value == 'auto':
+        return '#'
+    return value
+
+
+def commit_candidates(path):
+    """The commit-msg hook's candidates for the message in PATH: none
+    for an empty message, which git refuses itself, or a subject the
+    hook lets through."""
+    with open(path, encoding='utf-8', errors='replace') as handle:
+        subject = message_subject(handle.read(), comment_char())
+    if not subject:
+        return []
+    if subject.startswith(PASSED_PREFIXES):
+        print(f'commit subject left to the PR checks: {subject}')
+        return []
+    return [('commit subject', subject)]
+
+
+def error_prefix():
+    """A GitHub annotation in Actions, a plain prefix in a terminal."""
+    return '::error::' if os.environ.get('GITHUB_ACTIONS') else 'error: '
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == '--commit-msg':
+        if len(argv) != 2:
+            print('usage: check-pr-title.py --commit-msg FILE')
+            return 2
+        candidates = commit_candidates(argv[1])
+        if not candidates:
+            return 0
+    else:
+        candidates = None
     try:
         with open(CLIFF_CONFIG, encoding='utf-8') as handle:
             types = allowed_types(handle.read())
     except OSError as error:
-        print(f'::error::cannot read {CLIFF_CONFIG}: {error}')
+        print(f'{error_prefix()}cannot read {CLIFF_CONFIG}: {error}')
         return 1
 
     if not types:
-        print(f'::error::no commit types found in {CLIFF_CONFIG} — the '
-              'commit_parsers block changed shape; update '
+        print(f'{error_prefix()}no commit types found in {CLIFF_CONFIG} '
+              '— the commit_parsers block changed shape; update '
               '.github/scripts/check-pr-title.py to match')
         return 1
 
@@ -76,10 +145,11 @@ def main():
     # commit's subject is only a candidate when there is exactly one
     # commit — that is the case where COMMIT_OR_PR_TITLE prefers it
     # over the title.
-    candidates = [('PR title', os.environ.get('PR_TITLE', ''))]
-    commit_subject = os.environ.get('PR_COMMIT_SUBJECT', '')
-    if os.environ.get('PR_COMMIT_COUNT') == '1' and commit_subject:
-        candidates.append(("sole commit's subject", commit_subject))
+    if candidates is None:
+        candidates = [('PR title', os.environ.get('PR_TITLE', ''))]
+        commit_subject = os.environ.get('PR_COMMIT_SUBJECT', '')
+        if os.environ.get('PR_COMMIT_COUNT') == '1' and commit_subject:
+            candidates.append(("sole commit's subject", commit_subject))
 
     failed = [(label, text)
               for label, text in candidates if not pattern.match(text)]
@@ -90,7 +160,8 @@ def main():
         return 0
 
     for label, text in failed:
-        print(f'::error::{label} is not a Conventional Commit: {text!r}')
+        print(f'{error_prefix()}{label} is not a Conventional Commit: '
+              f'{text!r}')
     print()
 
     if len(candidates) > 1:
@@ -137,6 +208,11 @@ def main():
         print('parse. Retitle it as a revert commit, keeping the subject '
               'of the change being undone:')
         print('  revert: <original description>')
+    if argv and argv[0] == '--commit-msg':
+        print()
+        print('The commit was not made. Your message is in '
+              '.git/COMMIT_EDITMSG; edit it with')
+        print('  git commit -e -F .git/COMMIT_EDITMSG')
     return 1
 
 

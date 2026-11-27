@@ -28,3 +28,6 @@ Thumbs.db
 
 # Session handoff state is local, not tracked.
 .agent/
+
+# Python bytecode from the checker tests (.github/scripts).
+__pycache__/

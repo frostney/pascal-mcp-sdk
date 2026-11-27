@@ -83,6 +83,9 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Checker unit tests (CI and commit-msg modes)
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+
       - name: Check the squash subject is a Conventional Commit
         # These strings are attacker-controlled: pass them through the
         # environment, never interpolated into the shell command.

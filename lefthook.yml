@@ -1,9 +1,13 @@
-# pascal-mcp-sdk pre-commit hook.
+# pascal-mcp-sdk pre-commit and commit-msg hooks.
 #
 # Install once per fresh clone:  lefthook install
 #
 # Local pre-commit runs the canonical formatter (`lwpt format`) and
-# re-stages any files it rewrites. The heavyweight gates — `lwpt build`,
+# re-stages any files it rewrites. commit-msg checks that the subject
+# is a Conventional Commit with the PR-title check's own script and
+# types (#124); fixup!, squash!, amend! and merge subjects pass. The
+# required `conventional-title` check still gates the PR title, which
+# is written on GitHub, where no hook runs. The heavyweight gates — `lwpt build`,
 # `lwpt test`, the mcpsmoke E2E battery — run on the PR / CI workflows
 # (see .github/workflows/) so local commits stay fast.
 #
@@ -30,3 +34,10 @@ pre-commit:
         fails when it cannot parse a file. If lwpt is missing entirely
         (fresh clone), install the release binary first — see
         docs/guides/quick-start.md.
+
+commit-msg:
+  commands:
+
+    conventional-subject:
+      # {1} is the file holding the message git is about to record.
+      run: python3 .github/scripts/check-pr-title.py --commit-msg {1}

@@ -64,6 +64,19 @@ staged Pascal/TOML files and re-stages what it rewrites
 not in the hook. Override the binary with `PASCAL_MCP_SDK_LWPT=...` when
 lwpt is not on PATH.
 
+Commit-msg runs `.github/scripts/check-pr-title.py --commit-msg` on
+the message git is about to record: its subject, the first line that
+is neither blank nor a comment, must be a Conventional Commit of a
+`cliff.toml` type, the same rule as the required `conventional-title`
+check. Subjects starting with `fixup!`, `squash!` or `amend!` and a
+space, or with the word `Merge`, pass, since an autosquash rebase or the squash merge folds them away;
+CI still checks a PR whose only commit carries one. A refused commit is
+not made, and its message stays in `.git/COMMIT_EDITMSG`. `git revert`
+and `git cherry-pick` commit with `-n`, so no hook runs for them. The
+hook needs `python3` on PATH. It does not replace the CI check: the PR
+title is written on GitHub, and a hook runs only where
+`lefthook install` was run.
+
 ## Changelog — git-cliff
 
 `cliff.toml` maps Conventional Commit types straight to sections
