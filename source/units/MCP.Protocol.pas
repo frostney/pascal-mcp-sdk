@@ -127,9 +127,11 @@ type
     // write loop, so this remains false there during handler execution;
     // transports with mid-request delivery points can flip it.
     CancellationProbe: TMCPCancellationProbe;
-    // True when clientCapabilities declare AName in its schema shape
-    // (an object; sampling's and elicitation's typed members objects
-    // too). null, false or a missing entry is not a declaration.
+    // True when clientCapabilities declare AName. A capability the
+    // schema defines counts only in its shape (an object; sampling's
+    // and elicitation's typed members objects too), so null or false
+    // declares nothing; any other name is the client's own and counts
+    // when present, whatever its value.
     function HasCapability(const AName: string): Boolean;
     function IsCancelled: Boolean;
   end;
@@ -192,7 +194,8 @@ function IsLegacyProtocolVersion(const AVersion: string): Boolean;
 function BuildMissingCapabilityData(const ACapability: string): TJSONObject;
   overload;
 // The same with every capability in ACapabilities, so a client learns
-// all it lacks from one refusal (#84).
+// all it lacks from one refusal (#84). ACapabilities must not be empty
+// (EArgumentException): -32021 data names at least one.
 function BuildMissingCapabilityData(
   const ACapabilities: array of string): TJSONObject; overload;
 
@@ -217,9 +220,9 @@ end;
 function IsCapabilityEntry(const AName: string; AValue: TJSONData): Boolean;
   forward;
 
-// A capability counts as declared only in the shape the ClientCapabilities
-// schema gives it: "sampling": null or false declares nothing (#84
-// review).
+// A capability the ClientCapabilities schema defines counts as declared
+// only in its shape: "sampling": null or false declares nothing (#84
+// review). The set is open, so another name counts when present.
 function TMCPRequestContext.HasCapability(const AName: string): Boolean;
 begin
   Result := (ClientCapabilities <> nil) and
@@ -435,11 +438,19 @@ var
   Capabilities: TJSONObject;
   Name: string;
 begin
-  Capabilities := TJSONObject.Create;
+  if Length(ACapabilities) = 0 then
+    raise EArgumentException.Create(
+      'BuildMissingCapabilityData needs at least one capability');
   Result := TJSONObject.Create;
-  Result.Add('requiredCapabilities', Capabilities);
-  for Name in ACapabilities do
-    Capabilities.Add(Name, TJSONObject.Create);
+  try
+    Capabilities := TJSONObject.Create;
+    Result.Add('requiredCapabilities', Capabilities);
+    for Name in ACapabilities do
+      Capabilities.Add(Name, TJSONObject.Create);
+  except
+    Result.Free;
+    raise;
+  end;
 end;
 
 function IsJSONObjectValue(AData: TJSONData): Boolean;
@@ -468,12 +479,19 @@ begin
   Result := True;
 end;
 
-// One entry of requiredCapabilities against the ClientCapabilities
-// schema: every capability is an object, and the members the schema
-// types are objects too (sampling.context/tools, elicitation.form/url,
-// each experimental and extensions entry).
+// One entry of a ClientCapabilities object against its schema: a
+// capability the schema defines is an object, and the members it types
+// are objects too (sampling.context/tools, elicitation.form/url, each
+// experimental and extensions entry). The set is open ("any client can
+// define its own, additional capabilities", schema 2026-07-28, verified
+// 2026-11-27), and the schema leaves such a value unconstrained, so
+// another name only has to be present (#84 review).
 function IsCapabilityEntry(const AName: string; AValue: TJSONData): Boolean;
 begin
+  if (AName <> 'sampling') and (AName <> 'elicitation') and
+    (AName <> 'roots') and (AName <> 'experimental') and
+    (AName <> 'extensions') then
+    Exit(AValue <> nil);
   Result := IsJSONObjectValue(AValue);
   if not Result then
     Exit;

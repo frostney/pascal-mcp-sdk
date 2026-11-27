@@ -473,7 +473,10 @@ type
   end;
 
   // .RequiresClientCapability (#84): a declared need is checked before
-  // the handler runs.
+  // the handler runs. A request lacking a required client capability
+  // is answered -32021 with data.requiredCapabilities (spec verified
+  // 2026-11-27:
+  // https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta).
   TDeclaredCapabilities = class(TDispatchSuite)
   protected
     procedure BeforeEach; override;
@@ -483,6 +486,7 @@ type
     procedure TestEveryMissingCapabilityNamed;
     procedure TestMalformedDeclarationIsMissing;
     procedure TestNonASCIIToolName;
+    procedure TestCustomCapabilityByPresence;
     procedure TestPresentRuns;
     procedure TestLegacyEraNotChecked;
     procedure TestGuards;
@@ -6641,6 +6645,9 @@ begin
     .RequiresClientCapability('sampling');
   FServer.RegisterTool('asker', 'Asks at run time', '{"type":"object"}',
     AskerHandler);
+  FServer.RegisterTool('custom', 'Needs a client capability of its own',
+    '{"type":"object"}', NeedyHandler)
+    .RequiresClientCapability('com.example/feature');
   FServer.RegisterTool('pr' + #$C3#$BC + 'f' + #$F0#$9F#$98#$80, 'Needs one',
     '{"type":"object"}', NeedyHandler).RequiresClientCapability('sampling');
 end;
@@ -6714,6 +6721,21 @@ begin
   Expect<Integer>(NeedyRuns).ToBe(0);
   Expect<Boolean>(Dispatch(ToolCall('asker', '{"sampling":null}'), Response))
     .ToBe(True);
+  Expect<Boolean>(Pos('"code" : -32021', Response) > 0).ToBe(True);
+  Expect<Integer>(NeedyRuns).ToBe(1);
+end;
+
+// A capability the schema does not define is the client's own, with any
+// value: declared by presence (#84 review).
+procedure TDeclaredCapabilities.TestCustomCapabilityByPresence;
+var
+  Response: string;
+begin
+  Expect<Boolean>(Dispatch(ToolCall('custom', '{"com.example/feature":true}'),
+    Response)).ToBe(True);
+  Expect<Boolean>(Pos('"text" : "ran"', Response) > 0).ToBe(True);
+  Expect<Integer>(NeedyRuns).ToBe(1);
+  Expect<Boolean>(Dispatch(ToolCall('custom', '{}'), Response)).ToBe(True);
   Expect<Boolean>(Pos('"code" : -32021', Response) > 0).ToBe(True);
   Expect<Integer>(NeedyRuns).ToBe(1);
 end;
@@ -6800,6 +6822,8 @@ begin
     TestMalformedDeclarationIsMissing);
   Test('a non-ASCII tool name goes out byte-exact in the refusal',
     TestNonASCIIToolName);
+  Test('a client capability of its own counts when present',
+    TestCustomCapabilityByPresence);
   Test('declared capabilities present → the handler runs', TestPresentRuns);
   Test('classic era: not checked (no MRTR there)', TestLegacyEraNotChecked);
   Test('an empty or repeated capability name is refused', TestGuards);

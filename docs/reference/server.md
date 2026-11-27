@@ -96,8 +96,11 @@ argument validation to the handler — see
 capability, as a repeated name raises `EMCPServer`. A request whose
 `clientCapabilities` lack any of them is answered `-32021` before the
 handler runs, with every missing one in `data.requiredCapabilities`. A
-capability counts as declared only in its schema shape, so
-`"sampling": null` or `false` is missing. On
+capability the schema defines counts as declared only in its shape, so
+`"sampling": null` or `false` is missing; a capability of the client's
+own counts when present. The check is unconditional and top-level: it
+runs on every modern-era call, retries included, and does not look at
+modes such as `elicitation.form`, which a handler checks itself. On
 Streamable HTTP that matters: an error decided after the handler has
 streamed progress can only end the stream, while one decided first is
 answered `400`, as the specification requires. Not checked for
@@ -252,7 +255,7 @@ Every handler receives `TMCPRequestContext` (from `MCP.Protocol`):
 | `ProtocolVersion` | Negotiated revision for this request |
 | `ClientName`, `ClientVersion` | From `clientInfo`; `''` when absent |
 | `ClientCapabilities` | The per-request capability object |
-| `HasCapability(Name)` | Capability probe (used for MRTR gating and `RequiresClientCapability`); true only for an entry in its schema shape, so `null` or `false` is not declared |
+| `HasCapability(Name)` | Capability probe (used for MRTR gating and `RequiresClientCapability`); a capability the schema defines counts only in its shape, so `null` or `false` is not declared, while one of the client's own counts when present |
 | `LogLevel` | Client's requested log floor; `''` = no log opt-in |
 | `HasProgressToken`, `ProgressToken` | Progress opt-in state |
 | `InputResponses`, `RequestState` | MRTR retry payload — see [Client requests](client-requests.md) |

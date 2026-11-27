@@ -200,18 +200,36 @@ begin
   Result := MCPInputRequired(Requests);
 end;
 
-// An SSE body whose progress event comes first and whose last,
-// terminated event is the -32021 error.
+// Splits an SSE body into its events' data. False unless every event
+// is one "data: " line ended by a blank line, with nothing left over.
+function SplitSSEEvents(ABody: string; out AEvents: TStringArray): Boolean;
+var
+  Cut: Integer;
+begin
+  AEvents := nil;
+  while ABody <> '' do
+  begin
+    Cut := Pos(#10#10, ABody);
+    if (Cut = 0) or (Copy(ABody, 1, 6) <> 'data: ') or
+      (Pos(#10, Copy(ABody, 1, Cut - 1)) > 0) then
+      Exit(False);
+    AEvents := Concat(AEvents, [Copy(ABody, 7, Cut - 7)]);
+    Delete(ABody, 1, Cut + 1);
+  end;
+  Result := True;
+end;
+
+// An SSE body of well-formed events: progress first, and the -32021
+// error alone as the last event.
 function ProgressThenFinalRefusal(const ABody: string): Boolean;
 var
-  LastEvent: string;
+  Events: TStringArray;
 begin
-  LastEvent := Copy(ABody, LastDelimiter(#10, Copy(ABody, 1,
-    Length(ABody) - 2)) + 1, MaxInt);
-  Result := (Pos('notifications/progress', ABody) > 0) and
-    (Pos('notifications/progress', ABody) < Pos('"code" : -32021', ABody)) and
-    (Copy(ABody, Length(ABody) - 1, 2) = #10#10) and
-    (Pos('"code" : -32021', LastEvent) > 0);
+  Result := SplitSSEEvents(ABody, Events) and (Length(Events) >= 2) and
+    (Pos('notifications/progress', Events[0]) > 0) and
+    (Pos('-32021', Events[0]) = 0) and
+    (Pos('"code" : -32021', Events[High(Events)]) > 0) and
+    (Pos('notifications/progress', Events[High(Events)]) = 0);
 end;
 
 // Emits nothing while it runs: a streaming-opted call to this tool
@@ -1111,8 +1129,8 @@ end;
 procedure THTTPBinding.TestSSEStream;
 var
   Body, ContentType, LastEvent: string;
-  Status, EventCount, Cut: Integer;
-  Events: array of string;
+  Status, EventCount: Integer;
+  Events: TStringArray;
 begin
   Status := Exchange('POST', '/mcp',
     CallLine(3, 'echo', META_MODERN_STREAMING),
@@ -1123,16 +1141,7 @@ begin
   Expect<string>(ContentType).ToBe('text/event-stream');
 
   // Split the stream into data: events.
-  Events := [];
-  while Body <> '' do
-  begin
-    Cut := Pos(#10#10, Body);
-    if Cut = 0 then
-      Break;
-    Expect<string>(Copy(Body, 1, 6)).ToBe('data: ');
-    Events := Concat(Events, [Copy(Body, 7, Cut - 7)]);
-    Delete(Body, 1, Cut + 1);
-  end;
+  Expect<Boolean>(SplitSSEEvents(Body, Events)).ToBe(True);
   EventCount := Length(Events);
   // progress(0.5) + log message + final response, in stream order.
   Expect<Integer>(EventCount).ToBe(3);

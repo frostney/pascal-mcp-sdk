@@ -3400,6 +3400,33 @@ begin
   Result := ResultResponse(AMessage, ListResult, ALegacy);
 end;
 
+// 'capability "a"' or 'capabilities "a", "b"' for a -32021 message.
+function CapabilityList(const ANames: array of string): string;
+var
+  I: Integer;
+begin
+  if Length(ANames) = 1 then
+    Exit('capability "' + ANames[0] + '"');
+  Result := 'capabilities';
+  for I := 0 to High(ANames) do
+  begin
+    if I > 0 then
+      Result := Result + ',';
+    Result := Result + ' "' + ANames[I] + '"';
+  end;
+end;
+
+// The automatic -32021 for a subject lacking ANames (not empty), both
+// for declared needs (#84) and for a run-time input request.
+function MissingCapabilityResponse(const AMessage: TJSONRPCMessage;
+  const ASubjectKind, ASubjectName: string;
+  const ANames: array of string): string;
+begin
+  Result := BuildErrorResponse(AMessage.Id, MCP_ERROR_MISSING_CLIENT_CAPABILITY,
+    ASubjectKind + ' "' + ASubjectName + '" requires the client ' +
+    CapabilityList(ANames), BuildMissingCapabilityData(ANames));
+end;
+
 // The input_required tail shared by tools/call and prompts/get (#4).
 // Gate first, assemble second: an entry naming a kind the library
 // never emits is a server bug (-32603), a kind the client did not
@@ -3428,11 +3455,8 @@ begin
   if MissingCapability <> '' then
   begin
     AInputRequests.Free;
-    Exit(BuildErrorResponse(AMessage.Id,
-      MCP_ERROR_MISSING_CLIENT_CAPABILITY,
-      ASubjectKind + ' "' + ASubjectName + '" requires the client ' +
-      'capability "' + MissingCapability + '"',
-      BuildMissingCapabilityData(MissingCapability)));
+    Exit(MissingCapabilityResponse(AMessage, ASubjectKind, ASubjectName,
+      [MissingCapability]));
   end;
   InterimResult := TJSONObject.Create;
   try
@@ -3567,22 +3591,6 @@ begin
     end;
 end;
 
-// 'capability "a"' or 'capabilities "a", "b"' for a -32021 message.
-function CapabilityList(const ANames: array of string): string;
-var
-  I: Integer;
-begin
-  if Length(ANames) = 1 then
-    Exit('capability "' + ANames[0] + '"');
-  Result := 'capabilities';
-  for I := 0 to High(ANames) do
-  begin
-    if I > 0 then
-      Result := Result + ',';
-    Result := Result + ' "' + ANames[I] + '"';
-  end;
-end;
-
 function TMCPServer.HandleToolsCall(const AMessage: TJSONRPCMessage;
   const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
 var
@@ -3604,20 +3612,15 @@ begin
   // (spec verified 2026-11-27:
   // https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta).
   // Modern era only, like the MRTR requests these capabilities serve.
-  if not ALegacy then
-  begin
-    Missing := MissingDeclaredCapabilities(FTools[Index].RequiredCapabilities,
-      ACtx);
-    if Length(Missing) > 0 then
-    begin
-      OwnedEmpty.Free;
-      Exit(BuildErrorResponse(AMessage.Id, MCP_ERROR_MISSING_CLIENT_CAPABILITY,
-        'Tool "' + ToolName + '" requires the client ' +
-        CapabilityList(Missing), BuildMissingCapabilityData(Missing)));
-    end;
-  end;
-
+  // Inside the argument cleanup, so an exception here frees them too.
   try
+    if not ALegacy then
+    begin
+      Missing := MissingDeclaredCapabilities(
+        FTools[Index].RequiredCapabilities, ACtx);
+      if Length(Missing) > 0 then
+        Exit(MissingCapabilityResponse(AMessage, 'Tool', ToolName, Missing));
+    end;
     try
       if FTools[Index].ArgsClass <> nil then
       begin

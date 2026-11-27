@@ -138,7 +138,9 @@ Server.RegisterTool('greet_user',
 The raw `'{"type":"object"}'` schema means "no declared arguments" —
 this tool gets its input by asking, not from the caller.
 `RequiresClientCapability` refuses a client without elicitation before
-the handler runs; see [Tools](tools.md).
+the handler runs, on every call; when only some calls ask, or a
+particular elicitation mode matters, see
+[Tools](tools.md#asking-the-client-for-more-input-mrtr).
 
 ## A prompt with arguments
 

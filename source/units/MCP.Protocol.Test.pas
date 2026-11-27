@@ -36,6 +36,7 @@ type
     procedure TestUnknownLogLevelRejected;
     procedure TestWrongCaseLogLevelRejected;
     procedure TestHasCapability;
+    procedure TestMissingCapabilityData;
     procedure TestMissingRequiredMetaNames;
     procedure TestMissingRequiredMetaComplete;
   end;
@@ -316,14 +317,57 @@ var
   Ctx: TMCPRequestContext;
   MetaErr: TMCPMetaError;
 begin
+  // A defined capability counts only in its schema shape; the set is
+  // open, so a client's own capability counts whatever its value
+  // (ClientCapabilities, schema 2026-07-28, verified 2026-11-27:
+  // https://modelcontextprotocol.io/specification/2026-07-28/schema#clientcapabilities).
   Params := ParseObj(
     '{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
-    '"io.modelcontextprotocol/clientCapabilities":{"roots":{}}}}');
-  Expect<Boolean>(
-    ExtractRequestContext(Params, Supported, Ctx, MetaErr)).ToBe(True);
-  Expect<Boolean>(Ctx.HasCapability('roots')).ToBe(True);
-  Expect<Boolean>(Ctx.HasCapability('sampling')).ToBe(False);
-  Params.Free;
+    '"io.modelcontextprotocol/clientCapabilities":{"roots":{},' +
+    '"sampling":null,"elicitation":false,"com.example/feature":true,' +
+    '"com.example/other":null}}}');
+  try
+    Expect<Boolean>(
+      ExtractRequestContext(Params, Supported, Ctx, MetaErr)).ToBe(True);
+    Expect<Boolean>(Ctx.HasCapability('roots')).ToBe(True);
+    Expect<Boolean>(Ctx.HasCapability('sampling')).ToBe(False);
+    Expect<Boolean>(Ctx.HasCapability('elicitation')).ToBe(False);
+    Expect<Boolean>(Ctx.HasCapability('com.example/feature')).ToBe(True);
+    Expect<Boolean>(Ctx.HasCapability('com.example/other')).ToBe(True);
+    Expect<Boolean>(Ctx.HasCapability('com.example/absent')).ToBe(False);
+  finally
+    Params.Free;
+  end;
+end;
+
+procedure EmptyCapabilityData;
+begin
+  BuildMissingCapabilityData([]).Free;
+end;
+
+// -32021 data names at least one capability, so an empty list is a
+// caller bug, not data the validator would reject later.
+procedure TMetaValidation.TestMissingCapabilityData;
+var
+  Data: TJSONObject;
+  Raised: Boolean;
+begin
+  Data := BuildMissingCapabilityData(['sampling', 'com.example/feature']);
+  try
+    Expect<string>(Data.AsJSON).ToBe('{ "requiredCapabilities" : ' +
+      '{ "sampling" : {}, "com.example/feature" : {} } }');
+    Expect<Boolean>(IsMissingCapabilityData(Data)).ToBe(True);
+  finally
+    Data.Free;
+  end;
+  Raised := False;
+  try
+    EmptyCapabilityData;
+  except
+    on E: EArgumentException do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
 end;
 
 procedure TMetaValidation.SetupTests;
@@ -340,7 +384,10 @@ begin
   Test('logLevel extracted', TestLogLevelExtracted);
   Test('unknown logLevel → -32602', TestUnknownLogLevelRejected);
   Test('wrong-case logLevel → -32602', TestWrongCaseLogLevelRejected);
-  Test('HasCapability lookup', TestHasCapability);
+  Test('HasCapability: defined capabilities in shape, custom by presence',
+    TestHasCapability);
+  Test('BuildMissingCapabilityData lists every name and refuses none',
+    TestMissingCapabilityData);
   Test('MissingRequiredMeta names the first missing field',
     TestMissingRequiredMetaNames);
   Test('MissingRequiredMeta is empty for a complete envelope',
