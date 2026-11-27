@@ -26,10 +26,13 @@ uses
   cthreads,
   {$ENDIF}
   SysUtils,
+  DateUtils,
+  Math,
 
   fpjson,
 
   MCP.Apps,
+  MCP.Events,
   MCP.Protocol,
   MCP.Schema,
   MCP.Server,
@@ -230,6 +233,73 @@ begin
     ASize := 0;
 end;
 
+var
+  // `--clock-at <ms>` fixes the clock (Unix milliseconds), so mcpsmoke
+  // can check replay windows without racing the minute.
+  ClockAtMs: Int64 = -1;
+
+function ClockNowMs: Int64;
+var
+  Utc: TDateTime;
+begin
+  if ClockAtMs >= 0 then
+    Exit(ClockAtMs);
+  // One sample: DateTimeToUnix drops its milliseconds, which are added
+  // back from the same instant.
+  Utc := LocalTimeToUniversal(SysUtils.Now);
+  Result := DateTimeToUnix(Utc) * 1000 + MilliSecondOf(Utc);
+end;
+
+// The Events demo (#118): one occurrence per minute of UTC time, the
+// cursor the minute read last (minutes since 1970). Stateless: the
+// clock is the upstream. A cursor over an hour old is truncated to the
+// last hour.
+function ClockMinuteCheck(const AQuery: TMCPEventQuery;
+  const ACtx: TMCPRequestContext): TMCPEventPoll;
+var
+  NowMs, Now, Minute, Last, Floor: Int64;
+begin
+  NowMs := ClockNowMs;
+  Now := NowMs div 60000;
+  if AQuery.FromNow or not TryStrToInt64(AQuery.Cursor, Minute) or
+    (Minute > Now) then
+    Exit(MCPEventPoll(IntToStr(Now)));
+  Result := MCPEventPoll(IntToStr(Now), TJSONArray.Create);
+  // Replay starts at the later of the cursor and now minus maxAgeMs,
+  // and at most an hour back; skipping is "truncated" (events.mdx,
+  // Cursor Lifecycle).
+  // The cutoff from the actual instant: a tick at minute m (m * 60000
+  // ms) is replayed when m * 60000 >= now - maxAgeMs, so the last minute
+  // skipped is the one before the first such m (#118 review).
+  Floor := Now - 60;
+  if (AQuery.MaxAgeMs >= 0) and (AQuery.MaxAgeMs < NowMs) then
+    Floor := Max(Floor, (NowMs - AQuery.MaxAgeMs + 59999) div 60000 - 1);
+  if Minute < Floor then
+  begin
+    Minute := Floor;
+    Result.Truncated := True;
+  end;
+  Last := Now;
+  // Compared before adding, so no cursor overflows.
+  if (AQuery.MaxEvents >= 0) and (Last - Minute > AQuery.MaxEvents) then
+  begin
+    Last := Minute + AQuery.MaxEvents;
+    Result.HasMore := True;
+  end;
+  while Minute < Last do
+  begin
+    Inc(Minute);
+    Result.Events.Add(MCPEventOccurrence('minute-' + IntToStr(Minute),
+      // Literal colons: unquoted, FormatDateTime takes the locale's time
+      // separator (#118 review).
+      FormatDateTime('yyyy"-"mm"-"dd"T"hh":"nn":"ss"Z"',
+      UnixToDateTime(Minute * 60)),
+      TJSONObject.Create(['minute', Minute])));
+  end;
+  Result.Cursor := IntToStr(Last);
+  Result.NextPollMs := 60000;
+end;
+
 // `--skills-dir <dir>` also serves the skills under <dir> (#117), at
 // skill://disk/...; mcpsmoke uses it to check skills loaded from disk.
 function SkillsDirFromArgs(out ADir: string): Boolean;
@@ -324,11 +394,18 @@ begin
       [MCPSkillFile('examples/call.json',
       '{"name":"echo","arguments":{"message":"hi"}}' + #10)]);
 
+    // Events (#118): a minute clock a client polls with events/poll.
+    RegisterEvent(Server, 'clock.minute', 'Fires once a minute (UTC)',
+      ObjectSchema, ObjectSchema.AddInteger('minute', 'Minutes since 1970'),
+      ClockMinuteCheck, 60000);
+
     Server.RegisterResourceTemplate('mcp://pascal-mcp-sdk/shout/{text}',
       'shout', 'text/plain', ShoutReader, 'Uppercase echo of {text}');
 
     if PageSizeFromArgs(PageSize) then
       Server.PageSize := PageSize;
+    if (ParamCount = 2) and (ParamStr(1) = '--clock-at') then
+      ClockAtMs := StrToInt64Def(ParamStr(2), -1);
     if SkillsDirFromArgs(SkillsDir) then
       RegisterSkillDirectory(Server, SkillsDir, 'disk');
 

@@ -595,10 +595,63 @@ begin
   end;
 end;
 
+// The minute clock with its time fixed (`mcpdemo --clock-at`), 10
+// seconds into minute M: maxAgeMs 30000 replays from 20 seconds before
+// M, so the tick of M is in the window and the one before is not
+// (events.mdx, Cursor Lifecycle, verified 2026-11-27; #118 review).
+procedure FixedClockBattery;
+const
+  M = 29929560; // 2026-11-27T10:00:00Z in minutes since 1970
+var
+  Clock: TProcess;
+  Response: TJSONObject;
+begin
+  Clock := TProcess.Create(nil);
+  try
+    Clock.Executable := DemoBinary;
+    Clock.Parameters.Add('--clock-at');
+    Clock.Parameters.Add(IntToStr(Int64(M) * 60000 + 10000));
+    Clock.Options := [poUsePipes];
+    try
+      Clock.Execute;
+    except
+      on E: Exception do
+      begin
+        Check(False, 'fixed clock: launch ' + DemoBinary + ': ' + E.Message);
+        Exit;
+      end;
+    end;
+    try
+      Response := RoundTrip(Clock, '{"jsonrpc":"2.0","id":1,' +
+        '"method":"events/poll","params":{"name":"clock.minute",' +
+        '"maxAgeMs":30000,"cursor":"' + IntToStr(M - 1) + '",' + META_MODERN +
+        '}}');
+      Check((PathString(Response, 'result.events[0].eventId') = 'minute-' +
+        IntToStr(M)) and (PathString(Response, 'result.events[0].timestamp') =
+        '2026-11-27T10:00:00Z') and (FindPath(Response, 'result.events[1]') =
+        nil) and not FindPath(Response, 'result.truncated').AsBoolean,
+        'events/poll at a fixed time: the tick inside a 30 s window replayed');
+      Response.Free;
+      Response := RoundTrip(Clock, '{"jsonrpc":"2.0","id":2,' +
+        '"method":"events/poll","params":{"name":"clock.minute",' +
+        '"maxAgeMs":30000,"cursor":"' + IntToStr(M - 3) + '",' + META_MODERN +
+        '}}');
+      Check((PathString(Response, 'result.events[0].eventId') = 'minute-' +
+        IntToStr(M)) and FindPath(Response, 'result.truncated').AsBoolean,
+        'events/poll at a fixed time: older ticks skipped and truncated');
+      Response.Free;
+    finally
+      Shutdown(Clock, 'fixed clock');
+    end;
+  finally
+    Clock.Free;
+  end;
+end;
+
 var
   Demo: TProcess;
   Response: TJSONObject;
-  ResponseLine, SealedState, SkillDigest, SkillText: string;
+  ResponseLine, SealedState, SkillDigest, SkillText, EventCursor: string;
   SkillSize: Integer;
   ServerInfo: TJSONData;
   StartedAt: QWord;
@@ -902,6 +955,42 @@ begin
       'its examples directory');
     Response.Free;
 
+    // Events (#118): a poll from now gives the current minute; three
+    // minutes back with maxEvents 2 gives the next two and hasMore,
+    // whether or not the minute turns in between (events.mdx,
+    // Poll-Based Delivery, verified 2026-11-27).
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":41,"method":"events/poll","params":{' +
+      '"name":"clock.minute","cursor":null,' + META_MODERN + '}}');
+    EventCursor := PathString(Response, 'result.cursor');
+    Check((EventCursor <> '') and (FindPath(Response, 'result.events') <> nil)
+      and (FindPath(Response, 'result.events').Count = 0),
+      'events/poll from now: a fresh cursor and no events');
+    Response.Free;
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":42,"method":"events/poll","params":{' +
+      '"name":"clock.minute","maxEvents":2,"cursor":"' +
+      IntToStr(StrToInt64Def(EventCursor, 0) - 3) + '",' + META_MODERN + '}}');
+    Check((PathString(Response, 'result.events[0].eventId') = 'minute-' +
+      IntToStr(StrToInt64Def(EventCursor, 0) - 2)) and
+      (PathString(Response, 'result.events[1].name') = 'clock.minute') and
+      (FindPath(Response, 'result.events[2]') = nil) and
+      (FindPath(Response, 'result.hasMore') <> nil) and
+      FindPath(Response, 'result.hasMore').AsBoolean,
+      'events/poll from a cursor: two occurrences, more waiting');
+    Response.Free;
+    // maxAgeMs bounds the replay: one minute back at most, truncated.
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":43,"method":"events/poll","params":{' +
+      '"name":"clock.minute","maxAgeMs":60000,"cursor":"' +
+      IntToStr(StrToInt64Def(EventCursor, 0) - 3) + '",' + META_MODERN + '}}');
+    Check((FindPath(Response, 'result.truncated') <> nil) and
+      FindPath(Response, 'result.truncated').AsBoolean and
+      (FindPath(Response, 'result.events') <> nil) and
+      (FindPath(Response, 'result.events').Count <= 2),
+      'events/poll with maxAgeMs: older minutes skipped and truncated');
+    Response.Free;
+
     // The MCP Apps card is an ordinary resources/read (#98).
     Response := RoundTripWithLine(Demo,
       '{"jsonrpc":"2.0","id":36,"method":"resources/read","params":{' +
@@ -1125,6 +1214,7 @@ begin
   FixtureContentBattery;
   PagedDemoBattery;
   SkillsDirBattery;
+  FixedClockBattery;
 
   WriteLn;
   if Failures = 0 then

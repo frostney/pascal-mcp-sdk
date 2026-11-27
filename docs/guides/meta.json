@@ -12,6 +12,7 @@
     "resources",
     "mcp-apps",
     "skills",
+    "events",
     "configuration",
     "progress-and-logging",
     "testing",

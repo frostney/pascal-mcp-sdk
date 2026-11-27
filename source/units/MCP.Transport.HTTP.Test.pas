@@ -28,6 +28,8 @@ uses
   fphttpclient,
   sockets,
   ssockets,
+  MCP.Events,
+  MCP.Extensions,
   MCP.Protocol,
   MCP.Schema,
   MCP.Server,
@@ -59,8 +61,17 @@ type
     Name, Value: string;
   end;
 
+  // A method and header lookup for a route named by "target".
+  TRouteFixture = class
+  public
+    function Answer(AParams: TJSONObject; const ACtx: TMCPRequestContext;
+      ALegacy: Boolean): TJSONObject;
+    function Headers(const AName: string): TMCPHeaderParameters;
+  end;
+
   THTTPBinding = class(TTestSuite)
   private
+    FRouteFixture: TRouteFixture;
     FServer: TMCPServer;
     FTransport: TMCPHTTPServer;
     FThread: TServerThread;
@@ -94,6 +105,12 @@ type
     // a field can repeat; returns the status.
     function PostRoutedRaw(const AArguments, AExtraHeaderLines: string;
       out ABody: string): Integer;
+    // An events/poll with params AParamsJson (each member followed by a
+    // comma), Mcp-Name AName ('' sends none) and AHeaders.
+    function PostPollRaw(const AHeaderLines: string;
+      out ABody: string): Integer;
+    function PostPoll(const AName, AParamsJson: string;
+      const AHeaders: array of THeaderPair; out ABody: string): Integer;
     function PostWithUnsentBody(ADeclaredLength: Integer;
       out AResponseBody: string): Integer;
   protected
@@ -108,6 +125,7 @@ type
     procedure TestMissingProtocolVersion400;
     procedure TestMissingClientCapabilities400;
     procedure TestInBandInvalidParamsStays200;
+    procedure TestEventRouting;
     procedure TestStreamingOptInMissingCapabilities400;
     procedure TestNotificationAccepted;
     procedure TestMalformedNotificationAccepted;
@@ -354,12 +372,45 @@ begin
     AThread.WaitFor;
 end;
 
+function TRouteFixture.Answer(AParams: TJSONObject;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+begin
+  Result := TJSONObject.Create;
+end;
+
+// Region for the target "tick" alone, so the check must use the value
+// the route names.
+function TRouteFixture.Headers(const AName: string): TMCPHeaderParameters;
+var
+  Schema: TJSONObject;
+begin
+  Result := nil;
+  if AName <> 'tick' then
+    Exit;
+  Schema := TJSONObject(GetJSON('{"type":"object","properties":' +
+    '{"region":{"type":"string","x-mcp-header":"Region"}}}'));
+  try
+    MCPHeaderParameters(Schema, Result);
+  finally
+    Schema.Free;
+  end;
+end;
+
+function TickCheck(const AQuery: TMCPEventQuery;
+  const ACtx: TMCPRequestContext): TMCPEventPoll;
+begin
+  Result := MCPEventPoll('now');
+end;
+
 procedure THTTPBinding.BeforeEach;
 var
   Attempt: Integer;
   Probe, ProbeType: string;
 begin
   FServer := TMCPServer.Create('http-test', '1.0');
+  // The server owns the route fixture, freed with it.
+  FRouteFixture := TRouteFixture.Create;
+  FServer.Adopt(FRouteFixture);
   FServer.RegisterTool('ping', 'Ping', '{"type":"object"}', PingHandler);
   FServer.RegisterTool('echo', 'Echo',
     ObjectSchema.AddString('message', 'Text to echo'), NoisyEchoHandler);
@@ -386,6 +437,15 @@ begin
     '"dry":{"type":"boolean","x-mcp-header":"Dry"}}}}}',
     QuietHandler).ApplicationValidated;
   FServer.RegisterTool('waiter', 'Waits', '{"type":"object"}', WaiterHandler);
+  // A routed method whose name parameter is "target", with the event
+  // types' header lookup (#118 review).
+  FServer.RegisterMethod('example/route', FRouteFixture.Answer);
+  // An event type whose region is mirrored into Mcp-Param-Region (#118).
+  RegisterEvent(FServer, 'tick', 'Ticks',
+    TJSONObject(GetJSON('{"type":"object","properties":{"region":' +
+    '{"type":"string","x-mcp-header":"Region"}}}')), ObjectSchema.Build,
+    TickCheck);
+  FServer.RegisterRoute('example/route', 'target', FRouteFixture.Headers);
   FTransport := TMCPHTTPServer.Create(FServer);
   FTransport.Port := FindFreePort;
   FBaseUrl := 'http://127.0.0.1:' + IntToStr(FTransport.Port);
@@ -864,6 +924,100 @@ begin
   Expect<Integer>(PostRouted('{"region":"Hello, ' + #$E4#$B8#$96#$E7#$95#$8C +
     '"}', [HeaderPair('mcp-param-region', '=?base64?SGVsbG8sIOS4lueVjA==?=')],
     Body)).ToBe(200);
+end;
+
+// events/poll carries Mcp-Name (params.name) and the Mcp-Param-*
+// headers of its input schema, checked as for tools/call; events/list
+// carries no name (events.mdx, Streamable HTTP: Routing Headers,
+// verified 2026-11-27).
+function THTTPBinding.PostPoll(const AName, AParamsJson: string;
+  const AHeaders: array of THeaderPair; out ABody: string): Integer;
+var
+  Headers: array of THeaderPair;
+  ContentType: string;
+  I: Integer;
+begin
+  Headers := [HeaderPair('MCP-Protocol-Version', MCP_PROTOCOL_VERSION),
+    HeaderPair('Mcp-Method', 'events/poll')];
+  if AName <> '' then
+    Headers := Concat(Headers, [HeaderPair('Mcp-Name', AName)]);
+  for I := 0 to High(AHeaders) do
+    Headers := Concat(Headers, [AHeaders[I]]);
+  Result := Exchange('POST', '/mcp', '{"jsonrpc":"2.0","id":5,' +
+    '"method":"events/poll","params":{' + AParamsJson + META_MODERN + '}}',
+    Headers, ABody, ContentType);
+end;
+
+procedure THTTPBinding.TestEventRouting;
+var
+  Body, ContentType: string;
+begin
+  Expect<Integer>(PostPoll('tick', '"name":"tick","arguments":' +
+    '{"region":"eu"},', [HeaderPair('Mcp-Param-Region', 'eu')], Body))
+    .ToBe(200);
+  Expect<Boolean>(Pos('"cursor" : "now"', Body) > 0).ToBe(True);
+  Expect<Integer>(PostPoll('', '"name":"tick",', [], Body)).ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  Expect<Boolean>(Pos('required Mcp-Name header is missing', Body) > 0)
+    .ToBe(True);
+  Expect<Integer>(PostPoll('tock', '"name":"tick",', [], Body)).ToBe(400);
+  Expect<Integer>(PostPoll('tick', '"name":"tick","arguments":' +
+    '{"region":"eu"},', [], Body)).ToBe(400);
+  Expect<Boolean>(Pos('Mcp-Param-Region header is missing', Body) > 0)
+    .ToBe(True);
+  Expect<Integer>(Post('{"jsonrpc":"2.0","id":6,"method":"events/list",' +
+    '"params":{' + META_MODERN + '}}', 'events/list', '', Body)).ToBe(200);
+  // A route whose name parameter is not "name" still checks the
+  // headers of the value it names (#118 review).
+  Expect<Integer>(Exchange('POST', '/mcp', '{"jsonrpc":"2.0","id":7,' +
+    '"method":"example/route","params":{"target":"tick","arguments":' +
+    '{"region":"eu"},' + META_MODERN + '}}', [HeaderPair('MCP-Protocol-Version',
+    MCP_PROTOCOL_VERSION), HeaderPair('Mcp-Method', 'example/route'),
+    HeaderPair('Mcp-Name', 'tick')], Body, ContentType)).ToBe(400);
+  Expect<Boolean>(Pos('Mcp-Param-Region header is missing', Body) > 0)
+    .ToBe(True);
+  // A name that is not plain ASCII travels base64-encoded; raw bytes are
+  // refused (#118 review). 'tick' as a sentinel matches.
+  Expect<Integer>(PostPoll('=?base64?dGljaw==?=', '"name":"tick",', [], Body))
+    .ToBe(200);
+  Expect<Integer>(PostPoll('ti' + #$C3#$A9 + 'ck', '"name":"tick",', [], Body))
+    .ToBe(400);
+  Expect<Boolean>(Pos('not plain ASCII', Body) > 0).ToBe(True);
+  // Core methods keep their behaviour: a raw name that matches the body
+  // passes the header check (the tool is then unknown).
+  Expect<Integer>(Exchange('POST', '/mcp', '{"jsonrpc":"2.0","id":8,' +
+    '"method":"tools/call","params":{"name":"ti' + #$C3#$A9 + 'ck",' +
+    '"arguments":{},' + META_MODERN + '}}', [HeaderPair('MCP-Protocol-Version',
+    MCP_PROTOCOL_VERSION), HeaderPair('Mcp-Method', 'tools/call'),
+    HeaderPair('Mcp-Name', 'ti' + #$C3#$A9 + 'ck')], Body, ContentType))
+    .ToBe(200);
+  // A routed method's Mcp-Name must arrive once (#118 review).
+  Expect<Integer>(PostPollRaw('Mcp-Name: tock'#13#10'Mcp-Name: tick', Body))
+    .ToBe(400);
+  Expect<Integer>(ErrorCodeOf(Body)).ToBe(-32020);
+  Expect<Boolean>(Pos('Mcp-Name header sent more than once', Body) > 0)
+    .ToBe(True);
+  Expect<Integer>(PostPollRaw('Mcp-Name: tick', Body)).ToBe(200);
+end;
+
+// events/poll for "tick" with the raw header lines AHeaderLines, so a
+// field can repeat.
+function THTTPBinding.PostPollRaw(const AHeaderLines: string;
+  out ABody: string): Integer;
+var
+  Payload, Request: string;
+begin
+  Payload := '{"jsonrpc":"2.0","id":9,"method":"events/poll","params":{' +
+    '"name":"tick",' + META_MODERN + '}}';
+  Request := 'POST /mcp HTTP/1.1'#13#10 +
+    'Host: 127.0.0.1:' + IntToStr(FTransport.Port) + #13#10 +
+    'Content-Type: application/json'#13#10 +
+    'Accept: application/json, text/event-stream'#13#10 +
+    'MCP-Protocol-Version: ' + MCP_PROTOCOL_VERSION + #13#10 +
+    'Mcp-Method: events/poll'#13#10 + AHeaderLines + #13#10 +
+    'Connection: close'#13#10 +
+    'Content-Length: ' + IntToStr(Length(Payload)) + #13#10#13#10 + Payload;
+  Result := RawExchange(FTransport.Port, Request, ABody);
 end;
 
 procedure THTTPBinding.TestParamHeaderMissing;
@@ -1486,6 +1640,7 @@ begin
   Test('Mcp-Param headers: plain, nested, typed and base64 values match',
     TestParamHeadersMatch);
   Test('Mcp-Param header missing → 400, -32020', TestParamHeaderMissing);
+  Test('events/poll carries Mcp-Name and Mcp-Param-*', TestEventRouting);
   Test('Mcp-Param header mismatched → 400, -32020', TestParamHeaderMismatch);
   Test('Mcp-Param base64 with bad padding or characters → 400',
     TestParamHeaderBadBase64);

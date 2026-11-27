@@ -14,7 +14,8 @@ uses
   SysUtils,
 
   fpjson,
-  MCP.Protocol;
+  MCP.Protocol,
+  MCP.Schema;
 
 type
   // The core requests: those MCP.Server answers itself, and
@@ -37,6 +38,12 @@ type
   TMCPResourceResolver = function(const AUri: string;
     const ACtx: TMCPRequestContext): TJSONArray of object;
 
+  // The x-mcp-header parameters of the entity named AName (an event
+  // type, say), for the Streamable HTTP Mcp-Param-* check; none when it
+  // is unknown.
+  TMCPHeaderLookup = function(const AName: string): TMCPHeaderParameters
+    of object;
+
   TMCPExtensionHooks = class
   private
     FMethods: array of record
@@ -49,6 +56,12 @@ type
       Resolver: TMCPResourceResolver;
     end;
     FAdopted: array of TObject;
+    FModernOnly: array of string;
+    FPinned: TJSONObject; // owned: settings that replace a declaration
+    FRoutes: array of record
+      Method, NameParam: string;
+      Headers: TMCPHeaderLookup;
+    end;
   public
     destructor Destroy; override;
     // '' once added; otherwise why not (an empty name, a nil handler, a
@@ -72,6 +85,24 @@ type
     function Resolve(const AUri: string;
       const ACtx: TMCPRequestContext): TJSONArray;
     function HasResolvers: Boolean;
+    // '' once AMethod (added with AddMethod) routes: on Streamable HTTP
+    // its Mcp-Name header mirrors params.ANameParam and, with AHeaders,
+    // its Mcp-Param-* headers mirror params.arguments as AHeaders gives
+    // them; otherwise why not.
+    function AddRoute(const AMethod, ANameParam: string;
+      AHeaders: TMCPHeaderLookup): string;
+    function FindRoute(const AMethod: string; out ANameParam: string;
+      out AHeaders: TMCPHeaderLookup): Boolean;
+    // Extension AId is left out of the classic capabilities.
+    procedure RestrictToModern(const AId: string);
+    // Extension AId is answered with ASettings (owned), replacing what
+    // was declared.
+    procedure PinSettings(const AId: string; ASettings: TJSONObject);
+    // The extensions to declare (new, the caller's; nil for none): a
+    // clone of ADeclared (borrowed) with pinned settings in place,
+    // without the modern-only ones when ALegacy.
+    function ExtensionsFor(ADeclared: TJSONObject;
+      ALegacy: Boolean): TJSONObject;
     // Whether some resolver's prefix starts AUri.
     function Covers(const AUri: string): Boolean;
     // Whether AObject is adopted already.
@@ -132,6 +163,7 @@ destructor TMCPExtensionHooks.Destroy;
 var
   I: Integer;
 begin
+  FPinned.Free;
   for I := High(FAdopted) downto 0 do
     FAdopted[I].Free;
   inherited Destroy;
@@ -266,6 +298,83 @@ begin
     AResult.Add('ttlMs', ATtlMs);
   if AResult.Find('cacheScope') = nil then
     AResult.Add('cacheScope', AScope);
+end;
+
+function TMCPExtensionHooks.AddRoute(const AMethod, ANameParam: string;
+  AHeaders: TMCPHeaderLookup): string;
+var
+  Handler: TMCPMethodHandler;
+  Cacheable: Boolean;
+  NameParam: string;
+  Headers: TMCPHeaderLookup;
+  Slot: Integer;
+begin
+  if not FindMethod(AMethod, Handler, Cacheable) or (ANameParam = '') then
+    Exit(Format('Route "%s" needs a registered method and a name ' +
+      'parameter', [AMethod]));
+  if FindRoute(AMethod, NameParam, Headers) then
+    Exit(Format('Method "%s" is routed already', [AMethod]));
+  Result := '';
+  Slot := Length(FRoutes);
+  SetLength(FRoutes, Slot + 1);
+  FRoutes[Slot].Method := AMethod;
+  FRoutes[Slot].NameParam := ANameParam;
+  FRoutes[Slot].Headers := AHeaders;
+end;
+
+function TMCPExtensionHooks.FindRoute(const AMethod: string;
+  out ANameParam: string; out AHeaders: TMCPHeaderLookup): Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to High(FRoutes) do
+    if FRoutes[I].Method = AMethod then
+    begin
+      ANameParam := FRoutes[I].NameParam;
+      AHeaders := FRoutes[I].Headers;
+      Exit(True);
+    end;
+  ANameParam := '';
+  AHeaders := nil;
+  Result := False;
+end;
+
+procedure TMCPExtensionHooks.RestrictToModern(const AId: string);
+begin
+  SetLength(FModernOnly, Length(FModernOnly) + 1);
+  FModernOnly[High(FModernOnly)] := AId;
+end;
+
+procedure TMCPExtensionHooks.PinSettings(const AId: string;
+  ASettings: TJSONObject);
+begin
+  if FPinned = nil then
+    FPinned := TJSONObject.Create;
+  FPinned.Delete(AId);
+  FPinned.Add(AId, ASettings);
+end;
+
+function TMCPExtensionHooks.ExtensionsFor(ADeclared: TJSONObject;
+  ALegacy: Boolean): TJSONObject;
+var
+  I: Integer;
+begin
+  Result := nil;
+  if ADeclared.Count = 0 then
+    Exit;
+  Result := TJSONObject(ADeclared.Clone);
+  if FPinned <> nil then
+    for I := 0 to FPinned.Count - 1 do
+      if Result.IndexOfName(FPinned.Names[I]) >= 0 then
+      begin
+        Result.Delete(FPinned.Names[I]);
+        Result.Add(FPinned.Names[I], FPinned.Items[I].Clone);
+      end;
+  if ALegacy then
+    for I := 0 to High(FModernOnly) do
+      Result.Delete(FModernOnly[I]);
+  if Result.Count = 0 then
+    FreeAndNil(Result);
 end;
 
 function TMCPExtensionHooks.Owns(AObject: TObject): Boolean;

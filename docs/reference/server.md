@@ -24,7 +24,7 @@ is created, and later mutation raises `EMCPServer`.
 | `CacheScope` | `string` | `'private'` | SEP-2549 `cacheScope`; `'private'` or `'public'` |
 | `RedactErrorDetails` | `Boolean` | `False` | `True` replaces escaped exception detail with a correlation reference, logging the full error to stderr; deliberate errors (`MCPErrorResult`, `EMCPProtocolError`) are sent as written |
 | `DualEra` | `Boolean` | `True` | Answer the classic `initialize` handshake alongside stateless 2026-07-28 requests |
-| `PageSize` | `Integer` | `0` | Entries per page of `tools/list`, `resources/list`, `resources/templates/list` and `prompts/list`, and of `skills/list` and `resources/directory/read` from `MCP.Skills`, with a `nextCursor` while more remain; `0` lists everything at once |
+| `PageSize` | `Integer` | `0` | Entries per page of `tools/list`, `resources/list`, `resources/templates/list` and `prompts/list`, of `skills/list` and `resources/directory/read` from `MCP.Skills`, and of `events/list` from `MCP.Events`, with a `nextCursor` while more remain; `0` lists everything at once |
 | `RequestStateTtlMs` | `Integer` | `600000` | Lifetime of a sealed `requestState` token; must be > 0 |
 | `SetRequestStateKeys(Keys)` | method | random per server instance | HMAC keys for `requestState` sealing, each ≥ 32 bytes; the first seals, all verify |
 | `Name`, `Version` | `string` | — | Read-only, from `Create` |
@@ -307,6 +307,12 @@ procedure RegisterMethod(const AMethod: string; AHandler: TMCPMethodHandler;
   ACacheable: Boolean = False);
 procedure RegisterResourceResolver(const AUriPrefix: string;
   AResolver: TMCPResourceResolver);
+procedure RestrictExtensionToModern(const AId: string);
+procedure PinExtensionSettings(const AId: string; ASettings: TJSONObject);
+procedure RegisterRoute(const AMethod, ANameParam: string;
+  AHeaders: TMCPHeaderLookup);
+function MethodRoute(const AMethod: string; out ANameParam: string;
+  out AHeaders: TMCPHeaderLookup): Boolean;
 function HookProblem(const AMethods: array of string;
   const AUriPrefix: string): string;
 procedure Adopt(AObject: TObject);
@@ -367,6 +373,16 @@ text before its first variable lies under the prefix. `Adopt` hands the
 server an object to free after its handlers are gone, such as the
 state those handlers read, and `Adopted` finds the first adopted
 object of a class; adopting the same object again changes nothing.
+`RestrictExtensionToModern` leaves extension `AId` out of the classic
+`initialize` capabilities, for an extension whose methods answer
+2026-07-28 requests only. `PinExtensionSettings` declares `AId` with
+`ASettings` (owned; nil for `{}`) whatever `DeclareExtension` sets
+before or after, for settings an extension unit must keep true. `RegisterRoute` makes a registered method routable on Streamable HTTP:
+its requests carry an `Mcp-Name` header mirroring `params.ANameParam`
+and, when `AHeaders` (a `TMCPHeaderLookup`, from `MCP.Extensions`) is
+given, the `Mcp-Param-*` headers it names for that value, checked as for
+`tools/call`. An unregistered method, an empty name parameter or a
+second route raises `EMCPServer`. `MethodRoute` is the transport's view.
 `HookProblem` says why registering `AMethods` or `AUriPrefix` would
 fail, or `''`, without changing anything, so an extension can check
 everything before it registers its first hook. Registering or adopting
@@ -437,6 +453,49 @@ function MCPSkillMarkdown(AFrontmatter: TJSONObject;
 | `RegisterSkill` | The skill at `skill://ASkillPath/SKILL.md`, written from `AFrontmatter` (owned, also on failure) and `ABody`, with `AFiles`. The frontmatter's `name` must equal the path's last segment, and the Agent Skills fields are checked. A bad name, path or field, files that clash (the same URI, one under another, or a file with the directory media type), a URI already served, or a skill over `MCP_SKILL_MAX_FILES` or `MCP_SKILL_MAX_BYTES` with its nested skills' files raises `EMCPServer`, as does a call after the server started, and the server is left as it was. The first call declares the extension with `directoryRead` unless it is declared already, and serves `skills/list`, `skills/get`, `resources/directory/read` and the files |
 | `RegisterSkillDirectory` | Every skill under `ARoot`: each directory holding a `SKILL.md`, at `skill://APrefix/<its path below ARoot>`, its `SKILL.md` and files served as the bytes on disk. Its frontmatter is read with `MCP.Frontmatter`'s YAML subset, and the checks of `RegisterSkill` apply. Directories are listed by directory reads even when empty. Names starting with `.` are left out, and so are files outside any skill. A symbolic link (`ARoot` included), anything but a directory or regular file, a directory that cannot be read, a skill over the limits (checked from the listed sizes before reading, nested skills' files and any registered skill the tree lies below counted), a `SKILL.md` in `ARoot` itself, or frontmatter outside the subset (named with its file and line) raises `EMCPServer`, and then none of the tree's skills is registered. The tree is trusted and must not change while it is read |
 | `MCPSkillMarkdown` | The `SKILL.md` text `RegisterSkill` writes: a YAML frontmatter block for `AFrontmatter` (borrowed), then `ABody`. Strings are double-quoted with escapes YAML 1.1 and 1.2 share; a fractional number, a key written longer than the 1024 characters YAML parsers read, or text that is not UTF-8 raises `EMCPServer` |
+
+From `MCP.Events`, the Events extension's poll delivery
+([Events](../guides/events.md)):
+
+```pascal
+const MCP_EVENTS_EXTENSION = 'io.modelcontextprotocol/events';
+const MCP_EVENT_DEFAULT_POLL_MS = 30000;
+
+type TMCPEventQuery = record
+  Arguments: TJSONObject;   // borrowed; {} when absent
+  Cursor: string;
+  FromNow: Boolean;         // null or absent cursor
+  MaxAgeMs: Int64;          // -1 when absent
+  MaxEvents: Integer;       // -1 when absent
+end;
+
+type TMCPEventPoll = record
+  Events: TJSONArray;       // owned; nil for none
+  Cursor: string;
+  NoReplay: Boolean;        // cursor null
+  HasMore, Truncated: Boolean;
+  NextPollMs: Integer;      // 0: the registration's
+end;
+
+TMCPEventCheck = function(const AQuery: TMCPEventQuery;
+  const ACtx: TMCPRequestContext): TMCPEventPoll;   // and an of-object form
+
+function MCPEventPoll(const ACursor: string;
+  AEvents: TJSONArray = nil): TMCPEventPoll;
+function MCPEventOccurrence(const AEventId, ATimestamp: string;
+  AData: TJSONObject; AMeta: TJSONObject = nil): TJSONObject;
+procedure RegisterEvent(AServer: TMCPServer; const AName,
+  ADescription: string; AInputSchema, APayloadSchema: TJSONObject;
+  ACheck: TMCPEventCheck;
+  ANextPollMs: Integer = MCP_EVENT_DEFAULT_POLL_MS);   // and TMCPSchema forms
+```
+
+| Member | Meaning |
+| --- | --- |
+| `RegisterEvent` | Event type `AName`, delivered by poll, before the server starts. `AInputSchema` (owned) describes the arguments: root type object, `x-mcp-header` annotations as for tools, checked against arguments when inside the server-enforced subset. `APayloadSchema` (owned) describes each occurrence's data, checked when inside the subset. An input schema outside the subset is refused. The first call declares the extension with `{}` on `server/discover` only (`RestrictExtensionToModern`, `PinExtensionSettings`) and serves `events/list` and `events/poll` on 2026-07-28 (`-32601` for a classic client), routed on Streamable HTTP. A duplicate or empty name, a bad schema, a nil check or a call after the server started raises `EMCPServer` |
+| `TMCPEventQuery` | One poll: the arguments, the cursor or `FromNow` for a null or absent one, and the client's `maxAgeMs` (at least 0) and `maxEvents` (at least 1), read as the schema reads integers |
+| `TMCPEventPoll` | A check's answer: at most `MaxEvents` occurrences, the cursor after them (null with `NoReplay`), `HasMore`, `Truncated` and `NextPollMs`. Events on a poll from now, more than `MaxEvents`, or an occurrence without object data, an RFC 3339 timestamp or a payload matching its schema answer `-32603` |
+| `MCPEventOccurrence` | One occurrence: `AData` (owned) and `AMeta` (owned) as given. An empty `AEventId` is derived from the name, timestamp and data, so the same event keeps its id; the server adds the name |
 
 ### The request context
 
@@ -636,7 +695,8 @@ function MCPMissingCapabilityError(const ACapability: string): EMCPProtocolError
 ```
 
 Raised from a `tools/call`, `prompts/get` or `resources/read` handler
-(typed and template handlers included), it becomes the error response
+(typed and template handlers included), or an extension's method or
+event check, it becomes the error response
 with exactly that code, message and data, in both eras. It is
 deliberate, so [`RedactErrorDetails`](../guides/configuration.md#redacterrordetails)
 leaves it alone: its message and data reach the client verbatim, so
@@ -649,6 +709,7 @@ reader. `Data` is owned by the exception; do not free or change it.
 | `-32602` | Invalid params of a prompt or resource request that the handler rejects itself, or a `requestState` the handler cannot accept. A tool's argument errors stay in-band (`MCPErrorResult`), so the model can correct them |
 | `-32021` | A client capability the request needs and did not declare; it must carry `data.requiredCapabilities`, so build it with `MCPMissingCapabilityError('sampling')`, or for several, `EMCPProtocolError.Create(-32021, …, BuildMissingCapabilityData(['sampling', 'roots']))` from `MCP.Protocol`, or for one member, `EMCPProtocolError.Create(-32021, …, BuildMissingCapabilityData('elicitation', 'url'))`. Each builder returns a fresh object that the exception then owns; the list form raises `EArgumentException` for an empty list or a repeated name, the member form for an empty capability or member. The constructor refuses `-32021` unless `requiredCapabilities` names at least one capability shaped as in `ClientCapabilities`: each capability that schema defines is an object, and so are `sampling.tools`, `elicitation.form` and each `extensions` entry, while a capability of the client's own may have any value. Data changed after that is sent as `-32603` |
 | `-32700`, `-32600`, `-32601`, `-32603` | The other JSON-RPC codes, with their JSON-RPC meanings |
+| `-32023` to `-32027` | The general-purpose codes SEP-3415 allocates, each with typed data: NotFound (`data.kind`), Forbidden, ResourceExhausted (`data.limit`), Unsupported (`data.feature`) and CallbackEndpointError; `MCP.Errors` names them `MCP_ERROR_NOT_FOUND` and so on |
 | outside `-32768..-32000` | Your application's own codes |
 
 Any other code is reserved, by the
