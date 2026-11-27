@@ -50,10 +50,10 @@ discovers the library units through the nested manifest, and the
 library's own test files stay out of your project's `lwpt test`
 discovery.
 
-**By vendoring** — the library is seven files. Copy
-`source/units/MCP.JSONRPC.pas`, `MCP.Protocol.pas`, `MCP.Schema.pas`,
-`MCP.Server.pas`, `MCP.Transport.Stdio.pas`, `MCP.Transport.HTTP.pas`,
-and `MCP.inc` into your unit path. FPC-shipped packages only (RTL,
+**By vendoring** — copy every library unit from `source/units/`
+(the `MCP.*.pas` files, leaving out the `*.Test.pas` suites) and
+`MCP.inc` into your unit path. `MCP.Server` uses the others, so take
+them all even for a text-only server. FPC-shipped packages only (RTL,
 fpjson, fcl-base; fcl-web for the HTTP transport unit).
 
 **Zero-install from a clone** — the repo commits its dependency

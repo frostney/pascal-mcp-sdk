@@ -34,7 +34,7 @@ The 30-second version:
 git clone https://github.com/frostney/pascal-mcp-sdk
 cd pascal-mcp-sdk
 lwpt install --frozen  # verify deps (the pinned lwpt release on PATH)
-lwpt build             # build/mcpdemo + build/mcpsmoke
+lwpt build             # every [build] target in lwpt.toml (mcpdemo, mcpsmoke, mcpconformance)
 lwpt test              # co-located unit suites
 lwpt run smoke         # E2E battery
 lwpt format --check    # formatter gate

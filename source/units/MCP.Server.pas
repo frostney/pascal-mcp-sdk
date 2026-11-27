@@ -663,6 +663,18 @@ function MCPImageResult(const ABase64,
   AMimeType: string): TMCPToolResult; overload;
 function MCPImageResult(const AData: TBytes;
   const AMimeType: string): TMCPToolResult; overload;
+// Audio tool result: one audio content block, same contracts as
+// MCPImageResult (base64 string or raw bytes, media type verbatim).
+function MCPAudioResult(const ABase64,
+  AMimeType: string): TMCPToolResult; overload;
+function MCPAudioResult(const AData: TBytes;
+  const AMimeType: string): TMCPToolResult; overload;
+// Any mix of content blocks, in order (build them with MCP.Content:
+// MCPTextContent, MCPImageContent, MCPAudioContent, MCPResourceLink,
+// MCPEmbeddedText, MCPEmbeddedBlob). Takes ownership of every block,
+// also when it raises: a nil or repeated block frees the blocks and
+// raises EMCPServer (in a tool handler, an isError result).
+function MCPContentResult(const ABlocks: array of TJSONObject): TMCPToolResult;
 function MCPTextContents(const AUri, AMimeType, AText: string): TJSONArray;
 function MCPBlobContents(const AUri, AMimeType, ABase64: string): TJSONArray;
 
@@ -729,6 +741,14 @@ function PromptArguments: TMCPPromptArguments;
 function MCPPromptMessage(const ARole, AText: string): TJSONObject;
 function MCPUserMessage(const AText: string): TJSONObject;
 function MCPAssistantMessage(const AText: string): TJSONObject;
+// A prompt message carrying any content block (image, audio, resource
+// link, embedded resource; see MCP.Content). Takes ownership of
+// AContent; nil raises EMCPServer. ARole is 'user' or 'assistant'. In
+// a prompt message an embedded resource MUST carry its mimeType
+// (prompts spec, verified 2026-11-26), so pass one to MCPEmbeddedText
+// and MCPEmbeddedBlob there.
+function MCPContentMessage(const ARole: string;
+  AContent: TJSONObject): TJSONObject;
 function MCPMessages(const AMessages: array of TJSONObject): TJSONArray;
 
 // The candidates that start with AValue, compared case-insensitively,
@@ -750,14 +770,13 @@ procedure MCPLogMessage(const ACtx: TMCPRequestContext;
 
 implementation
 
-// base64 encodes the raw-bytes overload of MCPImageResult. fcl-base
-// ships inside FPC 3.2.2, so it is admitted on the same reading of the
-// dependency rule as fpjson and fcl-web (AGENTS.md); MCP.Transport.HTTP
-// already depends on this unit for the mirrored-header sentinel.
+// MCP.Content owns the content-block shapes (and the base64 encoding of
+// raw-bytes payloads); the tool-result and prompt-message builders here
+// wrap its blocks.
 uses
   Math,
 
-  base64;
+  MCP.Content;
 
 var
   // Process-global diagnostic state intentionally remains outside
@@ -1055,16 +1074,19 @@ begin
   Core.FList := nil;
 end;
 
-function MCPPromptMessage(const ARole, AText: string): TJSONObject;
-var
-  Content: TJSONObject;
+function MCPContentMessage(const ARole: string;
+  AContent: TJSONObject): TJSONObject;
 begin
-  Content := TJSONObject.Create;
-  Content.Add('type', 'text');
-  Content.Add('text', AText);
+  if AContent = nil then
+    raise EMCPServer.Create('MCPContentMessage: content block is nil');
   Result := TJSONObject.Create;
   Result.Add('role', ARole);
-  Result.Add('content', Content);
+  Result.Add('content', AContent);
+end;
+
+function MCPPromptMessage(const ARole, AText: string): TJSONObject;
+begin
+  Result := MCPContentMessage(ARole, MCPTextContent(AText));
 end;
 
 function MCPUserMessage(const AText: string): TJSONObject;
@@ -1348,38 +1370,6 @@ begin
   end;
 end;
 
-{ ───────── content builders ───────── }
-
-function TextContentBlock(const AText: string): TJSONObject;
-begin
-  Result := TJSONObject.Create;
-  Result.Add('type', 'text');
-  Result.Add('text', AText);
-end;
-
-function ImageContentBlock(const ABase64, AMimeType: string): TJSONObject;
-begin
-  Result := TJSONObject.Create;
-  Result.Add('type', 'image');
-  Result.Add('data', ABase64);
-  Result.Add('mimeType', AMimeType);
-end;
-
-// fcl-base's encoder takes a string, so the bytes are moved in
-// byte-for-byte rather than assigned: an assignment would invite a
-// codepage conversion, and image bytes are not text. Empty input
-// encodes to '' (base64 of nothing), not to padding.
-function BytesToBase64(const AData: TBytes): string;
-var
-  Raw: string;
-begin
-  if Length(AData) = 0 then
-    Exit('');
-  SetLength(Raw, Length(AData));
-  Move(AData[0], Raw[1], Length(AData));
-  Result := EncodeStringBase64(Raw);
-end;
-
 { ───────── MRTR builders and accessors (#4) ───────── }
 
 // Shared precondition for both input_required builders: the spec
@@ -1604,7 +1594,7 @@ function MCPTextResult(const AText: string): TMCPToolResult;
 begin
   Result := Default(TMCPToolResult);
   Result.Content := TJSONArray.Create;
-  Result.Content.Add(TextContentBlock(AText));
+  Result.Content.Add(MCPTextContent(AText));
 end;
 
 function MCPErrorResult(const AText: string): TMCPToolResult;
@@ -1634,13 +1624,70 @@ function MCPImageResult(const ABase64, AMimeType: string): TMCPToolResult;
 begin
   Result := Default(TMCPToolResult);
   Result.Content := TJSONArray.Create;
-  Result.Content.Add(ImageContentBlock(ABase64, AMimeType));
+  Result.Content.Add(MCPImageContent(ABase64, AMimeType));
 end;
 
 function MCPImageResult(const AData: TBytes;
   const AMimeType: string): TMCPToolResult;
 begin
-  Result := MCPImageResult(BytesToBase64(AData), AMimeType);
+  Result := MCPImageResult(MCPBase64(AData), AMimeType);
+end;
+
+function MCPAudioResult(const ABase64, AMimeType: string): TMCPToolResult;
+begin
+  Result := MCPContentResult([MCPAudioContent(ABase64, AMimeType)]);
+end;
+
+function MCPAudioResult(const AData: TBytes;
+  const AMimeType: string): TMCPToolResult;
+begin
+  Result := MCPContentResult([MCPAudioContent(AData, AMimeType)]);
+end;
+
+// Frees every distinct non-nil block of ABlocks once.
+procedure FreeDistinctBlocks(const ABlocks: array of TJSONObject);
+var
+  I, J: Integer;
+  Seen: Boolean;
+begin
+  for I := 0 to High(ABlocks) do
+  begin
+    Seen := ABlocks[I] = nil;
+    for J := 0 to I - 1 do
+      if ABlocks[J] = ABlocks[I] then
+        Seen := True;
+    if not Seen then
+      ABlocks[I].Free;
+  end;
+end;
+
+function MCPContentResult(const ABlocks: array of TJSONObject): TMCPToolResult;
+var
+  I, J: Integer;
+begin
+  // Checked before anything is adopted, so a rejected call leaves no
+  // half-built result: the blocks are freed (they were handed over)
+  // and EMCPServer raised. A nil block would serialize as null, and a
+  // repeated one is rejected by fpjson part-way through.
+  for I := 0 to High(ABlocks) do
+  begin
+    if ABlocks[I] = nil then
+    begin
+      FreeDistinctBlocks(ABlocks);
+      raise EMCPServer.CreateFmt('MCPContentResult: block %d is nil', [I]);
+    end;
+    for J := 0 to I - 1 do
+      if ABlocks[J] = ABlocks[I] then
+      begin
+        FreeDistinctBlocks(ABlocks);
+        raise EMCPServer.CreateFmt(
+          'MCPContentResult: block %d repeats block %d', [I, J]);
+      end;
+  end;
+  Result := Default(TMCPToolResult);
+  Result.Content := TJSONArray.Create;
+  for I := 0 to High(ABlocks) do
+    Result.Content.Add(ABlocks[I]);
 end;
 
 function MCPTextContents(const AUri, AMimeType, AText: string): TJSONArray;

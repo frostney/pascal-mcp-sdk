@@ -7,13 +7,13 @@
 
 ## Executive Summary
 
-pascal-mcp-sdk is six units layered strictly bottom-up. Four form the
+pascal-mcp-sdk is seven units layered strictly bottom-up. Four form the
 request chain — `MCP.JSONRPC` (the JSON-RPC 2.0 profile MCP mandates),
 `MCP.Protocol` (the stateless per-request `_meta` model of spec
 revision 2026-07-28), `MCP.Server` (the sans-I/O dispatch core), and a
 transport shell (`MCP.Transport.Stdio` or `MCP.Transport.HTTP`) — and
-`MCP.Schema` sits beside the chain as the schema helper `MCP.Server`
-consumes. The core performs no I/O: `CreateSession` binds connection
+`MCP.Schema` and `MCP.Content` sit beside the chain as the schema and
+content-block helpers `MCP.Server` consumes. The core performs no I/O: `CreateSession` binds connection
 state and `HandleMessage` maps one inbound line to at most one
 response line, so both transports wrap the same tested core without
 touching it. The runtime dependency set is packages that ship inside
@@ -28,6 +28,7 @@ flowchart TB
     STDIO["MCP.Transport.Stdio<br/>lines in/out, LF framing"]
     HTTP["MCP.Transport.HTTP<br/>POST + SSE, header mirroring"]
     SCHEMA["MCP.Schema<br/>fluent builder +<br/>RTTI argument classes"]
+    CONTENT["MCP.Content<br/>content blocks for<br/>results and messages"]
     SERVER["MCP.Server<br/>frozen registries + sessions<br/>HandleMessage(session, line) → line"]
     PROTOCOL["MCP.Protocol<br/>_meta validation, version<br/>negotiation, result stamping"]
     JSONRPC["MCP.JSONRPC<br/>JSON-RPC 2.0 parse/build<br/>MCP profile + error codes"]
@@ -35,15 +36,17 @@ flowchart TB
     STDIO --> SERVER
     HTTP --> SERVER
     SCHEMA -. "consumed by,<br/>off the request chain" .-> SERVER
+    CONTENT -. "consumed by,<br/>off the request chain" .-> SERVER
     SERVER --> PROTOCOL
     PROTOCOL --> JSONRPC
     JSONRPC --> RTL
 ```
 
 The strict bottom-up request chain is `MCP.JSONRPC` → `MCP.Protocol` →
-`MCP.Server` → transport. `MCP.Schema` sits to the side of that chain:
-a helper `MCP.Server` consumes to build and enforce tool schemas, not
-a layer a request passes through.
+`MCP.Server` → transport. `MCP.Schema` and `MCP.Content` sit to the
+side of that chain: helpers `MCP.Server` consumes to build and enforce
+tool schemas and to build content blocks, not layers a request passes
+through.
 
 Rules live in the layer that owns them and nowhere else:
 
@@ -53,6 +56,7 @@ Rules live in the layer that owns them and nowhere else:
 | `MCP.Protocol` | The reserved `_meta` keys, the two required per-request fields (`protocolVersion`, `clientCapabilities`), `-32602` for their absence, `-32022` (+ `supported` list) for version mismatch, response-side stamping (`resultType: "complete"`, `serverInfo`) | Tools and resources |
 | `MCP.Server` | Method dispatch (`server/discover`, `tools/*`, `resources/*`, `prompts/*`, `completion/complete`), capabilities computed from the registrations, frozen registries and request-visible configuration, per-connection legacy state, cooperative cancellation, in-band vs. protocol error policy (handler exceptions → `isError: true` results; dispatch faults → JSON-RPC errors), the legacy-`initialize` rejection that names supported versions | Bytes and streams |
 | `MCP.Schema` | The fluent builder (`ObjectSchema.AddString(...)`) and the RTTI-derived `TMCPArgs` argument classes, both emitting the JSON Schema 2020-12 subset the server enforces | Dispatch, bytes, streams |
+| `MCP.Content` | The five content block shapes tool results and prompt messages carry (text, image, audio, resource link, embedded resource) and the base64 encoding of raw-bytes payloads | Dispatch, registries, bytes and streams |
 | `MCP.Transport.Stdio` | LF-terminated writes on every platform, CR tolerance on reads, blank-line skipping, stderr-only logging, EOF as the graceful-shutdown signal | Protocol decisions — it contains not a single one |
 
 ## The sans-I/O core
