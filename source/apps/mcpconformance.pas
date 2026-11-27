@@ -650,6 +650,9 @@ begin
     'A prompt with required arguments',
     PromptArguments.Add('arg1', 'First test argument')
       .Add('arg2', 'Second test argument'), PromptWithArguments);
+  // completion-complete asks for arg1 with the value "test".
+  AServer.RegisterPromptCompletion('test_prompt_with_arguments', 'arg1',
+    ['test', 'testing', 'tested']);
   AServer.RegisterPrompt('test_prompt_with_embedded_resource',
     'A prompt that includes an embedded resource',
     PromptArguments.Add('resourceUri', 'URI of the resource to embed'),
@@ -672,6 +675,8 @@ begin
   AServer.RegisterResourceTemplate('test://template/{id}/data', 'template',
     'application/json', TemplateData,
     'A resource template with parameter substitution');
+  AServer.RegisterTemplateCompletion('test://template/{id}/data', 'id',
+    ['1', '2', '3']);
 end;
 
 var

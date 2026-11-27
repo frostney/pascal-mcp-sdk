@@ -86,6 +86,20 @@ expressions):
   — percent-decoding is not performed. Decode in the reader if your
   variables can carry encoded characters.
 
+### Suggesting variable values
+
+`RegisterTemplateCompletion` suggests values for a template variable
+while the user types it, from a list or a handler that also sees the
+variables already filled in:
+
+```pascal
+// After the RegisterResourceTemplate call above:
+Server.RegisterTemplateCompletion('mcp://my-server/shout/{text}', 'text',
+  ['hello', 'help', 'world']);
+```
+
+See [Argument completion](../reference/server.md#argument-completion).
+
 ## Errors
 
 Reading an unregistered URI answers the spec's era-appropriate error:

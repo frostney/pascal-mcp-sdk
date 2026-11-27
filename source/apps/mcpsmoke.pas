@@ -432,6 +432,8 @@ begin
       'discover: top-level serverInfo (required by RC wire schema)');
     Check(FindPath(Response, 'result.ttlMs') <> nil,
       'discover: ttlMs present (SEP-2549)');
+    Check(FindPath(Response, 'result.capabilities.completions') <> nil,
+      'discover: completions capability (a completion is registered)');
     Response.Free;
 
     // tools/list.
@@ -562,6 +564,26 @@ begin
       'MRTR retry: resultType complete');
     Check(PathString(Response, 'result.content[0].text') = 'Hello, Ada!',
       'MRTR retry: elicited name woven into the result');
+    Response.Free;
+
+    // completion/complete (#81): the demo's static name list, by
+    // prefix ignoring case; verified 2026-11-26 against
+    // https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/completion
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":34,"method":"completion/complete","params":{' +
+      '"ref":{"type":"ref/prompt","name":"greet"},' +
+      '"argument":{"name":"name","value":"a"},' + META_MODERN + '}}');
+    Check((PathString(Response, 'result.completion.values[0]') = 'Ada') and
+      (PathString(Response, 'result.completion.values[1]') = 'Alan') and
+      (PathInt(Response, 'result.completion.total') = 2),
+      'completion/complete: prefix matches from the prompt argument');
+    Response.Free;
+    Response := RoundTrip(Demo,
+      '{"jsonrpc":"2.0","id":35,"method":"completion/complete","params":{' +
+      '"ref":{"type":"ref/prompt","name":"nope"},' +
+      '"argument":{"name":"name","value":"a"},' + META_MODERN + '}}');
+    Check(PathInt(Response, 'error.code') = -32602,
+      'completion/complete: unknown prompt → -32602');
     Response.Free;
 
     // MRTR without the declared capability — the spec forbids sending
