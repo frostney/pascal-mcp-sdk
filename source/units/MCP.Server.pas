@@ -2179,6 +2179,13 @@ var
   I: Integer;
   CompleteResult: TJSONObject;
 begin
+  // Without a registration the server declares no completions
+  // capability, so the method is not supported: -32601, as the
+  // completion page's error handling recommends (verified 2026-11-27,
+  // .../server/utilities/completion#error-handling).
+  if Length(FCompletions) = 0 then
+    Exit(BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
+      'Method not found: completion/complete (no completions registered)'));
   Problem := ParseCompleteRequest(AMessage.Params, Request);
   if Problem = '' then
   begin

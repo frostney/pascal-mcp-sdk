@@ -6377,6 +6377,42 @@ begin
   end;
 end;
 
+// The error code AServer answers completion/complete with for its
+// code_review prompt, in the modern era or (ALegacy) after initialize.
+function CompletionErrorCode(AServer: TMCPServer; ALegacy: Boolean): Integer;
+var
+  Session: TMCPSession;
+  Line: string;
+  Response: TJSONObject;
+begin
+  Session := AServer.CreateSession;
+  try
+    if ALegacy then
+    begin
+      AServer.HandleMessage(Session, '{"jsonrpc":"2.0","id":1,' +
+        '"method":"initialize","params":{"protocolVersion":"2025-11-25",' +
+        '"capabilities":{},"clientInfo":{"name":"c","version":"1"}}}', Line);
+      AServer.HandleMessage(Session,
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}', Line);
+      AServer.HandleMessage(Session, '{"jsonrpc":"2.0","id":2,' +
+        '"method":"completion/complete","params":{"ref":{"type":' +
+        '"ref/prompt","name":"code_review"},"argument":{"name":' +
+        '"language","value":"p"}}}', Line);
+    end
+    else
+      AServer.HandleMessage(Session, CompleteLine(
+        '{"type":"ref/prompt","name":"code_review"}', 'language', 'p'), Line);
+  finally
+    Session.Free;
+  end;
+  Response := TJSONObject(GetJSON(Line));
+  try
+    Result := Response.Get('error', TJSONObject(nil)).Get('code', 0);
+  finally
+    Response.Free;
+  end;
+end;
+
 // Schema ServerCapabilities ("Present if the server offers ..."),
 // verified 2026-11-26 against
 // https://modelcontextprotocol.io/specification/2026-07-28/schema#servercapabilities
@@ -6399,6 +6435,10 @@ begin
     Other.RegisterPrompt('code_review', 'Review code',
       PromptArguments.Add('language'), LanguagePrompt);
     Expect<string>(DiscoveredCapabilities(Other)).ToBe('{ "prompts" : {} }');
+    // ...and does not support the method: -32601 in both eras
+    // (completion#error-handling, verified 2026-11-27).
+    Expect<Integer>(CompletionErrorCode(Other, False)).ToBe(-32601);
+    Expect<Integer>(CompletionErrorCode(Other, True)).ToBe(-32601);
   finally
     Other.Free;
   end;

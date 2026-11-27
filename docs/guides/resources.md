@@ -93,8 +93,9 @@ while the user types it, from a list or a handler that also sees the
 variables already filled in:
 
 ```pascal
-Server.RegisterTemplateCompletion('geo://{country}/{city}', 'country',
-  ['de', 'fr', 'nl']);
+// After the RegisterResourceTemplate call above:
+Server.RegisterTemplateCompletion('mcp://my-server/shout/{text}', 'text',
+  ['hello', 'help', 'world']);
 ```
 
 See [Argument completion](../reference/server.md#argument-completion).

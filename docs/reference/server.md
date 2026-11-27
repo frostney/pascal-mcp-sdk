@@ -204,7 +204,9 @@ its known `Total` exceeds the values sent. An unknown prompt or
 template, an argument it does not declare, or a nil handler is refused
 with `EMCPServer` at registration, and the first two are answered
 `-32602` on the wire; an argument with no completion registered
-answers an empty list. Registering any completion declares the
+answers an empty list, and a server with no completions registered
+answers `completion/complete` with `-32601`, since it declares no
+`completions` capability. Registering any completion declares the
 `completions` capability. Over Streamable HTTP a request that opts
 into notifications streams them, as for the other handler-backed
 methods.
