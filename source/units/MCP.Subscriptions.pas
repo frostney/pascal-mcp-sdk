@@ -51,9 +51,10 @@ type
   // from the thread that drives the stream.
   TMCPSubscriptionFeed = class
   public
-    // Appends the notifications due now to AOut, each an object with the
-    // method and its params (an object), which the stream stamps with
-    // its subscription id.
+    // Appends the notifications due now to AOut (borrowed for the call;
+    // what is appended is AOut's), each an object with the method and
+    // its params (an object), which the stream stamps with its
+    // subscription id.
     procedure Collect(AOut: TJSONArray); virtual; abstract;
   end;
 
@@ -89,13 +90,13 @@ procedure AddSubscriptionSource(AServer: TMCPServer;
 
 // Why AddSubscriptionSource would refuse a source for AKey, '' when it
 // would add one; nothing changes, so a caller can check first.
-function SubscriptionSourceProblem(AServer: TMCPServer;
+function MCPSubscriptionSourceProblem(AServer: TMCPServer;
   const AKey: string): string;
 
 // The most listen streams open at once (at least 1), before the server
 // starts; MCP_DEFAULT_MAX_LISTENERS unless set. Raises EMCPServer
 // without a source added, or after the server started.
-procedure SetMaxListeners(AServer: TMCPServer; AValue: Integer);
+procedure MCPSetMaxListeners(AServer: TMCPServer; AValue: Integer);
 
 implementation
 
@@ -179,24 +180,13 @@ end;
 
 procedure TListenStream.Acknowledge(ASink: TMCPLineSink; ASinkData: Pointer;
   AForce: Boolean);
-var
-  Params: TJSONObject;
 begin
-  if FAcknowledged then
-    Exit;
-  Params := TJSONObject.Create(['notifications', FAgreed.Clone]);
-  if AForce then
-  begin
-    Params.Add('_meta', TJSONObject.Create([MCP_SUBSCRIPTION_ID_KEY,
-      Id.Clone]));
-    ASink(BuildNotification('notifications/subscriptions/acknowledged',
-      Params), ASinkData);
-    FAcknowledged := True;
-  end
-  else
-    // Acknowledged once it has gone out, not when it was due.
+  // Acknowledged once it has gone out, not when it was due.
+  if not FAcknowledged then
     FAcknowledged := SendNotification(
-      'notifications/subscriptions/acknowledged', Params, ASink, ASinkData);
+      'notifications/subscriptions/acknowledged',
+      TJSONObject.Create(['notifications', FAgreed.Clone]), ASink,
+      ASinkData, AForce);
 end;
 
 function TListenStream.Step(ASink: TMCPLineSink; ASinkData: Pointer): Int64;
@@ -338,9 +328,12 @@ begin
   Problem := CheckFilter(TJSONObject(Filter));
   if Problem <> '' then
     raise InvalidParams(Problem);
-  // The request id is the subscription id, a string or an integer.
+  // The request id is the subscription id, a string or an integer, an
+  // integral number written as 2.0 included (#138 review).
   if (ACtx.RequestId = nil) or ((ACtx.RequestId.JSONType = jtNumber) and
-    (TJSONNumber(ACtx.RequestId).NumberType = ntFloat)) then
+    (TJSONNumber(ACtx.RequestId).NumberType = ntFloat) and
+    ((Frac(ACtx.RequestId.AsFloat) <> 0) or
+    (Abs(ACtx.RequestId.AsFloat) > 9007199254740991.0))) then
     raise InvalidParams('subscriptions/listen needs a string or integer ' +
       'request id');
   if not (ACtx.StreamHost is TMCPStreamHost) then
@@ -387,7 +380,7 @@ begin
   Result := TJSONObject.Create;
 end;
 
-function SubscriptionSourceProblem(AServer: TMCPServer;
+function MCPSubscriptionSourceProblem(AServer: TMCPServer;
   const AKey: string): string;
 var
   Subscriptions: TSubscriptions;
@@ -406,7 +399,7 @@ begin
   Subscriptions := TSubscriptions(AServer.Adopted(TSubscriptions));
   if Subscriptions = nil then
     // The listen handler must still be free for this unit to take.
-    Exit(AServer.HookProblem(['subscriptions/listen'], ''));
+    Exit(AServer.ListenHandlerProblem);
   for I := 0 to Subscriptions.FSources.Count - 1 do
     if TMCPSubscriptionSource(Subscriptions.FSources[I]).FilterKey = AKey
     then
@@ -425,7 +418,7 @@ begin
     if ASource = nil then
       raise EMCPServer.Create('AddSubscriptionSource needs a server and a ' +
         'source');
-    Problem := SubscriptionSourceProblem(AServer, ASource.FilterKey);
+    Problem := MCPSubscriptionSourceProblem(AServer, ASource.FilterKey);
     if Problem <> '' then
       raise EMCPServer.Create(Problem);
   except
@@ -448,7 +441,7 @@ begin
   Subscriptions.FSources.Add(ASource);
 end;
 
-procedure SetMaxListeners(AServer: TMCPServer; AValue: Integer);
+procedure MCPSetMaxListeners(AServer: TMCPServer; AValue: Integer);
 var
   Subscriptions: TSubscriptions;
   Problem: string;
@@ -458,7 +451,7 @@ begin
     raise EMCPServer.Create(Problem);
   Subscriptions := TSubscriptions(AServer.Adopted(TSubscriptions));
   if Subscriptions = nil then
-    raise EMCPServer.Create('SetMaxListeners: no subscription source is ' +
+    raise EMCPServer.Create('MCPSetMaxListeners: no subscription source is ' +
       'added');
   if AValue < 1 then
     raise EMCPServer.Create('MaxListeners must be at least 1');

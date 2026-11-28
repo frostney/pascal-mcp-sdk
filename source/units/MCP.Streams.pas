@@ -50,10 +50,12 @@ type
     function Now: Int64;
     // Writes notification AMethod with AParams (consumed), its _meta
     // carrying the stream's id as MCP_SUBSCRIPTION_ID_KEY, through ASink:
-    // False, with nothing written, once the stream is cancelled (#138
-    // review: one sender for every stream).
+    // False, with nothing written, once the stream is cancelled, unless
+    // AForce, as for a frame Close must still send (#138 review: one
+    // sender for every stream).
     function SendNotification(const AMethod: string; AParams: TJSONObject;
-      ASink: TMCPLineSink; ASinkData: Pointer): Boolean;
+      ASink: TMCPLineSink; ASinkData: Pointer;
+      AForce: Boolean = False): Boolean;
   public
     // ARequestId (borrowed) is copied: the request's JSON-RPC id.
     constructor Create(ARequestId: TJSONData);
@@ -208,12 +210,13 @@ begin
 end;
 
 function TMCPStream.SendNotification(const AMethod: string;
-  AParams: TJSONObject; ASink: TMCPLineSink; ASinkData: Pointer): Boolean;
+  AParams: TJSONObject; ASink: TMCPLineSink; ASinkData: Pointer;
+  AForce: Boolean): Boolean;
 var
   Meta: TJSONData;
 begin
   try
-    if Cancelled then
+    if not AForce and Cancelled then
     begin
       AParams.Free;
       Exit(False);

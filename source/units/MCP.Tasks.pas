@@ -1295,6 +1295,7 @@ type
     // requests are checked against, as on tasks/get.
     FCapabilities: TJSONObject;
     FQueue: TJSONArray; // owned: {method, params} objects, oldest first
+    FCapacity: Integer;
   public
     constructor Create(ATasks: TMCPTasks; AIds: TJSONArray;
       const ACtx: TMCPRequestContext);
@@ -1306,8 +1307,10 @@ type
   end;
 
 const
-  // States a feed holds for a reader that has not collected them; past
-  // it the oldest are dropped, so a stalled stream costs bounded memory.
+  // States a feed holds for a reader that has not collected them, at
+  // least one per task it follows. Past it, the oldest state of the
+  // changed task gives way, so every task's latest state is still sent
+  // and a stalled stream costs bounded memory (#138 review).
   MAX_QUEUED_STATES = 64;
 
 // Under the lock: every feed of AFeeds stops reaching the store.
@@ -1382,6 +1385,13 @@ begin
     raise;
   end;
   FTasks.Reap;
+  // No task it knows: nothing to follow, and the key is left out of the
+  // acknowledgment, so the stream takes no feed (#138 review).
+  if Ids.Count = 0 then
+  begin
+    Ids.Free;
+    Exit(nil);
+  end;
   Result := Ids;
 end;
 
@@ -1406,6 +1416,9 @@ begin
     FCapabilities := TJSONObject.Create;
   for I := 0 to AIds.Count - 1 do
     FIds.Add(AIds.Strings[I], True);
+  FCapacity := MAX_QUEUED_STATES;
+  if FCapacity < AIds.Count then
+    FCapacity := AIds.Count;
   System.EnterCriticalSection(ATasks.FLock);
   try
     // A store that is shutting down tells this feed nothing.
@@ -1454,6 +1467,7 @@ procedure TTaskFeed.Enqueue(AEntry: TTaskEntry);
 var
   Ctx: TMCPRequestContext;
   Missing, Member, Unknown: string;
+  I: Integer;
 begin
   if FIds.IndexOfName(AEntry.Id) < 0 then
     Exit;
@@ -1466,8 +1480,17 @@ begin
     if Missing <> '' then
       Exit;
   end;
-  if FQueue.Count >= MAX_QUEUED_STATES then
-    FQueue.Delete(0);
+  // A state after the ttlMs ended is not sent: tasks/get no longer finds
+  // the task (#138 review).
+  if MCPNowMs >= AEntry.DeadlineMs then
+    Exit;
+  if FQueue.Count >= FCapacity then
+    for I := 0 to FQueue.Count - 1 do
+      if FQueue.Objects[I].FindPath('params.taskId').AsString = AEntry.Id then
+      begin
+        FQueue.Delete(I);
+        Break;
+      end;
   FQueue.Add(TJSONObject.Create(['method', 'notifications/tasks', 'params',
     AEntry.Snapshot(True)]));
 end;
@@ -1521,7 +1544,7 @@ begin
   // first.
   Problem := AServer.HookProblem(TASK_METHODS, '');
   if Problem = '' then
-    Problem := SubscriptionSourceProblem(AServer, 'taskIds');
+    Problem := MCPSubscriptionSourceProblem(AServer, 'taskIds');
   if Problem <> '' then
     raise EMCPServer.Create(Problem);
   Result := TMCPTasks.Create(AServer);

@@ -90,9 +90,8 @@ type
       ACacheable: Boolean): string;
     // Why AddMethod would refuse one of AMethods (repeats among them
     // included), or AddResolver APrefix ('' to check none); '' when all
-    // would be added. subscriptions/listen among AMethods asks whether
-    // SetListenHandler would refuse instead. Nothing changes, so a caller
-    // can check before it adds any.
+    // would be added. Nothing changes, so a caller can check before it
+    // adds any.
     function Preflight(const AMethods: array of string;
       const APrefix: string): string;
     function FindMethod(const AName: string; out AHandler: TMCPMethodHandler;
@@ -129,6 +128,8 @@ type
     // '' once AHandler answers subscriptions/listen; otherwise why not (a
     // nil handler, or one set already: one unit serves the method).
     function SetListenHandler(AHandler: TMCPMethodHandler): string;
+    // Why SetListenHandler would refuse a handler, '' when it would not.
+    function ListenProblem: string;
     // Extension AId is left out of the classic capabilities.
     procedure RestrictToModern(const AId: string);
     // Extension AId is answered with ASettings (owned), replacing what
@@ -261,13 +262,13 @@ begin
   Result := Copy(AText, 1, Length(APrefix)) = APrefix;
 end;
 
-function ListenProblem(AHooks: TMCPExtensionHooks): string;
+function TMCPExtensionHooks.ListenProblem: string;
 var
   Handler: TMCPMethodHandler;
   Cacheable: Boolean;
 begin
   Result := '';
-  if AHooks.FindMethod(LISTEN_METHOD, Handler, Cacheable) then
+  if FindMethod(LISTEN_METHOD, Handler, Cacheable) then
     Result := 'A subscriptions/listen handler is already set';
 end;
 
@@ -278,12 +279,7 @@ var
 begin
   for I := 0 to High(AMethods) do
   begin
-    // subscriptions/listen asks whether SetListenHandler would refuse
-    // (#138): no extension adds it, but one unit may serve it.
-    if AMethods[I] = LISTEN_METHOD then
-      Result := ListenProblem(Self)
-    else
-      Result := MethodNameProblem(Self, AMethods[I]);
+    Result := MethodNameProblem(Self, AMethods[I]);
     if Result <> '' then
       Exit;
     for J := 0 to I - 1 do
@@ -423,7 +419,7 @@ var
 begin
   if not Assigned(AHandler) then
     Exit('A subscriptions/listen handler must not be nil');
-  Result := ListenProblem(Self);
+  Result := ListenProblem;
   if Result <> '' then
     Exit;
   // Held among the methods, though AddMethod refuses a core one, so

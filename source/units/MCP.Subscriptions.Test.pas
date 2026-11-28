@@ -187,6 +187,11 @@ begin
     .ToBe(True);
   Expect<Boolean>(Pos('"code" : -32602', Listen('"notifications":{},',
     '7.5')) > 0).ToBe(True);
+  // An integral number written with a fraction is an integer id.
+  Expect<Boolean>(Pos('"result"', Listen('"notifications":{},', '2.0')) > 0)
+    .ToBe(True);
+  Expect<Boolean>(FStream <> nil).ToBe(True);
+  FreeAndNil(FStream);
   Expect<Boolean>(FStream = nil).ToBe(True);
   // A refusal from a source answers the request; no stream.
   Expect<Boolean>(Pos('"message" : "Invalid params: ticks must be a number"',
@@ -371,7 +376,7 @@ var
   First: TMCPStream;
 begin
   AddSubscriptionSource(FServer, TTickSource.Create);
-  SetMaxListeners(FServer, 1);
+  MCPSetMaxListeners(FServer, 1);
   Listen('"notifications":{},');
   Expect<Int64>(Step).ToBe(High(Int64));
   First := FStream;

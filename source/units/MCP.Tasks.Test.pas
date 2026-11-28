@@ -199,6 +199,8 @@ type
     procedure TestStatusNotifications;
     procedure TestListenRefusals;
     procedure TestEnableRefusedCleanly;
+    procedure TestManyFollowedTasks;
+    procedure TestNoStateAfterExpiry;
   end;
 
 function Echo(AArguments: TJSONObject;
@@ -1517,6 +1519,96 @@ begin
   end;
 end;
 
+// A listen helper: a parked stream for ATaskIds (JSON), or nil.
+function OpenListen(AServer: TMCPServer; ASession: TMCPSession;
+  AHost: TMCPStreamHost; const ATaskIds: string): TMCPStream;
+var
+  Line: string;
+begin
+  AServer.HandleMessage(ASession, '{"jsonrpc":"2.0","id":9,"method":' +
+    '"subscriptions/listen","params":{"notifications":{"taskIds":' + ATaskIds +
+    '},' + META + '}}', Line);
+  Result := AHost.TakeParked;
+end;
+
+// More tasks than a feed's usual queue: each one's first state is sent.
+procedure TTasksSuite.TestManyFollowedTasks;
+const
+  COUNT = 70;
+var
+  Ids, Lines: string;
+  I, Found, At: Integer;
+  Session: TMCPSession;
+  Host: TMCPStreamHost;
+  Stream: TMCPStream;
+begin
+  RegisterFixture;
+  FTasks.MaxActive := COUNT;
+  Ids := '';
+  for I := 1 to COUNT do
+  begin
+    if Ids <> '' then
+      Ids := Ids + ',';
+    Ids := Ids + '"' + StartTask('wait', '{"ms":0}') + '"';
+  end;
+  Host := TMCPStreamHost.Create;
+  Session := FServer.CreateSession;
+  Stream := nil;
+  try
+    Session.StreamHost := Host;
+    Stream := OpenListen(FServer, Session, Host, '[' + Ids + ']');
+    Lines := '';
+    Stream.Step(CaptureSink, @Lines);
+    Found := 0;
+    At := Pos('notifications/tasks', Lines);
+    while At > 0 do
+    begin
+      Inc(Found);
+      Lines := Copy(Lines, At + 1, MaxInt);
+      At := Pos('notifications/tasks', Lines);
+    end;
+    Expect<Integer>(Found).ToBe(COUNT);
+  finally
+    Stream.Free;
+    Session.Free;
+    Host.Free;
+  end;
+end;
+
+// A handler that returns after its task expired sends no new state.
+procedure TTasksSuite.TestNoStateAfterExpiry;
+var
+  TaskId, Lines: string;
+  Session: TMCPSession;
+  Host: TMCPStreamHost;
+  Stream: TMCPStream;
+begin
+  RegisterFixture;
+  FTasks.TtlMs := 150;
+  StubbornMs := 200;
+  TaskId := StartTask('stubborn');
+  Expect<Boolean>(AwaitStart).ToBe(True);
+  Host := TMCPStreamHost.Create;
+  Session := FServer.CreateSession;
+  Stream := nil;
+  try
+    Session.StreamHost := Host;
+    Stream := OpenListen(FServer, Session, Host, '["' + TaskId + '"]');
+    Lines := '';
+    Stream.Step(CaptureSink, @Lines);
+    Expect<Boolean>(Pos('"status" : "working"', Lines) > 0).ToBe(True);
+    // Past the ttlMs, and the handler's late return.
+    Sleep(500);
+    Lines := '';
+    Stream.Step(CaptureSink, @Lines);
+    Expect<string>(Lines).ToBe('');
+  finally
+    Stream.Free;
+    Session.Free;
+    Host.Free;
+  end;
+end;
+
 // A taskIds source added before EnableTasks: it refuses, and changes
 // nothing, so the server neither declares Tasks nor serves its methods.
 procedure TTasksSuite.TestEnableRefusedCleanly;
@@ -1642,6 +1734,9 @@ begin
     TestListenRefusals);
   Test('EnableTasks refused by a listen conflict changes nothing',
     TestEnableRefusedCleanly);
+  Test('every followed task''s first state is sent, past the queue size',
+    TestManyFollowedTasks);
+  Test('a state after the task expired is not sent', TestNoStateAfterExpiry);
 end;
 
 begin

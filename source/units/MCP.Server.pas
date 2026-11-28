@@ -746,6 +746,10 @@ type
     // Without one the method answers -32601. A nil handler, a second one
     // or a started server raises EMCPServer.
     procedure SetListenHandler(AHandler: TMCPMethodHandler);
+    // Why SetListenHandler would refuse a handler for being set already
+    // ('' when it is free); nothing changes (#138 review). HookProblem
+    // says whether the server has started.
+    function ListenHandlerProblem: string;
     // Runs tool AToolName with AArguments (borrowed; the handler gets a
     // copy, its defaults seeded) and ACtx as a 2026-07-28 tools/call
     // would, outside any request, such as on a task's own thread (#82):
@@ -2748,6 +2752,11 @@ function TMCPServer.ClientFaultMessage(const ASite: string;
 begin
   Result := ExceptionClientMessage(ASite, 'Internal error: ',
     'Internal error', E);
+end;
+
+function TMCPServer.ListenHandlerProblem: string;
+begin
+  Result := FHooks.ListenProblem;
 end;
 
 procedure TMCPServer.SetListenHandler(AHandler: TMCPMethodHandler);

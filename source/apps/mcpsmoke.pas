@@ -806,6 +806,20 @@ begin
       'tasks: notifications/tasks for each change, then completed');
     SendLine(Fixture, '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
       '"params":{"requestId":900}}');
+    // A stream with nothing to follow waits without end, and the loop
+    // still answers requests beside it (#138 review).
+    SendLine(Fixture, '{"jsonrpc":"2.0","id":902,"method":' +
+      '"subscriptions/listen","params":{"notifications":{},' + META_TASKS +
+      '}}');
+    Response := NextJson(Fixture);
+    Check(PathString(Response, 'method') =
+      'notifications/subscriptions/acknowledged',
+      'tasks: a stream with nothing agreed is acknowledged');
+    Response.Free;
+    Response := Call('tasks/get', '"taskId":"nope"', Line);
+    Check(PathInt(Response, 'error.code') = -32602,
+      'tasks: a request is answered beside a quiet stream');
+    Response.Free;
 
     // A task still running when stdin ends is cancelled, and the
     // process exits as usual.

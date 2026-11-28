@@ -321,6 +321,7 @@ procedure SetToolCallHook(AHook: TMCPToolCallHook;
   ADrain: TMCPDrain = nil);
 function ClientFaultMessage(const ASite: string; E: Exception): string;
 procedure SetListenHandler(AHandler: TMCPMethodHandler);
+function ListenHandlerProblem: string;
 function HasTool(const AName: string): Boolean;
 function RunTool(const AToolName: string; AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolRun;
@@ -402,7 +403,8 @@ logged to stderr, as for a handler's exception. `SetListenHandler` lets one unit
 `subscriptions/listen` as a method `RegisterMethod` adds would
 (`MCP.Subscriptions` sets it); without one the method answers
 `-32601`, and a nil handler, a second one or a started server raises
-`EMCPServer`. `HasTool` says whether a tool is
+`EMCPServer`; `ListenHandlerProblem` says whether one is set already
+(`''` when not), as `HookProblem` says whether the server started. `HasTool` says whether a tool is
 registered. `RunTool` runs a registered tool as a 2026-07-28
 `tools/call` would, outside any request, such as on a thread of its
 own, freezing the configuration first as a session does: argument
@@ -561,16 +563,16 @@ type TMCPSubscriptionFeed = class      // Collect(AOut: TJSONArray)
 
 procedure AddSubscriptionSource(AServer: TMCPServer;
   ASource: TMCPSubscriptionSource);
-function SubscriptionSourceProblem(AServer: TMCPServer;
+function MCPSubscriptionSourceProblem(AServer: TMCPServer;
   const AKey: string): string;
-procedure SetMaxListeners(AServer: TMCPServer; AValue: Integer);
+procedure MCPSetMaxListeners(AServer: TMCPServer; AValue: Integer);
 ```
 
 | Member | Meaning |
 | --- | --- |
 | `AddSubscriptionSource` | Serves `subscriptions/listen` with `ASource` (owned) among its sources, before the server starts. A second source for a key, a core filter key, a nil source, a listen handler another unit set, or a started server raises `EMCPServer` and frees the source. `EnableTasks` adds the `taskIds` source |
-| `SubscriptionSourceProblem` | Why `AddSubscriptionSource` would refuse a source for `AKey`, or `''`; nothing changes, so an extension checks before it registers anything (`HookProblem` with `subscriptions/listen` among the methods asks whether `SetListenHandler` would refuse) |
-| `SetMaxListeners` | The most listen streams open at once (at least 1; `MCP_DEFAULT_MAX_LISTENERS` unless set), before the server starts and once a source is added; a request past it answers `-32603` before anything is acknowledged |
+| `MCPSubscriptionSourceProblem` | Why `AddSubscriptionSource` would refuse a source for `AKey`, or `''`; nothing changes, so an extension checks before it registers anything. `TMCPServer.ListenHandlerProblem` says the same for `SetListenHandler` |
+| `MCPSetMaxListeners` | The most listen streams open at once (at least 1; `MCP_DEFAULT_MAX_LISTENERS` unless set), before the server starts and once a source is added; a request past it answers `-32603` before anything is acknowledged |
 | `TMCPSubscriptionSource` | `FilterKey` names its key. `Agree` returns what of the request's value the server agrees to (new; it goes in the acknowledgment), or nil to leave the key out, and may raise `EMCPProtocolError` to refuse the request. `Open` returns a feed for a new stream |
 | `TMCPSubscriptionFeed` | `Collect` appends the notifications due now, each `{"method": ..., "params": {...}}`, which the stream sends with its subscription id. It runs on the thread that drives the stream, every `MCP_SUBSCRIPTION_POLL_MS`; a stream without feeds is not polled |
 
