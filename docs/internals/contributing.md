@@ -22,7 +22,7 @@ flowchart LR
     OWN["Implement in the<br/>unit that owns the rule"]
     GATE["Local gate:<br/>lwpt install --frozen · build ·<br/>test · run smoke · format --check"]
     PR["PR with Conventional<br/>Commit title"]
-    CI["CI: 4 build-and-test legs<br/>on 3 platforms, interop,<br/>conformance, docs + format gates"]
+    CI["CI: 4 build-and-test legs<br/>on 3 platforms, interop,<br/>conformance, docs,<br/>conventional-title"]
     MERGE["Squash merge —<br/>title becomes the<br/>changelog entry"]
     IDEA --> TEST --> OWN --> GATE --> PR --> CI --> MERGE
 ```
