@@ -18,6 +18,7 @@ uses
   {$IFDEF UNIX}
   cthreads,
   {$ENDIF}
+  Math,
   SysUtils,
 
   fpjson,
@@ -41,18 +42,6 @@ const
   GRUSSE = 'Gr' + #$C3#$BC + #$C3#$9F + 'e';
   GRIN = #$F0#$9F#$98#$80;
 
-type
-  THookStub = class
-    function Take(const AToolName: string; AArguments: TJSONObject;
-      const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
-  end;
-
-function THookStub.Take(const AToolName: string; AArguments: TJSONObject;
-  const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
-begin
-  Result := nil;
-end;
-
 procedure CaptureSink(const ALine: string; AUserData: Pointer);
 begin
   PString(AUserData)^ := PString(AUserData)^ + ALine + #10;
@@ -60,8 +49,55 @@ end;
 
 var
   // What the handlers saw, for the tests to check.
-  SawCancel: Boolean;
+  SawCancel, WaitStarted, OwnerFreed, UsedAfterFree: Boolean;
+  // How long the stubborn handler ignores cancellation, in ms.
+  StubbornMs: Integer;
   Rounds: Integer;
+
+type
+  // A tool's owner, adopted after EnableTasks: its handler reads it while
+  // it runs, so teardown must stop the task before it frees the owner.
+  TToolOwner = class
+  public
+    Calls: Integer;
+    destructor Destroy; override;
+    function Spin(AArguments: TJSONObject;
+      const ACtx: TMCPRequestContext): TMCPToolResult;
+  end;
+
+  THookStub = class
+    function Take(const AToolName: string; AArguments: TJSONObject;
+      const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+  end;
+
+destructor TToolOwner.Destroy;
+begin
+  OwnerFreed := True;
+  inherited Destroy;
+end;
+
+function TToolOwner.Spin(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  WaitStarted := True;
+  while not ACtx.IsCancelled do
+  begin
+    Inc(Calls);
+    Sleep(5);
+  end;
+  // Still reading its owner after the cancellation.
+  Sleep(50);
+  if OwnerFreed then
+    UsedAfterFree := True;
+  Inc(Calls);
+  Result := MCPTextResult('spun');
+end;
+
+function THookStub.Take(const AToolName: string; AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+begin
+  Result := nil;
+end;
 
 type
   TTasksSuite = class(TTestSuite)
@@ -104,6 +140,10 @@ type
     procedure TestGuards;
     procedure TestUtf8Result;
     procedure TestTeardownCancels;
+    procedure TestTeardownBeforeAdoptedOwners;
+    procedure TestStateOnlyRound;
+    procedure TestUnsendableResult;
+    procedure TestMalformedAnswer;
     procedure TestStatusNotifications;
     procedure TestListenRefusals;
   end;
@@ -121,6 +161,7 @@ var
   Left: Integer;
   Forever: Boolean;
 begin
+  WaitStarted := True;
   Forever := AArguments.Find('ms') = nil;
   Left := AArguments.Get('ms', 0);
   while Forever or (Left > 0) do
@@ -134,6 +175,33 @@ begin
     Dec(Left, 5);
   end;
   Result := MCPTextResult('waited');
+end;
+
+// Ignores cancellation for StubbornMs, then stops.
+function Stubborn(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  WaitStarted := True;
+  while not ACtx.IsCancelled do
+    Sleep(5);
+  Sleep(StubbornMs);
+  Result := MCPTextResult('late');
+end;
+
+// Nothing to ask the first time: runs again with its state.
+function StateOnly(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  if ACtx.RequestState = 'again' then
+    Exit(MCPTextResult('ran again'));
+  Result := MCPInputRequired(nil, 'again');
+end;
+
+// A result the wire cannot carry: a non-finite number.
+function Unsendable(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPStructuredResult(TJSONFloatNumber.Create(Infinity));
 end;
 
 function FailTool(AArguments: TJSONObject;
@@ -173,6 +241,15 @@ begin
   Result := Content.Get('v', '?');
 end;
 
+// Asks under a key with a '#' of its own.
+function Drafty(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  if MCPInputResponse(ACtx, 'q#draft') <> nil then
+    Exit(MCPTextResult(Answer(ACtx, 'q#draft')));
+  Result := MCPInputRequired(TJSONObject.Create(['q#draft', Elicit('Q?')]));
+end;
+
 // Three rounds: "name", then "name" again with "city", then done.
 function Ask(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
@@ -203,6 +280,19 @@ begin
     Exit(MCPTextResult(Answer(ACtx, 'a') + Answer(ACtx, 'b')));
   Result := MCPInputRequired(TJSONObject.Create(['a', Elicit('A?'), 'b',
     Elicit('B?')]));
+end;
+
+// Keys that differ only in case, and one with "=" in it.
+function Cased(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  if (MCPInputResponse(ACtx, 'k') <> nil) and
+    (MCPInputResponse(ACtx, 'K') <> nil) and
+    (MCPInputResponse(ACtx, 'x=y') <> nil) then
+    Exit(MCPTextResult(Answer(ACtx, 'k') + Answer(ACtx, 'K') +
+      Answer(ACtx, 'x=y')));
+  Result := MCPInputRequired(TJSONObject.Create(['k', Elicit('k?'), 'K',
+    Elicit('K?'), 'x=y', Elicit('x=y?')]));
 end;
 
 function Sample(AArguments: TJSONObject;
@@ -245,6 +335,10 @@ end;
 procedure TTasksSuite.BeforeEach;
 begin
   SawCancel := False;
+  WaitStarted := False;
+  OwnerFreed := False;
+  UsedAfterFree := False;
+  StubbornMs := 0;
   Rounds := 0;
   FServer := TMCPServer.Create('tasks', '1.0');
   FClient := nil;
@@ -259,8 +353,9 @@ end;
 
 procedure TTasksSuite.RegisterFixture;
 const
-  OPTIONAL_TOOLS: array[0..7] of string = ('wait', 'fail', 'crash',
-    'refuse', 'ask', 'pair', 'sample', 'greeting');
+  OPTIONAL_TOOLS: array[0..12] of string = ('wait', 'fail', 'crash',
+    'refuse', 'ask', 'pair', 'sample', 'greeting', 'cased', 'stubborn',
+    'stateonly', 'unsendable', 'drafty');
 var
   Name: string;
 begin
@@ -272,6 +367,13 @@ begin
   FServer.RegisterTool('refuse', 'Protocol error', NO_ARGUMENTS, Refuse);
   FServer.RegisterTool('ask', 'Three rounds', NO_ARGUMENTS, Ask);
   FServer.RegisterTool('pair', 'Two at once', NO_ARGUMENTS, Pair);
+  FServer.RegisterTool('cased', 'Keys by case', NO_ARGUMENTS, Cased);
+  FServer.RegisterTool('stubborn', 'Slow to stop', NO_ARGUMENTS, Stubborn);
+  FServer.RegisterTool('drafty', 'A key with a #', NO_ARGUMENTS, Drafty);
+  FServer.RegisterTool('stateonly', 'A round without questions',
+    NO_ARGUMENTS, StateOnly);
+  FServer.RegisterTool('unsendable', 'A non-finite result', NO_ARGUMENTS,
+    Unsendable);
   FServer.RegisterTool('sample', 'Sampling', NO_ARGUMENTS, Sample);
   FServer.RegisterTool('greeting', 'Non-ASCII', NO_ARGUMENTS, Greeting);
   FTasks := EnableTasks(FServer);
@@ -331,6 +433,15 @@ begin
       Exit;
     Sleep(10);
   end;
+end;
+
+procedure AwaitStart;
+var
+  Step: Integer;
+begin
+  for Step := 1 to 500 do
+    if not WaitStarted then
+      Sleep(10);
 end;
 
 function TTasksSuite.ErrorCode(AResponse: TJSONObject): Integer;
@@ -592,23 +703,66 @@ begin
   finally
     Response.Free;
   end;
+  // Keys are matched exactly: by case, and with "=" in them.
+  TaskId := StartTask('cased');
+  WaitFor(TaskId, 'input_required').Free;
+  Client.Request('tasks/update', '{"taskId":"' + TaskId +
+    '","inputResponses":{"K":{"action":"accept","content":{"v":"2"}}}}')
+    .Free;
+  Response := GetTask(TaskId);
+  try
+    Expect<Boolean>((Response.FindPath('result.inputRequests.k') <> nil) and
+      (Response.FindPath('result.inputRequests.K') = nil)).ToBe(True);
+  finally
+    Response.Free;
+  end;
+  Client.AnswerInput('k', '{"action":"accept","content":{"v":"1"}}');
+  Client.AnswerInput('x=y', '{"action":"accept","content":{"v":"3"}}');
+  Response := Client.AwaitTask(TaskId);
+  try
+    Expect<string>(Response.FindPath('result.result.content[0].text')
+      .AsString).ToBe('123');
+  finally
+    Response.Free;
+  end;
 end;
 
 // An input request the creating request's client did not declare fails
 // the task with -32021, as a call's round would be refused.
+// The questions go only to a poll that declares what they need: one
+// that does not gets -32021, and the task waits on for one that does.
 procedure TTasksSuite.TestInputCapabilityGate;
 var
   Response: TJSONObject;
+  TaskId: string;
+  Step: Integer;
 begin
   RegisterFixture;
-  Response := Client.AwaitTask(StartTask('sample'));
+  TaskId := StartTask('sample');
+  Response := nil;
+  for Step := 1 to 500 do
+  begin
+    FreeAndNil(Response);
+    Response := GetTask(TaskId);
+    if ErrorCode(Response) <> 0 then
+      Break;
+    Sleep(10);
+  end;
+  try
+    Expect<Integer>(ErrorCode(Response)).ToBe(-32021);
+    Expect<string>(Response.FindPath('error.data').AsJSON).ToBe(
+      '{ "requiredCapabilities" : { "sampling" : {} } }');
+  finally
+    Response.Free;
+  end;
+  Client.SetClientCapabilities('{"sampling":{},"extensions":' +
+    '{"io.modelcontextprotocol/tasks":{}}}');
+  Response := GetTask(TaskId);
   try
     Expect<string>(Response.FindPath('result.status').AsString)
-      .ToBe('failed');
-    Expect<Integer>(Response.FindPath('result.error.code').AsInteger)
-      .ToBe(-32021);
-    Expect<string>(Response.FindPath('result.error.data').AsJSON).ToBe(
-      '{ "requiredCapabilities" : { "sampling" : {} } }');
+      .ToBe('input_required');
+    Expect<string>(Response.FindPath('result.inputRequests.s.method')
+      .AsString).ToBe('sampling/createMessage');
   finally
     Response.Free;
   end;
@@ -622,6 +776,7 @@ var
 begin
   RegisterFixture;
   TaskId := StartTask('wait');
+  AwaitStart;
   Ack := Client.Request('tasks/cancel', '{"taskId":"' + TaskId + '"}');
   try
     Expect<string>(Ack.FindPath('result.resultType').AsString)
@@ -860,12 +1015,16 @@ end;
 procedure TTasksSuite.TestMaxActive;
 var
   Response: TJSONObject;
-  First: string;
+  First, Freed: string;
+  Step: Integer;
 begin
   RegisterFixture;
   FTasks.MaxActive := 1;
-  First := StartTask('wait');
+  // A handler slow to stop keeps its place after it is cancelled.
+  StubbornMs := 300;
+  First := StartTask('stubborn');
   Expect<Boolean>(First <> '').ToBe(True);
+  AwaitStart;
   // Full: an optional tool runs as usual, a required one is refused.
   Response := Client.CallTool('wait', '{"ms":0}');
   try
@@ -874,6 +1033,7 @@ begin
   finally
     Response.Free;
   end;
+  Client.Request('tasks/cancel', '{"taskId":"' + First + '"}').Free;
   Response := Client.CallTool('must', '{"ms":0}');
   try
     Expect<Integer>(ErrorCode(Response)).ToBe(-32603);
@@ -882,9 +1042,16 @@ begin
   finally
     Response.Free;
   end;
-  // A finished task frees its place.
-  Client.Request('tasks/cancel', '{"taskId":"' + First + '"}').Free;
-  Expect<Boolean>(StartTask('must', '{"ms":0}') <> '').ToBe(True);
+  // Once its handler has returned, the place is free.
+  Freed := '';
+  for Step := 1 to 500 do
+  begin
+    Freed := StartTask('must', '{"ms":0}');
+    if Freed <> '' then
+      Break;
+    Sleep(10);
+  end;
+  Expect<Boolean>(Freed <> '').ToBe(True);
 end;
 
 procedure TTasksSuite.TestTtl;
@@ -896,14 +1063,19 @@ begin
   RegisterFixture;
   FTasks.TtlMs := 100;
   TaskId := StartTask('wait');
+  AwaitStart;
   Response := GetTask(TaskId);
   try
     Expect<Integer>(Response.FindPath('result.ttlMs').AsInteger).ToBe(100);
   finally
     Response.Free;
   end;
-  Sleep(150);
-  // Gone, and its handler was cancelled.
+  // The handler sees its deadline without any request.
+  for Step := 1 to 500 do
+    if not SawCancel then
+      Sleep(10);
+  Expect<Boolean>(SawCancel).ToBe(True);
+  // Gone.
   Response := GetTask(TaskId);
   try
     Expect<Integer>(ErrorCode(Response)).ToBe(-32602);
@@ -916,10 +1088,11 @@ begin
   Expect<Boolean>(SawCancel).ToBe(True);
 end;
 
+// No task goes before its ttlMs ends: a full store takes no new one.
 procedure TTasksSuite.TestMaxKept;
 var
   Response: TJSONObject;
-  First, Second, Third: string;
+  First, Second: string;
 begin
   RegisterFixture;
   FTasks.MaxActive := 2;
@@ -928,16 +1101,20 @@ begin
   Client.AwaitTask(First).Free;
   Second := StartTask('wait', '{"ms":0}');
   Client.AwaitTask(Second).Free;
-  // The oldest finished task makes room.
-  Third := StartTask('wait', '{"ms":0}');
-  Expect<Boolean>(Third <> '').ToBe(True);
-  Response := GetTask(First);
+  Response := Client.CallTool('wait', '{"ms":0}');
   try
-    Expect<Integer>(ErrorCode(Response)).ToBe(-32602);
+    Expect<string>(Response.FindPath('result.resultType').AsString)
+      .ToBe('complete');
   finally
     Response.Free;
   end;
-  Response := GetTask(Second);
+  Response := Client.CallTool('must', '{"ms":0}');
+  try
+    Expect<Integer>(ErrorCode(Response)).ToBe(-32603);
+  finally
+    Response.Free;
+  end;
+  Response := GetTask(First);
   try
     Expect<string>(Response.FindPath('result.status').AsString)
       .ToBe('completed');
@@ -1024,10 +1201,111 @@ procedure TTasksSuite.TestTeardownCancels;
 begin
   RegisterFixture;
   StartTask('wait');
+  AwaitStart;
   StartTask('pair');
   FreeAndNil(FClient);
   FreeAndNil(FServer);
   Expect<Boolean>(SawCancel).ToBe(True);
+end;
+
+procedure TTasksSuite.TestTeardownBeforeAdoptedOwners;
+var
+  Owner: TToolOwner;
+begin
+  RegisterFixture;
+  Owner := TToolOwner.Create;
+  FServer.RegisterTool('spin', 'Reads its owner', NO_ARGUMENTS, Owner.Spin);
+  FTasks.SetToolSupport('spin', tsOptional);
+  FServer.Adopt(Owner);
+  StartTask('spin');
+  AwaitStart;
+  FreeAndNil(FClient);
+  FreeAndNil(FServer);
+  Expect<Boolean>(OwnerFreed).ToBe(True);
+  Expect<Boolean>(UsedAfterFree).ToBe(False);
+end;
+
+// A round that asks for nothing runs again at once with its state.
+procedure TTasksSuite.TestStateOnlyRound;
+var
+  Response: TJSONObject;
+  TaskId: string;
+begin
+  RegisterFixture;
+  // AwaitTask answers a '#' key only with its own answer, or for the
+  // server's numeric suffix.
+  Client.AnswerInput('q', '{"action":"accept","content":{"v":"wrong"}}');
+  TaskId := StartTask('drafty');
+  Response := Client.AwaitTask(TaskId);
+  try
+    Expect<string>(Response.FindPath('result.status').AsString)
+      .ToBe('input_required');
+  finally
+    Response.Free;
+  end;
+  Client.AnswerInput('q#draft', '{"action":"accept","content":{"v":"ok"}}');
+  Response := Client.AwaitTask(TaskId);
+  try
+    Expect<string>(Response.FindPath('result.result.content[0].text')
+      .AsString).ToBe('ok');
+  finally
+    Response.Free;
+  end;
+  Response := Client.AwaitTask(StartTask('stateonly'));
+  try
+    Expect<string>(Response.FindPath('result.result.content[0].text')
+      .AsString).ToBe('ran again');
+  finally
+    Response.Free;
+  end;
+end;
+
+// A result the wire cannot carry fails the task once, with -32603,
+// instead of failing every poll.
+procedure TTasksSuite.TestUnsendableResult;
+var
+  Response: TJSONObject;
+begin
+  RegisterFixture;
+  Response := Client.AwaitTask(StartTask('unsendable'));
+  try
+    Expect<string>(Response.FindPath('result.status').AsString)
+      .ToBe('failed');
+    Expect<Integer>(Response.FindPath('result.error.code').AsInteger)
+      .ToBe(-32603);
+  finally
+    Response.Free;
+  end;
+end;
+
+// An answer that is no result object is refused, and its question stays
+// open.
+procedure TTasksSuite.TestMalformedAnswer;
+var
+  Response: TJSONObject;
+  TaskId: string;
+begin
+  RegisterFixture;
+  TaskId := StartTask('pair');
+  WaitFor(TaskId, 'input_required').Free;
+  Response := Client.Request('tasks/update', '{"taskId":"' + TaskId +
+    '","inputResponses":{"a":{"action":"accept","content":{"v":"1"}},' +
+    '"b":"yes"}}');
+  try
+    Expect<Integer>(ErrorCode(Response)).ToBe(-32602);
+    Expect<string>(Response.FindPath('error.message').AsString)
+      .ToBe('Invalid params: inputResponses["b"] must be an object');
+  finally
+    Response.Free;
+  end;
+  // Neither was taken.
+  Response := GetTask(TaskId);
+  try
+    Expect<Boolean>((Response.FindPath('result.inputRequests.a') <> nil) and
+      (Response.FindPath('result.inputRequests.b') <> nil)).ToBe(True);
+  finally
+    Response.Free;
+  end;
 end;
 
 // A listen stream that lists a task gets its whole state, first as it
@@ -1112,7 +1390,8 @@ procedure TTasksSuite.TestListenRefusals;
 var
   Session: TMCPSession;
   Host: TMCPStreamHost;
-  Line: string;
+  Stream: TMCPStream;
+  Line, Lines, TaskId: string;
 begin
   RegisterFixture;
   Host := TMCPStreamHost.Create;
@@ -1131,6 +1410,24 @@ begin
       META + '}}', Line);
     Expect<Boolean>(Pos('"code" : -32602', Line) > 0).ToBe(True);
     Expect<Boolean>(Host.TakeParked = nil).ToBe(True);
+    // A stream whose request did not declare elicitation gets no state of
+    // a task that waits on an elicitation, as tasks/get would refuse it.
+    TaskId := StartTask('pair');
+    WaitFor(TaskId, 'input_required').Free;
+    FServer.HandleMessage(Session, '{"jsonrpc":"2.0","id":3,"method":' +
+      '"subscriptions/listen","params":{"notifications":{"taskIds":["' +
+      TaskId + '"]},"_meta":{"io.modelcontextprotocol/protocolVersion":' +
+      '"2026-07-28","io.modelcontextprotocol/clientCapabilities":' +
+      '{"extensions":{"io.modelcontextprotocol/tasks":{}}}}}}', Line);
+    Stream := Host.TakeParked;
+    try
+      Lines := '';
+      Stream.Step(CaptureSink, @Lines);
+      Expect<Boolean>((Pos('acknowledged', Lines) > 0) and
+        (Pos('notifications/tasks', Lines) = 0)).ToBe(True);
+    finally
+      Stream.Free;
+    end;
   finally
     Session.Free;
     Host.Free;
@@ -1172,6 +1469,14 @@ begin
     TestUtf8Result);
   Test('freeing the server cancels running tasks and waits',
     TestTeardownCancels);
+  Test('teardown stops tasks before it frees what their tools use',
+    TestTeardownBeforeAdoptedOwners);
+  Test('a round that asks for nothing runs again with its state',
+    TestStateOnlyRound);
+  Test('a result the wire cannot carry fails the task with -32603',
+    TestUnsendableResult);
+  Test('an answer that is no object is refused and taken by no one',
+    TestMalformedAnswer);
   Test('a listen stream gets a task''s state after each change',
     TestStatusNotifications);
   Test('taskIds without the extension or as a non-array are refused',

@@ -65,8 +65,9 @@ type
     function Agree(AValue: TJSONData;
       const ACtx: TMCPRequestContext): TJSONData; virtual; abstract;
     // A feed for a new stream, for AAgreed (borrowed: what Agree
-    // returned).
-    function Open(AAgreed: TJSONData): TMCPSubscriptionFeed; virtual;
+    // returned); ACtx is the listen request's, valid for the call only.
+    function Open(AAgreed: TJSONData;
+      const ACtx: TMCPRequestContext): TMCPSubscriptionFeed; virtual;
       abstract;
   end;
 
@@ -290,7 +291,7 @@ begin
       if Agreed = nil then
         Continue;
       Acknowledged.Add(Source.FilterKey, Agreed);
-      Feeds.Add(Source.Open(Agreed));
+      Feeds.Add(Source.Open(Agreed, ACtx));
     end;
   except
     for I := 0 to Feeds.Count - 1 do

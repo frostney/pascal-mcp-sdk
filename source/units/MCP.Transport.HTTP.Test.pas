@@ -551,7 +551,8 @@ type
     function FilterKey: string; override;
     function Agree(AValue: TJSONData;
       const ACtx: TMCPRequestContext): TJSONData; override;
-    function Open(AAgreed: TJSONData): TMCPSubscriptionFeed; override;
+    function Open(AAgreed: TJSONData;
+      const ACtx: TMCPRequestContext): TMCPSubscriptionFeed; override;
   end;
 
 procedure TOneTickFeed.Collect(AOut: TJSONArray);
@@ -574,7 +575,8 @@ begin
   Result := TJSONBoolean.Create(True);
 end;
 
-function TOneTickSource.Open(AAgreed: TJSONData): TMCPSubscriptionFeed;
+function TOneTickSource.Open(AAgreed: TJSONData;
+  const ACtx: TMCPRequestContext): TMCPSubscriptionFeed;
 begin
   Result := TOneTickFeed.Create;
 end;

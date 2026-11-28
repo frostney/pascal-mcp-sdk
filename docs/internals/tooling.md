@@ -267,8 +267,10 @@ scenario fails only on a gap in the library.
 CI runs it as the **required** `conformance` job on every PR and
 uploads the results as the `conformance-results` artifact. The job
 fails the PR workflow whenever the run differs from the baseline, in
-either direction. Every scenario the suite scores passes; the baseline
-still lists the Tasks extension scenarios as expected failures (#82).
+either direction. Every scenario the suite scores passes, and so do
+the nine Tasks extension scenarios it runs; `tasks-status-notifications`
+is an expected skip (#139), since the suite skips it whatever the
+server does.
 Only the HTTP binding is covered: the stdio binding is not exercised
 here.
 

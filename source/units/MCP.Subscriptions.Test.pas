@@ -31,6 +31,12 @@ const
 var
   Captured: string;
 
+// The streams' clock in these tests: fixed, so a due time is exact.
+function TestClock: Int64;
+begin
+  Result := 5000;
+end;
+
 type
   // Sends "ticks" notifications: as many as the filter's number, one per
   // poll, each with a non-ASCII label.
@@ -49,7 +55,8 @@ type
     function FilterKey: string; override;
     function Agree(AValue: TJSONData;
       const ACtx: TMCPRequestContext): TJSONData; override;
-    function Open(AAgreed: TJSONData): TMCPSubscriptionFeed; override;
+    function Open(AAgreed: TJSONData;
+      const ACtx: TMCPRequestContext): TMCPSubscriptionFeed; override;
   end;
 
   TListenSuite = class(TTestSuite)
@@ -113,7 +120,8 @@ begin
   Result := TJSONIntegerNumber.Create(AValue.AsInteger);
 end;
 
-function TTickSource.Open(AAgreed: TJSONData): TMCPSubscriptionFeed;
+function TTickSource.Open(AAgreed: TJSONData;
+  const ACtx: TMCPRequestContext): TMCPSubscriptionFeed;
 begin
   Result := TTickFeed.Create;
   TTickFeed(Result).FLeft := AAgreed.AsInteger;
@@ -122,6 +130,7 @@ end;
 procedure TListenSuite.BeforeEach;
 begin
   Captured := '';
+  MCPStreamClock := @TestClock;
   FServer := TMCPServer.Create('listen', '1.0');
   FSession := nil;
   FHost := TMCPStreamHost.Create;
@@ -130,6 +139,7 @@ end;
 
 procedure TListenSuite.AfterEach;
 begin
+  MCPStreamClock := nil;
   FreeAndNil(FStream);
   FreeAndNil(FSession);
   FreeAndNil(FHost);
@@ -238,7 +248,7 @@ procedure TListenSuite.TestNotifications;
 begin
   AddSubscriptionSource(FServer, TTickSource.Create);
   Listen('"notifications":{"ticks":2},');
-  Expect<Int64>(Step - FStream.Clock()).ToBe(MCP_SUBSCRIPTION_POLL_MS);
+  Expect<Int64>(Step).ToBe(5000 + MCP_SUBSCRIPTION_POLL_MS);
   // The first poll after the acknowledgment, byte-exact.
   Expect<string>(Copy(Captured, Pos(#10, Captured) + 1, MaxInt)).ToBe(
     '{ "jsonrpc" : "2.0", "method" : "notifications/ticks", "params" : { ' +

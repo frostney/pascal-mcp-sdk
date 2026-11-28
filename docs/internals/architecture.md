@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-pascal-mcp-sdk is twenty-one units layered strictly bottom-up. Four form the
+pascal-mcp-sdk is twenty-three units layered strictly bottom-up. Four form the
 request chain — `MCP.JSONRPC` (the JSON-RPC 2.0 profile MCP mandates),
 `MCP.Protocol` (the stateless per-request `_meta` model of spec
 revision 2026-07-28), `MCP.Server` (the sans-I/O dispatch core), and a
@@ -192,8 +192,9 @@ order, and once about one line's budget is queued the poll stops
 reading, so a cancellation behind that backlog waits its turn. The
 HTTP binding's poll reports a closed or reset connection, checked at
 most every 50 ms. No thread is involved, so a stdio-only program needs
-no thread driver; cancellation stays cooperative, as handlers already
-code it. The poll lives on the session rather than arriving with each
+no thread driver unless it enables Tasks, whose handlers run on threads
+of their own (`MCP.Tasks`); cancellation stays cooperative, as handlers
+already code it. The poll lives on the session rather than arriving with each
 call, as [ADR-0001](../adr/0001-sans-io-core.md#amendment-2026-11-27-93)
 records.
 
@@ -235,7 +236,9 @@ notifications, such as the Tasks extension's.
 
 Handlers are synchronous and come in two shapes per registry — plain
 function pointers and `of object` method pointers — so both programs
-and class-based hosts (lantaarn) register naturally.
+and class-based hosts (lantaarn) register naturally. A tool that runs
+as a task (`MCP.Tasks`) keeps its synchronous handler, which runs on
+the task's own thread instead of the request's.
 
 Tool schemas come from `MCP.Schema` in two forms:
 
