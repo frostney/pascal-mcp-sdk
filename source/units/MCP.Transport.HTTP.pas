@@ -88,10 +88,9 @@ unit MCP.Transport.HTTP;
 //     event. And when
 //     a stream write fails, the failure aborts the running handler,
 //     the core converts it into a response the transport can no
-//     longer deliver, and nothing further is sent for that request
-//     — subscriptions/listen streams do not arise because the core
-//     advertises no subscription capability;
-//   - a push stream a handler parks (events/stream, #126) is answered
+//     longer deliver, and nothing further is sent for that request;
+//   - a push stream a handler parks (events/stream, #126, and
+//     subscriptions/listen, #138) is answered
 //     as an SSE stream at once and stepped in the request's thread
 //     until it ends; a closed connection, checked at least every 50 ms,
 //     or a failed write cancels it with nothing more sent, and Stop

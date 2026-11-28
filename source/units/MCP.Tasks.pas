@@ -17,8 +17,9 @@
   requests, under keys unique over its lifetime, until tasks/update has
   answered every one; the handler then runs again with the answers and
   its requestState, as for a retried call. Tasks live in this process's
-  memory until their ttlMs ends. notifications/tasks is not sent: it
-  needs subscriptions/listen, which this server does not serve.
+  memory until their ttlMs ends. A subscriptions/listen stream that
+  lists taskIds gets notifications/tasks with a task's whole state after
+  each change (Task Status Notifications, #138; MCP.Subscriptions).
 }
 
 unit MCP.Tasks;
@@ -147,7 +148,8 @@ uses
   MCP.Crypto,
   MCP.Errors,
   MCP.JSONRPC,
-  MCP.Streams;
+  MCP.Streams,
+  MCP.Subscriptions;
 
 type
   TTaskStatus = (tkWorking, tkInputRequired, tkCompleted, tkFailed,
@@ -177,6 +179,8 @@ type
     StatusMessage: string;
     CreatedAt, UpdatedAt: string;
     CreatedMs: Int64;
+    // Counts every change a notification would show.
+    Version: Int64;
     CallResult: TJSONObject; // owned: the CallToolResult once completed
     Error: TJSONObject; // owned: the JSON-RPC error once failed
     // The round in progress: surfaced key -> request (owned), surfaced
@@ -198,6 +202,8 @@ type
     function Terminal: Boolean;
     // Under the lock.
     procedure SetStatus(AStatus: TTaskStatus; const AMessage: string = '');
+    // The task changed (under the lock): lastUpdatedAt and Version.
+    procedure Touch;
     // The Task fields (new); with ADetailed the status's own payload
     // too (result, error or inputRequests). Under the lock.
     function Snapshot(ADetailed: Boolean): TJSONObject;
@@ -295,7 +301,13 @@ procedure TTaskEntry.SetStatus(AStatus: TTaskStatus; const AMessage: string);
 begin
   Status := AStatus;
   StatusMessage := AMessage;
+  Touch;
+end;
+
+procedure TTaskEntry.Touch;
+begin
   UpdatedAt := UtcStamp;
+  Inc(Version);
 end;
 
 function TTaskEntry.Snapshot(ADetailed: Boolean): TJSONObject;
@@ -892,7 +904,7 @@ function TMCPTasks.UpdateTask(AParams: TJSONObject;
 var
   Entry: TTaskEntry;
   Responses: TJSONData;
-  I, Slot: Integer;
+  I, Slot, Outstanding: Integer;
   Key: string;
 begin
   System.EnterCriticalSection(FLock);
@@ -906,6 +918,7 @@ begin
     // input_required for the rest (Task Update Requests).
     if (Entry.Status = tkInputRequired) and (Entry.Pending <> nil) then
     begin
+      Outstanding := Entry.Pending.Count;
       for I := 0 to TJSONObject(Responses).Count - 1 do
       begin
         Key := TJSONObject(Responses).Names[I];
@@ -918,12 +931,14 @@ begin
       end;
       // Every request answered: working again at once, so no poll sees
       // input_required without its requests; the worker takes the
-      // answers.
+      // answers. Fewer open requests is a change too.
       if Entry.Pending.Count = 0 then
       begin
         Entry.SetStatus(tkWorking);
         RTLEventSetEvent(Entry.Wake);
-      end;
+      end
+      else if Entry.Pending.Count < Outstanding then
+        Entry.Touch;
     end;
     Result := TJSONObject.Create;
   finally
@@ -949,6 +964,142 @@ begin
     Result := TJSONObject.Create;
   finally
     System.LeaveCriticalSection(FLock);
+  end;
+end;
+
+type
+  // notifications/tasks on subscriptions/listen (Task Status
+  // Notifications): the taskIds filter key.
+  TTaskSource = class(TMCPSubscriptionSource)
+  private
+    FTasks: TMCPTasks; // borrowed: the server owns both
+  public
+    constructor Create(ATasks: TMCPTasks);
+    function FilterKey: string; override;
+    function Agree(AValue: TJSONData;
+      const ACtx: TMCPRequestContext): TJSONData; override;
+    function Open(AAgreed: TJSONData): TMCPSubscriptionFeed; override;
+  end;
+
+  // One stream's tasks, and the version of each it sent last.
+  TTaskFeed = class(TMCPSubscriptionFeed)
+  private
+    FTasks: TMCPTasks;
+    FIds: TStringList; // task id = last version sent
+  public
+    constructor Create(ATasks: TMCPTasks; AIds: TJSONArray);
+    destructor Destroy; override;
+    procedure Collect(AOut: TJSONArray); override;
+  end;
+
+constructor TTaskSource.Create(ATasks: TMCPTasks);
+begin
+  inherited Create;
+  FTasks := ATasks;
+end;
+
+function TTaskSource.FilterKey: string;
+begin
+  Result := 'taskIds';
+end;
+
+// The tasks the server agrees to notify about are those of AValue it
+// knows now. A client that did not declare the extension gets -32021.
+function Listed(AIds: TJSONArray; const AId: string): Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to AIds.Count - 1 do
+    if AIds.Strings[I] = AId then
+      Exit(True);
+  Result := False;
+end;
+
+function TTaskSource.Agree(AValue: TJSONData;
+  const ACtx: TMCPRequestContext): TJSONData;
+var
+  I: Integer;
+  Ids: TJSONArray;
+begin
+  if not ACtx.HasExtension(MCP_TASKS_EXTENSION) then
+    raise ExtensionRequired;
+  if AValue.JSONType <> jtArray then
+    raise InvalidParams('notifications.taskIds must be an array of strings');
+  for I := 0 to AValue.Count - 1 do
+    if AValue.Items[I].JSONType <> jtString then
+      raise InvalidParams('notifications.taskIds must be an array of ' +
+        'strings');
+  Ids := TJSONArray.Create;
+  try
+    System.EnterCriticalSection(FTasks.FLock);
+    try
+      FTasks.Purge(0);
+      for I := 0 to AValue.Count - 1 do
+        if (FTasks.FindEntry(AValue.Items[I].AsString) <> nil) and
+          not Listed(Ids, AValue.Items[I].AsString) then
+          Ids.Add(AValue.Items[I].AsString);
+    finally
+      System.LeaveCriticalSection(FTasks.FLock);
+    end;
+  except
+    Ids.Free;
+    raise;
+  end;
+  Result := Ids;
+end;
+
+function TTaskSource.Open(AAgreed: TJSONData): TMCPSubscriptionFeed;
+begin
+  Result := TTaskFeed.Create(FTasks, TJSONArray(AAgreed));
+end;
+
+constructor TTaskFeed.Create(ATasks: TMCPTasks; AIds: TJSONArray);
+var
+  I: Integer;
+begin
+  inherited Create;
+  FTasks := ATasks;
+  FIds := TStringList.Create;
+  FIds.CaseSensitive := True;
+  // -1: nothing sent yet, so the first poll sends each task's state.
+  for I := 0 to AIds.Count - 1 do
+    FIds.Values[AIds.Strings[I]] := '-1';
+end;
+
+destructor TTaskFeed.Destroy;
+begin
+  FIds.Free;
+  inherited Destroy;
+end;
+
+procedure TTaskFeed.Collect(AOut: TJSONArray);
+var
+  I: Integer;
+  Entry: TTaskEntry;
+begin
+  System.EnterCriticalSection(FTasks.FLock);
+  try
+    FTasks.Purge(0);
+    I := 0;
+    while I < FIds.Count do
+    begin
+      Entry := TTaskEntry(FTasks.FindEntry(FIds.Names[I]));
+      // A task gone past its ttlMs sends nothing more.
+      if Entry = nil then
+      begin
+        FIds.Delete(I);
+        Continue;
+      end;
+      if IntToStr(Entry.Version) <> FIds.ValueFromIndex[I] then
+      begin
+        AOut.Add(TJSONObject.Create(['method', 'notifications/tasks',
+          'params', Entry.Snapshot(True)]));
+        FIds.ValueFromIndex[I] := IntToStr(Entry.Version);
+      end;
+      Inc(I);
+    end;
+  finally
+    System.LeaveCriticalSection(FTasks.FLock);
   end;
 end;
 
@@ -998,6 +1149,8 @@ begin
   AServer.RegisterRoute(TASK_METHODS[0], 'taskId', nil);
   AServer.RegisterRoute(TASK_METHODS[1], 'taskId', nil);
   AServer.RegisterRoute(TASK_METHODS[2], 'taskId', nil);
+  // Task status notifications on subscriptions/listen.
+  AddSubscriptionSource(AServer, TTaskSource.Create(Result));
   AServer.EnsureExtension(MCP_TASKS_EXTENSION);
   AServer.RestrictExtensionToModern(MCP_TASKS_EXTENSION);
   // No settings are defined; {} whatever is declared before or after.

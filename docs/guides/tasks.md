@@ -192,6 +192,27 @@ ends. On stdio, `RunMCPStdioServer` returns at the end of input once
 the queued requests are served, and freeing the server then ends the
 tasks still running.
 
+## Status notifications
+
+A client that would rather not poll opens `subscriptions/listen` with
+the tasks it wants to follow:
+
+```json
+{"jsonrpc":"2.0","id":9,"method":"subscriptions/listen","params":{
+  "notifications":{"taskIds":["kU6vX0w..."]},"_meta":{ ... }}}
+```
+
+The stream acknowledges the tasks it found first
+(`notifications/subscriptions/acknowledged`, with only those of the
+listed ids it knows), then sends `notifications/tasks` with each task's
+whole state, as `tasks/get` would answer it: once at the start, and
+again after each change, a partly answered input round included. Every
+frame carries the request's id as
+`_meta["io.modelcontextprotocol/subscriptionId"]`. A task that expires
+sends nothing more. A request that lists `taskIds` without declaring
+the extension gets `-32021`. See [Server API](../reference/server.md#subscriptions)
+for how the stream ends.
+
 ## Threads
 
 Each task's handler runs on a thread of its own, beside the requests
@@ -213,10 +234,6 @@ suffixed key with the answer for its own name. See
 
 ## Not served
 
-- **`notifications/tasks`** is pushed over `subscriptions/listen`,
-  which the server does not serve yet
-  ([#138](https://github.com/frostney/pascal-mcp-sdk/issues/138)).
-  Clients poll, which the extension makes the default.
 - **The Tasks of the 2025-11-25 revision** (a `task` parameter on the
   request, `tasks/list`, `tasks/result`) are not served: the extension
   replaces them. A `task` parameter on `tools/call` is ignored.

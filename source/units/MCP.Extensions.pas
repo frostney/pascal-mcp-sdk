@@ -20,8 +20,10 @@ uses
 
 type
   // The core requests: those MCP.Server answers itself, and
-  // subscriptions/listen, which it leaves unanswered. Dispatch selects
-  // on this type, so a core method is always a reserved one too.
+  // subscriptions/listen, which it answers through the listen handler
+  // when a unit sets one (MCP.Subscriptions, #138) and with -32601
+  // otherwise. Dispatch selects on this type, so a core method is always
+  // a reserved one too.
   TMCPCoreMethod = (cmInitialize, cmPing, cmServerDiscover, cmToolsList,
     cmToolsCall, cmResourcesList, cmResourcesRead, cmResourcesTemplatesList,
     cmPromptsList, cmPromptsGet, cmCompletionComplete, cmSubscriptionsListen);
@@ -76,6 +78,7 @@ type
       Headers: TMCPHeaderLookup;
     end;
     FToolCallHook: TMCPToolCallHook;
+    FListenHandler: TMCPMethodHandler;
   public
     destructor Destroy; override;
     // '' once added; otherwise why not (an empty name, a nil handler, a
@@ -114,6 +117,11 @@ type
     // nil without a hook.
     function TakeToolCall(const AToolName: string; AArguments: TJSONObject;
       const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+    // '' once AHandler answers subscriptions/listen; otherwise why not (a
+    // nil handler, or one set already: one unit serves the method).
+    function SetListenHandler(AHandler: TMCPMethodHandler): string;
+    // The subscriptions/listen handler, or nil.
+    property ListenHandler: TMCPMethodHandler read FListenHandler;
     // Extension AId is left out of the classic capabilities.
     procedure RestrictToModern(const AId: string);
     // Extension AId is answered with ASettings (owned), replacing what
@@ -367,6 +375,17 @@ begin
   if Assigned(FToolCallHook) then
     Exit('A tool-call hook is already set');
   FToolCallHook := AHook;
+  Result := '';
+end;
+
+function TMCPExtensionHooks.SetListenHandler(
+  AHandler: TMCPMethodHandler): string;
+begin
+  if not Assigned(AHandler) then
+    Exit('A subscriptions/listen handler must not be nil');
+  if Assigned(FListenHandler) then
+    Exit('A subscriptions/listen handler is already set');
+  FListenHandler := AHandler;
   Result := '';
 end;
 

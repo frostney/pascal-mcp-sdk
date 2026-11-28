@@ -25,6 +25,13 @@ uses
   MCP.Protocol,
   MCP.Server;
 
+const
+  // The key every notification on a long-lived stream carries the
+  // stream's request id under, in params._meta (basic/patterns/
+  // subscriptions, Receiving Notifications; ext-events events.mdx, Event
+  // delivery), as does the result that ends it.
+  MCP_SUBSCRIPTION_ID_KEY = 'io.modelcontextprotocol/subscriptionId';
+
 type
   // A clock in milliseconds; MCPNowMs unless a test sets another.
   TMCPClock = function: Int64;

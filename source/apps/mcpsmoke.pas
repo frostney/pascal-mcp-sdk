@@ -713,8 +713,9 @@ var
   end;
 
 var
-  TaskId, Line: string;
+  TaskId, Line, Seen: string;
   Response: TJSONObject;
+  Step: Integer;
 begin
   NextId := 0;
   Fixture := TProcess.Create(nil);
@@ -769,6 +770,35 @@ begin
     Check(PathInt(Response, 'error.code') = -32602,
       'tasks: an unknown task answers -32602');
     Response.Free;
+
+    // A listen stream for a task (#138): the acknowledgment, then the
+    // task's state after each change, until it completes.
+    TaskId := Start('"name":"slow_compute","arguments":{"seconds":1}');
+    SendLine(Fixture, '{"jsonrpc":"2.0","id":900,"method":' +
+      '"subscriptions/listen","params":{"notifications":{"taskIds":["' +
+      TaskId + '"]},' + META_TASKS + '}}');
+    Response := NextJson(Fixture);
+    Check((PathString(Response, 'method') =
+      'notifications/subscriptions/acknowledged') and
+      (PathString(Response, 'params.notifications.taskIds[0]') = TaskId),
+      'tasks: subscriptions/listen acknowledges the task');
+    Response.Free;
+    Seen := '';
+    for Step := 1 to 20 do
+    begin
+      Response := NextJson(Fixture);
+      if (Response <> nil) and
+        (PathString(Response, 'method') = 'notifications/tasks') and
+        (PathString(Response, 'params.taskId') = TaskId) then
+        Seen := Seen + PathString(Response, 'params.status') + ' ';
+      Response.Free;
+      if Pos('completed', Seen) > 0 then
+        Break;
+    end;
+    Check(Seen = 'working completed ',
+      'tasks: notifications/tasks for each change, then completed');
+    SendLine(Fixture, '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+      '"params":{"requestId":900}}');
 
     // A task still running when stdin ends is cancelled, and the
     // process exits as usual.
