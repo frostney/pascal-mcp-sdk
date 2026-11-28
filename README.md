@@ -43,7 +43,7 @@ Pascal programs) and not
 **As an [lwpt](https://github.com/frostney/lwpt) dependency:**
 
 ```sh
-lwpt add frostney/pascal-mcp-sdk@^2.0
+lwpt add frostney/pascal-mcp-sdk@^3.0
 ```
 
 Your programs then `uses MCP.Server` (and friends) directly — lwpt

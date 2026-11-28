@@ -104,7 +104,7 @@ diagnostics go to stderr, and secrets come from the environment.
 ## Library versioning
 
 The library follows semver (lwpt package versions and git tags), so
-`lwpt add frostney/pascal-mcp-sdk@^2.0` keeps you on compatible
+`lwpt add frostney/pascal-mcp-sdk@^3.0` keeps you on compatible
 releases. Adopting a newer MCP protocol revision is a minor version at
 most as long as `supportedVersions` still contains everything
 previously advertised; dropping a revision is breaking. The release

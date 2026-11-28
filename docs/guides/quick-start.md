@@ -29,7 +29,7 @@ the library itself is covered in
 As an lwpt dependency, from your project root:
 
 ```sh
-lwpt add frostney/pascal-mcp-sdk@^2.0
+lwpt add frostney/pascal-mcp-sdk@^3.0
 lwpt build
 ```
 
