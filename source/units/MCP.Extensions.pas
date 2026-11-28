@@ -90,8 +90,9 @@ type
       ACacheable: Boolean): string;
     // Why AddMethod would refuse one of AMethods (repeats among them
     // included), or AddResolver APrefix ('' to check none); '' when all
-    // would be added. Nothing changes, so a caller can check before it
-    // adds any.
+    // would be added. subscriptions/listen among AMethods asks whether
+    // SetListenHandler would refuse instead. Nothing changes, so a caller
+    // can check before it adds any.
     function Preflight(const AMethods: array of string;
       const APrefix: string): string;
     function FindMethod(const AName: string; out AHandler: TMCPMethodHandler;
@@ -171,7 +172,7 @@ const
   CORE_METHOD_NAMES: array[TMCPCoreMethod] of string = ('initialize',
     'ping', 'server/discover', 'tools/list', 'tools/call', 'resources/list',
     'resources/read', 'resources/templates/list', 'prompts/list',
-    'prompts/get', 'completion/complete', 'subscriptions/listen');
+    'prompts/get', 'completion/complete', LISTEN_METHOD);
 
 function FindCoreMethod(const AName: string;
   out AMethod: TMCPCoreMethod): Boolean;
@@ -260,6 +261,16 @@ begin
   Result := Copy(AText, 1, Length(APrefix)) = APrefix;
 end;
 
+function ListenProblem(AHooks: TMCPExtensionHooks): string;
+var
+  Handler: TMCPMethodHandler;
+  Cacheable: Boolean;
+begin
+  Result := '';
+  if AHooks.FindMethod(LISTEN_METHOD, Handler, Cacheable) then
+    Result := 'A subscriptions/listen handler is already set';
+end;
+
 function TMCPExtensionHooks.Preflight(const AMethods: array of string;
   const APrefix: string): string;
 var
@@ -267,7 +278,12 @@ var
 begin
   for I := 0 to High(AMethods) do
   begin
-    Result := MethodNameProblem(Self, AMethods[I]);
+    // subscriptions/listen asks whether SetListenHandler would refuse
+    // (#138): no extension adds it, but one unit may serve it.
+    if AMethods[I] = LISTEN_METHOD then
+      Result := ListenProblem(Self)
+    else
+      Result := MethodNameProblem(Self, AMethods[I]);
     if Result <> '' then
       Exit;
     for J := 0 to I - 1 do
@@ -403,14 +419,13 @@ end;
 function TMCPExtensionHooks.SetListenHandler(
   AHandler: TMCPMethodHandler): string;
 var
-  Existing: TMCPMethodHandler;
-  Cacheable: Boolean;
   Slot: Integer;
 begin
   if not Assigned(AHandler) then
     Exit('A subscriptions/listen handler must not be nil');
-  if FindMethod(LISTEN_METHOD, Existing, Cacheable) then
-    Exit('A subscriptions/listen handler is already set');
+  Result := ListenProblem(Self);
+  if Result <> '' then
+    Exit;
   // Held among the methods, though AddMethod refuses a core one, so
   // dispatch finds it the way it finds an extension's.
   Slot := Length(FMethods);

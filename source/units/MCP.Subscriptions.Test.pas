@@ -80,6 +80,8 @@ type
     procedure TestCancelled;
     procedure TestNothingAgreed;
     procedure TestGuards;
+    procedure TestCoreFieldTypes;
+    procedure TestQuietStreamAndListenerCap;
   end;
 
 procedure CaptureSink(const ALine: string; AUserData: Pointer);
@@ -272,8 +274,18 @@ begin
   FStream.Close(CaptureSink, nil);
   Expect<string>(Captured).ToBe('{ "jsonrpc" : "2.0", "id" : "s-1", ' +
     '"result" : { "resultType" : "complete", "_meta" : { ' +
-    '"io.modelcontextprotocol/subscriptionId" : "s-1" } } }'#10);
+    '"io.modelcontextprotocol/subscriptionId" : "s-1", ' +
+    '"io.modelcontextprotocol/serverInfo" : { "name" : "listen", ' +
+    '"version" : "1.0" } } } }'#10);
   Expect<Boolean>(FStream.Finished).ToBe(True);
+  // Closed before its first step: the acknowledgment still comes first.
+  Listen('"notifications":{"ticks":1},', '8');
+  Captured := '';
+  FStream.Close(CaptureSink, nil);
+  Expect<Boolean>(Pos('notifications/subscriptions/acknowledged',
+    Copy(Captured, 1, Pos(#10, Captured))) > 0).ToBe(True);
+  Expect<Boolean>(Pos('"id" : 8, "result"', Copy(Captured,
+    Pos(#10, Captured) + 1, MaxInt)) > 0).ToBe(True);
 end;
 
 procedure TListenSuite.TestCancelled;
@@ -338,6 +350,44 @@ begin
   Expect<Boolean>(Raised).ToBe(True);
 end;
 
+// The core fields keep their schema types, though none is agreed to.
+procedure TListenSuite.TestCoreFieldTypes;
+begin
+  AddSubscriptionSource(FServer, TTickSource.Create);
+  Expect<Boolean>(Pos('"message" : "Invalid params: notifications.' +
+    'toolsListChanged must be a boolean"', Listen('"notifications":' +
+    '{"toolsListChanged":"yes"},')) > 0).ToBe(True);
+  Expect<Boolean>(Pos('notifications.resourceSubscriptions must be an ' +
+    'array of strings', Listen('"notifications":{"resourceSubscriptions":' +
+    '[1]},')) > 0).ToBe(True);
+  Expect<Boolean>(FStream = nil).ToBe(True);
+end;
+
+// A stream with nothing agreed asks no feed again after the
+// acknowledgment; past MaxListeners, a request is refused before
+// anything is acknowledged.
+procedure TListenSuite.TestQuietStreamAndListenerCap;
+var
+  First: TMCPStream;
+begin
+  AddSubscriptionSource(FServer, TTickSource.Create);
+  SetMaxListeners(FServer, 1);
+  Listen('"notifications":{},');
+  Expect<Int64>(Step).ToBe(High(Int64));
+  First := FStream;
+  FStream := nil;
+  try
+    Expect<Boolean>(Pos('"message" : "Too many subscriptions are open; ' +
+      'try again later"', Listen('"notifications":{},', '9')) > 0)
+      .ToBe(True);
+  finally
+    First.Free;
+  end;
+  // Its place is free once it ended.
+  Listen('"notifications":{},', '10');
+  Expect<Boolean>(FStream <> nil).ToBe(True);
+end;
+
 procedure TListenSuite.SetupTests;
 begin
   Test('without a source the method answers -32601', TestNoSource);
@@ -352,6 +402,9 @@ begin
   Test('nothing is sent after a cancellation', TestCancelled);
   Test('nothing agreed: an empty acknowledgment', TestNothingAgreed);
   Test('sources are guarded', TestGuards);
+  Test('the core filter fields keep their types', TestCoreFieldTypes);
+  Test('a quiet stream is not polled; MaxListeners caps the streams',
+    TestQuietStreamAndListenerCap);
 end;
 
 begin

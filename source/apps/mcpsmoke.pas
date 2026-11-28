@@ -765,9 +765,14 @@ begin
       'tasks: an unknown task answers -32602');
     Response.Free;
 
-    // A listen stream for a task (#138): the acknowledgment, then the
-    // task's state after each change, until it completes.
-    TaskId := Start('"name":"slow_compute","arguments":{"seconds":1}');
+    // A listen stream for a task (#138; basic/patterns/subscriptions and
+    // ext-tasks Task Status Notifications, verified 2026-11-28): the
+    // acknowledgment, then the task's state as it is, waiting for input,
+    // then each change once it is answered, until it completes.
+    TaskId := Start('"name":"confirm_delete","arguments":{"filename":' +
+      '"b.txt"}');
+    Check(Await(TaskId, 'input_required', Line),
+      'tasks: a task waits for input before the stream opens');
     SendLine(Fixture, '{"jsonrpc":"2.0","id":900,"method":' +
       '"subscriptions/listen","params":{"notifications":{"taskIds":["' +
       TaskId + '"]},' + META_TASKS + '}}');
@@ -777,6 +782,14 @@ begin
       (PathString(Response, 'params.notifications.taskIds[0]') = TaskId),
       'tasks: subscriptions/listen acknowledges the task');
     Response.Free;
+    Response := NextJson(Fixture);
+    Check((PathString(Response, 'method') = 'notifications/tasks') and
+      (PathString(Response, 'params.status') = 'input_required'),
+      'tasks: the stream sends the task as it is first');
+    Response.Free;
+    SendLine(Fixture, '{"jsonrpc":"2.0","id":901,"method":"tasks/update",' +
+      '"params":{"taskId":"' + TaskId + '","inputResponses":{"confirm":' +
+      '{"action":"accept","content":{"confirm":true}}},' + META_TASKS + '}}');
     Seen := '';
     for Step := 1 to 20 do
     begin

@@ -26,6 +26,7 @@ uses
   MCP.Protocol,
   MCP.Server,
   MCP.Streams,
+  MCP.Subscriptions,
   MCP.Tasks,
   MCP.Testing,
   TestingPascalLibrary;
@@ -72,6 +73,16 @@ type
       const ACtx: TMCPRequestContext): TMCPToolResult;
   end;
 
+  // A source for taskIds of another unit's, to make EnableTasks refuse.
+  TTaskIdsStub = class(TMCPSubscriptionSource)
+  public
+    function FilterKey: string; override;
+    function Agree(AValue: TJSONData;
+      const ACtx: TMCPRequestContext): TJSONData; override;
+    function Open(AAgreed: TJSONData;
+      const ACtx: TMCPRequestContext): TMCPSubscriptionFeed; override;
+  end;
+
   THookStub = class
     function Take(const AToolName: string; AArguments: TJSONObject;
       const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
@@ -115,6 +126,23 @@ begin
   end;
   Inc(Calls);
   Result := MCPTextResult('spun');
+end;
+
+function TTaskIdsStub.FilterKey: string;
+begin
+  Result := 'taskIds';
+end;
+
+function TTaskIdsStub.Agree(AValue: TJSONData;
+  const ACtx: TMCPRequestContext): TJSONData;
+begin
+  Result := nil;
+end;
+
+function TTaskIdsStub.Open(AAgreed: TJSONData;
+  const ACtx: TMCPRequestContext): TMCPSubscriptionFeed;
+begin
+  Result := nil;
 end;
 
 function THookStub.Take(const AToolName: string; AArguments: TJSONObject;
@@ -170,6 +198,7 @@ type
     procedure TestMalformedAnswer;
     procedure TestStatusNotifications;
     procedure TestListenRefusals;
+    procedure TestEnableRefusedCleanly;
   end;
 
 function Echo(AArguments: TJSONObject;
@@ -1422,7 +1451,6 @@ var
   Stream: TMCPStream;
   Line, Lines, TaskId: string;
   Notification: TJSONObject;
-  Step: Integer;
 begin
   RegisterFixture;
   TaskId := StartTask('pair');
@@ -1472,21 +1500,48 @@ begin
     Client.Request('tasks/update', '{"taskId":"' + TaskId +
       '","inputResponses":{"b":{"action":"accept","content":{"v":"2"}}}}')
       .Free;
+    // Two changes before the stream is stepped again: working, then
+    // completed, both sent, in order (#138 review).
+    Client.AwaitTask(TaskId).Free;
     Lines := '';
-    for Step := 1 to 500 do
-    begin
-      Stream.Step(CaptureSink, @Lines);
-      if Pos('"status" : "completed"', Lines) > 0 then
-        Break;
-      Sleep(10);
-    end;
-    Expect<Boolean>(Pos('"status" : "completed"', Lines) > 0).ToBe(True);
+    Stream.Step(CaptureSink, @Lines);
+    Expect<Boolean>((Pos('"status" : "working"', Lines) > 0) and
+      (Pos('"status" : "working"', Lines) <
+      Pos('"status" : "completed"', Lines))).ToBe(True);
     Expect<Boolean>(Pos('"result" : { "content" : [{ "type" : "text", ' +
       '"text" : "12" }]', Lines) > 0).ToBe(True);
   finally
     Stream.Free;
     Session.Free;
     Host.Free;
+  end;
+end;
+
+// A taskIds source added before EnableTasks: it refuses, and changes
+// nothing, so the server neither declares Tasks nor serves its methods.
+procedure TTasksSuite.TestEnableRefusedCleanly;
+var
+  Raised: Boolean;
+  Response: TJSONObject;
+begin
+  FServer.RegisterTool('echo', 'Sync only', NO_ARGUMENTS, Echo);
+  AddSubscriptionSource(FServer, TTaskIdsStub.Create);
+  Raised := False;
+  try
+    EnableTasks(FServer);
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  Expect<Boolean>(FServer.Adopted(TMCPTasks) = nil).ToBe(True);
+  Expect<string>(FServer.HookProblem(['tasks/get'], '')).ToBe('');
+  Response := Client.Discover;
+  try
+    Expect<Boolean>(Pos('io.modelcontextprotocol/tasks',
+      Response.AsJSON) = 0).ToBe(True);
+  finally
+    Response.Free;
   end;
 end;
 
@@ -1585,6 +1640,8 @@ begin
     TestStatusNotifications);
   Test('taskIds without the extension or as a non-array are refused',
     TestListenRefusals);
+  Test('EnableTasks refused by a listen conflict changes nothing',
+    TestEnableRefusedCleanly);
 end;
 
 begin

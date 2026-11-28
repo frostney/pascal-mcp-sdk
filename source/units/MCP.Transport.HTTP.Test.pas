@@ -1301,44 +1301,78 @@ begin
   Result := RawExchange(FTransport.Port, Request, ABody);
 end;
 
-// subscriptions/listen answers an SSE stream (#138): the
-// acknowledgment first, the notification, and on Stop the completion
-// result with the subscription id (Graceful Closure).
+// subscriptions/listen answers an SSE stream (#138; basic/patterns/
+// subscriptions, Acknowledgment, Receiving Notifications and Graceful
+// Closure, 2026-07-28, verified 2026-11-28): the acknowledgment first,
+// the notification, and once Stop ends it, the completion result with
+// the subscription id, then the end of the connection.
 procedure THTTPBinding.TestListenStream;
 var
-  Payload, Body: string;
-  Stopper: TStopLater;
+  Payload, Request, Body: string;
+  Sock: TInetSocket;
+  Buf: array[0..4095] of Byte;
+  Got: Integer;
+  Started: QWord;
 begin
   Payload := '{"jsonrpc":"2.0","id":8,"method":"subscriptions/listen",' +
     '"params":{"notifications":{"ticks":true,"toolsListChanged":true},' +
     META_MODERN + '}}';
-  Stopper := TStopLater.Create(FTransport, 400);
+  Request := 'POST /mcp HTTP/1.1'#13#10 +
+    'Host: 127.0.0.1:' + IntToStr(FTransport.Port) + #13#10 +
+    'Content-Type: application/json'#13#10 +
+    'Accept: application/json, text/event-stream'#13#10 +
+    'MCP-Protocol-Version: ' + MCP_PROTOCOL_VERSION + #13#10 +
+    'Mcp-Method: subscriptions/listen'#13#10 +
+    'Connection: close'#13#10 +
+    'Content-Length: ' + IntToStr(Length(Payload)) + #13#10#13#10 + Payload;
+  Body := '';
+  Sock := TInetSocket.Create('127.0.0.1', FTransport.Port);
   try
-    Expect<Integer>(RawExchange(FTransport.Port, 'POST /mcp HTTP/1.1'#13#10 +
-      'Host: 127.0.0.1:' + IntToStr(FTransport.Port) + #13#10 +
-      'Content-Type: application/json'#13#10 +
-      'Accept: application/json, text/event-stream'#13#10 +
-      'MCP-Protocol-Version: ' + MCP_PROTOCOL_VERSION + #13#10 +
-      'Mcp-Method: subscriptions/listen'#13#10 +
-      'Connection: close'#13#10 +
-      'Content-Length: ' + IntToStr(Length(Payload)) + #13#10#13#10 + Payload,
-      Body)).ToBe(200);
+    Sock.IOTimeout := 5000;
+    Sock.WriteBuffer(Request[1], Length(Request));
+    // Until the notification has arrived: the stream is open and stepped.
+    repeat
+      Got := Sock.Read(Buf[0], SizeOf(Buf));
+      if Got > 0 then
+      begin
+        SetLength(Body, Length(Body) + Got);
+        Move(Buf[0], Body[Length(Body) - Got + 1], Got);
+      end;
+    until (Got <= 0) or (Pos('notifications/ticks', Body) > 0);
+    Expect<Boolean>(Pos('notifications/ticks', Body) > 0).ToBe(True);
+    // The server ends it; the client reads to the end of the connection,
+    // well before the read timeout.
+    FTransport.Stop;
+    Started := GetTickCount64;
+    repeat
+      Got := Sock.Read(Buf[0], SizeOf(Buf));
+      if Got > 0 then
+      begin
+        SetLength(Body, Length(Body) + Got);
+        Move(Buf[0], Body[Length(Body) - Got + 1], Got);
+      end;
+    until Got <= 0;
+    Expect<Boolean>(GetTickCount64 - Started < 4000).ToBe(True);
   finally
-    Stopper.WaitFor;
-    Stopper.Free;
+    Sock.Free;
   end;
-  Expect<Integer>(Pos('data: { "jsonrpc" : "2.0", "method" : ' +
+  Expect<Boolean>(Pos('HTTP/1.1 200', Body) = 1).ToBe(True);
+  Expect<Boolean>(Pos('data: { "jsonrpc" : "2.0", "method" : ' +
     '"notifications/subscriptions/acknowledged", "params" : { ' +
     '"notifications" : { "ticks" : true }, "_meta" : { ' +
-    '"io.modelcontextprotocol/subscriptionId" : 8 } } }', Body)).ToBe(1);
+    '"io.modelcontextprotocol/subscriptionId" : 8 } } }', Body) > 0)
+    .ToBe(True);
+  Expect<Boolean>(Pos('acknowledged', Body) < Pos('notifications/ticks',
+    Body)).ToBe(True);
   Expect<Boolean>(Pos('data: { "jsonrpc" : "2.0", "method" : ' +
     '"notifications/ticks", "params" : { "n" : 1, "_meta" : { ' +
     '"io.modelcontextprotocol/subscriptionId" : 8 } } }', Body) > 0)
     .ToBe(True);
   Expect<Boolean>(Pos('data: { "jsonrpc" : "2.0", "id" : 8, "result" : ' +
     '{ "resultType" : "complete", "_meta" : { ' +
-    '"io.modelcontextprotocol/subscriptionId" : 8 } } }', Body) > 0)
-    .ToBe(True);
+    '"io.modelcontextprotocol/subscriptionId" : 8, ' +
+    '"io.modelcontextprotocol/serverInfo" : { "name" : "http-test", ' +
+    '"version" : "1.0" } } } }', Body) > 0).ToBe(True);
 end;
 
 // events/stream answers with an SSE stream at once (events.mdx,
