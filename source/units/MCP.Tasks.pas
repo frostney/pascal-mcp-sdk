@@ -44,6 +44,8 @@ const
   // How long a task stays readable after it was created, and the poll
   // interval suggested to clients, unless set otherwise.
   MCP_TASK_DEFAULT_TTL_MS = 3600000;
+  // The longest ttlMs: the largest integer a JSON number carries exactly.
+  MCP_TASK_MAX_TTL_MS = 9007199254740991;
   MCP_TASK_DEFAULT_POLL_INTERVAL_MS = 1000;
   // Tasks not yet finished at once, and tasks kept in all, finished ones
   // included, unless set otherwise.
@@ -126,9 +128,9 @@ type
     // Setting one replaces the other.
     procedure SetSelector(ASelector: TMCPTaskSelector); overload;
     procedure SetSelector(ASelector: TMCPTaskSelectorMethod); overload;
-    // A task's ttlMs: how long after creation it stays readable (at
-    // least 1). A task still running then is cancelled, and dropped at
-    // the next request.
+    // A task's ttlMs: how long after creation it stays readable (1 to
+    // MCP_TASK_MAX_TTL_MS). A task still running then is cancelled, and
+    // dropped at the next request to the task store.
     property TtlMs: Int64 read FTtlMs write SetTtlMs;
     // The pollIntervalMs suggested to clients (at least 1).
     property PollIntervalMs: Integer read FPollIntervalMs
@@ -151,7 +153,8 @@ type
 // classic-handshake client gets -32601). On Streamable HTTP these carry
 // Mcp-Name with the taskId. Task handlers run on threads, so on Unix the
 // program lists cthreads first in its uses clause; without it this raises
-// EMCPServer, as does a started server.
+// EMCPServer, as does a first call after the server started (a later
+// call returns the same settings, whose setters then raise).
 function EnableTasks(AServer: TMCPServer): TMCPTasks;
 
 implementation
@@ -175,6 +178,8 @@ const
     'completed', 'failed', 'cancelled');
   TASK_METHODS: array[0..2] of string = ('tasks/get', 'tasks/update',
     'tasks/cancel');
+  // The longest a parked worker waits before it looks at its deadline.
+  WAIT_SLICE_MS = 500;
   // Every capability an input request can need, so the kind check alone
   // decides at Park; the poll's own capabilities decide what is sent.
   EVERY_INPUT_CAPABILITY = '{"elicitation":{"form":{},"url":{}},' +
@@ -209,12 +214,16 @@ type
     Pending: TJSONObject;
     KeyMap: TJSONObject;
     Answers: TJSONObject;
-    // Every key ever surfaced, so none is used twice.
-    UsedKeys: TStringList;
+    // Every key ever surfaced, so none is used twice, compared exactly.
+    UsedKeys: TJSONObject;
     // What the next round of the handler starts with.
     NextResponses: TJSONObject; // owned; nil for none
     NextState: string;
     CancelRequested: Boolean;
+    // Set under the lock when the worker's loop has ended; Joined once
+    // its thread was joined, which happens once only (#82 review: a
+    // second pthread_join is undefined).
+    WorkerDone, Joined: Boolean;
     Wake: PRTLEvent;
     Worker: TTaskWorker; // owned
     constructor Create(AOwner: TMCPTasks);
@@ -308,9 +317,7 @@ begin
   inherited Create;
   Owner := AOwner;
   KeyMap := TJSONObject.Create;
-  UsedKeys := TStringList.Create;
-  UsedKeys.Sorted := True;
-  UsedKeys.CaseSensitive := True;
+  UsedKeys := TJSONObject.Create;
   Wake := RTLEventCreate;
 end;
 
@@ -391,9 +398,21 @@ begin
   end;
 end;
 
+// Under the lock.
 function TTaskEntry.Running: Boolean;
 begin
-  Result := (Worker <> nil) and not Worker.Finished;
+  Result := (Worker <> nil) and not WorkerDone;
+end;
+
+// Joins AEntry's worker unless that happened already; outside the lock,
+// and only once its thread is no longer needed by anyone else.
+procedure Join(AEntry: TTaskEntry);
+begin
+  if (AEntry.Worker <> nil) and not AEntry.Joined then
+  begin
+    AEntry.Worker.WaitFor;
+    AEntry.Joined := True;
+  end;
 end;
 
 { TTaskWorker }
@@ -442,7 +461,7 @@ begin
   Reply := MCPParseJSON(ProtocolErrorReply(Message, E, LogLine));
   try
     if LogLine <> '' then
-      MCPWriteStderrLine(LogLine);
+      MCPLogDiagnostic(LogLine);
     Error := TJSONObject(TJSONObject(Reply).Extract('error'));
   finally
     Reply.Free;
@@ -508,6 +527,10 @@ var
   Stored: TJSONData;
 begin
   try
+    // The result the call would have answered, stamped as it would have
+    // been (#82 review): resultType and the serverInfo _meta.
+    StampResult(AResult, FEntry.Owner.FServer.Name,
+      FEntry.Owner.FServer.Version);
     Stored := WireCopy(AResult);
   finally
     AResult.Free;
@@ -527,9 +550,31 @@ begin
   end;
 end;
 
+// The method of the first request in ARequests without the params its
+// kind needs (an object; elicitation and sampling need one), '' when
+// every one has them (#82 review).
+function MalformedRequest(ARequests: TJSONObject): string;
+var
+  I: Integer;
+  Request: TJSONObject;
+  Params: TJSONData;
+  Method: string;
+begin
+  Result := '';
+  for I := 0 to ARequests.Count - 1 do
+  begin
+    Request := TJSONObject(ARequests.Items[I]);
+    Method := Request.Get('method', '');
+    Params := Request.Find('params');
+    if ((Params = nil) and (Method <> 'roots/list')) or
+      ((Params <> nil) and (Params.JSONType <> jtObject)) then
+      Exit(Method + ' without its params');
+  end;
+end;
+
 function TTaskWorker.Park(ARun: TMCPToolRun): Boolean;
 var
-  Unknown, Member, Key, Surfaced: string;
+  Unknown, Member, Key, Surfaced, Malformed: string;
   Requests, Every: TJSONObject;
   I, Suffix: Integer;
   Ctx: TMCPRequestContext;
@@ -555,6 +600,13 @@ begin
         nil);
       Exit(False);
     end;
+    Malformed := MalformedRequest(Requests);
+    if Malformed <> '' then
+    begin
+      Fail(JSONRPC_INTERNAL_ERROR, 'Tool "' + FEntry.ToolName +
+        '" produced a malformed input request: ' + Malformed, nil);
+      Exit(False);
+    end;
     System.EnterCriticalSection(FEntry.Owner.FLock);
     try
       if FEntry.Terminal or FEntry.Stopped then
@@ -570,12 +622,12 @@ begin
         Key := Requests.Names[I];
         Surfaced := Key;
         Suffix := 1;
-        while FEntry.UsedKeys.IndexOf(Surfaced) >= 0 do
+        while FEntry.UsedKeys.IndexOfName(Surfaced) >= 0 do
         begin
           Inc(Suffix);
           Surfaced := Key + '#' + IntToStr(Suffix);
         end;
-        FEntry.UsedKeys.Add(Surfaced);
+        FEntry.UsedKeys.Add(Surfaced, True);
         FEntry.KeyMap.Add(Surfaced, Key);
         FEntry.Pending.Add(Surfaced, Requests.Items[I].Clone);
       end;
@@ -603,13 +655,13 @@ begin
   repeat
     // Wakes for tasks/update, tasks/cancel and the server going away, and
     // at the deadline, when nothing else asks (#82 review).
+    // In slices: the RTL turns a timeout into a wall-clock deadline, so
+    // a clock stepped back would stretch one long wait (#82 review).
     Left := FEntry.DeadlineMs - MCPNowMs;
+    if Left > WAIT_SLICE_MS then
+      Left := WAIT_SLICE_MS;
     if Left > 0 then
-    begin
-      if Left > High(LongInt) then
-        Left := High(LongInt);
       RTLEventWaitFor(FEntry.Wake, LongInt(Left));
-    end;
     System.EnterCriticalSection(FEntry.Owner.FLock);
     try
       if FEntry.Terminal or FEntry.Stopped then
@@ -631,13 +683,19 @@ end;
 procedure TTaskWorker.Execute;
 begin
   try
-    Work;
-  except
-    // Nothing escapes a worker: the task fails instead of staying
-    // working until its ttlMs ends.
-    on E: Exception do
-      Fail(JSONRPC_INTERNAL_ERROR, FEntry.Owner.FServer.ClientFaultMessage(
-        'tasks/' + FEntry.ToolName, E), nil);
+    try
+      Work;
+    except
+      // Nothing escapes a worker: the task fails instead of staying
+      // working until its ttlMs ends.
+      on E: Exception do
+        Fail(JSONRPC_INTERNAL_ERROR, FEntry.Owner.FServer.ClientFaultMessage(
+          'tasks/' + FEntry.ToolName, E), nil);
+    end;
+  finally
+    System.EnterCriticalSection(FEntry.Owner.FLock);
+    FEntry.WorkerDone := True;
+    System.LeaveCriticalSection(FEntry.Owner.FLock);
   end;
 end;
 
@@ -727,8 +785,7 @@ begin
     end;
     // Outside the lock, which the workers take on their way out.
     for I := 0 to Entries.Count - 1 do
-      if TTaskEntry(Entries[I]).Worker <> nil then
-        TTaskEntry(Entries[I]).Worker.WaitFor;
+      Join(TTaskEntry(Entries[I]));
   finally
     Entries.Free;
   end;
@@ -794,8 +851,8 @@ end;
 procedure TMCPTasks.SetTtlMs(AValue: Int64);
 begin
   EnsureMutable;
-  if AValue < 1 then
-    raise EMCPServer.Create('TtlMs must be at least 1');
+  if (AValue < 1) or (AValue > MCP_TASK_MAX_TTL_MS) then
+    raise EMCPServer.Create('TtlMs must be from 1 to MCP_TASK_MAX_TTL_MS');
   FTtlMs := AValue;
 end;
 
@@ -878,8 +935,7 @@ begin
     end;
     for I := 0 to Entries.Count - 1 do
     begin
-      if TTaskEntry(Entries[I]).Worker <> nil then
-        TTaskEntry(Entries[I]).Worker.WaitFor;
+      Join(TTaskEntry(Entries[I]));
       TTaskEntry(Entries[I]).Free;
     end;
   finally
@@ -940,52 +996,60 @@ begin
   end;
 
   Result := nil;
-  System.EnterCriticalSection(FLock);
   try
-    Purge;
-    // No task goes before its ttlMs ends (wire-fields: no early expiry),
-    // so a full store takes no new one (#82 review).
-    Full := (ActiveCount >= FMaxActive) or (FTasks.Count >= FMaxKept);
-    if Full and (Support = tsRequired) then
-      raise EMCPProtocolError.Create(JSONRPC_INTERNAL_ERROR,
-        'Too many tasks are running; try again later');
-    if not Full then
-    begin
-      Entry := TTaskEntry.Create(Self);
-      try
-        Entry.Id := NewTaskId;
-        Entry.ToolName := AToolName;
-        Entry.Arguments := TJSONObject(AArguments.Clone);
-        if ACtx.Meta <> nil then
-          Entry.Meta := TJSONObject(ACtx.Meta.Clone)
-        else
-          Entry.Meta := TJSONObject.Create;
-        // A call that retries an input round brings its answers and
-        // state to the handler's first run, as a synchronous call would.
-        if ACtx.InputResponses <> nil then
-          Entry.NextResponses := TJSONObject(ACtx.InputResponses.Clone);
-        Entry.NextState := ACtx.RequestState;
-        Entry.ClientName := ACtx.ClientName;
-        Entry.ClientVersion := ACtx.ClientVersion;
-        Entry.CreatedMs := MCPNowMs;
-        Entry.DeadlineMs := Entry.CreatedMs + FTtlMs;
-        Entry.CreatedAt := UtcStamp;
-        Entry.SetStatus(tkWorking);
-        Entry.Worker := TTaskWorker.Create(Entry);
-      except
-        Entry.Free;
-        raise;
+    System.EnterCriticalSection(FLock);
+    try
+      Purge;
+      // No task goes before its ttlMs ends (wire-fields: no early expiry),
+      // so a full store takes no new one (#82 review).
+      Full := (ActiveCount >= FMaxActive) or (FTasks.Count >= FMaxKept);
+      if Full and (Support = tsRequired) then
+        raise EMCPProtocolError.Create(JSONRPC_INTERNAL_ERROR,
+          'Too many tasks are running; try again later');
+      if not Full then
+      begin
+        Entry := TTaskEntry.Create(Self);
+        try
+          Entry.Id := NewTaskId;
+          Entry.ToolName := AToolName;
+          Entry.Arguments := TJSONObject(AArguments.Clone);
+          if ACtx.Meta <> nil then
+            Entry.Meta := TJSONObject(ACtx.Meta.Clone)
+          else
+            Entry.Meta := TJSONObject.Create;
+          // A call that retries an input round brings its answers and
+          // state to the handler's first run, as a synchronous call would.
+          if ACtx.InputResponses <> nil then
+            Entry.NextResponses := TJSONObject(ACtx.InputResponses.Clone);
+          Entry.NextState := ACtx.RequestState;
+          Entry.ClientName := ACtx.ClientName;
+          Entry.ClientVersion := ACtx.ClientVersion;
+          Entry.CreatedMs := MCPNowMs;
+          // Saturating: a ttlMs past the clock's range never ends.
+          if Entry.CreatedMs > High(Int64) - FTtlMs then
+            Entry.DeadlineMs := High(Int64)
+          else
+            Entry.DeadlineMs := Entry.CreatedMs + FTtlMs;
+          Entry.CreatedAt := UtcStamp;
+          Entry.SetStatus(tkWorking);
+          Entry.Worker := TTaskWorker.Create(Entry);
+        except
+          Entry.Free;
+          raise;
+        end;
+        // Readable before the CreateTaskResult goes out (Task Creation).
+        FTasks.Add(Entry);
+        Result := Entry.Snapshot(False);
+        Result.Add('resultType', 'task');
+        Entry.Worker.Start;
       end;
-      // Readable before the CreateTaskResult goes out (Task Creation).
-      FTasks.Add(Entry);
-      Result := Entry.Snapshot(False);
-      Result.Add('resultType', 'task');
-      Entry.Worker.Start;
+    finally
+      System.LeaveCriticalSection(FLock);
     end;
   finally
-    System.LeaveCriticalSection(FLock);
+    // Reaped on every way out, errors included (#82 review).
+    Reap;
   end;
-  Reap;
 end;
 
 function TMCPTasks.TaskFor(AParams: TJSONObject;
@@ -1039,15 +1103,19 @@ function TMCPTasks.GetTask(AParams: TJSONObject;
 var
   Entry: TTaskEntry;
 begin
-  System.EnterCriticalSection(FLock);
   try
-    Entry := TTaskEntry(TaskFor(AParams, ACtx, ALegacy, 'tasks/get'));
-    CheckInputCapabilities(Entry, ACtx);
-    Result := Entry.Snapshot(True);
+    System.EnterCriticalSection(FLock);
+    try
+      Entry := TTaskEntry(TaskFor(AParams, ACtx, ALegacy, 'tasks/get'));
+      CheckInputCapabilities(Entry, ACtx);
+      Result := Entry.Snapshot(True);
+    finally
+      System.LeaveCriticalSection(FLock);
+    end;
   finally
-    System.LeaveCriticalSection(FLock);
+    // Reaped on every way out, errors included (#82 review).
+    Reap;
   end;
-  Reap;
 end;
 
 function TMCPTasks.UpdateTask(AParams: TJSONObject;
@@ -1058,51 +1126,55 @@ var
   I, Slot, Outstanding: Integer;
   Key: string;
 begin
-  System.EnterCriticalSection(FLock);
   try
-    Entry := TTaskEntry(TaskFor(AParams, ACtx, ALegacy, 'tasks/update'));
-    Responses := AParams.Find('inputResponses');
-    if (Responses = nil) or (Responses.JSONType <> jtObject) then
-      raise InvalidParams('inputResponses must be an object');
-    // Only keys outstanding now count: others, answered, superseded or
-    // never issued, are ignored, and a partial set leaves the task in
-    // input_required for the rest (Task Update Requests).
-    if (Entry.Status = tkInputRequired) and (Entry.Pending <> nil) then
-    begin
-      // An answer is a result object; none is taken while one is not
-      // (#82 review).
-      for I := 0 to TJSONObject(Responses).Count - 1 do
-        if (Entry.Pending.IndexOfName(TJSONObject(Responses).Names[I]) >= 0)
-          and (TJSONObject(Responses).Items[I].JSONType <> jtObject) then
-          raise InvalidParams('inputResponses["' +
-            TJSONObject(Responses).Names[I] + '"] must be an object');
-      Outstanding := Entry.Pending.Count;
-      for I := 0 to TJSONObject(Responses).Count - 1 do
+    System.EnterCriticalSection(FLock);
+    try
+      Entry := TTaskEntry(TaskFor(AParams, ACtx, ALegacy, 'tasks/update'));
+      Responses := AParams.Find('inputResponses');
+      if (Responses = nil) or (Responses.JSONType <> jtObject) then
+        raise InvalidParams('inputResponses must be an object');
+      // Only keys outstanding now count: others, answered, superseded or
+      // never issued, are ignored, and a partial set leaves the task in
+      // input_required for the rest (Task Update Requests).
+      if (Entry.Status = tkInputRequired) and (Entry.Pending <> nil) then
       begin
-        Key := TJSONObject(Responses).Names[I];
-        Slot := Entry.Pending.IndexOfName(Key);
-        if Slot < 0 then
-          Continue;
-        Entry.Answers.Add(Entry.KeyMap.Get(Key, ''),
-          TJSONObject(Responses).Items[I].Clone);
-        Entry.Pending.Delete(Slot);
+        // An answer is a result object; none is taken while one is not
+        // (#82 review).
+        for I := 0 to TJSONObject(Responses).Count - 1 do
+          if (Entry.Pending.IndexOfName(TJSONObject(Responses).Names[I]) >= 0)
+            and (TJSONObject(Responses).Items[I].JSONType <> jtObject) then
+            raise InvalidParams('inputResponses["' +
+              TJSONObject(Responses).Names[I] + '"] must be an object');
+        Outstanding := Entry.Pending.Count;
+        for I := 0 to TJSONObject(Responses).Count - 1 do
+        begin
+          Key := TJSONObject(Responses).Names[I];
+          Slot := Entry.Pending.IndexOfName(Key);
+          if Slot < 0 then
+            Continue;
+          Entry.Answers.Add(Entry.KeyMap.Get(Key, ''),
+            TJSONObject(Responses).Items[I].Clone);
+          Entry.Pending.Delete(Slot);
+        end;
+        // Every request answered: working again at once, so no poll sees
+        // input_required without its requests; the worker takes the
+        // answers. Fewer open requests is a change too.
+        if Entry.Pending.Count = 0 then
+        begin
+          Entry.SetStatus(tkWorking);
+          RTLEventSetEvent(Entry.Wake);
+        end
+        else if Entry.Pending.Count < Outstanding then
+          Entry.Touch;
       end;
-      // Every request answered: working again at once, so no poll sees
-      // input_required without its requests; the worker takes the
-      // answers. Fewer open requests is a change too.
-      if Entry.Pending.Count = 0 then
-      begin
-        Entry.SetStatus(tkWorking);
-        RTLEventSetEvent(Entry.Wake);
-      end
-      else if Entry.Pending.Count < Outstanding then
-        Entry.Touch;
+      Result := TJSONObject.Create;
+    finally
+      System.LeaveCriticalSection(FLock);
     end;
-    Result := TJSONObject.Create;
   finally
-    System.LeaveCriticalSection(FLock);
+    // Reaped on every way out, errors included (#82 review).
+    Reap;
   end;
-  Reap;
 end;
 
 function TMCPTasks.CancelTask(AParams: TJSONObject;
@@ -1110,21 +1182,25 @@ function TMCPTasks.CancelTask(AParams: TJSONObject;
 var
   Entry: TTaskEntry;
 begin
-  System.EnterCriticalSection(FLock);
   try
-    Entry := TTaskEntry(TaskFor(AParams, ACtx, ALegacy, 'tasks/cancel'));
-    // A finished task stays as it is: the ack is the same either way.
-    if not Entry.Terminal then
-    begin
-      FreeAndNil(Entry.Pending);
-      Entry.SetStatus(tkCancelled, 'The client cancelled the task');
-      Release(Entry);
+    System.EnterCriticalSection(FLock);
+    try
+      Entry := TTaskEntry(TaskFor(AParams, ACtx, ALegacy, 'tasks/cancel'));
+      // A finished task stays as it is: the ack is the same either way.
+      if not Entry.Terminal then
+      begin
+        FreeAndNil(Entry.Pending);
+        Entry.SetStatus(tkCancelled, 'The client cancelled the task');
+        Release(Entry);
+      end;
+      Result := TJSONObject.Create;
+    finally
+      System.LeaveCriticalSection(FLock);
     end;
-    Result := TJSONObject.Create;
   finally
-    System.LeaveCriticalSection(FLock);
+    // Reaped on every way out, errors included (#82 review).
+    Reap;
   end;
-  Reap;
 end;
 
 type

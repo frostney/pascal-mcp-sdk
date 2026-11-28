@@ -188,6 +188,14 @@ begin
   Result := MCPTextResult('late');
 end;
 
+// An elicitation without its params.
+function Bare(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPInputRequired(TJSONObject.Create(['e', TJSONObject.Create([
+    'method', 'elicitation/create'])]));
+end;
+
 // Nothing to ask the first time: runs again with its state.
 function StateOnly(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
@@ -245,9 +253,11 @@ end;
 function Drafty(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
-  if MCPInputResponse(ACtx, 'q#draft') <> nil then
-    Exit(MCPTextResult(Answer(ACtx, 'q#draft')));
-  Result := MCPInputRequired(TJSONObject.Create(['q#draft', Elicit('Q?')]));
+  if (MCPInputResponse(ACtx, 'q#draft') <> nil) and
+    (MCPInputResponse(ACtx, 'c#2') <> nil) then
+    Exit(MCPTextResult(Answer(ACtx, 'q#draft') + Answer(ACtx, 'c#2')));
+  Result := MCPInputRequired(TJSONObject.Create(['q#draft', Elicit('Q?'),
+    'c#2', Elicit('C?')]));
 end;
 
 // Three rounds: "name", then "name" again with "city", then done.
@@ -353,9 +363,9 @@ end;
 
 procedure TTasksSuite.RegisterFixture;
 const
-  OPTIONAL_TOOLS: array[0..12] of string = ('wait', 'fail', 'crash',
+  OPTIONAL_TOOLS: array[0..13] of string = ('wait', 'fail', 'crash',
     'refuse', 'ask', 'pair', 'sample', 'greeting', 'cased', 'stubborn',
-    'stateonly', 'unsendable', 'drafty');
+    'stateonly', 'unsendable', 'drafty', 'bare');
 var
   Name: string;
 begin
@@ -370,6 +380,7 @@ begin
   FServer.RegisterTool('cased', 'Keys by case', NO_ARGUMENTS, Cased);
   FServer.RegisterTool('stubborn', 'Slow to stop', NO_ARGUMENTS, Stubborn);
   FServer.RegisterTool('drafty', 'A key with a #', NO_ARGUMENTS, Drafty);
+  FServer.RegisterTool('bare', 'A malformed request', NO_ARGUMENTS, Bare);
   FServer.RegisterTool('stateonly', 'A round without questions',
     NO_ARGUMENTS, StateOnly);
   FServer.RegisterTool('unsendable', 'A non-finite result', NO_ARGUMENTS,
@@ -435,13 +446,15 @@ begin
   end;
 end;
 
-procedure AwaitStart;
+// Whether the waiting handler has started, within 5 s.
+function AwaitStart: Boolean;
 var
   Step: Integer;
 begin
   for Step := 1 to 500 do
     if not WaitStarted then
       Sleep(10);
+  Result := WaitStarted;
 end;
 
 function TTasksSuite.ErrorCode(AResponse: TJSONObject): Integer;
@@ -555,6 +568,11 @@ begin
     Expect<Boolean>(Response.FindPath('result.result.isError').AsBoolean)
       .ToBe(False);
     Expect<Boolean>(Response.FindPath('result.error') = nil).ToBe(True);
+    // Stamped as the call would have answered it.
+    Expect<string>(Response.FindPath('result.result.resultType').AsString)
+      .ToBe('complete');
+    Expect<Boolean>(Response.FindPath('result.result._meta') <> nil)
+      .ToBe(True);
   finally
     Response.Free;
   end;
@@ -655,7 +673,8 @@ begin
   finally
     Response.Free;
   end;
-  Client.AnswerInput('name', '{"action":"accept","content":{"v":"Bo"}}');
+  // The suffixed key needs an answer of its own.
+  Client.AnswerInput('name#2', '{"action":"accept","content":{"v":"Bo"}}');
   Client.AnswerInput('city', '{"action":"accept","content":{"v":"Oslo"}}');
   Response := Client.AwaitTask(TaskId);
   try
@@ -776,7 +795,7 @@ var
 begin
   RegisterFixture;
   TaskId := StartTask('wait');
-  AwaitStart;
+  Expect<Boolean>(AwaitStart).ToBe(True);
   Ack := Client.Request('tasks/cancel', '{"taskId":"' + TaskId + '"}');
   try
     Expect<string>(Ack.FindPath('result.resultType').AsString)
@@ -1024,7 +1043,7 @@ begin
   StubbornMs := 300;
   First := StartTask('stubborn');
   Expect<Boolean>(First <> '').ToBe(True);
-  AwaitStart;
+  Expect<Boolean>(AwaitStart).ToBe(True);
   // Full: an optional tool runs as usual, a required one is refused.
   Response := Client.CallTool('wait', '{"ms":0}');
   try
@@ -1063,7 +1082,7 @@ begin
   RegisterFixture;
   FTasks.TtlMs := 100;
   TaskId := StartTask('wait');
-  AwaitStart;
+  Expect<Boolean>(AwaitStart).ToBe(True);
   Response := GetTask(TaskId);
   try
     Expect<Integer>(Response.FindPath('result.ttlMs').AsInteger).ToBe(100);
@@ -1149,6 +1168,15 @@ begin
   Expect<Boolean>(Raised).ToBe(True);
   Raised := False;
   try
+    FTasks.TtlMs := MCP_TASK_MAX_TTL_MS + 1;
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  FTasks.TtlMs := MCP_TASK_MAX_TTL_MS;
+  Raised := False;
+  try
     FTasks.MaxKept := FTasks.MaxActive - 1;
   except
     on E: EMCPServer do
@@ -1196,13 +1224,24 @@ begin
     Client.LastResponseLine) > 0).ToBe(True);
 end;
 
-// Freeing the server cancels a running task and waits for its handler.
+// Freeing the server cancels a running task and a parked one, and
+// waits for their workers.
 procedure TTasksSuite.TestTeardownCancels;
+var
+  Parked: string;
+  Response: TJSONObject;
 begin
   RegisterFixture;
   StartTask('wait');
-  AwaitStart;
-  StartTask('pair');
+  Expect<Boolean>(AwaitStart).ToBe(True);
+  Parked := StartTask('pair');
+  Response := WaitFor(Parked, 'input_required');
+  try
+    Expect<string>(Response.FindPath('result.status').AsString)
+      .ToBe('input_required');
+  finally
+    Response.Free;
+  end;
   FreeAndNil(FClient);
   FreeAndNil(FServer);
   Expect<Boolean>(SawCancel).ToBe(True);
@@ -1218,7 +1257,7 @@ begin
   FTasks.SetToolSupport('spin', tsOptional);
   FServer.Adopt(Owner);
   StartTask('spin');
-  AwaitStart;
+  Expect<Boolean>(AwaitStart).ToBe(True);
   FreeAndNil(FClient);
   FreeAndNil(FServer);
   Expect<Boolean>(OwnerFreed).ToBe(True);
@@ -1232,9 +1271,10 @@ var
   TaskId: string;
 begin
   RegisterFixture;
-  // AwaitTask answers a '#' key only with its own answer, or for the
-  // server's numeric suffix.
+  // AwaitTask answers a key with a '#' only with an answer of its own,
+  // a numeric suffix the handler chose included.
   Client.AnswerInput('q', '{"action":"accept","content":{"v":"wrong"}}');
+  Client.AnswerInput('c', '{"action":"accept","content":{"v":"wrong"}}');
   TaskId := StartTask('drafty');
   Response := Client.AwaitTask(TaskId);
   try
@@ -1243,7 +1283,8 @@ begin
   finally
     Response.Free;
   end;
-  Client.AnswerInput('q#draft', '{"action":"accept","content":{"v":"ok"}}');
+  Client.AnswerInput('q#draft', '{"action":"accept","content":{"v":"o"}}');
+  Client.AnswerInput('c#2', '{"action":"accept","content":{"v":"k"}}');
   Response := Client.AwaitTask(TaskId);
   try
     Expect<string>(Response.FindPath('result.result.content[0].text')
@@ -1267,6 +1308,17 @@ var
   Response: TJSONObject;
 begin
   RegisterFixture;
+  // A malformed input request fails the task before any client sees it.
+  Response := Client.AwaitTask(StartTask('bare'));
+  try
+    Expect<string>(Response.FindPath('result.status').AsString)
+      .ToBe('failed');
+    Expect<string>(Response.FindPath('result.error.message').AsString)
+      .ToBe('Tool "bare" produced a malformed input request: ' +
+      'elicitation/create without its params');
+  finally
+    Response.Free;
+  end;
   Response := Client.AwaitTask(StartTask('unsendable'));
   try
     Expect<string>(Response.FindPath('result.status').AsString)
@@ -1449,7 +1501,7 @@ begin
   Test('input rounds: answers, state, unknown keys, keys never reused',
     TestInputRounds);
   Test('a partial update leaves only the unanswered key', TestPartialAnswers);
-  Test('an undeclared input kind fails the task with -32021',
+  Test('a poll that lacks an input''s capability gets -32021',
     TestInputCapabilityGate);
   Test('tasks/cancel: empty ack, cancelled, idempotent, while waiting',
     TestCancel);
@@ -1463,7 +1515,7 @@ begin
   Test('MaxActive: optional calls run as usual, required ones -32603',
     TestMaxActive);
   Test('a task past its ttlMs is gone and its handler cancelled', TestTtl);
-  Test('MaxKept drops the oldest finished task', TestMaxKept);
+  Test('MaxKept: a full store takes no new task', TestMaxKept);
   Test('settings and late changes are guarded', TestGuards);
   Test('a non-ASCII result goes out byte-exact; the handler''s context',
     TestUtf8Result);
@@ -1473,7 +1525,7 @@ begin
     TestTeardownBeforeAdoptedOwners);
   Test('a round that asks for nothing runs again with its state',
     TestStateOnlyRound);
-  Test('a result the wire cannot carry fails the task with -32603',
+  Test('an unsendable result or a malformed request fails with -32603',
     TestUnsendableResult);
   Test('an answer that is no object is refused and taken by no one',
     TestMalformedAnswer);
