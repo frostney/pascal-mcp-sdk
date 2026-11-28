@@ -3,8 +3,9 @@ name: CI
 # Post-merge confirmation, mirroring the duetto / lwpt CI pattern.
 # Sister workflow:
 #
-#   pr.yml — every PR: Linux + macOS + win64 native gate, plus the
-#            docs, interop and conformance checks.
+#   pr.yml — every PR: Linux + macOS + win64 native gate (four
+#            build-and-test legs, one of them on FPC 3.2.4-rc2),
+#            plus the docs, interop and conformance checks.
 #   pr-title.yml — every PR: the conventional-title check.
 #   Together they supply the checks the main ruleset requires.
 #
