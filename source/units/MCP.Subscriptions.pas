@@ -330,18 +330,33 @@ begin
     raise InvalidParams(Problem);
   // The request id is the subscription id, a string or an integer, an
   // integral number written as 2.0 included (#138 review).
+  // Any number past 2^53 is refused too, in every form, so two ids never
+  // compare equal where they differ (#138 review).
   if (ACtx.RequestId = nil) or ((ACtx.RequestId.JSONType = jtNumber) and
-    (TJSONNumber(ACtx.RequestId).NumberType = ntFloat) and
-    ((Frac(ACtx.RequestId.AsFloat) <> 0) or
-    (Abs(ACtx.RequestId.AsFloat) > 9007199254740991.0))) then
+    ((Abs(ACtx.RequestId.AsFloat) > 9007199254740991.0) or
+    ((TJSONNumber(ACtx.RequestId).NumberType = ntFloat) and
+    (Frac(ACtx.RequestId.AsFloat) <> 0)))) then
     raise InvalidParams('subscriptions/listen needs a string or integer ' +
       'request id');
   if not (ACtx.StreamHost is TMCPStreamHost) then
     raise EMCPProtocolError.Create(JSONRPC_INTERNAL_ERROR,
       'subscriptions/listen needs a transport that can stream');
+  // Each stream holds a connection's thread on Streamable HTTP: a place
+  // is taken before any feed opens, and given back if the request fails
+  // (#138 review).
+  System.EnterCriticalSection(FLock);
+  try
+    Admitted := FOpen < FMaxListeners;
+    if Admitted then
+      Inc(FOpen);
+  finally
+    System.LeaveCriticalSection(FLock);
+  end;
+  if not Admitted then
+    raise EMCPProtocolError.Create(JSONRPC_INTERNAL_ERROR,
+      'Too many subscriptions are open; try again later');
   Acknowledged := TJSONObject.Create;
   Feeds := TList.Create;
-  Admitted := False;
   try
     for I := 0 to FSources.Count - 1 do
     begin
@@ -355,24 +370,12 @@ begin
       Acknowledged.Add(Source.FilterKey, Agreed);
       Feeds.Add(Source.Open(Agreed, ACtx));
     end;
-    // Each stream holds a connection's thread on Streamable HTTP: a cap
-    // before anything is acknowledged (#138 review).
-    System.EnterCriticalSection(FLock);
-    try
-      Admitted := FOpen < FMaxListeners;
-      if Admitted then
-        Inc(FOpen);
-    finally
-      System.LeaveCriticalSection(FLock);
-    end;
-    if not Admitted then
-      raise EMCPProtocolError.Create(JSONRPC_INTERNAL_ERROR,
-        'Too many subscriptions are open; try again later');
   except
     for I := 0 to Feeds.Count - 1 do
       TMCPSubscriptionFeed(Feeds[I]).Free;
     Feeds.Free;
     Acknowledged.Free;
+    Closed;
     raise;
   end;
   TMCPStreamHost(ACtx.StreamHost).Park(TListenStream.Create(Self,

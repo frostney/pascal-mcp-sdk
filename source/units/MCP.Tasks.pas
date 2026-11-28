@@ -1303,6 +1303,8 @@ type
     // Under the store's lock: AEntry's state, when the feed follows it
     // and the listen request may see its input requests.
     procedure Enqueue(AEntry: TTaskEntry);
+    // Under the store's lock: makes a place in the full queue.
+    procedure Evict(const ATaskId: string);
     procedure Collect(AOut: TJSONArray); override;
   end;
 
@@ -1342,16 +1344,6 @@ begin
   Result := 'taskIds';
 end;
 
-function Listed(AIds: TJSONArray; const AId: string): Boolean;
-var
-  I: Integer;
-begin
-  for I := 0 to AIds.Count - 1 do
-    if AIds.Strings[I] = AId then
-      Exit(True);
-  Result := False;
-end;
-
 // The tasks the server agrees to notify about are those of AValue it
 // knows now. A client that did not declare the extension gets -32021.
 function TTaskSource.Agree(AValue: TJSONData;
@@ -1359,6 +1351,7 @@ function TTaskSource.Agree(AValue: TJSONData;
 var
   I: Integer;
   Ids: TJSONArray;
+  Known: TJSONObject;
 begin
   if not ACtx.HasExtension(MCP_TASKS_EXTENSION) then
     raise ExtensionRequired;
@@ -1368,22 +1361,32 @@ begin
     if AValue.Items[I].JSONType <> jtString then
       raise InvalidParams('notifications.taskIds must be an array of ' +
         'strings');
+  // The ids the store knows, in one pass under the lock; the request's
+  // list is matched outside it (#138 review).
+  Known := TJSONObject.Create;
   Ids := TJSONArray.Create;
   try
     System.EnterCriticalSection(FTasks.FLock);
     try
       FTasks.Purge;
-      for I := 0 to AValue.Count - 1 do
-        if (FTasks.FindEntry(AValue.Items[I].AsString) <> nil) and
-          not Listed(Ids, AValue.Items[I].AsString) then
-          Ids.Add(AValue.Items[I].AsString);
+      for I := 0 to FTasks.FTasks.Count - 1 do
+        Known.Add(TTaskEntry(FTasks.FTasks[I]).Id, True);
     finally
       System.LeaveCriticalSection(FTasks.FLock);
     end;
+    for I := 0 to AValue.Count - 1 do
+      if Known.IndexOfName(AValue.Items[I].AsString) >= 0 then
+      begin
+        Ids.Add(AValue.Items[I].AsString);
+        // Listed once, however often the request names it.
+        Known.Delete(AValue.Items[I].AsString);
+      end;
   except
+    Known.Free;
     Ids.Free;
     raise;
   end;
+  Known.Free;
   FTasks.Reap;
   // No task it knows: nothing to follow, and the key is left out of the
   // acknowledgment, so the stream takes no feed (#138 review).
@@ -1467,7 +1470,6 @@ procedure TTaskFeed.Enqueue(AEntry: TTaskEntry);
 var
   Ctx: TMCPRequestContext;
   Missing, Member, Unknown: string;
-  I: Integer;
 begin
   if FIds.IndexOfName(AEntry.Id) < 0 then
     Exit;
@@ -1481,23 +1483,49 @@ begin
       Exit;
   end;
   // A state after the ttlMs ended is not sent: tasks/get no longer finds
-  // the task (#138 review).
+  // the task (#138 review). The deadline goes with the state, so one
+  // queued before it is dropped once it has passed.
   if MCPNowMs >= AEntry.DeadlineMs then
     Exit;
+  // Full: the oldest state of the changed task gives way, or else one a
+  // later state of its task supersedes, so the queue keeps its size and
+  // every task's latest state (#138 review).
   if FQueue.Count >= FCapacity then
-    for I := 0 to FQueue.Count - 1 do
-      if FQueue.Objects[I].FindPath('params.taskId').AsString = AEntry.Id then
+    Evict(AEntry.Id);
+  FQueue.Add(TJSONObject.Create(['method', 'notifications/tasks', 'params',
+    AEntry.Snapshot(True), 'deadline', AEntry.DeadlineMs]));
+end;
+
+function QueuedTaskId(AItem: TJSONData): string;
+begin
+  Result := TJSONObject(AItem).FindPath('params.taskId').AsString;
+end;
+
+procedure TTaskFeed.Evict(const ATaskId: string);
+var
+  I, J: Integer;
+begin
+  for I := 0 to FQueue.Count - 1 do
+    if QueuedTaskId(FQueue.Items[I]) = ATaskId then
+    begin
+      FQueue.Delete(I);
+      Exit;
+    end;
+  for I := 0 to FQueue.Count - 1 do
+    for J := I + 1 to FQueue.Count - 1 do
+      if QueuedTaskId(FQueue.Items[J]) = QueuedTaskId(FQueue.Items[I]) then
       begin
         FQueue.Delete(I);
-        Break;
+        Exit;
       end;
-  FQueue.Add(TJSONObject.Create(['method', 'notifications/tasks', 'params',
-    AEntry.Snapshot(True)]));
+  // One state per task and as many tasks as places: none left to drop.
+  FQueue.Delete(0);
 end;
 
 procedure TTaskFeed.Collect(AOut: TJSONArray);
 var
   Tasks: TMCPTasks;
+  Item: TJSONObject;
 begin
   Tasks := FTasks;
   if Tasks = nil then
@@ -1505,7 +1533,16 @@ begin
   System.EnterCriticalSection(Tasks.FLock);
   try
     while FQueue.Count > 0 do
-      AOut.Add(FQueue.Extract(0));
+    begin
+      Item := TJSONObject(FQueue.Extract(0));
+      if MCPNowMs >= Item.Get('deadline', Int64(0)) then
+        Item.Free
+      else
+      begin
+        Item.Delete('deadline');
+        AOut.Add(Item);
+      end;
+    end;
   finally
     System.LeaveCriticalSection(Tasks.FLock);
   end;

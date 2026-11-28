@@ -37,8 +37,11 @@ Task-oriented pages for building and shipping your own MCP server:
   resources and the tools that link them.
 - [Skills](guides/skills.md) — Agent Skills served as `skill://`
   resources with the digests hosts verify.
-- [Events](guides/events.md) — event types clients poll for what
-  happened since their cursor.
+- [Events](guides/events.md) — event types clients poll, or stream, for
+  what happened since their cursor.
+- [Tasks](guides/tasks.md) — tool calls that run as tasks: polled,
+  answered and cancelled, with status notifications over
+  `subscriptions/listen`.
 - [Configuration](guides/configuration.md) — the server properties:
   instructions, caching hints, error redaction, dual-era mode.
 - [Progress and logging](guides/progress-and-logging.md) — in-request

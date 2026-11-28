@@ -187,6 +187,10 @@ begin
     .ToBe(True);
   Expect<Boolean>(Pos('"code" : -32602', Listen('"notifications":{},',
     '7.5')) > 0).ToBe(True);
+  // Past 2^53 an integer id is refused too: it would compare equal to
+  // another.
+  Expect<Boolean>(Pos('"code" : -32602', Listen('"notifications":{},',
+    '9007199254740993')) > 0).ToBe(True);
   // An integral number written with a fraction is an integer id.
   Expect<Boolean>(Pos('"result"', Listen('"notifications":{},', '2.0')) > 0)
     .ToBe(True);

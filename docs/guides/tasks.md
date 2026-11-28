@@ -230,8 +230,11 @@ listed ids it knows), then sends `notifications/tasks` with each task's
 whole state, as `tasks/get` would answer it: once at the start, and
 again after each change, a partly answered input round included. Each
 change is sent, in order, even when several come between two of the
-stream's polls (every 100 ms); a reader that falls 64 states behind
-loses the oldest. Every frame carries the request's id as
+stream's polls (every 100 ms). For a reader that falls behind, at most
+64 states wait (or one per followed task, when it follows more); past
+that, an older state of a task gives way to its newer one, so every
+task's latest state still arrives. A state still waiting when its task
+expires is dropped. Every frame carries the request's id as
 `_meta["io.modelcontextprotocol/subscriptionId"]`. A state waiting on a
 question the listen request did not declare what it needs for, as
 `tasks/get` would refuse it, is left out: declare `elicitation` in the

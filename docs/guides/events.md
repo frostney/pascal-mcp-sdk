@@ -200,4 +200,5 @@ without `listChanged` is accurate.
   `MCP.Streams`, and the error codes.
 - [Tools](tools.md#routing-headers-x-mcp-header), for the `x-mcp-header`
   annotation event arguments share.
-- [Skills](skills.md), the other extension built on the same hooks.
+- [Skills](skills.md) and [Tasks](tasks.md), the other extensions built
+  on the same hooks.

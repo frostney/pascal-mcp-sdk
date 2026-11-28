@@ -1607,6 +1607,25 @@ begin
     Session.Free;
     Host.Free;
   end;
+  // A state queued before the deadline is not sent after it.
+  TaskId := StartTask('pair');
+  WaitFor(TaskId, 'input_required').Free;
+  Host := TMCPStreamHost.Create;
+  Session := FServer.CreateSession;
+  Stream := nil;
+  try
+    Session.StreamHost := Host;
+    Stream := OpenListen(FServer, Session, Host, '["' + TaskId + '"]');
+    Sleep(200);
+    Lines := '';
+    Stream.Step(CaptureSink, @Lines);
+    Expect<Boolean>((Pos('acknowledged', Lines) > 0) and
+      (Pos('notifications/tasks', Lines) = 0)).ToBe(True);
+  finally
+    Stream.Free;
+    Session.Free;
+    Host.Free;
+  end;
 end;
 
 // A taskIds source added before EnableTasks: it refuses, and changes
