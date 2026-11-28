@@ -384,8 +384,9 @@ registrations, such as the state those handlers read or work of its
 own that still runs tools, and `Adopted` finds the first adopted
 object of a class; adopting the same object again changes nothing.
 `SetToolCallHook` lets one extension see every `tools/call` for a
-registered tool, in both eras, once the tool's declared client
-capabilities are met and before its handler runs: the hook returns
+registered tool, in both eras, before its handler runs, a 2026-07-28
+call once the tool's declared client capabilities are met (a classic
+call has no such check): the hook returns
 `nil` to let the call run as usual, or the result to send in its place
 (new; the server stamps and sends it), and may raise
 `EMCPProtocolError`. Its arguments and everything the context borrows
@@ -589,7 +590,10 @@ a `#2` suffix), until `tasks/update` has answered all of them with
 objects; a round without requests runs again at once. A `tasks/get`
 whose request did not declare what a waiting request needs gets
 `-32021`. A result, input requests or error data the wire cannot carry
-fail the task with `-32603`, faults following `RedactErrorDetails`.
+fail the task with `-32603`, faults following `RedactErrorDetails`, as
+do requests that lack what their kind needs. A task's id is its only
+key, so whoever holds it reaches the task: enable Tasks only on a server
+with one caller (see [Tasks](../guides/tasks.md#who-can-reach-a-task)).
 
 ### The request context
 

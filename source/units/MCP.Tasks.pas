@@ -81,6 +81,10 @@ type
     FTasks: TList; // TTaskEntry, owned, oldest first
     FRetired: TList; // TTaskEntry, owned: out of reach, worker still running
     FReaped: TList; // TTaskEntry, owned: worker done, to free outside FLock
+    FDrained: TList; // TTaskEntry, owned: every entry, once Drain has run
+    // Workers done whose task is still kept: joined and freed outside
+    // FLock, so a finished task holds no thread (#82 review).
+    FIdle: TList; // TTaskWorker, owned
     FDraining: Boolean;
     procedure EnsureMutable;
     procedure SetTtlMs(AValue: Int64);
@@ -176,8 +180,11 @@ const
     'completed', 'failed', 'cancelled');
   TASK_METHODS: array[0..2] of string = ('tasks/get', 'tasks/update',
     'tasks/cancel');
-  // The longest a parked worker waits before it looks at its deadline.
-  WAIT_SLICE_MS = 500;
+  // How often a parked worker looks for its answers and its deadline. It
+  // sleeps rather than waiting on an event: the RTL turns an event's
+  // timeout into a wall-clock deadline, which a clock stepped back
+  // stretches, while a sleep is relative (#82 review).
+  PARK_POLL_MS = 25;
   // Every capability an input request can need, so the kind check alone
   // decides at Park; the poll's own capabilities decide what is sent.
   EVERY_INPUT_CAPABILITY = '{"elicitation":{"form":{},"url":{}},' +
@@ -222,7 +229,6 @@ type
     // its thread was joined, which happens once only (#82 review: a
     // second pthread_join is undefined).
     WorkerDone, Joined: Boolean;
-    Wake: PRTLEvent;
     Worker: TTaskWorker; // owned
     constructor Create(AOwner: TMCPTasks);
     destructor Destroy; override;
@@ -316,13 +322,11 @@ begin
   Owner := AOwner;
   KeyMap := TJSONObject.Create;
   UsedKeys := TJSONObject.Create;
-  Wake := RTLEventCreate;
 end;
 
 destructor TTaskEntry.Destroy;
 begin
   Worker.Free;
-  RTLEventDestroy(Wake);
   Arguments.Free;
   Meta.Free;
   CallResult.Free;
@@ -548,15 +552,26 @@ begin
   end;
 end;
 
-// The method of the first request in ARequests without the params its
-// kind needs (an object; elicitation and sampling need one), '' when
-// every one has them (#82 review).
+// Why the first request in ARequests lacks what its kind requires, ''
+// when none does (#82 review): elicitation/create a message and, in url
+// mode, a url, otherwise a requestedSchema object; sampling/createMessage
+// a messages array and a numeric maxTokens; roots/list nothing, though
+// its params, when present, are an object too. Field requirements from
+// the 2026-07-28 schema (ElicitRequestFormParams, ElicitRequestURLParams,
+// CreateMessageRequestParams), verified 2026-11-28.
 function MalformedRequest(ARequests: TJSONObject): string;
 var
   I: Integer;
   Request: TJSONObject;
   Params: TJSONData;
+  P: TJSONObject;
   Method: string;
+
+  function Has(const AName: string; AType: TJSONtype): Boolean;
+  begin
+    Result := (P.Find(AName) <> nil) and (P.Find(AName).JSONType = AType);
+  end;
+
 begin
   Result := '';
   for I := 0 to ARequests.Count - 1 do
@@ -564,9 +579,23 @@ begin
     Request := TJSONObject(ARequests.Items[I]);
     Method := Request.Get('method', '');
     Params := Request.Find('params');
-    if ((Params = nil) and (Method <> 'roots/list')) or
-      ((Params <> nil) and (Params.JSONType <> jtObject)) then
-      Exit(Method + ' without its params');
+    if Params = nil then
+    begin
+      if Method <> 'roots/list' then
+        Exit(Method + ' without its params');
+      Continue;
+    end;
+    if Params.JSONType <> jtObject then
+      Exit(Method + ' params that are no object');
+    P := TJSONObject(Params);
+    if (Method = 'elicitation/create') and (not Has('message', jtString) or
+      ((P.Get('mode', 'form') = 'url') and not Has('url', jtString)) or
+      ((P.Get('mode', 'form') <> 'url') and
+      not Has('requestedSchema', jtObject))) then
+      Exit(Method + ' without its message, url or requestedSchema');
+    if (Method = 'sampling/createMessage') and
+      (not Has('messages', jtArray) or not Has('maxTokens', jtNumber)) then
+      Exit(Method + ' without its messages or maxTokens');
   end;
 end;
 
@@ -630,7 +659,6 @@ begin
         FEntry.Pending.Add(Surfaced, Requests.Items[I].Clone);
       end;
       FEntry.NextState := ARun.RequestState;
-      RTLEventResetEvent(FEntry.Wake);
       FEntry.SetStatus(tkInputRequired);
       Result := True;
     finally
@@ -651,15 +679,8 @@ begin
   AResponses := nil;
   AState := '';
   repeat
-    // Wakes for tasks/update, tasks/cancel and the server going away, and
-    // at the deadline, when nothing else asks (#82 review).
-    // In slices: the RTL turns a timeout into a wall-clock deadline, so
-    // a clock stepped back would stretch one long wait (#82 review).
-    Left := FEntry.DeadlineMs - MCPNowMs;
-    if Left > WAIT_SLICE_MS then
-      Left := WAIT_SLICE_MS;
-    if Left > 0 then
-      RTLEventWaitFor(FEntry.Wake, LongInt(Left));
+    // Every PARK_POLL_MS: the answers, tasks/cancel, the server going
+    // away and the deadline, which no request needs to come for.
     System.EnterCriticalSection(FEntry.Owner.FLock);
     try
       if FEntry.Terminal or FEntry.Stopped then
@@ -675,6 +696,11 @@ begin
     finally
       System.LeaveCriticalSection(FEntry.Owner.FLock);
     end;
+    Left := FEntry.DeadlineMs - MCPNowMs;
+    if Left > PARK_POLL_MS then
+      Left := PARK_POLL_MS;
+    if Left > 0 then
+      Sleep(Left);
   until False;
 end;
 
@@ -753,40 +779,46 @@ begin
   FTasks := TList.Create;
   FRetired := TList.Create;
   FReaped := TList.Create;
+  FDrained := TList.Create;
+  FIdle := TList.Create;
 end;
 
-// Cancels AEntry's handler and lets its worker go (under the lock).
+// Cancels AEntry's handler and, at its next look, a parked worker (under
+// the lock).
 procedure Release(AEntry: TTaskEntry);
 begin
   AEntry.CancelRequested := True;
-  RTLEventSetEvent(AEntry.Wake);
 end;
 
 procedure TMCPTasks.Drain;
 var
   I: Integer;
-  Entries: TList;
 begin
-  Entries := TList.Create;
+  System.EnterCriticalSection(FLock);
   try
-    System.EnterCriticalSection(FLock);
-    try
-      FDraining := True;
-      for I := 0 to FTasks.Count - 1 do
-        Entries.Add(FTasks[I]);
-      for I := 0 to FRetired.Count - 1 do
-        Entries.Add(FRetired[I]);
-      for I := 0 to Entries.Count - 1 do
-        Release(TTaskEntry(Entries[I]));
-    finally
-      System.LeaveCriticalSection(FLock);
-    end;
-    // Outside the lock, which the workers take on their way out.
-    for I := 0 to Entries.Count - 1 do
-      Join(TTaskEntry(Entries[I]));
+    // From here no task is admitted, and the store's lists are this
+    // drain's alone: a handler that calls back into the store while it
+    // is joined finds nothing to free (#82 review).
+    FDraining := True;
+    for I := 0 to FTasks.Count - 1 do
+      FDrained.Add(FTasks[I]);
+    for I := 0 to FRetired.Count - 1 do
+      FDrained.Add(FRetired[I]);
+    for I := 0 to FReaped.Count - 1 do
+      FDrained.Add(FReaped[I]);
+    FTasks.Clear;
+    FRetired.Clear;
+    FReaped.Clear;
+    for I := 0 to FDrained.Count - 1 do
+      Release(TTaskEntry(FDrained[I]));
   finally
-    Entries.Free;
+    System.LeaveCriticalSection(FLock);
   end;
+  // Outside the lock, which the workers take on their way out; only this
+  // thread reaches FDrained now, and the idle workers.
+  for I := 0 to FDrained.Count - 1 do
+    Join(TTaskEntry(FDrained[I]));
+  Reap;
 end;
 
 destructor TMCPTasks.Destroy;
@@ -794,17 +826,15 @@ var
   I: Integer;
 begin
   // The server drained the tasks first; a TMCPTasks freed on its own
-  // drains here.
+  // drains here. Either way every entry ends up in FDrained, joined.
   Drain;
-  for I := 0 to FTasks.Count - 1 do
-    TTaskEntry(FTasks[I]).Free;
-  for I := 0 to FRetired.Count - 1 do
-    TTaskEntry(FRetired[I]).Free;
-  for I := 0 to FReaped.Count - 1 do
-    TTaskEntry(FReaped[I]).Free;
+  for I := 0 to FDrained.Count - 1 do
+    TTaskEntry(FDrained[I]).Free;
   FTasks.Free;
   FRetired.Free;
   FReaped.Free;
+  FDrained.Free;
+  FIdle.Free;
   FTools.Free;
   DoneCriticalSection(FLock);
   inherited Destroy;
@@ -903,10 +933,16 @@ begin
     end;
   end;
   // Past its ttlMs, a task may be deleted (Task Polling); one still
-  // running is cancelled first, and stays counted until it stops.
+  // running is cancelled first, and stays counted until it stops. A kept
+  // task whose worker is done gives its thread up.
   for I := FTasks.Count - 1 downto 0 do
   begin
     Entry := TTaskEntry(FTasks[I]);
+    if (Entry.Worker <> nil) and Entry.WorkerDone then
+    begin
+      FIdle.Add(Entry.Worker);
+      Entry.Worker := nil;
+    end;
     if MCPNowMs >= Entry.DeadlineMs then
     begin
       FTasks.Delete(I);
@@ -919,15 +955,20 @@ end;
 procedure TMCPTasks.Reap;
 var
   I: Integer;
-  Entries: TList;
+  Entries, Workers: TList;
 begin
+  Workers := nil;
   Entries := TList.Create;
   try
+    Workers := TList.Create;
     System.EnterCriticalSection(FLock);
     try
       for I := 0 to FReaped.Count - 1 do
         Entries.Add(FReaped[I]);
       FReaped.Clear;
+      for I := 0 to FIdle.Count - 1 do
+        Workers.Add(FIdle[I]);
+      FIdle.Clear;
     finally
       System.LeaveCriticalSection(FLock);
     end;
@@ -936,7 +977,14 @@ begin
       Join(TTaskEntry(Entries[I]));
       TTaskEntry(Entries[I]).Free;
     end;
+    // Done already: the join returns at once.
+    for I := 0 to Workers.Count - 1 do
+    begin
+      TTaskWorker(Workers[I]).WaitFor;
+      TTaskWorker(Workers[I]).Free;
+    end;
   finally
+    Workers.Free;
     Entries.Free;
   end;
 end;
@@ -999,8 +1047,10 @@ begin
     try
       Purge;
       // No task goes before its ttlMs ends (wire-fields: no early expiry),
-      // so a full store takes no new one (#82 review).
-      Full := (ActiveCount >= FMaxActive) or (FTasks.Count >= FMaxKept);
+      // so a full store takes no new one, nor one that is shutting down
+      // (#82 review).
+      Full := FDraining or (ActiveCount >= FMaxActive) or
+        (FTasks.Count >= FMaxKept);
       if Full and (Support = tsRequired) then
         raise EMCPProtocolError.Create(JSONRPC_INTERNAL_ERROR,
           'Too many tasks are running; try again later');
@@ -1039,6 +1089,14 @@ begin
         FTasks.Add(Entry);
         Result := Entry.Snapshot(False);
         Result.Add('resultType', 'task');
+        // A call cancelled already never sends its taskId, so its task
+        // would run where no client can cancel it: it starts cancelled
+        // (#82 review).
+        if ACtx.IsCancelled then
+        begin
+          Entry.SetStatus(tkCancelled, 'The client cancelled the request');
+          Release(Entry);
+        end;
         Entry.Worker.Start;
       end;
     finally
@@ -1158,10 +1216,7 @@ begin
         // input_required without its requests; the worker takes the
         // answers. Fewer open requests is a change too.
         if Entry.Pending.Count = 0 then
-        begin
-          Entry.SetStatus(tkWorking);
-          RTLEventSetEvent(Entry.Wake);
-        end
+          Entry.SetStatus(tkWorking)
         else if Entry.Pending.Count < Outstanding then
           Entry.Touch;
       end;
