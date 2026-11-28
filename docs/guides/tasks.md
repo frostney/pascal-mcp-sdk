@@ -110,8 +110,10 @@ end;
 Tasks.SetSelector(Mode);
 ```
 
-At most `MaxActive` tasks (32 by default) run or wait for input at
-once. Past that, a call whose tool allows it runs as usual, and one
+At most `MaxActive` tasks (32 by default) have a handler that has not
+returned, a cancelled or expired one included until its handler does,
+and at most `MaxKept` (1000 by default) are kept until their `ttlMs`
+ends. Past either, a call whose tool allows it runs as usual, and one
 that runs only as a task answers `-32603`.
 
 The extension is defined for the 2026-07-28 revision. The classic
@@ -136,7 +138,7 @@ encoded, since it is the only thing that gives access to the task.
 | `working` | nothing |
 | `input_required` | `inputRequests`: the questions still open |
 | `completed` | `result`: the `CallToolResult` the call would have answered, a tool error (`isError: true`) included |
-| `failed` | `error`: the JSON-RPC error the handler raised as `EMCPProtocolError`, and that error's message as `statusMessage` |
+| `failed` | `error`: the JSON-RPC error the handler raised as `EMCPProtocolError`, or `-32603` for a fault, such as a result the wire cannot carry, and that error's message as `statusMessage`. Faults follow `RedactErrorDetails` |
 | `cancelled` | `statusMessage` `"The client cancelled the task"` |
 
 A handler's other exceptions become an `isError` result, as in a call,
@@ -157,10 +159,12 @@ one answers `-32020`.
 When a task's handler returns `MCPInputRequired(Requests, State)`, the
 task goes to `input_required` with those requests. The client answers
 them with `tasks/update`, one at a time or together; keys it was not
-asked, or already answered, are ignored. Once every request has an
-answer, the task is `working` again and the handler runs again, with
-the answers in `ACtx.InputResponses` and its `State` in
-`ACtx.RequestState`, as for a retried call. The state stays on the
+asked, or already answered, are ignored, and an answer that is not an
+object is refused with `-32602` and taken for none. Once every request
+has an answer, the task is `working` again and the handler runs again,
+with the answers in `ACtx.InputResponses` and its `State` in
+`ACtx.RequestState`, as for a retried call. A round that asks for
+nothing runs again at once with its state. The state stays on the
 server, so it is not sealed.
 
 A key stays unique over the task's lifetime: when a later round asks
@@ -168,9 +172,11 @@ under a key an earlier round already used, the client sees it with a
 suffix (`confirm#2`), and the handler still reads its answer under
 `confirm`.
 
-The questions follow the same rule as a call's input round: each kind
-must be one the creating request's client declared, such as
-`elicitation`. A question of another kind fails the task with `-32021`.
+The questions follow the same rule as a call's input round: each goes
+only to a request that declared its kind, such as `elicitation`. A
+`tasks/get` that did not declare what a question needs gets `-32021`,
+and the task waits on for a poll that did. A request that is no input
+request at all fails the task with `-32603`.
 
 ## Cancellation and lifetime
 
@@ -180,15 +186,16 @@ so it can stop. A result it still returns is dropped. A finished task
 stays as it is, and the answer is the same.
 
 A task can be read for `TtlMs` after it was created (one hour by
-default). After that it is gone, and a handler still running is
-cancelled. Of the tasks that ended, the server keeps `MaxKept` in all
-(1000 by default) and drops the oldest to make room. `PollIntervalMs`
-(one second by default) is the poll interval suggested to clients.
+default), and never goes before that. Once it has passed, the task is
+gone at the next request, and the handler's `IsCancelled` is true from
+that moment, whether a request comes or not. `PollIntervalMs` (one
+second by default) is the poll interval suggested to clients.
 
 Tasks live in the server's memory: they end with the process. Freeing
-the server cancels every task and waits until its handler returns, so
-a handler that never asks `IsCancelled` holds up shutdown until it
-ends. On stdio, `RunMCPStdioServer` returns at the end of input once
+the server cancels every task and waits until its handler returns,
+before it frees anything else, so a handler can still use what the
+server owns, such as an object it adopted. A handler that never asks
+`IsCancelled` holds up shutdown until it ends. On stdio, `RunMCPStdioServer` returns at the end of input once
 the queued requests are served, and freeing the server then ends the
 tasks still running.
 

@@ -56,6 +56,9 @@ type
   TMCPToolCallHook = function(const AToolName: string;
     AArguments: TJSONObject; const ACtx: TMCPRequestContext;
     ALegacy: Boolean): TJSONObject of object;
+  // Stops the work a tool-call hook started and waits for it, before the
+  // server frees anything (#82 review).
+  TMCPDrain = procedure of object;
 
   TMCPExtensionHooks = class
   private
@@ -76,6 +79,7 @@ type
       Headers: TMCPHeaderLookup;
     end;
     FToolCallHook: TMCPToolCallHook;
+    FToolCallDrain: TMCPDrain;
   public
     destructor Destroy; override;
     // '' once added; otherwise why not (an empty name, a nil handler, a
@@ -107,9 +111,14 @@ type
       AHeaders: TMCPHeaderLookup): string;
     function FindRoute(const AMethod: string; out ANameParam: string;
       out AHeaders: TMCPHeaderLookup): Boolean;
-    // '' once AHook sees every tools/call; otherwise why not (a nil
-    // hook, or a hook set already: one extension takes tool calls over).
-    function SetToolCallHook(AHook: TMCPToolCallHook): string;
+    // '' once AHook sees every tools/call, with ADrain (nil for none) to
+    // stop what it started; otherwise why not (a nil hook, or a hook set
+    // already: one extension takes tool calls over).
+    function SetToolCallHook(AHook: TMCPToolCallHook;
+      ADrain: TMCPDrain): string;
+    // Runs the tool-call hook's drain, once: the server calls it before
+    // it frees anything, adopted objects included. Safe on nil.
+    procedure Drain;
     // What the tool-call hook answers for a call (see TMCPToolCallHook);
     // nil without a hook.
     function TakeToolCall(const AToolName: string; AArguments: TJSONObject;
@@ -360,14 +369,29 @@ begin
   Result := False;
 end;
 
-function TMCPExtensionHooks.SetToolCallHook(AHook: TMCPToolCallHook): string;
+function TMCPExtensionHooks.SetToolCallHook(AHook: TMCPToolCallHook;
+  ADrain: TMCPDrain): string;
 begin
   if not Assigned(AHook) then
     Exit('A tool-call hook must not be nil');
   if Assigned(FToolCallHook) then
     Exit('A tool-call hook is already set');
   FToolCallHook := AHook;
+  FToolCallDrain := ADrain;
   Result := '';
+end;
+
+procedure TMCPExtensionHooks.Drain;
+var
+  Pending: TMCPDrain;
+begin
+  // A server whose constructor raised has no hooks yet: nothing to drain.
+  if Self = nil then
+    Exit;
+  Pending := FToolCallDrain;
+  FToolCallDrain := nil;
+  if Assigned(Pending) then
+    Pending();
 end;
 
 function TMCPExtensionHooks.TakeToolCall(const AToolName: string;

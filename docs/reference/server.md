@@ -317,7 +317,9 @@ function HookProblem(const AMethods: array of string;
   const AUriPrefix: string): string;
 procedure Adopt(AObject: TObject);
 function Adopted(AClass: TClass): TObject;
-procedure SetToolCallHook(AHook: TMCPToolCallHook);
+procedure SetToolCallHook(AHook: TMCPToolCallHook;
+  ADrain: TMCPDrain = nil);
+function ClientFaultMessage(const ASite: string; E: Exception): string;
 function HasTool(const AName: string): Boolean;
 function RunTool(const AToolName: string; AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolRun;
@@ -387,11 +389,18 @@ capabilities are met and before its handler runs: the hook returns
 `nil` to let the call run as usual, or the result to send in its place
 (new; the server stamps and sends it), and may raise
 `EMCPProtocolError`. Its arguments and everything the context borrows
-are valid for the call only. A nil hook, a second one or a started
-server raises `EMCPServer`. `HasTool` says whether a tool is
+are valid for the call only. `ADrain` (a `procedure of object`, from
+`MCP.Extensions`) runs first when the server is freed, before anything
+else goes, so the work the hook started can stop and be waited for. A
+nil hook, a second one or a started server raises `EMCPServer`.
+`ClientFaultMessage` is the message a client gets for an exception
+that escaped at `ASite`: `Internal error:` followed by its text, or with
+`RedactErrorDetails` `Internal error` and a reference, the details
+logged to stderr, as for a handler's exception. `HasTool` says whether a tool is
 registered. `RunTool` runs a registered tool as a 2026-07-28
 `tools/call` would, outside any request, such as on a thread of its
-own: argument binding and the input schema first, then the handler on
+own, freezing the configuration first as a session does: argument
+binding and the input schema first, then the handler on
 a copy of `AArguments`, then its structured output against the output
 schema. A handler's other exceptions and rejected arguments become an
 `isError` result, as in a call, and its `EMCPProtocolError`
@@ -565,18 +574,22 @@ property MaxKept: Integer;
 | `SetSelector` | Decides for every call in place of `SetToolSupport`, from the tool's name, its arguments and the context, whose `InputResponses` is set on the retry of an input round. Setting one form replaces the other; nil for none |
 | `TtlMs` | A task's `ttlMs`: how long after creation `tasks/get` finds it (at least 1); a handler still running then is cancelled |
 | `PollIntervalMs` | The `pollIntervalMs` suggested to clients (at least 1) |
-| `MaxActive` | Tasks running or waiting for input at once (1 to `MaxKept`); past it, an optional call runs as usual and a required one answers `-32603` |
-| `MaxKept` | Tasks kept in all (at least `MaxActive`); the oldest finished ones are dropped to make room |
+| `MaxActive` | Tasks whose handler has not returned, cancelled and expired ones included (1 to `MaxKept`); past it, an optional call runs as usual and a required one answers `-32603` |
+| `MaxKept` | Tasks kept until their `ttlMs` ends (at least `MaxActive`); past it, as past `MaxActive`. No task goes before its `ttlMs` ends |
 
 A task's handler is the tool's own, run with `RunTool` on a thread of
 its own, with the creating request's context (its client, capabilities
 and `_meta`) and no notifier. Its `IsCancelled` turns true on
 `tasks/cancel`, at the end of `TtlMs`, and when the server is freed,
-which waits for every handler to return. An input round parks the task
-in `input_required` with its requests, under keys unique over the
-task's lifetime (a reused key gets a `#2` suffix), until `tasks/update`
-has answered all of them; requests of a kind the client did not
-declare fail the task with `-32021`.
+which waits for every handler to return before it frees anything else
+(the drain `EnableTasks` sets). A round starts only while the task may
+run. An input round parks the task in `input_required` with its
+requests, under keys unique over the task's lifetime (a reused key gets
+a `#2` suffix), until `tasks/update` has answered all of them with
+objects; a round without requests runs again at once. A `tasks/get`
+whose request did not declare what a waiting request needs gets
+`-32021`. A result, input requests or error data the wire cannot carry
+fail the task with `-32603`, faults following `RedactErrorDetails`.
 
 ### The request context
 

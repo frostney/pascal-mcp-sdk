@@ -724,9 +724,18 @@ type
     // Every tools/call for a registered tool reaches AHook before the
     // tool's handler runs, once its declared client capabilities are
     // met, in both eras (#82; MCP.Extensions has the hook type): the
-    // Tasks extension answers some with a task. A nil hook, a second
-    // one or a started server raises EMCPServer.
-    procedure SetToolCallHook(AHook: TMCPToolCallHook);
+    // Tasks extension answers some with a task. ADrain (nil for none)
+    // runs first when the server is freed, before anything else goes,
+    // to stop the work the hook started and wait for it. A nil hook, a
+    // second one or a started server raises EMCPServer.
+    procedure SetToolCallHook(AHook: TMCPToolCallHook;
+      ADrain: TMCPDrain = nil);
+    // The message a client gets for E, an exception that escaped at
+    // ASite: its text after "Internal error: ", or with
+    // RedactErrorDetails "Internal error" and a reference, the details
+    // going to stderr under that reference, as for a handler's
+    // exception (#82 review).
+    function ClientFaultMessage(const ASite: string; E: Exception): string;
     // Whether a tool named AName is registered.
     function HasTool(const AName: string): Boolean;
     // Runs tool AToolName with AArguments (borrowed; the handler gets a
@@ -740,8 +749,9 @@ type
     // an input request's kinds are not checked against them either: the
     // caller does that (MissingInputCapability, MCP.Protocol). An
     // unknown tool raises EMCPServer, and a handler's EMCPProtocolError
-    // propagates. Safe to call from another thread once the server has
-    // started, as far as the handler itself is.
+    // propagates. It freezes the configuration first, as a session does.
+    // Safe to call from another thread once the server has started, as
+    // far as the handler itself is.
     function RunTool(const AToolName: string; AArguments: TJSONObject;
       const ACtx: TMCPRequestContext): TMCPToolRun;
     // Why RegisterMethod would refuse one of AMethods, or
@@ -2567,9 +2577,10 @@ destructor TMCPServer.Destroy;
 var
   I: Integer;
 begin
-  // The extensions' objects go first: one may still be running a tool
-  // on a thread of its own, such as a task (#82), and waits for it
-  // while the registrations it reads are still there.
+  // Work a tool-call hook started, such as a task's handler on a thread
+  // of its own (#82), stops first, while everything it may use is still
+  // there; then the extensions' objects go, before the registrations.
+  FHooks.Drain;
   FreeAndNil(FHooks);
   for I := 0 to High(FTools) do
     FTools[I].Definition.Free;
@@ -2714,13 +2725,18 @@ begin
   Result := FHooks.FindRoute(AMethod, ANameParam, AHeaders);
 end;
 
-procedure TMCPServer.SetToolCallHook(AHook: TMCPToolCallHook);
-var
-  Problem: string;
+procedure TMCPServer.SetToolCallHook(AHook: TMCPToolCallHook;
+  ADrain: TMCPDrain);
 begin
   EnsureMutable;
-  Problem := FHooks.SetToolCallHook(AHook);
-  RaiseIfProblem(Problem);
+  RaiseIfProblem(FHooks.SetToolCallHook(AHook, ADrain));
+end;
+
+function TMCPServer.ClientFaultMessage(const ASite: string;
+  E: Exception): string;
+begin
+  Result := ExceptionClientMessage(ASite, 'Internal error: ',
+    'Internal error', E);
 end;
 
 function TMCPServer.HasTool(const AName: string): Boolean;
@@ -4328,6 +4344,9 @@ var
   ToolResult: TMCPToolResult;
 begin
   Result := Default(TMCPToolRun);
+  // As a session does: the validation the wire path applies is set up
+  // when the configuration freezes (#82 review).
+  FreezeConfiguration;
   Index := FindTool(AToolName);
   if Index < 0 then
     raise EMCPServer.CreateFmt('Unknown tool: %s', [AToolName]);

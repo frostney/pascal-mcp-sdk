@@ -117,10 +117,11 @@ type
     // cancelled, and returns that response. While it waits for input it
     // answers the requests it has a canned answer for (AnswerInput) with
     // tasks/update; a key the server suffixed to keep it unique, as
-    // confirm#2, takes the answer for confirm when it has none of its
-    // own. It returns early with an input_required response when some
-    // requested key has no answer, and with an error response as it is;
-    // after ATimeoutMs it raises EMCPTesting.
+    // confirm#2 ('#' and digits), takes the answer for confirm when it
+    // has none of its own. It returns early with an input_required
+    // response when some requested key has no answer, and with an error
+    // response as it is, a refused tasks/update's included; after
+    // ATimeoutMs it raises EMCPTesting.
     function AwaitTask(const ATaskId: string;
       ATimeoutMs: Integer = 10000): TJSONObject;
 
@@ -391,11 +392,34 @@ begin
   Result := Send(AMethod, Envelope(AParamsJson));
 end;
 
+// The handler's key of AKey when the server suffixed it to keep it
+// unique ("confirm#2" for "confirm"), '' otherwise: the part before the
+// last '#', when only digits follow it.
+function UnsuffixedKey(const AKey: string): string;
+var
+  Hash, I: Integer;
+begin
+  Result := '';
+  Hash := 0;
+  for I := Length(AKey) downto 1 do
+    if AKey[I] = '#' then
+    begin
+      Hash := I;
+      Break;
+    end;
+  if (Hash <= 1) or (Hash = Length(AKey)) then
+    Exit;
+  for I := Hash + 1 to Length(AKey) do
+    if not (AKey[I] in ['0'..'9']) then
+      Exit;
+  Result := Copy(AKey, 1, Hash - 1);
+end;
+
 // The answers for every key of ARequests, or nil when one has none.
 function TaskAnswers(AAnswers, ARequests: TJSONObject): TJSONObject;
 var
-  I, Hash: Integer;
-  Key: string;
+  I: Integer;
+  Key, Plain: string;
   Answer: TJSONData;
 begin
   Result := TJSONObject.Create;
@@ -404,9 +428,9 @@ begin
     begin
       Key := ARequests.Names[I];
       Answer := AAnswers.Find(Key);
-      Hash := Pos('#', Key);
-      if (Answer = nil) and (Hash > 1) then
-        Answer := AAnswers.Find(Copy(Key, 1, Hash - 1));
+      Plain := UnsuffixedKey(Key);
+      if (Answer = nil) and (Plain <> '') then
+        Answer := AAnswers.Find(Plain);
       if Answer = nil then
       begin
         FreeAndNil(Result);
@@ -455,6 +479,12 @@ begin
       Params.Add('taskId', ATaskId);
       Params.Add('inputResponses', Answers);
       Update := Send('tasks/update', Params);
+      // A refused update comes back as it is, not as a timeout.
+      if Update.Find('error') <> nil then
+      begin
+        FreeAndNil(Result);
+        Exit(Update);
+      end;
       Update.Free;
     end;
     FreeAndNil(Result);
