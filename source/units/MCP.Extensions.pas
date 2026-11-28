@@ -1,6 +1,7 @@
 { MCP.Extensions — the hooks an extension unit serves through (#115):
   request methods it adds, resources under a URI prefix that it reads
-  without listing them, and objects whose lifetime the server owns.
+  without listing them, objects whose lifetime the server owns, and a
+  hook that may take a tools/call over before its handler runs (#82).
   MCP.Server keeps one TMCPExtensionHooks and consults it after its own
   methods and resources; MCP.Skills is the first user. No I/O. }
 
@@ -44,6 +45,18 @@ type
   TMCPHeaderLookup = function(const AName: string): TMCPHeaderParameters
     of object;
 
+  // A tools/call for tool AToolName, seen before its handler runs (#82):
+  // nil lets the call run as usual; otherwise the result to send in its
+  // place (new, the caller's; the server stamps and sends it), such as
+  // the Tasks extension's CreateTaskResult. AArguments (the call's
+  // arguments, {} when it has none) and everything ACtx borrows are
+  // valid for the call only, so clone what you keep. ALegacy is true for
+  // a client on the classic handshake. Raise EMCPProtocolError to
+  // answer a JSON-RPC error.
+  TMCPToolCallHook = function(const AToolName: string;
+    AArguments: TJSONObject; const ACtx: TMCPRequestContext;
+    ALegacy: Boolean): TJSONObject of object;
+
   TMCPExtensionHooks = class
   private
     FMethods: array of record
@@ -62,6 +75,7 @@ type
       Method, NameParam: string;
       Headers: TMCPHeaderLookup;
     end;
+    FToolCallHook: TMCPToolCallHook;
   public
     destructor Destroy; override;
     // '' once added; otherwise why not (an empty name, a nil handler, a
@@ -93,6 +107,13 @@ type
       AHeaders: TMCPHeaderLookup): string;
     function FindRoute(const AMethod: string; out ANameParam: string;
       out AHeaders: TMCPHeaderLookup): Boolean;
+    // '' once AHook sees every tools/call; otherwise why not (a nil
+    // hook, or a hook set already: one extension takes tool calls over).
+    function SetToolCallHook(AHook: TMCPToolCallHook): string;
+    // What the tool-call hook answers for a call (see TMCPToolCallHook);
+    // nil without a hook.
+    function TakeToolCall(const AToolName: string; AArguments: TJSONObject;
+      const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
     // Extension AId is left out of the classic capabilities.
     procedure RestrictToModern(const AId: string);
     // Extension AId is answered with ASettings (owned), replacing what
@@ -337,6 +358,25 @@ begin
   ANameParam := '';
   AHeaders := nil;
   Result := False;
+end;
+
+function TMCPExtensionHooks.SetToolCallHook(AHook: TMCPToolCallHook): string;
+begin
+  if not Assigned(AHook) then
+    Exit('A tool-call hook must not be nil');
+  if Assigned(FToolCallHook) then
+    Exit('A tool-call hook is already set');
+  FToolCallHook := AHook;
+  Result := '';
+end;
+
+function TMCPExtensionHooks.TakeToolCall(const AToolName: string;
+  AArguments: TJSONObject; const ACtx: TMCPRequestContext;
+  ALegacy: Boolean): TJSONObject;
+begin
+  Result := nil;
+  if Assigned(FToolCallHook) then
+    Result := FToolCallHook(AToolName, AArguments, ACtx, ALegacy);
 end;
 
 procedure TMCPExtensionHooks.RestrictToModern(const AId: string);

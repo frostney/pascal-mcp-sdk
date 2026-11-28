@@ -112,6 +112,17 @@ type
       const AArgumentsJson: string = '{}'): TJSONObject;
     // ARefJson: '{"type":"ref/prompt","name":"greet"}' or a ref/resource.
     function Complete(const ARefJson, AArgument, AValue: string): TJSONObject;
+    // Polls tasks/get for task ATaskId (MCP.Tasks; declare the extension
+    // with SetClientCapabilities first) until it is completed, failed or
+    // cancelled, and returns that response. While it waits for input it
+    // answers the requests it has a canned answer for (AnswerInput) with
+    // tasks/update; a key the server suffixed to keep it unique, as
+    // confirm#2, takes the answer for confirm when it has none of its
+    // own. It returns early with an input_required response when some
+    // requested key has no answer, and with an error response as it is;
+    // after ATimeoutMs it raises EMCPTesting.
+    function AwaitTask(const ATaskId: string;
+      ATimeoutMs: Integer = 10000): TJSONObject;
 
     // The notification lines (progress, log messages) the last helper
     // call emitted, in order, across every input round it answered.
@@ -378,6 +389,80 @@ function TMCPTestClient.Request(const AMethod: string;
 begin
   StartCall;
   Result := Send(AMethod, Envelope(AParamsJson));
+end;
+
+// The answers for every key of ARequests, or nil when one has none.
+function TaskAnswers(AAnswers, ARequests: TJSONObject): TJSONObject;
+var
+  I, Hash: Integer;
+  Key: string;
+  Answer: TJSONData;
+begin
+  Result := TJSONObject.Create;
+  try
+    for I := 0 to ARequests.Count - 1 do
+    begin
+      Key := ARequests.Names[I];
+      Answer := AAnswers.Find(Key);
+      Hash := Pos('#', Key);
+      if (Answer = nil) and (Hash > 1) then
+        Answer := AAnswers.Find(Copy(Key, 1, Hash - 1));
+      if Answer = nil then
+      begin
+        FreeAndNil(Result);
+        Exit;
+      end;
+      Result.Add(Key, Answer.Clone);
+    end;
+  except
+    Result.Free;
+    raise;
+  end;
+end;
+
+function TMCPTestClient.AwaitTask(const ATaskId: string;
+  ATimeoutMs: Integer): TJSONObject;
+var
+  Deadline: QWord;
+  Status: TJSONData;
+  Requests, Answers, Params: TJSONObject;
+  Update: TJSONObject;
+begin
+  StartCall;
+  Deadline := GetTickCount64 + QWord(ATimeoutMs);
+  repeat
+    Params := Envelope('{}');
+    Params.Add('taskId', ATaskId);
+    Result := Send('tasks/get', Params);
+    Status := Result.FindPath('result.status');
+    if (Status = nil) or (Status.JSONType <> jtString) then
+      Exit;
+    if (Status.AsString = 'completed') or (Status.AsString = 'failed') or
+      (Status.AsString = 'cancelled') then
+      Exit;
+    if Status.AsString = 'input_required' then
+    begin
+      Requests := nil;
+      if (Result.FindPath('result.inputRequests') <> nil) and
+        (Result.FindPath('result.inputRequests').JSONType = jtObject) then
+        Requests := TJSONObject(Result.FindPath('result.inputRequests'));
+      if Requests = nil then
+        Exit;
+      Answers := TaskAnswers(FInputResponses, Requests);
+      if Answers = nil then
+        Exit;
+      Params := Envelope('{}');
+      Params.Add('taskId', ATaskId);
+      Params.Add('inputResponses', Answers);
+      Update := Send('tasks/update', Params);
+      Update.Free;
+    end;
+    FreeAndNil(Result);
+    if GetTickCount64 >= Deadline then
+      raise EMCPTesting.CreateFmt('Task %s did not finish within %d ms',
+        [ATaskId, ATimeoutMs]);
+    Sleep(10);
+  until False;
 end;
 
 function TMCPTestClient.Discover: TJSONObject;

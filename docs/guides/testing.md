@@ -172,6 +172,36 @@ Without an answer for a requested key, or after ten rounds, the latest
 what the tool asked for. The full API is in the
 [test client reference](../reference/test-client.md).
 
+## Tasks
+
+A tool that runs as a task (see [Tasks](tasks.md)) answers
+`tools/call` with a `taskId`. `AwaitTask` polls the task to its end,
+answering its input requests from the same canned answers:
+
+```pascal
+FClient.SetClientCapabilities('{"elicitation":{},' +
+  '"extensions":{"io.modelcontextprotocol/tasks":{}}}');
+FClient.AnswerInput('confirm', '{"action":"accept","content":{"confirm":true}}');
+Response := FClient.CallTool('delete_file', '{"filename":"a.txt"}');
+try
+  TaskId := Response.FindPath('result.taskId').AsString;
+finally
+  Response.Free;
+end;
+Response := FClient.AwaitTask(TaskId);
+try
+  Expect<string>(Response.FindPath('result.status').AsString)
+    .ToBe('completed');
+  Expect<string>(Response.FindPath('result.result.content[0].text').AsString)
+    .ToBe('Deleted a.txt');
+finally
+  Response.Free;
+end;
+```
+
+The handler runs on a thread of its own, so the program that runs the
+test lists `cthreads` first on Unix, as the server does.
+
 ## What it does not cover
 
 The client calls the core, so it tests your handlers, schemas and

@@ -26,6 +26,8 @@ function ListPrompts: TJSONObject;
 function GetPrompt(const AName: string;
   const AArgumentsJson: string = '{}'): TJSONObject;
 function Complete(const ARefJson, AArgument, AValue: string): TJSONObject;
+function AwaitTask(const ATaskId: string;
+  ATimeoutMs: Integer = 10000): TJSONObject;
 
 property Notifications: TStringList;       // owned by the client
 property LastResponseLine: string;
@@ -43,6 +45,7 @@ property Session: TMCPSession;             // owned by the client
 | `Request` | One request with the `_meta` envelope added to `AParamsJson` (an object); a key of yours in `_meta` wins over the envelope's |
 | `CallTool`, `GetPrompt` | Answer `input_required` rounds from the canned responses and retry with the echoed `requestState`, while every requested key has an answer, at most ten times; then, or without an answer, they return the latest response. A round that asks for nothing is retried with its `requestState` alone |
 | `Discover`, the list methods, `ReadResource`, `Complete` | One request each |
+| `AwaitTask` | Polls `tasks/get` for a task (declare the Tasks extension with `SetClientCapabilities` first) until it is completed, failed or cancelled, and returns that response. While the task waits for input, it answers the requests it has canned answers for with `tasks/update`, a key the server suffixed (`confirm#2`) with the answer for its own name when it has none of its own. It returns an `input_required` response as it is when a requested key has no answer, and an error response as it is; past `ATimeoutMs` it raises `EMCPTesting` |
 | `Notifications` | The notification lines the last call emitted, in order, across every round it answered; cleared when a call starts, before it checks its arguments |
 | `LastResponseLine` | The raw response line of the last round, for byte-exact assertions; `''` when that round got no response, such as a cancelled one |
 | `Session` | The client's session, for a hand-written `HandleMessage` line |

@@ -101,74 +101,35 @@
       "expected": "pass"
     },
     "tasks-capability-negotiation": {
-      "expected": "fail",
-      "issue": 82,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "tasks-dispatch-and-envelope": {
-      "expected": "fail",
-      "issue": 82,
-      "passingChecks": [
-        "sep-2663-tasks-result-removed-method-not-found",
-        "tasks-removed-tasks-list",
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "tasks-lifecycle": {
-      "expected": "fail",
-      "issue": 82,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "tasks-mrtr-composition": {
-      "expected": "fail",
-      "issue": 82,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "tasks-mrtr-input": {
-      "expected": "fail",
-      "issue": 82,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "tasks-request-headers": {
-      "expected": "fail",
-      "issue": 82,
-      "passingChecks": [
-        "tasks-headers-reject-mismatched-method",
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "tasks-request-state-removal": {
-      "expected": "fail",
-      "issue": 82,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "tasks-required-task-error": {
-      "expected": "fail",
-      "issue": 82,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "tasks-status-notifications": {
       "expected": "skip",
-      "issue": 82
+      "issue": 138
     },
     "tasks-wire-fields": {
-      "expected": "fail",
-      "issue": 82,
-      "passingChecks": [
-        "wire-schema-valid"
-      ]
+      "expected": "pass"
     },
     "tools-call-audio": {
       "expected": "pass"
