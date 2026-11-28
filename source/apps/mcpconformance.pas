@@ -33,6 +33,7 @@ uses
   MCP.JSONRPC,
   MCP.Protocol,
   MCP.Server,
+  MCP.Tasks,
   MCP.Transport.HTTP,
   MCP.Transport.Stdio;
 
@@ -554,6 +555,150 @@ begin
   end;
 end;
 
+{ ───────── task tools (the suite's tasks-* scenarios, SEP-2663) ───────── }
+
+const
+  GREET_SCHEMA =
+    '{"type":"object","properties":{"name":{"type":"string"}},' +
+    '"required":["name"]}';
+  SLOW_COMPUTE_SCHEMA =
+    '{"type":"object","properties":{"seconds":{"type":"integer"},' +
+    '"label":{"type":"string"}},"required":["seconds"]}';
+  FILENAME_SCHEMA =
+    '{"type":"object","properties":{"filename":{"type":"string"}},' +
+    '"required":["filename"]}';
+  // The suite answers these elicitations with {confirm: true}.
+  TASK_CONFIRM_SCHEMA =
+    '{"type":"object","properties":{"confirm":{"type":"boolean"}},' +
+    '"required":["confirm"]}';
+
+function Greet(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPTextResult('Hello, ' + AArguments.Get('name', '') + '!');
+end;
+
+// Sleeps the seconds asked for, checking for cancellation every 50 ms.
+function SlowCompute(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Step: Integer;
+begin
+  for Step := 1 to AArguments.Get('seconds', 0) * 20 do
+  begin
+    if ACtx.IsCancelled then
+      Exit(MCPErrorResult('Cancelled'));
+    Sleep(50);
+  end;
+  Result := MCPTextResult('Computed ' + AArguments.Get('label', 'result'));
+end;
+
+function FailingJob(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Sleep(100);
+  Result := MCPErrorResult('The conformance task failed.');
+end;
+
+function ProtocolErrorJob(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := Default(TMCPToolResult);
+  raise EMCPProtocolError.Create(JSONRPC_INTERNAL_ERROR,
+    'The conformance task encountered a protocol error.');
+end;
+
+function ConfirmRequest(const AMessage: string): TJSONObject;
+begin
+  Result := MCPElicitFormRequest(AMessage, JSONObjectOf(TASK_CONFIRM_SCHEMA));
+end;
+
+function ConfirmDelete(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Filename: string;
+  Content: TJSONObject;
+begin
+  Filename := AArguments.Get('filename', '');
+  if MCPInputResponse(ACtx, 'confirm') = nil then
+    Exit(MCPInputRequired(OneRequest('confirm',
+      ConfirmRequest('Delete ' + Filename + '?'))));
+  Content := MCPElicitationContent(ACtx, 'confirm');
+  if (Content <> nil) and Content.Get('confirm', False) then
+    Result := MCPTextResult('Deleted ' + Filename)
+  else
+    Result := MCPTextResult('Did not delete ' + Filename);
+end;
+
+// Two input requests at once, so a client can answer them one by one.
+function MultiInput(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Requests: TJSONObject;
+begin
+  if (MCPInputResponse(ACtx, 'first') <> nil) and
+    (MCPInputResponse(ACtx, 'second') <> nil) then
+    Exit(MCPTextResult('Both inputs received.'));
+  Requests := TJSONObject.Create;
+  Requests.Add('first', ConfirmRequest('Confirm the first operation.'));
+  Requests.Add('second', ConfirmRequest('Confirm the second operation.'));
+  Result := MCPInputRequired(Requests);
+end;
+
+// Asks for a name synchronously; the selector runs the retry as a task.
+function ToolWithTask(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  if MCPInputResponse(ACtx, 'user_name') <> nil then
+    Exit(MCPTextResult('Hello, ' + ElicitedText(ACtx, 'user_name', 'name') +
+      '!'));
+  Result := MCPInputRequired(OneRequest('user_name',
+    MCPElicitFormRequest('What is your name?', FieldSchema('name'))));
+end;
+
+function TaskSelector(const AToolName: string; AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPTaskSupport;
+begin
+  if (AToolName = 'slow_compute') or (AToolName = 'protocol_error_job') or
+    (AToolName = 'confirm_delete') or (AToolName = 'multi_input') then
+    Result := tsOptional
+  else if AToolName = 'failing_job' then
+    Result := tsRequired
+  else if (AToolName = 'test_tool_with_task') and
+    (ACtx.InputResponses <> nil) then
+    Result := tsRequired
+  else
+    Result := tsNone;
+end;
+
+procedure RegisterTaskTools(AServer: TMCPServer);
+var
+  Tasks: TMCPTasks;
+begin
+  AServer.RegisterTool('greet', 'Returns a synchronous greeting',
+    GREET_SCHEMA, Greet);
+  AServer.RegisterTool('slow_compute',
+    'Completes after the requested number of seconds', SLOW_COMPUTE_SCHEMA,
+    SlowCompute);
+  AServer.RegisterTool('failing_job', 'Produces a tool execution error',
+    NO_ARGUMENTS, FailingJob);
+  AServer.RegisterTool('protocol_error_job',
+    'Produces a protocol-level error', NO_ARGUMENTS, ProtocolErrorJob);
+  AServer.RegisterTool('confirm_delete',
+    'Waits for elicitation before confirming deletion', FILENAME_SCHEMA,
+    ConfirmDelete);
+  AServer.RegisterTool('multi_input',
+    'Waits for two independent elicitation responses', NO_ARGUMENTS,
+    MultiInput);
+  AServer.RegisterTool('test_tool_with_task',
+    'Collects input synchronously, then completes through a task',
+    NO_ARGUMENTS, ToolWithTask);
+  Tasks := EnableTasks(AServer);
+  Tasks.SetSelector(TaskSelector);
+  // The suite polls every 200 ms at most.
+  Tasks.PollIntervalMs := 200;
+end;
+
 type
   TArgumentlessTool = record
     Name: string;
@@ -645,6 +790,7 @@ begin
   AServer.RegisterTool('test_custom_headers',
     'Tool whose region argument is mirrored into an Mcp-Param header',
     CUSTOM_HEADER_SCHEMA, CustomHeaders).ApplicationValidated;
+  RegisterTaskTools(AServer);
 end;
 
 procedure RegisterPrompts(AServer: TMCPServer);

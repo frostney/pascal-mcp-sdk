@@ -49,6 +49,14 @@ const
     '"io.modelcontextprotocol/clientInfo":{"name":"mcpsmoke","version":"0.1.0"},' +
     '"io.modelcontextprotocol/clientCapabilities":{"elicitation":{}}}';
 
+  // Modern _meta declaring the Tasks extension (#82), with elicitation
+  // for a task's input round.
+  META_TASKS =
+    '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+    '"io.modelcontextprotocol/clientInfo":{"name":"mcpsmoke","version":"0.1.0"},' +
+    '"io.modelcontextprotocol/clientCapabilities":{"elicitation":{},' +
+    '"extensions":{"io.modelcontextprotocol/tasks":{}}}}';
+
 var
   Failures: Integer = 0;
 
@@ -645,6 +653,123 @@ begin
     end;
   finally
     Clock.Free;
+  end;
+end;
+
+// The Tasks extension over stdio, against the conformance fixture (#82):
+// a task created, polled to its result, answered through tasks/update,
+// cancelled, and a task still running when stdin ends. Shapes verified
+// 2026-11-28 against modelcontextprotocol/ext-tasks
+// specification/2026-07-28/tasks.md at cc9aaac.
+procedure TasksBattery;
+var
+  Fixture: TProcess;
+  NextId: Integer;
+
+  function Call(const AMethod, AParams: string; out ALine: string): TJSONObject;
+  begin
+    Inc(NextId);
+    Result := RoundTripWithLine(Fixture, '{"jsonrpc":"2.0","id":' +
+      IntToStr(NextId) + ',"method":"' + AMethod + '","params":{' + AParams +
+      ',' + META_TASKS + '}}', ALine);
+  end;
+
+  function Start(const AParams: string): string;
+  var
+    Response: TJSONObject;
+    Line: string;
+  begin
+    Response := Call('tools/call', AParams, Line);
+    Result := PathString(Response, 'result.taskId');
+    Check((PathString(Response, 'result.resultType') = 'task') and
+      (Length(Result) = 22) and
+      (PathString(Response, 'result.status') <> ''),
+      'tasks: tools/call answers a CreateTaskResult');
+    Response.Free;
+  end;
+
+  // tasks/get until the status is AStatus, at most 5 s; the last line.
+  function Await(const ATaskId, AStatus: string; out ALine: string): Boolean;
+  var
+    Response: TJSONObject;
+    Step: Integer;
+  begin
+    Result := False;
+    for Step := 1 to 250 do
+    begin
+      Response := Call('tasks/get', '"taskId":"' + ATaskId + '"', ALine);
+      Result := PathString(Response, 'result.status') = AStatus;
+      Response.Free;
+      if Result then
+        Exit;
+      Sleep(20);
+    end;
+  end;
+
+var
+  TaskId, Line: string;
+  Response: TJSONObject;
+begin
+  NextId := 0;
+  Fixture := TProcess.Create(nil);
+  try
+    Fixture.Executable := FixtureBinary;
+    Fixture.Options := [poUsePipes];
+    try
+      Fixture.Execute;
+    except
+      on E: Exception do
+      begin
+        Check(False, 'tasks: launch ' + FixtureBinary + ': ' + E.Message);
+        Exit;
+      end;
+    end;
+
+    Response := Call('server/discover', '"x":0', Line);
+    Check(Pos('"io.modelcontextprotocol/tasks" : {}', Line) > 0,
+      'tasks: server/discover declares the extension');
+    Response.Free;
+
+    TaskId := Start('"name":"slow_compute","arguments":{"seconds":0,' +
+      '"label":"Gr' + #$C3#$BC + #$C3#$9F + 'e ' + #$F0#$9F#$98#$80 + '"}');
+    Check(Await(TaskId, 'completed', Line) and (Pos('"text" : "Computed Gr' +
+      #$C3#$BC + #$C3#$9F + 'e ' + #$F0#$9F#$98#$80 + '"', Line) > 0),
+      'tasks: tasks/get inlines the result, UTF-8 byte-exact');
+
+    TaskId := Start('"name":"confirm_delete","arguments":{"filename":' +
+      '"a.txt"}');
+    Check(Await(TaskId, 'input_required', Line) and
+      (Pos('"inputRequests" : { "confirm" : { "method" : ' +
+      '"elicitation/create"', Line) > 0),
+      'tasks: input_required carries the input request');
+    Response := Call('tasks/update', '"taskId":"' + TaskId +
+      '","inputResponses":{"confirm":{"action":"accept","content":' +
+      '{"confirm":true}}}', Line);
+    Check(PathString(Response, 'result.resultType') = 'complete',
+      'tasks: tasks/update acknowledged');
+    Response.Free;
+    Check(Await(TaskId, 'completed', Line) and
+      (Pos('"text" : "Deleted a.txt"', Line) > 0),
+      'tasks: the answered task completes');
+
+    TaskId := Start('"name":"slow_compute","arguments":{"seconds":60}');
+    Response := Call('tasks/cancel', '"taskId":"' + TaskId + '"', Line);
+    Check(PathString(Response, 'result.resultType') = 'complete',
+      'tasks: tasks/cancel acknowledged');
+    Response.Free;
+    Check(Await(TaskId, 'cancelled', Line), 'tasks: the task is cancelled');
+
+    Response := Call('tasks/get', '"taskId":"nope"', Line);
+    Check(PathInt(Response, 'error.code') = -32602,
+      'tasks: an unknown task answers -32602');
+    Response.Free;
+
+    // A task still running when stdin ends is cancelled, and the
+    // process exits as usual.
+    Start('"name":"slow_compute","arguments":{"seconds":60}');
+    Shutdown(Fixture, 'tasks');
+  finally
+    Fixture.Free;
   end;
 end;
 
@@ -1323,6 +1448,7 @@ begin
   SkillsDirBattery;
   FixedClockBattery;
   PushBattery;
+  TasksBattery;
 
   WriteLn;
   if Failures = 0 then

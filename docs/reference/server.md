@@ -317,6 +317,12 @@ function HookProblem(const AMethods: array of string;
   const AUriPrefix: string): string;
 procedure Adopt(AObject: TObject);
 function Adopted(AClass: TClass): TObject;
+procedure SetToolCallHook(AHook: TMCPToolCallHook;
+  ADrain: TMCPDrain = nil);
+function ClientFaultMessage(const ASite: string; E: Exception): string;
+function HasTool(const AName: string): Boolean;
+function RunTool(const AToolName: string; AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolRun;
 // on TMCPToolOptions:
 function RequireLinkedResource(const AMetaPaths: array of string;
   const AMimeType: string = ''; const AUriPrefix: string = ''): TMCPToolOptions;
@@ -343,13 +349,16 @@ second call replaces the first.
 stored as nil keep JSON nulls there.
 
 An extension unit adds the requests and resources it serves through
-three hooks, whose handler types are in `MCP.Extensions`:
+hooks, whose handler types are in `MCP.Extensions`:
 
 ```pascal
 TMCPMethodHandler = function(AParams: TJSONObject;
   const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject of object;
 TMCPResourceResolver = function(const AUri: string;
   const ACtx: TMCPRequestContext): TJSONArray of object;
+TMCPToolCallHook = function(const AToolName: string;
+  AArguments: TJSONObject; const ACtx: TMCPRequestContext;
+  ALegacy: Boolean): TJSONObject of object;
 ```
 
 `RegisterMethod` answers requests for `AMethod` in both eras, after
@@ -370,9 +379,39 @@ is none of its resources. Prefixes may not overlap, and a registered
 resource under a resolver's prefix fails startup, since it would hide
 what the extension serves there; so does a resource template whose
 text before its first variable lies under the prefix. `Adopt` hands the
-server an object to free after its handlers are gone, such as the
-state those handlers read, and `Adopted` finds the first adopted
+server an object to free after its handlers are gone and before its
+registrations, such as the state those handlers read or work of its
+own that still runs tools, and `Adopted` finds the first adopted
 object of a class; adopting the same object again changes nothing.
+`SetToolCallHook` lets one extension see every `tools/call` for a
+registered tool, in both eras, before its handler runs, a 2026-07-28
+call once the tool's declared client capabilities are met (a classic
+call has no such check): the hook returns
+`nil` to let the call run as usual, or the result to send in its place
+(new; the server stamps and sends it), and may raise
+`EMCPProtocolError`. Its arguments and everything the context borrows
+are valid for the call only. `ADrain` (a `procedure of object`, from
+`MCP.Extensions`) runs first when the server is freed, before anything
+else goes, so the work the hook started can stop and be waited for. A
+nil hook, a second one or a started server raises `EMCPServer`.
+`ClientFaultMessage` is the message a client gets for an exception
+that escaped at `ASite`: `Internal error:` followed by its text, or with
+`RedactErrorDetails` `Internal error` and a reference, the details
+logged to stderr, as for a handler's exception. `HasTool` says whether a tool is
+registered. `RunTool` runs a registered tool as a 2026-07-28
+`tools/call` would, outside any request, such as on a thread of its
+own, freezing the configuration first as a session does: argument
+binding and the input schema first, then the handler on
+a copy of `AArguments`, then its structured output against the output
+schema. A handler's other exceptions and rejected arguments become an
+`isError` result, as in a call, and its `EMCPProtocolError`
+propagates, as does `EMCPServer` for an unknown tool. The context's
+capabilities are not checked against the tool's declared ones, nor an
+input request's kinds against them (`MissingInputCapability` in
+`MCP.Protocol` does that). It returns a `TMCPToolRun`: with
+`InputRequired`, the handler's `InputRequests` (owned), its plain
+`RequestState` and `Meta` (owned; nil for none); otherwise `Result`,
+the `CallToolResult` object (owned, not yet stamped).
 `RestrictExtensionToModern` leaves extension `AId` out of the classic
 `initialize` capabilities, for an extension whose methods answer
 2026-07-28 requests only. `PinExtensionSettings` declares `AId` with
@@ -501,6 +540,60 @@ procedure RegisterEvent(AServer: TMCPServer; const AName,
 | `TMCPEventQuery` | One poll: the arguments, the cursor or `FromNow` for a null or absent one, and the client's `maxAgeMs` (at least 0) and `maxEvents` (at least 1), read as the schema reads integers |
 | `TMCPEventPoll` | A check's answer: at most `MaxEvents` occurrences, the cursor after them (null with `NoReplay`), `HasMore`, `Truncated` and `NextPollMs`. Events on a poll from now, more than `MaxEvents`, an occurrence without object data, an RFC 3339 timestamp or a payload matching its schema, and on a poll `HasMore` with `NoReplay`, answer `-32603`. With `Truncated` and events, `GapCursor` is the position delivery resumed from, before them, which a push stream's gap notification carries; with `''` that notification carries the fresh cursor, after the events, which then belong to the gap `Truncated` signals |
 | `MCPEventOccurrence` | One occurrence: `AData` (owned) and `AMeta` (owned) as given. An empty `AEventId` is derived from the name, timestamp and data, so the same event keeps its id; the server adds the name |
+
+#### Tasks
+
+From `MCP.Tasks`, the Tasks extension: tool calls answered with a task
+the client polls ([Tasks](../guides/tasks.md)):
+
+```pascal
+const MCP_TASKS_EXTENSION = 'io.modelcontextprotocol/tasks';
+const MCP_TASK_DEFAULT_TTL_MS = 3600000;
+const MCP_TASK_DEFAULT_POLL_INTERVAL_MS = 1000;
+const MCP_TASK_DEFAULT_MAX_ACTIVE = 32;
+const MCP_TASK_DEFAULT_MAX_KEPT = 1000;
+
+type TMCPTaskSupport = (tsNone, tsOptional, tsRequired);
+type TMCPTaskSelector = function(const AToolName: string;
+  AArguments: TJSONObject; const ACtx: TMCPRequestContext): TMCPTaskSupport;
+// and TMCPTaskSelectorMethod, the same "of object"
+
+function EnableTasks(AServer: TMCPServer): TMCPTasks;
+// on TMCPTasks:
+procedure SetToolSupport(const AToolName: string; ASupport: TMCPTaskSupport);
+procedure SetSelector(ASelector: TMCPTaskSelector);         // or a method
+property TtlMs: Int64;
+property PollIntervalMs: Integer;
+property MaxActive: Integer;
+property MaxKept: Integer;
+```
+
+| Member | Meaning |
+| --- | --- |
+| `EnableTasks` | Turns the extension on before the server starts and returns its settings (owned by the server; the same object on a second call): declares `{}` on `server/discover` only (`RestrictExtensionToModern`, `PinExtensionSettings`), serves `tasks/get`, `tasks/update` and `tasks/cancel` on 2026-07-28 (`-32021` for a request that does not declare the extension, `-32601` for a classic client), routed on Streamable HTTP with `Mcp-Name` mirroring `taskId`, and takes tool calls over with `SetToolCallHook`. Without a thread driver on Unix (`cthreads` first in the program's uses clause), or when its first call comes after the server started, it raises `EMCPServer`; a later call returns the same settings, whose setters then raise |
+| `SetToolSupport` | How a registered tool runs: `tsNone` as usual, `tsOptional` as a task when the request declares the extension and as usual otherwise, `tsRequired` only as a task (`-32021` otherwise, and for a classic client a tool error). An unknown tool or a started server raises `EMCPServer` |
+| `SetSelector` | Decides for every call in place of `SetToolSupport`, from the tool's name, its arguments and the context, whose `InputResponses` is set on the retry of an input round. Setting one form replaces the other; nil for none |
+| `TtlMs` | A task's `ttlMs`: how long after creation `tasks/get` finds it (1 to `MCP_TASK_MAX_TTL_MS`, the largest integer a JSON number carries exactly); a handler still running then is cancelled, and the task is dropped at the next request to the task store |
+| `PollIntervalMs` | The `pollIntervalMs` suggested to clients (at least 1) |
+| `MaxActive` | Tasks running or waiting for input, cancelled and expired ones counting until their handler returns (1 to `MaxKept`); past it, an optional call runs as usual and a required one answers `-32603` |
+| `MaxKept` | Tasks kept until their `ttlMs` ends (at least `MaxActive`); past it, as past `MaxActive`. No task goes before its `ttlMs` ends |
+
+A task's handler is the tool's own, run with `RunTool` on a thread of
+its own, with the creating request's context (its client, capabilities
+and `_meta`) and no notifier. Its `IsCancelled` turns true on
+`tasks/cancel`, at the end of `TtlMs`, and when the server is freed,
+which waits for every handler to return before it frees anything else
+(the drain `EnableTasks` sets). A round starts only while the task may
+run. An input round parks the task in `input_required` with its
+requests, under keys unique over the task's lifetime (a reused key gets
+a `#2` suffix), until `tasks/update` has answered all of them with
+objects; a round without requests runs again at once. A `tasks/get`
+whose request did not declare what a waiting request needs gets
+`-32021`. A result, input requests or error data the wire cannot carry
+fail the task with `-32603`, faults following `RedactErrorDetails`, as
+do requests that lack what their kind needs. A task's id is its only
+key, so whoever holds it reaches the task: enable Tasks only on a server
+with one caller (see [Tasks](../guides/tasks.md#who-can-reach-a-task)).
 
 ### The request context
 

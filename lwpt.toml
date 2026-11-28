@@ -46,12 +46,16 @@ args = ["scripts/smoke.pas"]
 # values: set just above the 2026-08-15 baseline (worst routine
 # validatesubsetarguments at cyclomatic 26 / cognitive 85; worst file
 # MCP.Server.pas at 541/600) so the numbers can shrink but not grow
-# unnoticed. Hotspot scoring needs full git history, which CI's
-# shallow checkout lacks — deliberately not limited.
+# unnoticed. The file ceiling went from 600 to 605 on 2026-11-28, when
+# MCP.Server.pas reached 603 with the tool-call hook, RunTool,
+# ClientFaultMessage and the exception-safe stamping the Tasks extension
+# runs on (#82). Hotspot scoring needs full git
+# history, which CI's shallow checkout lacks — deliberately not
+# limited.
 [health]
 max-routine-cyclomatic = 30
 max-routine-cognitive = 90
-max-file-cyclomatic = 600
+max-file-cyclomatic = 605
 max-file-cognitive = 650
 
 # Token-clone ceiling for `lwpt duplication` (CI gate); baseline

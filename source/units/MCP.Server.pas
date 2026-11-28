@@ -134,6 +134,20 @@ type
     Meta: TJSONObject;
   end;
 
+  // What TMCPServer.RunTool produced (#82). With InputRequired, the
+  // handler asked for more input: InputRequests (owned), RequestState
+  // (its plain state, '' for none) and Meta (owned; nil for none, the
+  // interim result's _meta). Otherwise Result is the CallToolResult
+  // (owned: content, isError, structuredContent and the handler's
+  // _meta, not yet stamped) the call would have answered.
+  TMCPToolRun = record
+    InputRequired: Boolean;
+    Result: TJSONObject;
+    InputRequests: TJSONObject;
+    RequestState: string;
+    Meta: TJSONObject;
+  end;
+
   TMCPToolHandler = function(AArguments: TJSONObject;
     const ACtx: TMCPRequestContext): TMCPToolResult;
   TMCPToolMethod = function(AArguments: TJSONObject;
@@ -618,6 +632,10 @@ type
       ALookup: TRegistryLookup; const ANoun: string;
       out AName: string; out AIndex: Integer;
       out AArguments, AOwnedEmpty: TJSONObject): string;
+    function InvokeTool(AIndex: Integer; AArguments: TJSONObject;
+      const ACtx: TMCPRequestContext): TMCPToolResult;
+    function ToolCallResult(AIndex: Integer; const AToolName: string;
+      var AToolResult: TMCPToolResult; ALegacy: Boolean): TJSONObject;
     function HandleToolsCall(const AMessage: TJSONRPCMessage;
       const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
     function HandleResourcesList(const AMessage: TJSONRPCMessage;
@@ -703,6 +721,40 @@ type
     // The route of AMethod, for transports.
     function MethodRoute(const AMethod: string; out ANameParam: string;
       out AHeaders: TMCPHeaderLookup): Boolean;
+    // Every tools/call for a registered tool reaches AHook before the
+    // tool's handler runs, in both eras, a 2026-07-28 one once its
+    // declared client capabilities are met (#82; MCP.Extensions has the
+    // hook type; a classic call has no such check): the
+    // Tasks extension answers some with a task. ADrain (nil for none)
+    // runs first when the server is freed, before anything else goes,
+    // to stop the work the hook started and wait for it. A nil hook, a
+    // second one or a started server raises EMCPServer.
+    procedure SetToolCallHook(AHook: TMCPToolCallHook;
+      ADrain: TMCPDrain = nil);
+    // The message a client gets for E, an exception that escaped at
+    // ASite: its text after "Internal error: ", or with
+    // RedactErrorDetails "Internal error" and a reference, the details
+    // going to stderr under that reference, as for a handler's
+    // exception (#82 review).
+    function ClientFaultMessage(const ASite: string; E: Exception): string;
+    // Whether a tool named AName is registered.
+    function HasTool(const AName: string): Boolean;
+    // Runs tool AToolName with AArguments (borrowed; the handler gets a
+    // copy, its defaults seeded) and ACtx as a 2026-07-28 tools/call
+    // would, outside any request, such as on a task's own thread (#82):
+    // argument binding and the input schema checked first, then the
+    // handler, then its structured output checked against the output
+    // schema. As in a call, the handler's other exceptions and an
+    // argument it rejects become an isError result. ACtx's client
+    // capabilities are not checked against what the tool declares, and
+    // an input request's kinds are not checked against them either: the
+    // caller does that (MissingInputCapability, MCP.Protocol). An
+    // unknown tool raises EMCPServer, and a handler's EMCPProtocolError
+    // propagates. It freezes the configuration first, as a session does.
+    // Safe to call from another thread once the server has started, as
+    // far as the handler itself is.
+    function RunTool(const AToolName: string; AArguments: TJSONObject;
+      const ACtx: TMCPRequestContext): TMCPToolRun;
     // Why RegisterMethod would refuse one of AMethods, or
     // RegisterResourceResolver AUriPrefix ('' for none), the server
     // having started included; '' when all would succeed. Nothing
@@ -710,7 +762,9 @@ type
     function HookProblem(const AMethods: array of string;
       const AUriPrefix: string): string;
     // AObject (owned from here) is freed with the server, after its
-    // handlers, so an extension's state outlives every request; adopting
+    // handlers and before its registrations, so an extension's state
+    // outlives every request and can wait for work of its own that still
+    // reads them (#82); adopting
     // it again changes nothing. After the server started it raises
     // EMCPServer and frees AObject, unless the server owns it already,
     // which then lives on until the server is freed. Adopted returns the first adopted
@@ -1091,6 +1145,13 @@ uses
   MCP.Content,
   MCP.Crypto,
   MCP.RequestState;
+
+// Raises EMCPServer with AProblem, after APrefix, unless AProblem is ''.
+procedure RaiseIfProblem(const AProblem: string; const APrefix: string = '');
+begin
+  if AProblem <> '' then
+    raise EMCPServer.Create(APrefix + AProblem);
+end;
 
 var
   // Process-global diagnostic state intentionally remains outside
@@ -1819,8 +1880,7 @@ var
   Problem: string;
 begin
   Problem := IconProblem(ADefinition, ASrc, ATheme);
-  if Problem <> '' then
-    raise EMCPServer.Create(Problem);
+  RaiseIfProblem(Problem);
   AddIcon(ADefinition, ASrc, AMimeType, ASizes, ATheme);
 end;
 
@@ -2518,6 +2578,14 @@ destructor TMCPServer.Destroy;
 var
   I: Integer;
 begin
+  // Work a tool-call hook started, such as a task's handler on a thread
+  // of its own (#82), stops first, while everything it may use is still
+  // there; then the extensions' objects go, before the registrations.
+  FHooks.Drain;
+  // Still assigned while the hooks free the adopted objects, as before
+  // (#82 review): a destructor of one may reach the server.
+  FHooks.Free;
+  FHooks := nil;
   for I := 0 to High(FTools) do
     FTools[I].Definition.Free;
   for I := 0 to High(FResources) do
@@ -2532,7 +2600,6 @@ begin
   FSealer.Free;
   FIdentity.Free;
   FExtensions.Free;
-  FHooks.Free;
   inherited Destroy;
 end;
 
@@ -2620,8 +2687,7 @@ var
 begin
   EnsureMutable;
   Problem := FHooks.AddMethod(AMethod, AHandler, ACacheable);
-  if Problem <> '' then
-    raise EMCPServer.Create(Problem);
+  RaiseIfProblem(Problem);
 end;
 
 procedure TMCPServer.RegisterResourceResolver(const AUriPrefix: string;
@@ -2631,8 +2697,7 @@ var
 begin
   EnsureMutable;
   Problem := FHooks.AddResolver(AUriPrefix, AResolver);
-  if Problem <> '' then
-    raise EMCPServer.Create(Problem);
+  RaiseIfProblem(Problem);
 end;
 
 procedure TMCPServer.RestrictExtensionToModern(const AId: string);
@@ -2655,14 +2720,32 @@ var
 begin
   EnsureMutable;
   Problem := FHooks.AddRoute(AMethod, ANameParam, AHeaders);
-  if Problem <> '' then
-    raise EMCPServer.Create(Problem);
+  RaiseIfProblem(Problem);
 end;
 
 function TMCPServer.MethodRoute(const AMethod: string; out ANameParam: string;
   out AHeaders: TMCPHeaderLookup): Boolean;
 begin
   Result := FHooks.FindRoute(AMethod, ANameParam, AHeaders);
+end;
+
+procedure TMCPServer.SetToolCallHook(AHook: TMCPToolCallHook;
+  ADrain: TMCPDrain);
+begin
+  EnsureMutable;
+  RaiseIfProblem(FHooks.SetToolCallHook(AHook, ADrain));
+end;
+
+function TMCPServer.ClientFaultMessage(const ASite: string;
+  E: Exception): string;
+begin
+  Result := ExceptionClientMessage(ASite, 'Internal error: ',
+    'Internal error', E);
+end;
+
+function TMCPServer.HasTool(const AName: string): Boolean;
+begin
+  Result := FindTool(AName) >= 0;
 end;
 
 procedure TMCPServer.Adopt(AObject: TObject);
@@ -2765,8 +2848,7 @@ var
 begin
   EnsureMutable;
   Problem := CompletionTargetProblem(Self, ARefType, ARefName, AArgument);
-  if Problem <> '' then
-    raise EMCPServer.Create('Cannot register a completion: ' + Problem);
+  RaiseIfProblem(Problem, 'Cannot register a completion: ');
   if ACallable and not Assigned(AHandler) and not Assigned(AMethod) then
     raise EMCPServer.CreateFmt('The completion for "%s" of "%s" needs a ' +
       'non-nil callable', [AArgument, ARefName]);
@@ -2955,8 +3037,7 @@ begin
   // The checks that need no registry live in MCP.Metadata (#115, for
   // this unit's size).
   Problem := ToolDefinitionProblem(ADefinition, AToolName);
-  if Problem <> '' then
-    raise EMCPServer.Create(Problem);
+  RaiseIfProblem(Problem);
   if FindTool(AToolName) >= 0 then
     raise EMCPServer.CreateFmt(
       'Tool "%s" is already registered', [AToolName]);
@@ -3552,8 +3633,14 @@ begin
   // The modern stamps (resultType, serverInfo _meta) belong to the
   // 2026-07-28 dialect only; legacy responses stay byte-faithful to
   // their negotiated revision.
-  if not ALegacy then
-    StampResult(AResult, FName, FVersion);
+  // AResult is ours until BuildResultResponse takes it (#82 review).
+  try
+    if not ALegacy then
+      StampResult(AResult, FName, FVersion);
+  except
+    AResult.Free;
+    raise;
+  end;
   Result := BuildResultResponse(AMessage.Id, AResult);
 end;
 
@@ -4061,6 +4148,15 @@ begin
   Result := ResultResponse(AMessage, InterimResult, False);
 end;
 
+// A copy of AArguments (borrowed), {} for nil.
+function CopyArguments(AArguments: TJSONObject): TJSONObject;
+begin
+  if AArguments <> nil then
+    Result := TJSONObject(AArguments.Clone)
+  else
+    Result := TJSONObject.Create;
+end;
+
 function TMCPServer.ResolveCallTarget(const AMessage: TJSONRPCMessage;
   ALookup: TRegistryLookup; const ANoun: string;
   out AName: string; out AIndex: Integer;
@@ -4096,10 +4192,7 @@ begin
   // the caller owns: seeding defaults or a handler changing it must not
   // touch AMessage, whose original arguments a sealed requestState is
   // bound to (#89).
-  if ArgsData <> nil then
-    AOwnedEmpty := TJSONObject(ArgsData.Clone)
-  else
-    AOwnedEmpty := TJSONObject.Create;
+  AOwnedEmpty := CopyArguments(TJSONObject(ArgsData));
   AArguments := AOwnedEmpty;
   Result := '';
 end;
@@ -4161,15 +4254,140 @@ begin
 end;
 
 
+// The tool's handler with AArguments (the caller's copy): typed binding
+// or the raw input-schema subset first, execution errors in-band. A
+// handler's EMCPProtocolError propagates (#88).
+function TMCPServer.InvokeTool(AIndex: Integer; AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  BindError: string;
+  ArgsInstance: TMCPArgs;
+begin
+  try
+    if FTools[AIndex].ArgsClass <> nil then
+    begin
+      // Typed path: bind + validate before the handler runs.
+      // Binding failures are argument errors the model can correct,
+      // so they travel in-band like any execution error.
+      if MCPBindArguments(FTools[AIndex].ArgsClass, AArguments,
+        ArgsInstance, BindError) then
+      try
+        if Assigned(FTools[AIndex].ArgsMethod) then
+          Result := FTools[AIndex].ArgsMethod(ArgsInstance, ACtx)
+        else
+          Result := FTools[AIndex].ArgsHandler(ArgsInstance, ACtx);
+      finally
+        ArgsInstance.Free;
+      end
+      else
+        Result := MCPErrorResult(BindError);
+    end
+    else if FTools[AIndex].SubsetValidate and
+      not MCPValidateAgainstSchema(
+        TJSONObject(FTools[AIndex].Definition.Find('inputSchema')),
+        AArguments, 'argument', True, BindError) then
+      // Raw path (#23): the registered schema's enforceable subset
+      // is checked before the handler runs; violations travel
+      // in-band exactly like typed binding failures.
+      Result := MCPErrorResult(BindError)
+    else if Assigned(FTools[AIndex].Method) then
+      Result := FTools[AIndex].Method(AArguments, ACtx)
+    else
+      Result := FTools[AIndex].Handler(AArguments, ACtx);
+  except
+    // Execution errors travel in-band (isError: true) so the model
+    // can read them and self-correct; only dispatch-level faults and
+    // a handler's deliberate EMCPProtocolError (answered by the
+    // dispatch wrapper, #88) are JSON-RPC errors.
+    on E: EMCPProtocolError do
+      raise;
+    on E: Exception do
+      Result := MCPErrorResult(ExceptionClientMessage(
+        'tools/call handler', 'Tool execution failed: ',
+        'Tool execution failed', E));
+  end;
+end;
+
+// The CallToolResult object for a finished (not input-required) run,
+// taking AToolResult's trees on every path.
+function TMCPServer.ToolCallResult(AIndex: Integer; const AToolName: string;
+  var AToolResult: TMCPToolResult; ALegacy: Boolean): TJSONObject;
+begin
+  if AToolResult.Content = nil then
+    AToolResult.Content := TJSONArray.Create;
+  // The result trees stay ours until the result takes them: free them
+  // if checking or converting raises (serializing a non-finite number).
+  try
+    if FTools[AIndex].OutputValidate then
+      CheckStructuredOutput(AToolName,
+        TJSONObject(FTools[AIndex].Definition.Find('outputSchema')),
+        AToolResult);
+    // The classic dialect's structuredContent is an object (2025-11-25
+    // schema, CallToolResult, verified 2026-11-27 against
+    // https://modelcontextprotocol.io/specification/2025-11-25/schema#calltoolresult);
+    // any other value travels as a text block of its JSON (#91).
+    if (AToolResult.StructuredContent <> nil) and ALegacy and
+      (AToolResult.StructuredContent.JSONType <> jtObject) then
+      MoveStructuredToText(AToolResult);
+  except
+    AToolResult.Content.Free;
+    AToolResult.StructuredContent.Free;
+    AToolResult.Meta.Free;
+    raise;
+  end;
+
+  Result := TJSONObject.Create;
+  Result.Add('content', AToolResult.Content);
+  Result.Add('isError', AToolResult.IsError);
+  if AToolResult.StructuredContent <> nil then
+    Result.Add('structuredContent', AToolResult.StructuredContent);
+  // The handler's own _meta keys; the serverInfo stamp joins them (#96).
+  if AToolResult.Meta <> nil then
+    Result.Add('_meta', HandlerMeta(AToolResult.Meta));
+end;
+
+function TMCPServer.RunTool(const AToolName: string; AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolRun;
+var
+  Index: Integer;
+  Arguments: TJSONObject;
+  ToolResult: TMCPToolResult;
+begin
+  Result := Default(TMCPToolRun);
+  // As a session does: the validation the wire path applies is set up
+  // when the configuration freezes (#82 review).
+  FreezeConfiguration;
+  Index := FindTool(AToolName);
+  if Index < 0 then
+    raise EMCPServer.CreateFmt('Unknown tool: %s', [AToolName]);
+  // The handler's own copy, as in a call (ResolveCallTarget).
+  Arguments := CopyArguments(AArguments);
+  try
+    ToolResult := InvokeTool(Index, Arguments, ACtx);
+  finally
+    Arguments.Free;
+  end;
+  if ToolResult.InputRequired then
+  begin
+    ToolResult.Content.Free;
+    ToolResult.StructuredContent.Free;
+    Result.InputRequired := True;
+    Result.InputRequests := ToolResult.InputRequests;
+    Result.RequestState := ToolResult.RequestState;
+    Result.Meta := ToolResult.Meta;
+  end
+  else
+    Result.Result := ToolCallResult(Index, AToolName, ToolResult, False);
+end;
+
 function TMCPServer.HandleToolsCall(const AMessage: TJSONRPCMessage;
   const ACtx: TMCPRequestContext; ALegacy: Boolean): string;
 var
-  ToolName, BindError, TargetError: string;
+  ToolName, TargetError: string;
   Index: Integer;
   Missing: TStringArray;
-  Arguments, OwnedEmpty, CallResult, Meta: TJSONObject;
+  Arguments, OwnedEmpty, Meta, HookResult: TJSONObject;
   ToolResult: TMCPToolResult;
-  ArgsInstance: TMCPArgs;
 begin
   TargetError := ResolveCallTarget(AMessage, FindTool, 'tool', ToolName,
     Index, Arguments, OwnedEmpty);
@@ -4191,49 +4409,12 @@ begin
       if Length(Missing) > 0 then
         Exit(MissingCapabilityResponse(AMessage, 'Tool', ToolName, Missing));
     end;
-    try
-      if FTools[Index].ArgsClass <> nil then
-      begin
-        // Typed path: bind + validate before the handler runs.
-        // Binding failures are argument errors the model can correct,
-        // so they travel in-band like any execution error.
-        if MCPBindArguments(FTools[Index].ArgsClass, Arguments,
-          ArgsInstance, BindError) then
-        try
-          if Assigned(FTools[Index].ArgsMethod) then
-            ToolResult := FTools[Index].ArgsMethod(ArgsInstance, ACtx)
-          else
-            ToolResult := FTools[Index].ArgsHandler(ArgsInstance, ACtx);
-        finally
-          ArgsInstance.Free;
-        end
-        else
-          ToolResult := MCPErrorResult(BindError);
-      end
-      else if FTools[Index].SubsetValidate and
-        not MCPValidateAgainstSchema(
-          TJSONObject(FTools[Index].Definition.Find('inputSchema')),
-          Arguments, 'argument', True, BindError) then
-        // Raw path (#23): the registered schema's enforceable subset
-        // is checked before the handler runs; violations travel
-        // in-band exactly like typed binding failures.
-        ToolResult := MCPErrorResult(BindError)
-      else if Assigned(FTools[Index].Method) then
-        ToolResult := FTools[Index].Method(Arguments, ACtx)
-      else
-        ToolResult := FTools[Index].Handler(Arguments, ACtx);
-    except
-      // Execution errors travel in-band (isError: true) so the model
-      // can read them and self-correct; only dispatch-level faults and
-      // a handler's deliberate EMCPProtocolError (answered by the
-      // dispatch wrapper, #88) are JSON-RPC errors.
-      on E: EMCPProtocolError do
-        raise;
-      on E: Exception do
-        ToolResult := MCPErrorResult(ExceptionClientMessage(
-          'tools/call handler', 'Tool execution failed: ',
-          'Tool execution failed', E));
-    end;
+    // An extension may answer the call in the handler's place, such as
+    // with a task (#82).
+    HookResult := FHooks.TakeToolCall(ToolName, Arguments, ACtx, ALegacy);
+    if HookResult <> nil then
+      Exit(ResultResponse(AMessage, HookResult, ALegacy));
+    ToolResult := InvokeTool(Index, Arguments, ACtx);
   finally
     OwnedEmpty.Free;
   end;
@@ -4260,38 +4441,8 @@ begin
         ToolResult.InputRequests, ToolResult.RequestState, ToolResult.Meta));
   end;
 
-  if ToolResult.Content = nil then
-    ToolResult.Content := TJSONArray.Create;
-  // The result trees stay ours until CallResult takes them: free them
-  // if checking or converting raises (serializing a non-finite number).
-  try
-    if FTools[Index].OutputValidate then
-      CheckStructuredOutput(ToolName,
-        TJSONObject(FTools[Index].Definition.Find('outputSchema')), ToolResult);
-    // The classic dialect's structuredContent is an object (2025-11-25
-    // schema, CallToolResult, verified 2026-11-27 against
-    // https://modelcontextprotocol.io/specification/2025-11-25/schema#calltoolresult);
-    // any other value travels as a text block of its JSON (#91).
-    if (ToolResult.StructuredContent <> nil) and ALegacy and
-      (ToolResult.StructuredContent.JSONType <> jtObject) then
-      MoveStructuredToText(ToolResult);
-  except
-    ToolResult.Content.Free;
-    ToolResult.StructuredContent.Free;
-    ToolResult.Meta.Free;
-    raise;
-  end;
-
-  CallResult := TJSONObject.Create;
-  CallResult.Add('content', ToolResult.Content);
-  CallResult.Add('isError', ToolResult.IsError);
-  if ToolResult.StructuredContent <> nil then
-    CallResult.Add('structuredContent', ToolResult.StructuredContent);
-  // The handler's own _meta keys; the serverInfo stamp joins them (#96).
-  if ToolResult.Meta <> nil then
-    CallResult.Add('_meta', HandlerMeta(ToolResult.Meta));
-
-  Result := ResultResponse(AMessage, CallResult, ALegacy);
+  Result := ResultResponse(AMessage, ToolCallResult(Index, ToolName,
+    ToolResult, ALegacy), ALegacy);
 end;
 
 function TMCPServer.HandleResourcesList(const AMessage: TJSONRPCMessage;

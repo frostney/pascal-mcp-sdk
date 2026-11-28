@@ -112,6 +112,18 @@ type
       const AArgumentsJson: string = '{}'): TJSONObject;
     // ARefJson: '{"type":"ref/prompt","name":"greet"}' or a ref/resource.
     function Complete(const ARefJson, AArgument, AValue: string): TJSONObject;
+    // Polls tasks/get for task ATaskId (MCP.Tasks; declare the extension
+    // with SetClientCapabilities first) until it is completed, failed or
+    // cancelled, and returns that response. While it waits for input it
+    // answers the requests it has a canned answer for (AnswerInput) with
+    // tasks/update, keys matched exactly: a key the server suffixed to
+    // keep it unique, as confirm#2, needs an answer of its own. It
+    // returns early with an input_required response when some requested
+    // key has no answer, and with an error response as it is, a refused
+    // tasks/update's included; after ATimeoutMs (on the monotonic
+    // MCPNowMs) it raises EMCPTesting.
+    function AwaitTask(const ATaskId: string;
+      ATimeoutMs: Integer = 10000): TJSONObject;
 
     // The notification lines (progress, log messages) the last helper
     // call emitted, in order, across every input round it answered.
@@ -129,7 +141,8 @@ implementation
 
 uses
   MCP.JSONRPC,
-  MCP.Protocol;
+  MCP.Protocol,
+  MCP.Streams;
 
 const
   MAX_INPUT_ROUNDS = 10;
@@ -378,6 +391,59 @@ function TMCPTestClient.Request(const AMethod: string;
 begin
   StartCall;
   Result := Send(AMethod, Envelope(AParamsJson));
+end;
+
+function TMCPTestClient.AwaitTask(const ATaskId: string;
+  ATimeoutMs: Integer): TJSONObject;
+var
+  Deadline: Int64;
+  Status: TJSONData;
+  Requests, Answers, Params: TJSONObject;
+  Update: TJSONObject;
+begin
+  StartCall;
+  Deadline := MCPNowMs + ATimeoutMs;
+  repeat
+    Params := Envelope('{}');
+    Params.Add('taskId', ATaskId);
+    Result := Send('tasks/get', Params);
+    Status := Result.FindPath('result.status');
+    if (Status = nil) or (Status.JSONType <> jtString) then
+      Exit;
+    if (Status.AsString = 'completed') or (Status.AsString = 'failed') or
+      (Status.AsString = 'cancelled') then
+      Exit;
+    if Status.AsString = 'input_required' then
+    begin
+      Requests := nil;
+      if (Result.FindPath('result.inputRequests') <> nil) and
+        (Result.FindPath('result.inputRequests').JSONType = jtObject) then
+        Requests := TJSONObject(Result.FindPath('result.inputRequests'));
+      if Requests = nil then
+        Exit;
+      // Keys are matched exactly: a suffixed key (confirm#2) needs an
+      // answer of its own (#82 review).
+      Answers := AnswersFor(Requests);
+      if Answers = nil then
+        Exit;
+      Params := Envelope('{}');
+      Params.Add('taskId', ATaskId);
+      Params.Add('inputResponses', Answers);
+      Update := Send('tasks/update', Params);
+      // A refused update comes back as it is, not as a timeout.
+      if Update.Find('error') <> nil then
+      begin
+        FreeAndNil(Result);
+        Exit(Update);
+      end;
+      Update.Free;
+    end;
+    FreeAndNil(Result);
+    if MCPNowMs >= Deadline then
+      raise EMCPTesting.CreateFmt('Task %s did not finish within %d ms',
+        [ATaskId, ATimeoutMs]);
+    Sleep(10);
+  until False;
 end;
 
 function TMCPTestClient.Discover: TJSONObject;

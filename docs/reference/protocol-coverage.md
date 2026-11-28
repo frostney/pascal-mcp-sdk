@@ -26,8 +26,8 @@ the README links here.
 | stdio transport | ✅ newline-delimited, EOF shutdown contract |
 | Streamable HTTP transport | ✅ `MCP.Transport.HTTP`: single POST endpoint, SSE response streams, mirrored-header validation (`Mcp-Name`, and `Mcp-Param-*` for `x-mcp-header` parameters), Origin allowlist |
 | Classic handshake era (`initialize`: 2024-11-05, 2025-06-18, 2025-11-25) | ✅ dual-era default on stdio: era-faithful dialect (unstamped results, `-32002`, `ping`); `DualEra := False` for strict modern-only. The Streamable HTTP binding is modern-only |
-| `subscriptions/listen`, list-changed | ⏳ not implemented (registries are static after startup) |
-| Tasks (`io.modelcontextprotocol/tasks`) | ⏳ not implemented ([#82](https://github.com/frostney/pascal-mcp-sdk/issues/82)); in the conformance baseline nine of its scenarios are expected failures and one, `tasks-status-notifications`, an expected skip |
+| Tasks (`io.modelcontextprotocol/tasks`) | ✅ `MCP.Tasks`: server-directed task creation per tool (`tsOptional`, `tsRequired`) or per call (a selector), only for requests that declare the extension (`-32021` for a required one otherwise); a flat `CreateTaskResult`, readable before it is sent; `tasks/get` with the result, the JSON-RPC error or the open input requests inlined; input rounds answered with `tasks/update`, partial answers kept, keys unique over the task's lifetime; `tasks/cancel`; `ttlMs` (no task goes before it ends), `pollIntervalMs`, limits on running and kept tasks; each handler on a thread of its own, with the creating request's context and no progress or log notifications; the input requests checked against each poll's capabilities; `Mcp-Name` routing on Streamable HTTP; 2026-07-28 only. `notifications/tasks`: not served, it needs `subscriptions/listen` |
+| `subscriptions/listen`, list-changed | ⏳ not implemented ([#138](https://github.com/frostney/pascal-mcp-sdk/issues/138)): the registries are static after startup, so there are no list changes, and task status notifications are not sent; clients poll `tasks/get`. In the conformance baseline `tasks-status-notifications` is an expected skip, since the suite skips it until its harness reads this stream |
 | Authorization (OAuth 2.1 for HTTP transports) | ⏳ not in the library, deliberately: beyond loopback the operator must put authentication in front of the Streamable HTTP binding, for example in a reverse proxy; a platform's edge terminates TLS but authenticates nothing by itself (see [Deployment](../guides/deployment.md#tls-auth-and-the-proxy-in-front)) |
 
 Resource-template matching is intentionally limited to simple `{var}`
@@ -74,6 +74,14 @@ suite for the routing headers, the SSE stream, a client close and
 `Stop`, the stdio loop suite for streams beside requests, cancellation,
 the end of input and an idle stdin, and `mcpsmoke`, which polls
 `mcpdemo`'s minute clock over stdio and streams it over real pipes.
+Tasks is covered by the `MCP.Tasks` unit suite (creation, completion,
+tool and protocol errors, input rounds with partial answers and reused
+keys, the capability gate, cancellation, the errors, the limits, a
+non-ASCII result on the wire and teardown while tasks run), by the
+official conformance suite's nine `tasks-*` scenarios that run against
+the conformance fixture over Streamable HTTP, routing headers
+included, and by `mcpsmoke`, which creates, polls, answers and cancels
+tasks of the fixture over stdio and ends its input while one runs.
 MCP Apps and extension negotiation are covered by the `MCP.Apps` unit
 suite and the `mcpsmoke` checks of `mcpdemo`'s card over stdio: the
 wire data and the served HTML. No host renders the card in these

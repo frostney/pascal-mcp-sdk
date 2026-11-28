@@ -186,11 +186,12 @@ Implemented: tools, resources (including RFC 6570 templates),
 prompts, argument completion, MRTR, progress/log notifications,
 caching hints, extension negotiation with
 [MCP Apps](docs/guides/mcp-apps.md) interactive UIs,
-[Skills](docs/guides/skills.md) and [Events](docs/guides/events.md)
-poll and push delivery, both
-transports, and the classic `initialize` era. Deliberately out:
-`subscriptions/listen` and list-changed notifications — registries
-are static after startup. The authoritative surface-by-surface table,
+[Skills](docs/guides/skills.md), [Events](docs/guides/events.md)
+poll and push delivery and [Tasks](docs/guides/tasks.md), both
+transports, and the classic `initialize` era. Not served:
+`subscriptions/listen`, so neither list-changed notifications (the
+registries are static after startup) nor task status notifications
+(clients poll). The authoritative surface-by-surface table,
 including verification and interop evidence, lives in
 [docs/reference/protocol-coverage.md](docs/reference/protocol-coverage.md).
 

@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-pascal-mcp-sdk is twenty-one units layered strictly bottom-up. Four form the
+pascal-mcp-sdk is twenty-two units layered strictly bottom-up. Four form the
 request chain — `MCP.JSONRPC` (the JSON-RPC 2.0 profile MCP mandates),
 `MCP.Protocol` (the stateless per-request `_meta` model of spec
 revision 2026-07-28), `MCP.Server` (the sans-I/O dispatch core), and a
@@ -21,7 +21,9 @@ and list cursors for it, and `MCP.RequestState` with `MCP.Crypto` seal the MRTR
 serve through, `MCP.Apps` and `MCP.Skills` build the MCP Apps and
 Skills extensions on top of the core (`MCP.Skills` reading frontmatter
 with `MCP.Frontmatter`), `MCP.Events` builds the Events extension's poll
-and push delivery, `MCP.Streams` holds the long-lived requests a transport
+and push delivery, `MCP.Tasks` builds the Tasks extension on the
+tool-call hook, running each task's handler on a thread of its own,
+`MCP.Streams` holds the long-lived requests a transport
 drives for push, `MCP.Errors` holds the exceptions every layer raises, and `MCP.Testing` sits above it as the in-process test
 client for server authors. The core performs no I/O, with one scoped exception: when no
 `requestState` keys are set, the first `CreateSession` reads 32 bytes
@@ -86,10 +88,11 @@ Rules live in the layer that owns them and nowhere else:
 | `MCP.Pagination` | The opaque list cursor and the check of one a client sends back | Registries, dispatch |
 | `MCP.Crypto` | SHA-256, HMAC-SHA-256, constant-time comparison, the OS random source and base64url, in-tree because FPC 3.2.2 ships no SHA-256 | Everything MCP |
 | `MCP.Testing` | The in-process test client (`TMCPTestClient`): request envelopes, notification capture, canned input answers, over `HandleMessage` with no transport | Bytes and streams |
-| `MCP.Extensions` | The hooks an extension serves through: request methods after the core's, resolvers for unlisted resources under a URI prefix, objects the server frees | Dispatch, bytes and streams |
+| `MCP.Extensions` | The hooks an extension serves through: request methods after the core's, resolvers for unlisted resources under a URI prefix, a hook that may answer a `tools/call` in its handler's place, objects the server frees | Dispatch, bytes and streams |
 | `MCP.Apps` | The MCP Apps extension on top of the core: `ui://` resources with `_meta.ui`, tool links, the extension declaration | Dispatch, bytes and streams |
 | `MCP.Skills` | The Skills extension on the hooks: the skill catalog with digests and sizes, the `SKILL.md` writer, skills loaded from a directory, `skills/list`, `skills/get` and `resources/directory/read` | Transport streams |
 | `MCP.Events` | The Events extension on the hooks: event types, `events/list`, poll and push delivery, occurrence checks and derived ids, the routing of `events/poll` and `events/stream` | Bytes and sockets |
+| `MCP.Tasks` | The Tasks extension on the hooks: which calls become tasks, the in-memory task store and its limits, one worker thread per task, input rounds through `tasks/update`, cancellation, `tasks/get`, `tasks/update` and `tasks/cancel` and their routing | Bytes and sockets |
 | `MCP.Streams` | A long-lived request a transport drives after its handler returns, and the host a handler parks it with | Dispatch, sockets |
 | `MCP.Errors` | `EMCPServer`, `EMCPProtocolError` with the codes a handler may answer, and the response for one | Dispatch, registries |
 | `MCP.Frontmatter` | The YAML subset a `SKILL.md` frontmatter is read with, on which YAML 1.1 and 1.2 parsers agree, and the refusal of everything outside it with its line | Skills, dispatch, bytes and streams |
@@ -186,8 +189,9 @@ order, and once about one line's budget is queued the poll stops
 reading, so a cancellation behind that backlog waits its turn. The
 HTTP binding's poll reports a closed or reset connection, checked at
 most every 50 ms. No thread is involved, so a stdio-only program needs
-no thread driver; cancellation stays cooperative, as handlers already
-code it. The poll lives on the session rather than arriving with each
+no thread driver unless it enables Tasks, whose handlers run on threads
+of their own (`MCP.Tasks`); cancellation stays cooperative, as handlers
+already code it. The poll lives on the session rather than arriving with each
 call, as [ADR-0001](../adr/0001-sans-io-core.md#amendment-2026-11-27-93)
 records.
 
@@ -227,7 +231,9 @@ and freeze when the first session is created. That is why no
 
 Handlers are synchronous and come in two shapes per registry — plain
 function pointers and `of object` method pointers — so both programs
-and class-based hosts (lantaarn) register naturally.
+and class-based hosts (lantaarn) register naturally. A tool that runs
+as a task (`MCP.Tasks`) keeps its synchronous handler, which runs on
+the task's own thread instead of the request's.
 
 Tool schemas come from `MCP.Schema` in two forms:
 
