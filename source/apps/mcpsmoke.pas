@@ -707,8 +707,9 @@ var
   end;
 
 var
-  TaskId, Line: string;
+  TaskId, Line, Seen: string;
   Response: TJSONObject;
+  Step: Integer;
 begin
   NextId := 0;
   Fixture := TProcess.Create(nil);
@@ -762,6 +763,62 @@ begin
     Response := Call('tasks/get', '"taskId":"nope"', Line);
     Check(PathInt(Response, 'error.code') = -32602,
       'tasks: an unknown task answers -32602');
+    Response.Free;
+
+    // A listen stream for a task (#138; basic/patterns/subscriptions and
+    // ext-tasks Task Status Notifications, verified 2026-11-28): the
+    // acknowledgment, then the task's state as it is, waiting for input,
+    // then each change once it is answered, until it completes.
+    TaskId := Start('"name":"confirm_delete","arguments":{"filename":' +
+      '"b.txt"}');
+    Check(Await(TaskId, 'input_required', Line),
+      'tasks: a task waits for input before the stream opens');
+    SendLine(Fixture, '{"jsonrpc":"2.0","id":900,"method":' +
+      '"subscriptions/listen","params":{"notifications":{"taskIds":["' +
+      TaskId + '"]},' + META_TASKS + '}}');
+    Response := NextJson(Fixture);
+    Check((PathString(Response, 'method') =
+      'notifications/subscriptions/acknowledged') and
+      (PathString(Response, 'params.notifications.taskIds[0]') = TaskId),
+      'tasks: subscriptions/listen acknowledges the task');
+    Response.Free;
+    Response := NextJson(Fixture);
+    Check((PathString(Response, 'method') = 'notifications/tasks') and
+      (PathString(Response, 'params.status') = 'input_required'),
+      'tasks: the stream sends the task as it is first');
+    Response.Free;
+    SendLine(Fixture, '{"jsonrpc":"2.0","id":901,"method":"tasks/update",' +
+      '"params":{"taskId":"' + TaskId + '","inputResponses":{"confirm":' +
+      '{"action":"accept","content":{"confirm":true}}},' + META_TASKS + '}}');
+    Seen := '';
+    for Step := 1 to 20 do
+    begin
+      Response := NextJson(Fixture);
+      if (Response <> nil) and
+        (PathString(Response, 'method') = 'notifications/tasks') and
+        (PathString(Response, 'params.taskId') = TaskId) then
+        Seen := Seen + PathString(Response, 'params.status') + ' ';
+      Response.Free;
+      if Pos('completed', Seen) > 0 then
+        Break;
+    end;
+    Check(Seen = 'working completed ',
+      'tasks: notifications/tasks for each change, then completed');
+    SendLine(Fixture, '{"jsonrpc":"2.0","method":"notifications/cancelled",' +
+      '"params":{"requestId":900}}');
+    // A stream with nothing to follow waits without end, and the loop
+    // still answers requests beside it (#138 review).
+    SendLine(Fixture, '{"jsonrpc":"2.0","id":902,"method":' +
+      '"subscriptions/listen","params":{"notifications":{},' + META_TASKS +
+      '}}');
+    Response := NextJson(Fixture);
+    Check(PathString(Response, 'method') =
+      'notifications/subscriptions/acknowledged',
+      'tasks: a stream with nothing agreed is acknowledged');
+    Response.Free;
+    Response := Call('tasks/get', '"taskId":"nope"', Line);
+    Check(PathInt(Response, 'error.code') = -32602,
+      'tasks: a request is answered beside a quiet stream');
     Response.Free;
 
     // A task still running when stdin ends is cancelled, and the

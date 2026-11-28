@@ -466,7 +466,13 @@ function TStdioReader.WaitForLine(ATimeoutMs: Int64): Boolean;
 var
   Deadline, Left: Int64;
 begin
-  Deadline := MCPNowMs + ATimeoutMs;
+  // Saturating: a stream with nothing due waits as long as it can (#138
+  // review).
+  Deadline := MCPNowMs;
+  if ATimeoutMs > High(Int64) - Deadline then
+    Deadline := High(Int64)
+  else
+    Deadline := Deadline + ATimeoutMs;
   repeat
     if (FHead < Length(FQueue)) or FEOF then
       Exit(True);
@@ -865,7 +871,7 @@ begin
         begin
           // Best effort: a closed stderr cannot end the loop (#126
           // review).
-          MCPLogDiagnostic('events stream ended: ' + E.ClassName + ': ' +
+          MCPLogDiagnostic('stream ended: ' + E.ClassName + ': ' +
             E.Message);
           FStreams[I].Cancel;
         end;

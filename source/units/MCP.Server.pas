@@ -43,9 +43,11 @@ unit MCP.Server;
 //                                      lifecycle, negotiated identity,
 //                                      and active-request cancellation
 //                                      belong to TMCPSession.
-// Not implemented (deliberate): subscriptions/listen and the
-// listChanged capability flags (registries are fixed after startup, so
-// there is nothing to notify), and a general JSON-Schema validation engine — the schema
+// Not implemented (deliberate): the listChanged capability flags and
+// resource subscriptions (registries are fixed after startup, so there
+// is nothing to notify; subscriptions/listen itself is served by the
+// unit that sets the listen handler, MCP.Subscriptions, #138), and a
+// general JSON-Schema validation engine — the schema
 // subset the builders emit is server-enforced per call (#23);
 // beyond it, handlers validate their own inputs and report problems
 // as isError tool results, which is what models can act on.
@@ -739,6 +741,15 @@ type
     function ClientFaultMessage(const ASite: string; E: Exception): string;
     // Whether a tool named AName is registered.
     function HasTool(const AName: string): Boolean;
+    // AHandler answers subscriptions/listen, in both eras, as a method
+    // RegisterMethod adds would (#138; MCP.Subscriptions sets it).
+    // Without one the method answers -32601. A nil handler, a second one
+    // or a started server raises EMCPServer.
+    procedure SetListenHandler(AHandler: TMCPMethodHandler);
+    // Why SetListenHandler would refuse a handler for being set already
+    // ('' when it is free); nothing changes (#138 review). HookProblem
+    // says whether the server has started.
+    function ListenHandlerProblem: string;
     // Runs tool AToolName with AArguments (borrowed; the handler gets a
     // copy, its defaults seeded) and ACtx as a 2026-07-28 tools/call
     // would, outside any request, such as on a task's own thread (#82):
@@ -2743,6 +2754,17 @@ begin
     'Internal error', E);
 end;
 
+function TMCPServer.ListenHandlerProblem: string;
+begin
+  Result := FHooks.ListenProblem;
+end;
+
+procedure TMCPServer.SetListenHandler(AHandler: TMCPMethodHandler);
+begin
+  EnsureMutable;
+  RaiseIfProblem(FHooks.SetListenHandler(AHandler));
+end;
+
 function TMCPServer.HasTool(const AName: string): Boolean;
 begin
   Result := FindTool(AName) >= 0;
@@ -3844,8 +3866,10 @@ begin
         Exit(HandlePromptsGet(AMessage, ACtx, ALegacy));
       cmCompletionComplete:
         Exit(HandleComplete(AMessage, ACtx, ALegacy));
-    end
-  else if FHooks.FindMethod(AMessage.Method, Handler, Cacheable) then
+    end;
+  // An extension's methods, and subscriptions/listen once a unit set its
+  // handler (#138): the hooks hold it as one of their methods.
+  if FHooks.FindMethod(AMessage.Method, Handler, Cacheable) then
     Exit(HookResponse(AMessage, ACtx, ALegacy, Handler, Cacheable));
   Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
     'Method not found: ' + AMessage.Method);

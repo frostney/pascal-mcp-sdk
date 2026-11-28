@@ -209,6 +209,40 @@ server owns, such as an object it adopted. A handler that never asks
 the queued requests are served, and freeing the server then ends the
 tasks still running.
 
+## Status notifications
+
+A client that would rather not poll opens `subscriptions/listen` with
+the tasks it wants to follow:
+
+```json
+{"jsonrpc": "2.0", "id": 9, "method": "subscriptions/listen", "params": {
+  "notifications": {"taskIds": ["Zm9vYmFyYmF6cXV4cXV1"]},
+  "_meta": {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientCapabilities": {
+      "elicitation": {},
+      "extensions": {"io.modelcontextprotocol/tasks": {}}}}}}
+```
+
+The stream acknowledges the tasks it found first
+(`notifications/subscriptions/acknowledged`, with only those of the
+listed ids it knows), then sends `notifications/tasks` with each task's
+whole state, as `tasks/get` would answer it: once at the start, and
+again after each change, a partly answered input round included. Each
+change is sent, in order, even when several come between two of the
+stream's polls (every 100 ms). For a reader that falls behind, at most
+64 states wait (or one per followed task, when it follows more); past
+that, an older state of a task gives way to its newer one, so every
+task's latest state still arrives. A state still waiting when its task
+expires is dropped. Every frame carries the request's id as
+`_meta["io.modelcontextprotocol/subscriptionId"]`. A state waiting on a
+question the listen request did not declare what it needs for, as
+`tasks/get` would refuse it, is left out: declare `elicitation` in the
+example to see those. A task that expires sends nothing more. A request
+that lists `taskIds` without declaring the extension gets `-32021`. See
+[Server API](../reference/server.md#subscriptions) for the limits and
+how the stream ends.
+
 ## Threads
 
 Each task's handler runs on a thread of its own, beside the requests
@@ -230,10 +264,6 @@ suffixed key (`confirm#2`) only with an answer of its own. See
 
 ## Not served
 
-- **`notifications/tasks`** is pushed over `subscriptions/listen`,
-  which the server does not serve yet
-  ([#138](https://github.com/frostney/pascal-mcp-sdk/issues/138)).
-  Clients poll, which the extension makes the default.
 - **The Tasks of the 2025-11-25 revision** (a `task` parameter on the
   request, `tasks/list`, `tasks/result`) are not served: the extension
   replaces them. A `task` parameter on `tools/call` is ignored.

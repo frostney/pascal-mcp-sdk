@@ -126,7 +126,7 @@
     },
     "tasks-status-notifications": {
       "expected": "skip",
-      "issue": 138
+      "issue": 139
     },
     "tasks-wire-fields": {
       "expected": "pass"

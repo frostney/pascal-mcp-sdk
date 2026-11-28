@@ -42,8 +42,9 @@ const
   MCP_EVENT_MIN_HEARTBEAT_MS = 1000;
   MCP_EVENT_MAX_HEARTBEAT_MS = 300000;
   // The key every push notification carries the stream's request id
-  // under, in params._meta (events.mdx, Event delivery).
-  MCP_SUBSCRIPTION_ID_KEY = 'io.modelcontextprotocol/subscriptionId';
+  // under, in params._meta (events.mdx, Event delivery), as MCP.Streams
+  // defines it for every long-lived stream.
+  MCP_SUBSCRIPTION_ID_KEY = MCP.Streams.MCP_SUBSCRIPTION_ID_KEY;
 
 type
   // A poll as the check sees it. Arguments is borrowed for the call ({}
@@ -815,30 +816,9 @@ end;
 // the stream is cancelled.
 procedure TEventStream.Send(const AMethod: string; AParams: TJSONObject;
   ASink: TMCPLineSink; ASinkData: Pointer);
-var
-  Meta: TJSONData;
 begin
-  try
-    if Cancelled then
-    begin
-      AParams.Free;
-      Exit;
-    end;
-    Meta := AParams.Find('_meta');
-    if (Meta = nil) or (Meta.JSONType <> jtObject) then
-    begin
-      AParams.Delete('_meta');
-      Meta := TJSONObject.Create;
-      AParams.Add('_meta', Meta);
-    end;
-    TJSONObject(Meta).Delete(MCP_SUBSCRIPTION_ID_KEY);
-    TJSONObject(Meta).Add(MCP_SUBSCRIPTION_ID_KEY, Id.Clone);
-  except
-    AParams.Free;
-    raise;
-  end;
-  ASink(BuildNotification(AMethod, AParams), ASinkData);
-  FLastWrite := Now;
+  if SendNotification(AMethod, AParams, ASink, ASinkData) then
+    FLastWrite := Now;
 end;
 
 // The error member of error and terminated notifications: data only
@@ -1120,8 +1100,9 @@ begin
   if Fresh then
   begin
     AServer.RestrictExtensionToModern(MCP_EVENTS_EXTENSION);
-    // listChanged needs subscriptions/listen, which this server lacks:
-    // {} whatever is declared before or after (#118 review).
+    // The event types are fixed once the server starts, so there is no
+    // list change to announce: {} whatever is declared before or after
+    // (#118 review).
     AServer.PinExtensionSettings(MCP_EVENTS_EXTENSION, TJSONObject.Create);
   end;
 end;

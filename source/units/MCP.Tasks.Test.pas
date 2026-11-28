@@ -25,6 +25,8 @@ uses
   MCP.JSONRPC,
   MCP.Protocol,
   MCP.Server,
+  MCP.Streams,
+  MCP.Subscriptions,
   MCP.Tasks,
   MCP.Testing,
   TestingPascalLibrary;
@@ -40,6 +42,11 @@ const
   // "Grüße", raw UTF-8 bytes, and U+1F600 beside it.
   GRUSSE = 'Gr' + #$C3#$BC + #$C3#$9F + 'e';
   GRIN = #$F0#$9F#$98#$80;
+
+procedure CaptureSink(const ALine: string; AUserData: Pointer);
+begin
+  PString(AUserData)^ := PString(AUserData)^ + ALine + #10;
+end;
 
 var
   // What the handlers saw, for the tests to check.
@@ -64,6 +71,16 @@ type
     destructor Destroy; override;
     function Spin(AArguments: TJSONObject;
       const ACtx: TMCPRequestContext): TMCPToolResult;
+  end;
+
+  // A source for taskIds of another unit's, to make EnableTasks refuse.
+  TTaskIdsStub = class(TMCPSubscriptionSource)
+  public
+    function FilterKey: string; override;
+    function Agree(AValue: TJSONData;
+      const ACtx: TMCPRequestContext): TJSONData; override;
+    function Open(AAgreed: TJSONData;
+      const ACtx: TMCPRequestContext): TMCPSubscriptionFeed; override;
   end;
 
   THookStub = class
@@ -109,6 +126,23 @@ begin
   end;
   Inc(Calls);
   Result := MCPTextResult('spun');
+end;
+
+function TTaskIdsStub.FilterKey: string;
+begin
+  Result := 'taskIds';
+end;
+
+function TTaskIdsStub.Agree(AValue: TJSONData;
+  const ACtx: TMCPRequestContext): TJSONData;
+begin
+  Result := nil;
+end;
+
+function TTaskIdsStub.Open(AAgreed: TJSONData;
+  const ACtx: TMCPRequestContext): TMCPSubscriptionFeed;
+begin
+  Result := nil;
 end;
 
 function THookStub.Take(const AToolName: string; AArguments: TJSONObject;
@@ -162,6 +196,11 @@ type
     procedure TestStateOnlyRound;
     procedure TestUnsendableResult;
     procedure TestMalformedAnswer;
+    procedure TestStatusNotifications;
+    procedure TestListenRefusals;
+    procedure TestEnableRefusedCleanly;
+    procedure TestManyFollowedTasks;
+    procedure TestNoStateAfterExpiry;
   end;
 
 function Echo(AArguments: TJSONObject;
@@ -1404,6 +1443,267 @@ begin
   end;
 end;
 
+// A listen stream that lists a task gets its whole state, first as it
+// is, then after each change, with the subscription id; unknown and
+// repeated ids are left out of the acknowledgment.
+procedure TTasksSuite.TestStatusNotifications;
+var
+  Session: TMCPSession;
+  Host: TMCPStreamHost;
+  Stream: TMCPStream;
+  Line, Lines, TaskId: string;
+  Notification: TJSONObject;
+begin
+  RegisterFixture;
+  TaskId := StartTask('pair');
+  WaitFor(TaskId, 'input_required').Free;
+  Host := TMCPStreamHost.Create;
+  Session := FServer.CreateSession;
+  Stream := nil;
+  try
+    Session.StreamHost := Host;
+    FServer.HandleMessage(Session, '{"jsonrpc":"2.0","id":9,"method":' +
+      '"subscriptions/listen","params":{"notifications":{"taskIds":["' +
+      TaskId + '","nope","' + TaskId + '"]},' + META + '}}', Line);
+    Stream := Host.TakeParked;
+    Expect<Boolean>(Stream <> nil).ToBe(True);
+    Lines := '';
+    Stream.Step(CaptureSink, @Lines);
+    Expect<string>(Copy(Lines, 1, Pos(#10, Lines))).ToBe('{ "jsonrpc" : ' +
+      '"2.0", "method" : "notifications/subscriptions/acknowledged", ' +
+      '"params" : { "notifications" : { "taskIds" : ["' + TaskId + '"] }, ' +
+      '"_meta" : { "io.modelcontextprotocol/subscriptionId" : 9 } } }'#10);
+    Notification := TJSONObject(MCPParseJSON(Copy(Lines, Pos(#10, Lines) + 1,
+      MaxInt)));
+    try
+      Expect<string>(Notification.Get('method', '')).ToBe(
+        'notifications/tasks');
+      Expect<string>(Notification.FindPath('params.status').AsString)
+        .ToBe('input_required');
+      Expect<Boolean>(Notification.FindPath('params.inputRequests.b') <> nil)
+        .ToBe(True);
+      Expect<Integer>(TJSONObject(Notification.FindPath('params._meta'))
+        .Get('io.modelcontextprotocol/subscriptionId', 0)).ToBe(9);
+    finally
+      Notification.Free;
+    end;
+    // Nothing changed: nothing sent.
+    Lines := '';
+    Stream.Step(CaptureSink, @Lines);
+    Expect<string>(Lines).ToBe('');
+    // A partial answer is a change; then the result.
+    Client.Request('tasks/update', '{"taskId":"' + TaskId +
+      '","inputResponses":{"a":{"action":"accept","content":{"v":"1"}}}}')
+      .Free;
+    Lines := '';
+    Stream.Step(CaptureSink, @Lines);
+    Expect<Boolean>((Pos('"inputRequests" : { "b"', Lines) > 0) and
+      (Pos('"a" :', Lines) = 0)).ToBe(True);
+    Client.Request('tasks/update', '{"taskId":"' + TaskId +
+      '","inputResponses":{"b":{"action":"accept","content":{"v":"2"}}}}')
+      .Free;
+    // Two changes before the stream is stepped again: working, then
+    // completed, both sent, in order (#138 review).
+    Client.AwaitTask(TaskId).Free;
+    Lines := '';
+    Stream.Step(CaptureSink, @Lines);
+    Expect<Boolean>((Pos('"status" : "working"', Lines) > 0) and
+      (Pos('"status" : "working"', Lines) <
+      Pos('"status" : "completed"', Lines))).ToBe(True);
+    Expect<Boolean>(Pos('"result" : { "content" : [{ "type" : "text", ' +
+      '"text" : "12" }]', Lines) > 0).ToBe(True);
+  finally
+    Stream.Free;
+    Session.Free;
+    Host.Free;
+  end;
+end;
+
+// A listen helper: a parked stream for ATaskIds (JSON), or nil.
+function OpenListen(AServer: TMCPServer; ASession: TMCPSession;
+  AHost: TMCPStreamHost; const ATaskIds: string): TMCPStream;
+var
+  Line: string;
+begin
+  AServer.HandleMessage(ASession, '{"jsonrpc":"2.0","id":9,"method":' +
+    '"subscriptions/listen","params":{"notifications":{"taskIds":' + ATaskIds +
+    '},' + META + '}}', Line);
+  Result := AHost.TakeParked;
+end;
+
+// More tasks than a feed's usual queue: each one's first state is sent.
+procedure TTasksSuite.TestManyFollowedTasks;
+const
+  COUNT = 70;
+var
+  Ids, Lines: string;
+  I, Found, At: Integer;
+  Session: TMCPSession;
+  Host: TMCPStreamHost;
+  Stream: TMCPStream;
+begin
+  RegisterFixture;
+  FTasks.MaxActive := COUNT;
+  Ids := '';
+  for I := 1 to COUNT do
+  begin
+    if Ids <> '' then
+      Ids := Ids + ',';
+    Ids := Ids + '"' + StartTask('wait', '{"ms":0}') + '"';
+  end;
+  Host := TMCPStreamHost.Create;
+  Session := FServer.CreateSession;
+  Stream := nil;
+  try
+    Session.StreamHost := Host;
+    Stream := OpenListen(FServer, Session, Host, '[' + Ids + ']');
+    Lines := '';
+    Stream.Step(CaptureSink, @Lines);
+    Found := 0;
+    At := Pos('notifications/tasks', Lines);
+    while At > 0 do
+    begin
+      Inc(Found);
+      Lines := Copy(Lines, At + 1, MaxInt);
+      At := Pos('notifications/tasks', Lines);
+    end;
+    Expect<Integer>(Found).ToBe(COUNT);
+  finally
+    Stream.Free;
+    Session.Free;
+    Host.Free;
+  end;
+end;
+
+// A handler that returns after its task expired sends no new state.
+procedure TTasksSuite.TestNoStateAfterExpiry;
+var
+  TaskId, Lines: string;
+  Session: TMCPSession;
+  Host: TMCPStreamHost;
+  Stream: TMCPStream;
+begin
+  RegisterFixture;
+  FTasks.TtlMs := 150;
+  StubbornMs := 200;
+  TaskId := StartTask('stubborn');
+  Expect<Boolean>(AwaitStart).ToBe(True);
+  Host := TMCPStreamHost.Create;
+  Session := FServer.CreateSession;
+  Stream := nil;
+  try
+    Session.StreamHost := Host;
+    Stream := OpenListen(FServer, Session, Host, '["' + TaskId + '"]');
+    Lines := '';
+    Stream.Step(CaptureSink, @Lines);
+    Expect<Boolean>(Pos('"status" : "working"', Lines) > 0).ToBe(True);
+    // Past the ttlMs, and the handler's late return.
+    Sleep(500);
+    Lines := '';
+    Stream.Step(CaptureSink, @Lines);
+    Expect<string>(Lines).ToBe('');
+  finally
+    Stream.Free;
+    Session.Free;
+    Host.Free;
+  end;
+  // A state queued before the deadline is not sent after it.
+  TaskId := StartTask('pair');
+  WaitFor(TaskId, 'input_required').Free;
+  Host := TMCPStreamHost.Create;
+  Session := FServer.CreateSession;
+  Stream := nil;
+  try
+    Session.StreamHost := Host;
+    Stream := OpenListen(FServer, Session, Host, '["' + TaskId + '"]');
+    Sleep(200);
+    Lines := '';
+    Stream.Step(CaptureSink, @Lines);
+    Expect<Boolean>((Pos('acknowledged', Lines) > 0) and
+      (Pos('notifications/tasks', Lines) = 0)).ToBe(True);
+  finally
+    Stream.Free;
+    Session.Free;
+    Host.Free;
+  end;
+end;
+
+// A taskIds source added before EnableTasks: it refuses, and changes
+// nothing, so the server neither declares Tasks nor serves its methods.
+procedure TTasksSuite.TestEnableRefusedCleanly;
+var
+  Raised: Boolean;
+  Response: TJSONObject;
+begin
+  FServer.RegisterTool('echo', 'Sync only', NO_ARGUMENTS, Echo);
+  AddSubscriptionSource(FServer, TTaskIdsStub.Create);
+  Raised := False;
+  try
+    EnableTasks(FServer);
+  except
+    on E: EMCPServer do
+      Raised := True;
+  end;
+  Expect<Boolean>(Raised).ToBe(True);
+  Expect<Boolean>(FServer.Adopted(TMCPTasks) = nil).ToBe(True);
+  Expect<string>(FServer.HookProblem(['tasks/get'], '')).ToBe('');
+  Response := Client.Discover;
+  try
+    Expect<Boolean>(Pos('io.modelcontextprotocol/tasks',
+      Response.AsJSON) = 0).ToBe(True);
+  finally
+    Response.Free;
+  end;
+end;
+
+procedure TTasksSuite.TestListenRefusals;
+var
+  Session: TMCPSession;
+  Host: TMCPStreamHost;
+  Stream: TMCPStream;
+  Line, Lines, TaskId: string;
+begin
+  RegisterFixture;
+  Host := TMCPStreamHost.Create;
+  Session := FServer.CreateSession;
+  try
+    Session.StreamHost := Host;
+    // taskIds without the extension: -32021.
+    FServer.HandleMessage(Session, '{"jsonrpc":"2.0","id":1,"method":' +
+      '"subscriptions/listen","params":{"notifications":{"taskIds":[]},' +
+      '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+      '"io.modelcontextprotocol/clientCapabilities":{}}}}', Line);
+    Expect<Boolean>(Pos('"code" : -32021', Line) > 0).ToBe(True);
+    Expect<Boolean>(Host.TakeParked = nil).ToBe(True);
+    FServer.HandleMessage(Session, '{"jsonrpc":"2.0","id":2,"method":' +
+      '"subscriptions/listen","params":{"notifications":{"taskIds":"x"},' +
+      META + '}}', Line);
+    Expect<Boolean>(Pos('"code" : -32602', Line) > 0).ToBe(True);
+    Expect<Boolean>(Host.TakeParked = nil).ToBe(True);
+    // A stream whose request did not declare elicitation gets no state of
+    // a task that waits on an elicitation, as tasks/get would refuse it.
+    TaskId := StartTask('pair');
+    WaitFor(TaskId, 'input_required').Free;
+    FServer.HandleMessage(Session, '{"jsonrpc":"2.0","id":3,"method":' +
+      '"subscriptions/listen","params":{"notifications":{"taskIds":["' +
+      TaskId + '"]},"_meta":{"io.modelcontextprotocol/protocolVersion":' +
+      '"2026-07-28","io.modelcontextprotocol/clientCapabilities":' +
+      '{"extensions":{"io.modelcontextprotocol/tasks":{}}}}}}', Line);
+    Stream := Host.TakeParked;
+    try
+      Lines := '';
+      Stream.Step(CaptureSink, @Lines);
+      Expect<Boolean>((Pos('acknowledged', Lines) > 0) and
+        (Pos('notifications/tasks', Lines) = 0)).ToBe(True);
+    finally
+      Stream.Free;
+    end;
+  finally
+    Session.Free;
+    Host.Free;
+  end;
+end;
+
 procedure TTasksSuite.SetupTests;
 begin
   Test('the extension is declared with {}', TestDeclaration);
@@ -1447,6 +1747,15 @@ begin
     TestUnsendableResult);
   Test('an answer that is no object is refused and taken by no one',
     TestMalformedAnswer);
+  Test('a listen stream gets a task''s state after each change',
+    TestStatusNotifications);
+  Test('taskIds without the extension or as a non-array are refused',
+    TestListenRefusals);
+  Test('EnableTasks refused by a listen conflict changes nothing',
+    TestEnableRefusedCleanly);
+  Test('every followed task''s first state is sent, past the queue size',
+    TestManyFollowedTasks);
+  Test('a state after the task expired is not sent', TestNoStateAfterExpiry);
 end;
 
 begin

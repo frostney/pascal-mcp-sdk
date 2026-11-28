@@ -25,6 +25,13 @@ uses
   MCP.Protocol,
   MCP.Server;
 
+const
+  // The key every notification on a long-lived stream carries the
+  // stream's request id under, in params._meta (basic/patterns/
+  // subscriptions, Receiving Notifications; ext-events events.mdx, Event
+  // delivery), as does the result that ends it.
+  MCP_SUBSCRIPTION_ID_KEY = 'io.modelcontextprotocol/subscriptionId';
+
 type
   // A clock in milliseconds; MCPNowMs unless a test sets another.
   TMCPClock = function: Int64;
@@ -41,6 +48,14 @@ type
     procedure Finish;
     // The stream's clock now.
     function Now: Int64;
+    // Writes notification AMethod with AParams (consumed), its _meta
+    // carrying the stream's id as MCP_SUBSCRIPTION_ID_KEY, through ASink:
+    // False, with nothing written, once the stream is cancelled, unless
+    // AForce, as for a frame Close must still send (#138 review: one
+    // sender for every stream).
+    function SendNotification(const AMethod: string; AParams: TJSONObject;
+      ASink: TMCPLineSink; ASinkData: Pointer;
+      AForce: Boolean = False): Boolean;
   public
     // ARequestId (borrowed) is copied: the request's JSON-RPC id.
     constructor Create(ARequestId: TJSONData);
@@ -192,6 +207,35 @@ end;
 function TMCPStream.Now: Int64;
 begin
   Result := FClock();
+end;
+
+function TMCPStream.SendNotification(const AMethod: string;
+  AParams: TJSONObject; ASink: TMCPLineSink; ASinkData: Pointer;
+  AForce: Boolean): Boolean;
+var
+  Meta: TJSONData;
+begin
+  try
+    if not AForce and Cancelled then
+    begin
+      AParams.Free;
+      Exit(False);
+    end;
+    Meta := AParams.Find('_meta');
+    if (Meta = nil) or (Meta.JSONType <> jtObject) then
+    begin
+      AParams.Delete('_meta');
+      Meta := TJSONObject.Create;
+      AParams.Add('_meta', Meta);
+    end;
+    TJSONObject(Meta).Delete(MCP_SUBSCRIPTION_ID_KEY);
+    TJSONObject(Meta).Add(MCP_SUBSCRIPTION_ID_KEY, Id.Clone);
+  except
+    AParams.Free;
+    raise;
+  end;
+  ASink(BuildNotification(AMethod, AParams), ASinkData);
+  Result := True;
 end;
 
 procedure TMCPStream.Cancel;

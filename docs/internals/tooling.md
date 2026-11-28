@@ -269,7 +269,7 @@ uploads the results as the `conformance-results` artifact. The job
 fails the PR workflow whenever the run differs from the baseline, in
 either direction. Every scenario the suite scores passes, and so do
 the nine Tasks extension scenarios it runs; `tasks-status-notifications`
-is an expected skip (#138), since the suite skips it whatever the
+is an expected skip (#139), since the suite skips it whatever the
 server does.
 Only the HTTP binding is covered: the stdio binding is not exercised
 here.

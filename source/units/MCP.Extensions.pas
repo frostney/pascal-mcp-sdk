@@ -20,8 +20,10 @@ uses
 
 type
   // The core requests: those MCP.Server answers itself, and
-  // subscriptions/listen, which it leaves unanswered. Dispatch selects
-  // on this type, so a core method is always a reserved one too.
+  // subscriptions/listen, which it answers through the listen handler
+  // when a unit sets one (MCP.Subscriptions, #138) and with -32601
+  // otherwise. Dispatch selects on this type, so a core method is always
+  // a reserved one too.
   TMCPCoreMethod = (cmInitialize, cmPing, cmServerDiscover, cmToolsList,
     cmToolsCall, cmResourcesList, cmResourcesRead, cmResourcesTemplatesList,
     cmPromptsList, cmPromptsGet, cmCompletionComplete, cmSubscriptionsListen);
@@ -123,6 +125,11 @@ type
     // nil without a hook.
     function TakeToolCall(const AToolName: string; AArguments: TJSONObject;
       const ACtx: TMCPRequestContext; ALegacy: Boolean): TJSONObject;
+    // '' once AHandler answers subscriptions/listen; otherwise why not (a
+    // nil handler, or one set already: one unit serves the method).
+    function SetListenHandler(AHandler: TMCPMethodHandler): string;
+    // Why SetListenHandler would refuse a handler, '' when it would not.
+    function ListenProblem: string;
     // Extension AId is left out of the classic capabilities.
     procedure RestrictToModern(const AId: string);
     // Extension AId is answered with ASettings (owned), replacing what
@@ -162,10 +169,11 @@ procedure AddMissingCacheFields(AResult: TJSONObject; ATtlMs: Integer;
 implementation
 
 const
+  LISTEN_METHOD = 'subscriptions/listen';
   CORE_METHOD_NAMES: array[TMCPCoreMethod] of string = ('initialize',
     'ping', 'server/discover', 'tools/list', 'tools/call', 'resources/list',
     'resources/read', 'resources/templates/list', 'prompts/list',
-    'prompts/get', 'completion/complete', 'subscriptions/listen');
+    'prompts/get', 'completion/complete', LISTEN_METHOD);
 
 function FindCoreMethod(const AName: string;
   out AMethod: TMCPCoreMethod): Boolean;
@@ -252,6 +260,16 @@ end;
 function StartsWith(const AText, APrefix: string): Boolean;
 begin
   Result := Copy(AText, 1, Length(APrefix)) = APrefix;
+end;
+
+function TMCPExtensionHooks.ListenProblem: string;
+var
+  Handler: TMCPMethodHandler;
+  Cacheable: Boolean;
+begin
+  Result := '';
+  if FindMethod(LISTEN_METHOD, Handler, Cacheable) then
+    Result := 'A subscriptions/listen handler is already set';
 end;
 
 function TMCPExtensionHooks.Preflight(const AMethods: array of string;
@@ -392,6 +410,26 @@ begin
   FToolCallDrain := nil;
   if Assigned(Pending) then
     Pending();
+end;
+
+function TMCPExtensionHooks.SetListenHandler(
+  AHandler: TMCPMethodHandler): string;
+var
+  Slot: Integer;
+begin
+  if not Assigned(AHandler) then
+    Exit('A subscriptions/listen handler must not be nil');
+  Result := ListenProblem;
+  if Result <> '' then
+    Exit;
+  // Held among the methods, though AddMethod refuses a core one, so
+  // dispatch finds it the way it finds an extension's.
+  Slot := Length(FMethods);
+  SetLength(FMethods, Slot + 1);
+  FMethods[Slot].Name := LISTEN_METHOD;
+  FMethods[Slot].Handler := AHandler;
+  FMethods[Slot].Cacheable := False;
+  Result := '';
 end;
 
 function TMCPExtensionHooks.TakeToolCall(const AToolName: string;

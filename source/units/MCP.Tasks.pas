@@ -19,9 +19,10 @@
   its requestState, as for a retried call; a round that asks for nothing
   runs again at once with its state. The questions are checked against
   the capabilities of the request that polls for them. Tasks live in
-  this process's memory until their ttlMs ends. notifications/tasks is
-  not sent: it needs subscriptions/listen, which this server does not
-  serve.
+  this process's memory until their ttlMs ends. A subscriptions/listen
+  stream that lists taskIds gets notifications/tasks with a task's whole
+  state after each change (Task Status Notifications, #138;
+  MCP.Subscriptions).
 }
 
 unit MCP.Tasks;
@@ -85,8 +86,13 @@ type
     // Workers done whose task is still kept: joined and freed outside
     // FLock, so a finished task holds no thread (#82 review).
     FIdle: TList; // TTaskWorker, owned
+    // The listen streams' task feeds (TTaskFeed, borrowed: each stream
+    // owns its feed), told of every change under FLock (#138).
+    FFeeds: TList;
     FDraining: Boolean;
     procedure EnsureMutable;
+    // Under FLock: queues AEntry's state for each feed that follows it.
+    procedure Changed(AEntry: TObject);
     procedure SetTtlMs(AValue: Int64);
     procedure SetPollIntervalMs(AValue: Integer);
     procedure SetMaxActive(AValue: Integer);
@@ -169,7 +175,8 @@ uses
   MCP.Crypto,
   MCP.Errors,
   MCP.JSONRPC,
-  MCP.Streams;
+  MCP.Streams,
+  MCP.Subscriptions;
 
 type
   TTaskStatus = (tkWorking, tkInputRequired, tkCompleted, tkFailed,
@@ -273,6 +280,9 @@ type
     constructor Create(AEntry: TTaskEntry);
   end;
 
+// Under the lock: every listen feed stops reaching the store (below).
+procedure DetachFeeds(AFeeds: TList); forward;
+
 function UtcStamp: string;
 begin
   Result := FormatDateTime('yyyy"-"mm"-"dd"T"hh":"nn":"ss"."zzz"Z"',
@@ -355,6 +365,7 @@ procedure TTaskEntry.Touch;
 begin
   UpdatedAt := UtcStamp;
   Inc(Version);
+  Owner.Changed(Self);
 end;
 
 function TTaskEntry.Snapshot(ADetailed: Boolean): TJSONObject;
@@ -781,6 +792,7 @@ begin
   FReaped := TList.Create;
   FDrained := TList.Create;
   FIdle := TList.Create;
+  FFeeds := TList.Create;
 end;
 
 // Cancels AEntry's handler and, at its next look, a parked worker (under
@@ -800,6 +812,7 @@ begin
     // drain's alone: a handler that calls back into the store while it
     // is joined finds nothing to free (#82 review).
     FDraining := True;
+    DetachFeeds(FFeeds);
     for I := 0 to FTasks.Count - 1 do
       FDrained.Add(FTasks[I]);
     for I := 0 to FRetired.Count - 1 do
@@ -835,6 +848,7 @@ begin
   FReaped.Free;
   FDrained.Free;
   FIdle.Free;
+  FFeeds.Free;
   FTools.Free;
   DoneCriticalSection(FLock);
   inherited Destroy;
@@ -1256,6 +1270,284 @@ begin
   end;
 end;
 
+type
+  // notifications/tasks on subscriptions/listen (Task Status
+  // Notifications): the taskIds filter key.
+  TTaskSource = class(TMCPSubscriptionSource)
+  private
+    FTasks: TMCPTasks; // borrowed: the server owns both
+  public
+    constructor Create(ATasks: TMCPTasks);
+    function FilterKey: string; override;
+    function Agree(AValue: TJSONData;
+      const ACtx: TMCPRequestContext): TJSONData; override;
+    function Open(AAgreed: TJSONData;
+      const ACtx: TMCPRequestContext): TMCPSubscriptionFeed; override;
+  end;
+
+  // One stream's tasks, and the states it has yet to send, queued at
+  // each change so none is lost between two polls (#138 review).
+  TTaskFeed = class(TMCPSubscriptionFeed)
+  private
+    FTasks: TMCPTasks; // borrowed; nil once the store has drained
+    FIds: TJSONObject; // the task ids it follows
+    // The listen request's capabilities (owned), which a task's input
+    // requests are checked against, as on tasks/get.
+    FCapabilities: TJSONObject;
+    FQueue: TJSONArray; // owned: {method, params} objects, oldest first
+    FCapacity: Integer;
+  public
+    constructor Create(ATasks: TMCPTasks; AIds: TJSONArray;
+      const ACtx: TMCPRequestContext);
+    destructor Destroy; override;
+    // Under the store's lock: AEntry's state, when the feed follows it
+    // and the listen request may see its input requests.
+    procedure Enqueue(AEntry: TTaskEntry);
+    // Under the store's lock: makes a place in the full queue.
+    procedure Evict(const ATaskId: string);
+    procedure Collect(AOut: TJSONArray); override;
+  end;
+
+const
+  // States a feed holds for a reader that has not collected them, at
+  // least one per task it follows. Past it, the oldest state of the
+  // changed task gives way, so every task's latest state is still sent
+  // and a stalled stream costs bounded memory (#138 review).
+  MAX_QUEUED_STATES = 64;
+
+// Under the lock: every feed of AFeeds stops reaching the store.
+procedure DetachFeeds(AFeeds: TList);
+var
+  I: Integer;
+begin
+  for I := 0 to AFeeds.Count - 1 do
+    TTaskFeed(AFeeds[I]).FTasks := nil;
+  AFeeds.Clear;
+end;
+
+procedure TMCPTasks.Changed(AEntry: TObject);
+var
+  I: Integer;
+begin
+  for I := 0 to FFeeds.Count - 1 do
+    TTaskFeed(FFeeds[I]).Enqueue(TTaskEntry(AEntry));
+end;
+
+constructor TTaskSource.Create(ATasks: TMCPTasks);
+begin
+  inherited Create;
+  FTasks := ATasks;
+end;
+
+function TTaskSource.FilterKey: string;
+begin
+  Result := 'taskIds';
+end;
+
+// The tasks the server agrees to notify about are those of AValue it
+// knows now. A client that did not declare the extension gets -32021.
+function TTaskSource.Agree(AValue: TJSONData;
+  const ACtx: TMCPRequestContext): TJSONData;
+var
+  I: Integer;
+  Ids: TJSONArray;
+  Known: TJSONObject;
+begin
+  if not ACtx.HasExtension(MCP_TASKS_EXTENSION) then
+    raise ExtensionRequired;
+  if AValue.JSONType <> jtArray then
+    raise InvalidParams('notifications.taskIds must be an array of strings');
+  for I := 0 to AValue.Count - 1 do
+    if AValue.Items[I].JSONType <> jtString then
+      raise InvalidParams('notifications.taskIds must be an array of ' +
+        'strings');
+  // The ids the store knows, in one pass under the lock; the request's
+  // list is matched outside it (#138 review).
+  Known := TJSONObject.Create;
+  Ids := TJSONArray.Create;
+  try
+    System.EnterCriticalSection(FTasks.FLock);
+    try
+      FTasks.Purge;
+      for I := 0 to FTasks.FTasks.Count - 1 do
+        Known.Add(TTaskEntry(FTasks.FTasks[I]).Id, True);
+    finally
+      System.LeaveCriticalSection(FTasks.FLock);
+    end;
+    for I := 0 to AValue.Count - 1 do
+      if Known.IndexOfName(AValue.Items[I].AsString) >= 0 then
+      begin
+        Ids.Add(AValue.Items[I].AsString);
+        // Listed once, however often the request names it.
+        Known.Delete(AValue.Items[I].AsString);
+      end;
+  except
+    Known.Free;
+    Ids.Free;
+    raise;
+  end;
+  Known.Free;
+  FTasks.Reap;
+  // No task it knows: nothing to follow, and the key is left out of the
+  // acknowledgment, so the stream takes no feed (#138 review).
+  if Ids.Count = 0 then
+  begin
+    Ids.Free;
+    Exit(nil);
+  end;
+  Result := Ids;
+end;
+
+function TTaskSource.Open(AAgreed: TJSONData;
+  const ACtx: TMCPRequestContext): TMCPSubscriptionFeed;
+begin
+  Result := TTaskFeed.Create(FTasks, TJSONArray(AAgreed), ACtx);
+end;
+
+constructor TTaskFeed.Create(ATasks: TMCPTasks; AIds: TJSONArray;
+  const ACtx: TMCPRequestContext);
+var
+  I: Integer;
+  Entry: TTaskEntry;
+begin
+  inherited Create;
+  FIds := TJSONObject.Create;
+  FQueue := TJSONArray.Create;
+  if ACtx.ClientCapabilities <> nil then
+    FCapabilities := TJSONObject(ACtx.ClientCapabilities.Clone)
+  else
+    FCapabilities := TJSONObject.Create;
+  for I := 0 to AIds.Count - 1 do
+    FIds.Add(AIds.Strings[I], True);
+  FCapacity := MAX_QUEUED_STATES;
+  if FCapacity < AIds.Count then
+    FCapacity := AIds.Count;
+  System.EnterCriticalSection(ATasks.FLock);
+  try
+    // A store that is shutting down tells this feed nothing.
+    if ATasks.FDraining then
+      Exit;
+    FTasks := ATasks;
+    ATasks.FFeeds.Add(Self);
+    // Each task's state as it is now comes first.
+    for I := 0 to AIds.Count - 1 do
+    begin
+      Entry := TTaskEntry(ATasks.FindEntry(AIds.Strings[I]));
+      if Entry <> nil then
+        Enqueue(Entry);
+    end;
+  finally
+    System.LeaveCriticalSection(ATasks.FLock);
+  end;
+end;
+
+destructor TTaskFeed.Destroy;
+var
+  Tasks: TMCPTasks;
+begin
+  // The stream ends before the server frees the store (the transports
+  // end their streams first); a drained store has let go of the feed.
+  Tasks := FTasks;
+  if Tasks <> nil then
+  begin
+    System.EnterCriticalSection(Tasks.FLock);
+    try
+      Tasks.FFeeds.Remove(Self);
+    finally
+      System.LeaveCriticalSection(Tasks.FLock);
+    end;
+  end;
+  FIds.Free;
+  FCapabilities.Free;
+  FQueue.Free;
+  inherited Destroy;
+end;
+
+// A task's state as tasks/get answers it. One waiting on input requests
+// the listen request did not declare what they need for is left out, as
+// tasks/get would refuse it (#82 review).
+procedure TTaskFeed.Enqueue(AEntry: TTaskEntry);
+var
+  Ctx: TMCPRequestContext;
+  Missing, Member, Unknown: string;
+begin
+  if FIds.IndexOfName(AEntry.Id) < 0 then
+    Exit;
+  if (AEntry.Status = tkInputRequired) and (AEntry.Pending <> nil) then
+  begin
+    Ctx := Default(TMCPRequestContext);
+    Ctx.ProtocolVersion := MCP_PROTOCOL_VERSION;
+    Ctx.ClientCapabilities := FCapabilities;
+    Missing := MissingInputCapability(AEntry.Pending, Ctx, Unknown, Member);
+    if Missing <> '' then
+      Exit;
+  end;
+  // A state after the ttlMs ended is not sent: tasks/get no longer finds
+  // the task (#138 review). The deadline goes with the state, so one
+  // queued before it is dropped once it has passed.
+  if MCPNowMs >= AEntry.DeadlineMs then
+    Exit;
+  // Full: the oldest state of the changed task gives way, or else one a
+  // later state of its task supersedes, so the queue keeps its size and
+  // every task's latest state (#138 review).
+  if FQueue.Count >= FCapacity then
+    Evict(AEntry.Id);
+  FQueue.Add(TJSONObject.Create(['method', 'notifications/tasks', 'params',
+    AEntry.Snapshot(True), 'deadline', AEntry.DeadlineMs]));
+end;
+
+function QueuedTaskId(AItem: TJSONData): string;
+begin
+  Result := TJSONObject(AItem).FindPath('params.taskId').AsString;
+end;
+
+procedure TTaskFeed.Evict(const ATaskId: string);
+var
+  I, J: Integer;
+begin
+  for I := 0 to FQueue.Count - 1 do
+    if QueuedTaskId(FQueue.Items[I]) = ATaskId then
+    begin
+      FQueue.Delete(I);
+      Exit;
+    end;
+  for I := 0 to FQueue.Count - 1 do
+    for J := I + 1 to FQueue.Count - 1 do
+      if QueuedTaskId(FQueue.Items[J]) = QueuedTaskId(FQueue.Items[I]) then
+      begin
+        FQueue.Delete(I);
+        Exit;
+      end;
+  // One state per task and as many tasks as places: none left to drop.
+  FQueue.Delete(0);
+end;
+
+procedure TTaskFeed.Collect(AOut: TJSONArray);
+var
+  Tasks: TMCPTasks;
+  Item: TJSONObject;
+begin
+  Tasks := FTasks;
+  if Tasks = nil then
+    Exit;
+  System.EnterCriticalSection(Tasks.FLock);
+  try
+    while FQueue.Count > 0 do
+    begin
+      Item := TJSONObject(FQueue.Extract(0));
+      if MCPNowMs >= Item.Get('deadline', Int64(0)) then
+        Item.Free
+      else
+      begin
+        Item.Delete('deadline');
+        AOut.Add(Item);
+      end;
+    end;
+  finally
+    System.LeaveCriticalSection(Tasks.FLock);
+  end;
+end;
+
 function ThreadsAvailable: Boolean;
 {$IFDEF UNIX}
 var
@@ -1284,7 +1576,12 @@ begin
   if not ThreadsAvailable then
     raise EMCPServer.Create('Tasks run on threads: list cthreads first in ' +
       'the program''s uses clause');
+  // Everything that could refuse is checked before the server changes
+  // (#138 review); the tool-call hook, the one step left that can, goes
+  // first.
   Problem := AServer.HookProblem(TASK_METHODS, '');
+  if Problem = '' then
+    Problem := MCPSubscriptionSourceProblem(AServer, 'taskIds');
   if Problem <> '' then
     raise EMCPServer.Create(Problem);
   Result := TMCPTasks.Create(AServer);
@@ -1297,6 +1594,8 @@ begin
     raise;
   end;
   AServer.Adopt(Result);
+  // Task status notifications on subscriptions/listen.
+  AddSubscriptionSource(AServer, TTaskSource.Create(Result));
   AServer.RegisterMethod(TASK_METHODS[0], Result.GetTask);
   AServer.RegisterMethod(TASK_METHODS[1], Result.UpdateTask);
   AServer.RegisterMethod(TASK_METHODS[2], Result.CancelTask);

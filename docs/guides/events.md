@@ -97,8 +97,9 @@ subscription the caller may not have.
 ## What the server serves
 
 The first `RegisterEvent` call declares the extension with `{}`, which
-stays `{}` whatever `DeclareExtension` sets, since `listChanged` needs
-`subscriptions/listen`. It serves:
+stays `{}` whatever `DeclareExtension` sets: the event types are fixed
+once the server starts, so there is no list change to announce. It
+serves:
 
 - `events/list`: each type with its description, `"delivery":
   ["poll", "push"]`, and its input and payload schemas, paged with
@@ -186,7 +187,8 @@ does over the in-process test client.
 
 - **Webhooks** need subscriptions the server keeps, outbound HTTPS
   calls and an authenticated caller.
-- **`notifications/events/list_changed`** needs `subscriptions/listen`.
+- **`notifications/events/list_changed`**: the event types are fixed
+  once the server starts, so there is nothing to announce.
 
 The event types are fixed when the server starts, so a declaration
 without `listChanged` is accurate.
@@ -198,4 +200,5 @@ without `listChanged` is accurate.
   `MCP.Streams`, and the error codes.
 - [Tools](tools.md#routing-headers-x-mcp-header), for the `x-mcp-header`
   annotation event arguments share.
-- [Skills](skills.md), the other extension built on the same hooks.
+- [Skills](skills.md) and [Tasks](tasks.md), the other extensions built
+  on the same hooks.
