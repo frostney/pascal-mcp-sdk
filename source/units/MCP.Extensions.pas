@@ -82,7 +82,6 @@ type
     end;
     FToolCallHook: TMCPToolCallHook;
     FToolCallDrain: TMCPDrain;
-    FListenHandler: TMCPMethodHandler;
   public
     destructor Destroy; override;
     // '' once added; otherwise why not (an empty name, a nil handler, a
@@ -129,8 +128,6 @@ type
     // '' once AHandler answers subscriptions/listen; otherwise why not (a
     // nil handler, or one set already: one unit serves the method).
     function SetListenHandler(AHandler: TMCPMethodHandler): string;
-    // The subscriptions/listen handler, or nil.
-    property ListenHandler: TMCPMethodHandler read FListenHandler;
     // Extension AId is left out of the classic capabilities.
     procedure RestrictToModern(const AId: string);
     // Extension AId is answered with ASettings (owned), replacing what
@@ -170,6 +167,7 @@ procedure AddMissingCacheFields(AResult: TJSONObject; ATtlMs: Integer;
 implementation
 
 const
+  LISTEN_METHOD = 'subscriptions/listen';
   CORE_METHOD_NAMES: array[TMCPCoreMethod] of string = ('initialize',
     'ping', 'server/discover', 'tools/list', 'tools/call', 'resources/list',
     'resources/read', 'resources/templates/list', 'prompts/list',
@@ -404,12 +402,22 @@ end;
 
 function TMCPExtensionHooks.SetListenHandler(
   AHandler: TMCPMethodHandler): string;
+var
+  Existing: TMCPMethodHandler;
+  Cacheable: Boolean;
+  Slot: Integer;
 begin
   if not Assigned(AHandler) then
     Exit('A subscriptions/listen handler must not be nil');
-  if Assigned(FListenHandler) then
+  if FindMethod(LISTEN_METHOD, Existing, Cacheable) then
     Exit('A subscriptions/listen handler is already set');
-  FListenHandler := AHandler;
+  // Held among the methods, though AddMethod refuses a core one, so
+  // dispatch finds it the way it finds an extension's.
+  Slot := Length(FMethods);
+  SetLength(FMethods, Slot + 1);
+  FMethods[Slot].Name := LISTEN_METHOD;
+  FMethods[Slot].Handler := AHandler;
+  FMethods[Slot].Cacheable := False;
   Result := '';
 end;
 

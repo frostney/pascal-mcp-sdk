@@ -3857,12 +3857,10 @@ begin
         Exit(HandlePromptsGet(AMessage, ACtx, ALegacy));
       cmCompletionComplete:
         Exit(HandleComplete(AMessage, ACtx, ALegacy));
-      cmSubscriptionsListen:
-        if Assigned(FHooks.ListenHandler) then
-          Exit(HookResponse(AMessage, ACtx, ALegacy, FHooks.ListenHandler,
-            False));
-    end
-  else if FHooks.FindMethod(AMessage.Method, Handler, Cacheable) then
+    end;
+  // An extension's methods, and subscriptions/listen once a unit set its
+  // handler (#138): the hooks hold it as one of their methods.
+  if FHooks.FindMethod(AMessage.Method, Handler, Cacheable) then
     Exit(HookResponse(AMessage, ACtx, ALegacy, Handler, Cacheable));
   Result := BuildErrorResponse(AMessage.Id, JSONRPC_METHOD_NOT_FOUND,
     'Method not found: ' + AMessage.Method);
