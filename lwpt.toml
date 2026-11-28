@@ -47,8 +47,9 @@ args = ["scripts/smoke.pas"]
 # validatesubsetarguments at cyclomatic 26 / cognitive 85; worst file
 # MCP.Server.pas at 541/600) so the numbers can shrink but not grow
 # unnoticed. The file ceiling went from 600 to 605 on 2026-11-28, when
-# MCP.Server.pas reached 602 with the tool-call hook, RunTool and
-# ClientFaultMessage the Tasks extension runs on (#82). Hotspot scoring needs full git
+# MCP.Server.pas reached 603 with the tool-call hook, RunTool,
+# ClientFaultMessage and the exception-safe stamping the Tasks extension
+# runs on (#82). Hotspot scoring needs full git
 # history, which CI's shallow checkout lacks — deliberately not
 # limited.
 [health]
