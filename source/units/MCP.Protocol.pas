@@ -556,7 +556,9 @@ var
   MetaData: TJSONData;
   Meta: TJSONObject;
 begin
-  if AResult.Find('resultType') = nil then
+  // Keys count by presence: a key stored as a nil child reads as absent
+  // to Find but would make a second Add raise (#82 review).
+  if AResult.IndexOfName('resultType') < 0 then
     AResult.Add('resultType', RESULT_TYPE_COMPLETE);
 
   MetaData := AResult.Find('_meta');
@@ -564,16 +566,20 @@ begin
     Meta := TJSONObject(MetaData)
   else
   begin
-    // A _meta that is no object, such as null, is replaced: adding a
-    // second key would raise and leave the result unsent (#82 review).
-    AResult.Delete('_meta');
+    // A _meta that is no object, such as null, is replaced.
+    if AResult.IndexOfName('_meta') >= 0 then
+      AResult.Delete(AResult.IndexOfName('_meta'));
     Meta := TJSONObject.Create;
     AResult.Add('_meta', Meta);
   end;
 
   if Meta.Find(META_KEY_SERVER_INFO) = nil then
+  begin
+    if Meta.IndexOfName(META_KEY_SERVER_INFO) >= 0 then
+      Meta.Delete(Meta.IndexOfName(META_KEY_SERVER_INFO));
     Meta.Add(META_KEY_SERVER_INFO,
       BuildServerInfo(AServerName, AServerVersion));
+  end;
 end;
 
 // -32021 data payload: {requiredCapabilities: {<name>: {}}} (schema

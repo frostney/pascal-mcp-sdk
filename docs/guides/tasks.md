@@ -132,6 +132,9 @@ and at the top level the task's `taskId`, `status`, `createdAt`,
 before this answer goes out. Its id is 128 random bits, base64url
 encoded, since it is the only thing that gives access to the task.
 
+A `tools/call` the client cancels while its task is being created
+never sends the task's id, so that task starts cancelled.
+
 `tasks/get` answers the task as it is now, with `resultType`
 `"complete"` and, by status:
 
@@ -177,8 +180,10 @@ suffix (`confirm#2`), and the handler still reads its answer under
 The questions follow the same rule as a call's input round: each goes
 only to a request that declared its kind, such as `elicitation`. A
 `tasks/get` that did not declare what a question needs gets `-32021`,
-and the task waits on for a poll that did. A request that is no input
-request at all fails the task with `-32603`.
+and the task waits on for a poll that did. A question that is no input
+request, or lacks what its kind needs (an elicitation's message and
+schema or url, a sampling request's messages and `maxTokens`), fails the
+task with `-32603`. A waiting task looks for its answers every 25 ms.
 
 ## Cancellation and lifetime
 
@@ -192,6 +197,9 @@ default), and never goes before that. Once it has passed, the task is
 gone at the next request, and the handler's `IsCancelled` is true from
 that moment, whether a request comes or not. `PollIntervalMs` (one
 second by default) is the poll interval suggested to clients.
+
+A finished task keeps its result, not its thread: the thread is freed
+at the next request to the task store.
 
 Tasks live in the server's memory: they end with the process. Freeing
 the server cancels every task and waits until its handler returns,
@@ -249,10 +257,18 @@ suffixed key (`confirm#2`) only with an answer of its own. See
 - **Tasks that outlive the process** need a store outside it, which
   `MCP.Tasks` does not have.
 
+## Who can reach a task
+
 The extension asks a server to check, on every task request, that the
 caller may reach that task. The library has no authentication of its
 own (see [Deployment](deployment.md#tls-auth-and-the-proxy-in-front)),
-so the task id is the only key: keep it as secret as the task's result.
+and a request carries no caller identity it could bind a task to, so a
+task's id is its only key, as the extension allows: whoever holds the
+id can read the task, answer its questions and cancel it. That fits a
+server with one caller, such as a stdio server its client starts, or
+one Streamable HTTP server per user. Do not enable Tasks on a server
+several callers share, even behind an authenticating proxy: the proxy
+knows who calls, but not whose task an id names.
 
 ## Related pages
 

@@ -39,7 +39,7 @@ const FAQ: { q: string; a: string; extra?: React.ReactNode }[] = [
   },
   {
     q: 'Which parts of the MCP specification are implemented?',
-    a: 'The 2026-07-28 server surface: tools, resources and templates, prompts, completion, input requests, progress, caching hints, extension negotiation with MCP Apps, Skills and Events, over stdio and Streamable HTTP, plus the classic handshake on stdio. Not served include subscriptions/listen and list-changed notifications, Events webhook delivery, the Tasks extension and authorization; the protocol coverage page has the full table.',
+    a: 'The 2026-07-28 server surface: tools, resources and templates, prompts, completion, input requests, progress, caching hints, extension negotiation with MCP Apps, Skills, Events and Tasks (tool calls that run as tasks, polled with tasks/get, answered with tasks/update and cancelled with tasks/cancel), over stdio and Streamable HTTP, plus the classic handshake on stdio. Not served include subscriptions/listen and list-changed notifications, Events webhook delivery and authorization; the protocol coverage page has the full table.',
   },
   {
     q: 'Is this the same as tina4stack/pascal-mcp (claude-pascal-mcp) or @pascal-app/mcp?',

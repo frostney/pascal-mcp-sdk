@@ -50,6 +50,8 @@ end;
 var
   // What the handlers saw, for the tests to check.
   SawCancel, WaitStarted, OwnerFreed, UsedAfterFree: Boolean;
+  // Where the owner leaves its callbacks' answers when it is freed.
+  OwnerLines: PString;
   // How long the stubborn handler ignores cancellation, in ms.
   StubbornMs: Integer;
   Rounds: Integer;
@@ -60,6 +62,11 @@ type
   TToolOwner = class
   public
     Calls: Integer;
+    // A session of its own, to call back into the server while teardown
+    // waits for it; and what those calls answered.
+    Server: TMCPServer;
+    Session: TMCPSession;
+    CallbackLines: string;
     destructor Destroy; override;
     function Spin(AArguments: TJSONObject;
       const ACtx: TMCPRequestContext): TMCPToolResult;
@@ -72,12 +79,17 @@ type
 
 destructor TToolOwner.Destroy;
 begin
+  if OwnerLines <> nil then
+    OwnerLines^ := CallbackLines;
+  Session.Free;
   OwnerFreed := True;
   inherited Destroy;
 end;
 
 function TToolOwner.Spin(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
+var
+  Line: string;
 begin
   WaitStarted := True;
   while not ACtx.IsCancelled do
@@ -85,10 +97,22 @@ begin
     Inc(Calls);
     Sleep(5);
   end;
-  // Still reading its owner after the cancellation.
+  // Still reading its owner after the cancellation, and calling back into
+  // the server while teardown waits for it: no task is admitted, and the
+  // store has nothing left to find.
   Sleep(50);
   if OwnerFreed then
     UsedAfterFree := True;
+  if Session <> nil then
+  begin
+    Server.HandleMessage(Session, '{"jsonrpc":"2.0","id":1,"method":' +
+      '"tools/call","params":{"name":"wait","arguments":{"ms":0},' + META +
+      '}}', Line);
+    CallbackLines := Line;
+    Server.HandleMessage(Session, '{"jsonrpc":"2.0","id":2,"method":' +
+      '"tasks/get","params":{"taskId":"x",' + META + '}}', Line);
+    CallbackLines := CallbackLines + #10 + Line;
+  end;
   Inc(Calls);
   Result := MCPTextResult('spun');
 end;
@@ -194,6 +218,14 @@ function Bare(AArguments: TJSONObject;
 begin
   Result := MCPInputRequired(TJSONObject.Create(['e', TJSONObject.Create([
     'method', 'elicitation/create'])]));
+end;
+
+// An elicitation whose params lack its message and schema.
+function Hollow(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := MCPInputRequired(TJSONObject.Create(['e', TJSONObject.Create([
+    'method', 'elicitation/create', 'params', TJSONObject.Create])]));
 end;
 
 // Nothing to ask the first time: runs again with its state.
@@ -348,6 +380,7 @@ begin
   WaitStarted := False;
   OwnerFreed := False;
   UsedAfterFree := False;
+  OwnerLines := nil;
   StubbornMs := 0;
   Rounds := 0;
   FServer := TMCPServer.Create('tasks', '1.0');
@@ -363,9 +396,9 @@ end;
 
 procedure TTasksSuite.RegisterFixture;
 const
-  OPTIONAL_TOOLS: array[0..13] of string = ('wait', 'fail', 'crash',
+  OPTIONAL_TOOLS: array[0..14] of string = ('wait', 'fail', 'crash',
     'refuse', 'ask', 'pair', 'sample', 'greeting', 'cased', 'stubborn',
-    'stateonly', 'unsendable', 'drafty', 'bare');
+    'stateonly', 'unsendable', 'drafty', 'bare', 'hollow');
 var
   Name: string;
 begin
@@ -381,6 +414,7 @@ begin
   FServer.RegisterTool('stubborn', 'Slow to stop', NO_ARGUMENTS, Stubborn);
   FServer.RegisterTool('drafty', 'A key with a #', NO_ARGUMENTS, Drafty);
   FServer.RegisterTool('bare', 'A malformed request', NO_ARGUMENTS, Bare);
+  FServer.RegisterTool('hollow', 'Empty params', NO_ARGUMENTS, Hollow);
   FServer.RegisterTool('stateonly', 'A round without questions',
     NO_ARGUMENTS, StateOnly);
   FServer.RegisterTool('unsendable', 'A non-finite result', NO_ARGUMENTS,
@@ -1250,6 +1284,7 @@ end;
 procedure TTasksSuite.TestTeardownBeforeAdoptedOwners;
 var
   Owner: TToolOwner;
+  Lines: string;
 begin
   RegisterFixture;
   Owner := TToolOwner.Create;
@@ -1258,10 +1293,19 @@ begin
   FServer.Adopt(Owner);
   StartTask('spin');
   Expect<Boolean>(AwaitStart).ToBe(True);
+  Owner.Server := FServer;
+  Owner.Session := FServer.CreateSession;
   FreeAndNil(FClient);
+  // The owner is freed with the server, so its callbacks are read first.
+  Lines := '';
+  OwnerLines := @Lines;
   FreeAndNil(FServer);
   Expect<Boolean>(OwnerFreed).ToBe(True);
   Expect<Boolean>(UsedAfterFree).ToBe(False);
+  // The tools/call ran as usual, not as a task; tasks/get found nothing.
+  Expect<Boolean>((Pos('"text" : "waited"', Lines) > 0) and
+    (Pos('"resultType" : "task"', Lines) = 0) and
+    (Pos('"code" : -32602', Lines) > 0)).ToBe(True);
 end;
 
 // A round that asks for nothing runs again at once with its state.
@@ -1316,6 +1360,14 @@ begin
     Expect<string>(Response.FindPath('result.error.message').AsString)
       .ToBe('Tool "bare" produced a malformed input request: ' +
       'elicitation/create without its params');
+  finally
+    Response.Free;
+  end;
+  Response := Client.AwaitTask(StartTask('hollow'));
+  try
+    Expect<string>(Response.FindPath('result.error.message').AsString)
+      .ToBe('Tool "hollow" produced a malformed input request: ' +
+      'elicitation/create without its message, url or requestedSchema');
   finally
     Response.Free;
   end;

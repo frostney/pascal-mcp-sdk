@@ -724,8 +724,9 @@ type
     function MethodRoute(const AMethod: string; out ANameParam: string;
       out AHeaders: TMCPHeaderLookup): Boolean;
     // Every tools/call for a registered tool reaches AHook before the
-    // tool's handler runs, once its declared client capabilities are
-    // met, in both eras (#82; MCP.Extensions has the hook type): the
+    // tool's handler runs, in both eras, a 2026-07-28 one once its
+    // declared client capabilities are met (#82; MCP.Extensions has the
+    // hook type; a classic call has no such check): the
     // Tasks extension answers some with a task. ADrain (nil for none)
     // runs first when the server is freed, before anything else goes,
     // to stop the work the hook started and wait for it. A nil hook, a
@@ -2588,7 +2589,10 @@ begin
   // of its own (#82), stops first, while everything it may use is still
   // there; then the extensions' objects go, before the registrations.
   FHooks.Drain;
-  FreeAndNil(FHooks);
+  // Still assigned while the hooks free the adopted objects, as before
+  // (#82 review): a destructor of one may reach the server.
+  FHooks.Free;
+  FHooks := nil;
   for I := 0 to High(FTools) do
     FTools[I].Definition.Free;
   for I := 0 to High(FResources) do
@@ -3642,8 +3646,14 @@ begin
   // The modern stamps (resultType, serverInfo _meta) belong to the
   // 2026-07-28 dialect only; legacy responses stay byte-faithful to
   // their negotiated revision.
-  if not ALegacy then
-    StampResult(AResult, FName, FVersion);
+  // AResult is ours until BuildResultResponse takes it (#82 review).
+  try
+    if not ALegacy then
+      StampResult(AResult, FName, FVersion);
+  except
+    AResult.Free;
+    raise;
+  end;
   Result := BuildResultResponse(AMessage.Id, AResult);
 end;
 
