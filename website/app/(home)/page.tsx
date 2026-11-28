@@ -35,7 +35,7 @@ const FAQ: { q: string; a: string; extra?: React.ReactNode }[] = [
   },
   {
     q: 'How do I build an MCP server in Pascal?',
-    a: 'Install FPC 3.2.2, add the library (lwpt add frostney/pascal-mcp-sdk@^2.0, or vendor its source units), register your tools with a name, description, and JSON Schema, and call RunMCPStdioServer. The quick start walks through a complete server in a few minutes.',
+    a: 'Install FPC 3.2.2, add the library (lwpt add frostney/pascal-mcp-sdk@^3.0, or vendor its source units), register your tools with a name, description, and JSON Schema, and call RunMCPStdioServer. The quick start walks through a complete server in a few minutes.',
   },
   {
     q: 'Which parts of the MCP specification are implemented?',
@@ -178,7 +178,7 @@ export default async function HomePage() {
               dependency:
             </strong>{' '}
             <code className="rounded bg-fd-muted px-1.5 py-0.5">
-              lwpt add {gitConfig.user}/{gitConfig.repo}@^2.0
+              lwpt add {gitConfig.user}/{gitConfig.repo}@^3.0
             </code>{' '}
             — then <code className="rounded bg-fd-muted px-1.5 py-0.5">uses MCP.Server</code>{' '}
             in your program.
