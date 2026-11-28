@@ -125,7 +125,7 @@ The checks a PR needs to merge are listed in
   that apt and Homebrew offer, which the library supports as 3.2.2. A
   further Linux leg does the same on FPC 3.2.4-rc2, installed with
   [frostney/fpc-toolchain](https://github.com/frostney/fpc-toolchain)
-  pinned by commit, and is not a required check. The Linux legs
+  pinned by commit, and is required like the others. The Linux legs
   run `test` and `mcpsmoke` a second time under `LC_ALL=C` (the build
   is not repeated there), where the
   locale's code page is US-ASCII (#102); reproduce it with
