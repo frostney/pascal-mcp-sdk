@@ -8,7 +8,9 @@ name: PR
 #            mcpsmoke E2E battery on Linux, macOS, and win64 (the stdio
 #            transport is pure RTL, so unlike duetto there are no
 #            platform-specific transport legs to stage — all three OSes
-#            run the full battery pre-merge). The linux-x64 leg alone adds
+#            run the full battery pre-merge), in four required
+#            build-and-test jobs: one per OS and a second Linux one on
+#            FPC 3.2.4-rc2. The linux-x64 leg alone adds
 #            format --check, agents --check, the reference-docs check,
 #            health and duplication.
 #   ci.yml — push to main and manual dispatch: the wider per-arch
@@ -49,8 +51,8 @@ jobs:
             lwpt-asset: macos-arm64
             fpc-install: brew
           # The next FPC release, ahead of the package managers (#130):
-          # build, unit suites and mcpsmoke on 3.2.4-rc2. Not a required
-          # check.
+          # build, unit suites and mcpsmoke on 3.2.4-rc2. A required
+          # check, like the other legs.
           - name: linux-x64-fpc-3.2.4
             runner: ubuntu-latest
             lwpt-asset: linux-x64
