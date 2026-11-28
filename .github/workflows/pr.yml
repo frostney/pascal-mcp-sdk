@@ -49,8 +49,8 @@ jobs:
             lwpt-asset: macos-arm64
             fpc-install: brew
           # The next FPC release, ahead of the package managers (#130):
-          # build, unit suites and mcpsmoke on 3.2.4-rc2. Not a required
-          # check.
+          # build, unit suites and mcpsmoke on 3.2.4-rc2. A required
+          # check, like the other legs.
           - name: linux-x64-fpc-3.2.4
             runner: ubuntu-latest
             lwpt-asset: linux-x64

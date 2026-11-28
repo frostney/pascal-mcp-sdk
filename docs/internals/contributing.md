@@ -180,15 +180,16 @@ registry.
   subject and the changelog entry — `pr-title.yml` gates it, with
   allowed types read from `cliff.toml`.
 - The `main` branch ruleset requires
-  seven checks before a PR can merge: `build-and-test (linux-x64)`,
-  `build-and-test (macos-arm64)`, `build-and-test (win64)`, `docs`,
-  `interop`, `conformance` and `conventional-title`. A red one blocks
+  eight checks before a PR can merge: `build-and-test (linux-x64)`,
+  `build-and-test (macos-arm64)`, `build-and-test (win64)`,
+  `build-and-test (linux-x64-fpc-3.2.4)`, `docs`, `interop`,
+  `conformance` and `conventional-title`. A red one blocks
   the merge. What each covers
   (see [Tooling § CI](tooling.md#ci)):
 
 | Required check | Proves |
 | --- | --- |
-| `build-and-test (…)`, all three | checksum-verified lwpt install, `install --frozen`, build, unit suites, mcpsmoke on every platform; on the Linux leg also the `fpc @lwpt.cfg` zero-install path, `format --check` and `agents --check` (no formatter or AGENTS.md drift), `check-reference-docs.sh` (every `MCP*`/`Register*` routine in the interface of `MCP.Server` and `MCP.Content` is documented in `docs/reference/`), and health / duplication (the complexity and token-clone ceilings in `lwpt.toml`, ratchets set just above the adoption-day baseline, so they shrink but never grow unnoticed) |
+| `build-and-test (…)`, all four | checksum-verified lwpt install, `install --frozen`, build, unit suites, mcpsmoke on every platform, and on FPC 3.2.4-rc2, the next release, so a change that breaks on it shows before it ships; on the `linux-x64` leg also the `fpc @lwpt.cfg` zero-install path, `format --check` and `agents --check` (no formatter or AGENTS.md drift), `check-reference-docs.sh` (every `MCP*`/`Register*` routine in the interface of `MCP.Server` and `MCP.Content` is documented in `docs/reference/`), and health / duplication (the complexity and token-clone ceilings in `lwpt.toml`, ratchets set just above the adoption-day baseline, so they shrink but never grow unnoticed) |
 | `docs` | markdownlint: docs follow `.markdownlint-cli2.jsonc` |
 | `interop` | the official TypeScript clients still talk to `mcpdemo` — a red interop job is a real cross-implementation regression |
 | `conformance` | the official conformance suite's 2026-07-28 requirement set, run against `mcpconformance`, still matches `tools/conformance/baseline.json` |
@@ -196,12 +197,7 @@ registry.
 
 - Not required: `pages.yml` builds the website when a PR touches
   `docs/` or `website/`, and fails on broken internal doc links, so
-  fix a red build there before merging. `build-and-test
-  (linux-x64-fpc-3.2.4)` builds and runs the unit suites and mcpsmoke
-  with FPC 3.2.4-rc2. The `main` ruleset does not require it, so a red
-  run does not block a merge, but look at the step that failed: it may
-  be a change in the next FPC release, the toolchain install, or a
-  regression of the change itself.
+  fix a red build there before merging.
 
 - Reverting via GitHub's Revert button produces a `Revert "..."`
   title git-cliff cannot parse — retitle it
