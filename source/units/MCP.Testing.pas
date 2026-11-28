@@ -116,12 +116,12 @@ type
     // with SetClientCapabilities first) until it is completed, failed or
     // cancelled, and returns that response. While it waits for input it
     // answers the requests it has a canned answer for (AnswerInput) with
-    // tasks/update; a key the server suffixed to keep it unique, as
-    // confirm#2 ('#' and digits), takes the answer for confirm when it
-    // has none of its own. It returns early with an input_required
-    // response when some requested key has no answer, and with an error
-    // response as it is, a refused tasks/update's included; after
-    // ATimeoutMs it raises EMCPTesting.
+    // tasks/update, keys matched exactly: a key the server suffixed to
+    // keep it unique, as confirm#2, needs an answer of its own. It
+    // returns early with an input_required response when some requested
+    // key has no answer, and with an error response as it is, a refused
+    // tasks/update's included; after ATimeoutMs (on the monotonic
+    // MCPNowMs) it raises EMCPTesting.
     function AwaitTask(const ATaskId: string;
       ATimeoutMs: Integer = 10000): TJSONObject;
 
@@ -141,7 +141,8 @@ implementation
 
 uses
   MCP.JSONRPC,
-  MCP.Protocol;
+  MCP.Protocol,
+  MCP.Streams;
 
 const
   MAX_INPUT_ROUNDS = 10;
@@ -392,68 +393,16 @@ begin
   Result := Send(AMethod, Envelope(AParamsJson));
 end;
 
-// The handler's key of AKey when the server suffixed it to keep it
-// unique ("confirm#2" for "confirm"), '' otherwise: the part before the
-// last '#', when only digits follow it.
-function UnsuffixedKey(const AKey: string): string;
-var
-  Hash, I: Integer;
-begin
-  Result := '';
-  Hash := 0;
-  for I := Length(AKey) downto 1 do
-    if AKey[I] = '#' then
-    begin
-      Hash := I;
-      Break;
-    end;
-  if (Hash <= 1) or (Hash = Length(AKey)) then
-    Exit;
-  for I := Hash + 1 to Length(AKey) do
-    if not (AKey[I] in ['0'..'9']) then
-      Exit;
-  Result := Copy(AKey, 1, Hash - 1);
-end;
-
-// The answers for every key of ARequests, or nil when one has none.
-function TaskAnswers(AAnswers, ARequests: TJSONObject): TJSONObject;
-var
-  I: Integer;
-  Key, Plain: string;
-  Answer: TJSONData;
-begin
-  Result := TJSONObject.Create;
-  try
-    for I := 0 to ARequests.Count - 1 do
-    begin
-      Key := ARequests.Names[I];
-      Answer := AAnswers.Find(Key);
-      Plain := UnsuffixedKey(Key);
-      if (Answer = nil) and (Plain <> '') then
-        Answer := AAnswers.Find(Plain);
-      if Answer = nil then
-      begin
-        FreeAndNil(Result);
-        Exit;
-      end;
-      Result.Add(Key, Answer.Clone);
-    end;
-  except
-    Result.Free;
-    raise;
-  end;
-end;
-
 function TMCPTestClient.AwaitTask(const ATaskId: string;
   ATimeoutMs: Integer): TJSONObject;
 var
-  Deadline: QWord;
+  Deadline: Int64;
   Status: TJSONData;
   Requests, Answers, Params: TJSONObject;
   Update: TJSONObject;
 begin
   StartCall;
-  Deadline := GetTickCount64 + QWord(ATimeoutMs);
+  Deadline := MCPNowMs + ATimeoutMs;
   repeat
     Params := Envelope('{}');
     Params.Add('taskId', ATaskId);
@@ -472,7 +421,9 @@ begin
         Requests := TJSONObject(Result.FindPath('result.inputRequests'));
       if Requests = nil then
         Exit;
-      Answers := TaskAnswers(FInputResponses, Requests);
+      // Keys are matched exactly: a suffixed key (confirm#2) needs an
+      // answer of its own (#82 review).
+      Answers := AnswersFor(Requests);
       if Answers = nil then
         Exit;
       Params := Envelope('{}');
@@ -488,7 +439,7 @@ begin
       Update.Free;
     end;
     FreeAndNil(Result);
-    if GetTickCount64 >= Deadline then
+    if MCPNowMs >= Deadline then
       raise EMCPTesting.CreateFmt('Task %s did not finish within %d ms',
         [ATaskId, ATimeoutMs]);
     Sleep(10);

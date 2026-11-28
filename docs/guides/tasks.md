@@ -24,7 +24,9 @@ client answers them.
 program builds;
 
 uses
+  {$IFDEF UNIX}
   cthreads, // first: task handlers run on threads
+  {$ENDIF}
   fpjson, MCP.Protocol, MCP.Server, MCP.Tasks, MCP.Transport.Stdio;
 
 function RunBuild(AArguments: TJSONObject;
@@ -110,10 +112,10 @@ end;
 Tasks.SetSelector(Mode);
 ```
 
-At most `MaxActive` tasks (32 by default) have a handler that has not
-returned, a cancelled or expired one included until its handler does,
-and at most `MaxKept` (1000 by default) are kept until their `ttlMs`
-ends. Past either, a call whose tool allows it runs as usual, and one
+At most `MaxActive` tasks (32 by default) are running or waiting for
+input at once, a cancelled or expired one counting until its handler
+returns, and at most `MaxKept` (1000 by default) are kept until their
+`ttlMs` ends. Past either, a call whose tool allows it runs as usual, and one
 that runs only as a task answers `-32603`.
 
 The extension is defined for the 2026-07-28 revision. The classic
@@ -215,7 +217,7 @@ progress and log notifications are not delivered for tasks, so
 
 `TMCPTestClient.AwaitTask(TaskId)` polls `tasks/get` until the task
 ends, and answers its questions from the answers `AnswerInput` set, a
-suffixed key with the answer for its own name. See
+suffixed key (`confirm#2`) only with an answer of its own. See
 [Testing](testing.md#tasks).
 
 ## Not served

@@ -656,12 +656,6 @@ begin
   end;
 end;
 
-// Push delivery over stdio (#126), the minute clock fixed 10 seconds
-// into minute M: a stream from M-2 opens with active and the two ticks,
-// each with its cursor; a second stream and a tools/list are answered
-// while it is open; its heartbeat follows the 1 s grant; once it is
-// cancelled nothing more comes for it (events.mdx, Push-Based
-// Delivery, verified 2026-11-27).
 // The Tasks extension over stdio, against the conformance fixture (#82):
 // a task created, polled to its result, answered through tasks/update,
 // cancelled, and a task still running when stdin ends. Shapes verified
@@ -779,6 +773,12 @@ begin
   end;
 end;
 
+// Push delivery over stdio (#126), the minute clock fixed 10 seconds
+// into minute M: a stream from M-2 opens with active and the two ticks,
+// each with its cursor; a second stream and a tools/list are answered
+// while it is open; its heartbeat follows the 1 s grant; once it is
+// cancelled nothing more comes for it (events.mdx, Push-Based
+// Delivery, verified 2026-11-27).
 procedure PushBattery;
 const
   M = 29929560; // 2026-11-27T10:00:00Z in minutes since 1970

@@ -564,6 +564,9 @@ begin
     Meta := TJSONObject(MetaData)
   else
   begin
+    // A _meta that is no object, such as null, is replaced: adding a
+    // second key would raise and leave the result unsent (#82 review).
+    AResult.Delete('_meta');
     Meta := TJSONObject.Create;
     AResult.Add('_meta', Meta);
   end;

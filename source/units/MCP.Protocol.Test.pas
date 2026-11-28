@@ -47,6 +47,7 @@ type
     procedure SetupTests; override;
     procedure TestStampsResultType;
     procedure TestStampsServerInfo;
+    procedure TestReplacesNonObjectMeta;
     procedure TestPreservesExistingResultType;
     procedure TestIdempotent;
   end;
@@ -537,8 +538,25 @@ begin
   ResultObj.Free;
 end;
 
+// A _meta that is no object is replaced, not added beside (#82 review).
+procedure TStamping.TestReplacesNonObjectMeta;
+var
+  ResultObj: TJSONObject;
+begin
+  ResultObj := TJSONObject.Create(['_meta', TJSONNull.Create]);
+  try
+    StampResult(ResultObj, 'srv', '1.0');
+    Expect<string>(ResultObj.AsJSON).ToBe('{ "resultType" : "complete", ' +
+      '"_meta" : { "io.modelcontextprotocol/serverInfo" : { "name" : ' +
+      '"srv", "version" : "1.0" } } }');
+  finally
+    ResultObj.Free;
+  end;
+end;
+
 procedure TStamping.SetupTests;
 begin
+  Test('a _meta that is no object is replaced', TestReplacesNonObjectMeta);
   Test('resultType "complete" stamped', TestStampsResultType);
   Test('serverInfo stamped in _meta', TestStampsServerInfo);
   Test('existing resultType preserved', TestPreservesExistingResultType);
